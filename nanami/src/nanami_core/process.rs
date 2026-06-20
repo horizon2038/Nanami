@@ -1,17 +1,15 @@
-use crate::nanami_core::vm_space::VmSpace;
+use alloc::{boxed::Box, vec::Vec};
+
+use crate::nanami_core::vm_space::{BootstrapVmSpace, VmSpace};
 use nun::{CapabilityDescriptor, CapabilityError, Word};
 
 pub const PROCESS_ROOT_SLOT_BASE: usize = 200;
-pub const PROCESS_ROOT_SLOT_LIMIT: usize = 1024;
-pub const TOTAL_PROCESS_SLOTS: usize = PROCESS_ROOT_SLOT_LIMIT - PROCESS_ROOT_SLOT_BASE;
-pub const MAX_ACTIVE_PROCESSES: usize = 64;
 pub const MAX_IO_RANGES_PER_PROCESS: usize = 16;
 pub const MAX_IRQS_PER_PROCESS: usize = 8;
 
-const INVALID_PID: usize = usize::MAX;
 const INVALID_IRQ: Word = usize::MAX;
 
-static mut VM_SPACE_POOL: [VmSpace; MAX_ACTIVE_PROCESSES] = [VmSpace::new(); MAX_ACTIVE_PROCESSES];
+static mut ALPHA_VM_SPACE: BootstrapVmSpace = BootstrapVmSpace::new();
 
 #[derive(Clone, Copy)]
 pub struct IoPortRange {
@@ -42,23 +40,6 @@ pub struct ProcessEntry {
 }
 
 impl ProcessEntry {
-    pub const EMPTY: Self = Self {
-        used: false,
-        pid: INVALID_PID,
-        root_node: 0,
-        pcb: 0,
-        address_space: 0,
-        os_port: 0,
-        os_port_identifier: 0,
-        irq_count: 0,
-        irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
-        io_range_count: 0,
-        io_ranges: [IoPortRange::EMPTY; MAX_IO_RANGES_PER_PROCESS],
-        next_frame_slot: 0,
-        user_heap_next_va: 0,
-        user_heap_limit_va: 0,
-    };
-
     pub fn has_irq(&self) -> bool {
         self.irq_count > 0
     }
@@ -76,9 +57,25 @@ impl ProcessEntry {
 }
 
 pub struct ProcessManager {
-    pub entries: [ProcessEntry; MAX_ACTIVE_PROCESSES],
-    used_slots: [bool; TOTAL_PROCESS_SLOTS],
-    vm_owner: [usize; MAX_ACTIVE_PROCESSES],
+    alpha_entry: ProcessEntry,
+    alpha_vm_space: *mut BootstrapVmSpace,
+    next_pid: usize,
+    root_slot_limit: usize,
+    reserved_root_slots: &'static [usize],
+    entries: Vec<ProcessEntry>,
+    used_root_slots: Vec<usize>,
+    vm_spaces: Vec<ProcessVmSpace>,
+    frame_chunks: Vec<ProcessFrameChunk>,
+}
+
+struct ProcessVmSpace {
+    pid: usize,
+    space: Box<VmSpace>,
+}
+
+struct ProcessFrameChunk {
+    pid: usize,
+    chunk_index: usize,
 }
 
 impl ProcessManager {
@@ -86,10 +83,11 @@ impl ProcessManager {
         alpha_root_node: CapabilityDescriptor,
         alpha_address_space: CapabilityDescriptor,
         alpha_os_port: CapabilityDescriptor,
+        root_slot_limit: usize,
+        reserved_root_slots: &'static [usize],
     ) -> Self {
         crate::info!("process: ProcessManager::new_alpha");
-        let mut entries = [ProcessEntry::EMPTY; MAX_ACTIVE_PROCESSES];
-        entries[0] = ProcessEntry {
+        let alpha_entry = ProcessEntry {
             used: true,
             pid: 0,
             root_node: alpha_root_node,
@@ -105,57 +103,77 @@ impl ProcessManager {
             user_heap_next_va: 0,
             user_heap_limit_va: 0,
         };
-        let mut used_slots = [false; TOTAL_PROCESS_SLOTS];
-        used_slots[0] = true;
-        let mut vm_owner = [INVALID_PID; MAX_ACTIVE_PROCESSES];
-        vm_owner[0] = 0;
-        unsafe {
-            VM_SPACE_POOL[0] = VmSpace::new();
-        }
+        let alpha_vm_space = core::ptr::addr_of_mut!(ALPHA_VM_SPACE);
         Self {
-            entries,
-            used_slots,
-            vm_owner,
+            alpha_entry,
+            alpha_vm_space,
+            next_pid: 1,
+            root_slot_limit,
+            reserved_root_slots,
+            entries: Vec::new(),
+            used_root_slots: Vec::new(),
+            vm_spaces: Vec::new(),
+            frame_chunks: Vec::new(),
         }
     }
 
-    pub fn alpha_vm_space_mut(&mut self) -> &mut VmSpace {
-        unsafe { &mut VM_SPACE_POOL[0] }
+    pub fn alpha_vm_space_mut(&mut self) -> &mut BootstrapVmSpace {
+        unsafe { &mut *self.alpha_vm_space }
     }
 
     pub fn alpha_entry(&self) -> ProcessEntry {
-        self.entries[0]
+        self.alpha_entry
     }
 
     pub fn vm_space_mut(&mut self, pid: usize) -> Option<&mut VmSpace> {
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.vm_owner[i] == pid {
-                unsafe {
-                    return Some(&mut VM_SPACE_POOL[i]);
-                }
+        for vm in self.vm_spaces.iter_mut() {
+            if vm.pid == pid {
+                return Some(vm.space.as_mut());
             }
-            i += 1;
         }
         None
     }
 
     pub fn ensure_vm_space_for_pid(&mut self, pid: usize) -> Result<(), CapabilityError> {
+        if pid == 0 {
+            return Ok(());
+        }
         if self.vm_space_mut(pid).is_some() {
             return Ok(());
         }
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.vm_owner[i] == INVALID_PID {
-                self.vm_owner[i] = pid;
-                unsafe {
-                    VM_SPACE_POOL[i] = VmSpace::new();
-                }
-                return Ok(());
-            }
-            i += 1;
+        self.vm_spaces.push(ProcessVmSpace {
+            pid,
+            space: Box::new(VmSpace::new()),
+        });
+        Ok(())
+    }
+
+    fn entry_mut_by_pid(&mut self, pid: usize) -> Option<&mut ProcessEntry> {
+        if pid == 0 {
+            return Some(&mut self.alpha_entry);
         }
-        Err(CapabilityError::InvalidArgument)
+        self.entries
+            .iter_mut()
+            .find(|entry| entry.used && entry.pid == pid)
+    }
+
+    pub fn has_frame_chunk(&self, pid: usize, chunk_index: usize) -> bool {
+        self.frame_chunks
+            .iter()
+            .any(|chunk| chunk.pid == pid && chunk.chunk_index == chunk_index)
+    }
+
+    pub fn register_frame_chunk(
+        &mut self,
+        pid: usize,
+        chunk_index: usize,
+    ) -> Result<(), CapabilityError> {
+        if self.has_frame_chunk(pid, chunk_index) {
+            return Ok(());
+        }
+        self.frame_chunks
+            .push(ProcessFrameChunk { pid, chunk_index });
+        Ok(())
     }
 
     pub fn install_process(
@@ -170,80 +188,68 @@ impl ProcessManager {
         user_heap_next_va: usize,
         user_heap_limit_va: usize,
     ) -> Result<(), CapabilityError> {
-        if pid >= TOTAL_PROCESS_SLOTS {
-            return Err(CapabilityError::InvalidArgument);
+        let entry = ProcessEntry {
+            used: true,
+            pid,
+            root_node,
+            pcb,
+            address_space,
+            os_port,
+            os_port_identifier,
+            irq_count: 0,
+            irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
+            io_range_count: 0,
+            io_ranges: [IoPortRange::EMPTY; MAX_IO_RANGES_PER_PROCESS],
+            next_frame_slot,
+            user_heap_next_va,
+            user_heap_limit_va,
+        };
+
+        if pid == 0 {
+            self.alpha_entry = entry;
+            return Ok(());
         }
 
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used && self.entries[i].pid == pid {
-                self.entries[i] = ProcessEntry {
-                    used: true,
-                    pid,
-                    root_node,
-                    pcb,
-                    address_space,
-                    os_port,
-                    os_port_identifier,
-                    irq_count: 0,
-                    irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
-                    io_range_count: 0,
-                    io_ranges: [IoPortRange::EMPTY; MAX_IO_RANGES_PER_PROCESS],
-                    next_frame_slot,
-                    user_heap_next_va,
-                    user_heap_limit_va,
-                };
-                return Ok(());
-            }
-            i += 1;
+        if let Some(existing) = self.entry_mut_by_pid(pid) {
+            *existing = entry;
+            return Ok(());
         }
 
-        let mut j = 0;
-        while j < MAX_ACTIVE_PROCESSES {
-            if !self.entries[j].used {
-                self.entries[j] = ProcessEntry {
-                    used: true,
-                    pid,
-                    root_node,
-                    pcb,
-                    address_space,
-                    os_port,
-                    os_port_identifier,
-                    irq_count: 0,
-                    irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
-                    io_range_count: 0,
-                    io_ranges: [IoPortRange::EMPTY; MAX_IO_RANGES_PER_PROCESS],
-                    next_frame_slot,
-                    user_heap_next_va,
-                    user_heap_limit_va,
-                };
-                return Ok(());
+        self.entries.push(entry);
+        Ok(())
+    }
+
+    pub fn alloc_process_slot(&mut self) -> Result<(usize, usize), CapabilityError> {
+        let mut slot = PROCESS_ROOT_SLOT_BASE;
+        while slot < self.root_slot_limit {
+            if !self.is_root_slot_reserved(slot) && !self.used_root_slots.contains(&slot) {
+                self.used_root_slots.push(slot);
+                let pid = self.next_pid;
+                self.next_pid = self
+                    .next_pid
+                    .checked_add(1)
+                    .ok_or(CapabilityError::InvalidArgument)?;
+                return Ok((pid, slot));
             }
-            j += 1;
+            slot += 1;
         }
         Err(CapabilityError::InvalidArgument)
     }
 
-    pub fn alloc_process_slot(&mut self) -> Result<usize, CapabilityError> {
-        let mut pid = 1usize;
-        while pid < TOTAL_PROCESS_SLOTS {
-            if !self.used_slots[pid] {
-                self.used_slots[pid] = true;
-                return Ok(pid);
-            }
-            pid += 1;
-        }
-        Err(CapabilityError::InvalidArgument)
+    fn is_root_slot_reserved(&self, slot: usize) -> bool {
+        self.reserved_root_slots
+            .iter()
+            .any(|reserved| *reserved == slot)
     }
 
     pub fn find_entry_by_pid(&self, pid: usize) -> Option<ProcessEntry> {
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            let e = self.entries[i];
-            if e.used && e.pid == pid {
-                return Some(e);
+        if pid == 0 && self.alpha_entry.used {
+            return Some(self.alpha_entry);
+        }
+        for entry in self.entries.iter() {
+            if entry.used && entry.pid == pid {
+                return Some(*entry);
             }
-            i += 1;
         }
         None
     }
@@ -253,32 +259,29 @@ impl ProcessManager {
         pid: usize,
         irq_number: Word,
     ) -> Result<(), CapabilityError> {
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used
-                && self.entries[i].pid != pid
-                && self.entries[i].has_irq_number(irq_number)
-            {
+        if self.alpha_entry.used
+            && self.alpha_entry.pid != pid
+            && self.alpha_entry.has_irq_number(irq_number)
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        for entry in self.entries.iter() {
+            if entry.used && entry.pid != pid && entry.has_irq_number(irq_number) {
                 return Err(CapabilityError::PermissionDenied);
             }
-            i += 1;
         }
 
-        let mut j = 0;
-        while j < MAX_ACTIVE_PROCESSES {
-            if self.entries[j].used && self.entries[j].pid == pid {
-                if self.entries[j].has_irq_number(irq_number) {
-                    return Ok(());
-                }
-                if self.entries[j].irq_count >= MAX_IRQS_PER_PROCESS {
-                    return Err(CapabilityError::PermissionDenied);
-                }
-                let slot = self.entries[j].irq_count;
-                self.entries[j].irq_numbers[slot] = irq_number;
-                self.entries[j].irq_count += 1;
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            if entry.has_irq_number(irq_number) {
                 return Ok(());
             }
-            j += 1;
+            if entry.irq_count >= MAX_IRQS_PER_PROCESS {
+                return Err(CapabilityError::PermissionDenied);
+            }
+            let slot = entry.irq_count;
+            entry.irq_numbers[slot] = irq_number;
+            entry.irq_count += 1;
+            return Ok(());
         }
 
         Err(CapabilityError::InvalidArgument)
@@ -289,23 +292,19 @@ impl ProcessManager {
         pid: usize,
         irq_number: Word,
     ) -> Result<(), CapabilityError> {
-        let mut i = 0usize;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used && self.entries[i].pid == pid {
-                let mut j = 0usize;
-                while j < self.entries[i].irq_count {
-                    if self.entries[i].irq_numbers[j] == irq_number {
-                        let last = self.entries[i].irq_count - 1;
-                        self.entries[i].irq_numbers[j] = self.entries[i].irq_numbers[last];
-                        self.entries[i].irq_numbers[last] = INVALID_IRQ;
-                        self.entries[i].irq_count -= 1;
-                        return Ok(());
-                    }
-                    j += 1;
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            let mut j = 0usize;
+            while j < entry.irq_count {
+                if entry.irq_numbers[j] == irq_number {
+                    let last = entry.irq_count - 1;
+                    entry.irq_numbers[j] = entry.irq_numbers[last];
+                    entry.irq_numbers[last] = INVALID_IRQ;
+                    entry.irq_count -= 1;
+                    return Ok(());
                 }
-                return Err(CapabilityError::InvalidArgument);
+                j += 1;
             }
-            i += 1;
+            return Err(CapabilityError::InvalidArgument);
         }
         Err(CapabilityError::InvalidArgument)
     }
@@ -320,40 +319,27 @@ impl ProcessManager {
             return Err(CapabilityError::InvalidArgument);
         }
 
-        let mut i = 0;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used && self.entries[i].pid == pid {
-                if self.entries[i].io_range_count >= MAX_IO_RANGES_PER_PROCESS {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-
-                let mut k = 0;
-                while k < self.entries[i].io_range_count {
-                    let r = self.entries[i].io_ranges[k];
-                    let overlaps = !(max < r.min || r.max < min);
-                    if overlaps {
-                        return Err(CapabilityError::PermissionDenied);
-                    }
-                    k += 1;
-                }
-
-                self.entries[i].io_ranges[self.entries[i].io_range_count] =
-                    IoPortRange { min, max };
-                self.entries[i].io_range_count += 1;
-                return Ok(());
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            if entry.io_range_count >= MAX_IO_RANGES_PER_PROCESS {
+                return Err(CapabilityError::InvalidArgument);
             }
-            i += 1;
+
+            let mut k = 0;
+            while k < entry.io_range_count {
+                let r = entry.io_ranges[k];
+                let overlaps = !(max < r.min || r.max < min);
+                if overlaps {
+                    return Err(CapabilityError::PermissionDenied);
+                }
+                k += 1;
+            }
+
+            entry.io_ranges[entry.io_range_count] = IoPortRange { min, max };
+            entry.io_range_count += 1;
+            return Ok(());
         }
 
         Err(CapabilityError::InvalidArgument)
-    }
-
-    pub fn process_root_slot_for_pid(pid: usize) -> Result<usize, CapabilityError> {
-        let slot = PROCESS_ROOT_SLOT_BASE + pid;
-        if slot >= PROCESS_ROOT_SLOT_LIMIT {
-            return Err(CapabilityError::InvalidArgument);
-        }
-        Ok(slot)
     }
 
     pub fn reserve_process_heap(
@@ -370,37 +356,26 @@ impl ProcessManager {
             .checked_mul(page_size)
             .ok_or(CapabilityError::InvalidArgument)?;
 
-        let mut i = 0usize;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used && self.entries[i].pid == pid {
-                if self.entries[i].next_frame_slot + page_count > max_frame_slots {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-                if self.entries[i].user_heap_next_va == 0
-                    || self.entries[i].user_heap_limit_va <= self.entries[i].user_heap_next_va
-                {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-
-                let heap_base = self.entries[i].user_heap_next_va;
-                let heap_end = heap_base
-                    .checked_add(bytes)
-                    .ok_or(CapabilityError::InvalidArgument)?;
-                if heap_end > self.entries[i].user_heap_limit_va {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-
-                let start_slot = self.entries[i].next_frame_slot;
-                self.entries[i].next_frame_slot += page_count;
-                self.entries[i].user_heap_next_va = heap_end;
-                return Ok((
-                    self.entries[i].root_node,
-                    self.entries[i].address_space,
-                    heap_base,
-                    start_slot,
-                ));
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            if entry.next_frame_slot + page_count > max_frame_slots {
+                return Err(CapabilityError::InvalidArgument);
             }
-            i += 1;
+            if entry.user_heap_next_va == 0 || entry.user_heap_limit_va <= entry.user_heap_next_va {
+                return Err(CapabilityError::InvalidArgument);
+            }
+
+            let heap_base = entry.user_heap_next_va;
+            let heap_end = heap_base
+                .checked_add(bytes)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if heap_end > entry.user_heap_limit_va {
+                return Err(CapabilityError::InvalidArgument);
+            }
+
+            let start_slot = entry.next_frame_slot;
+            entry.next_frame_slot += page_count;
+            entry.user_heap_next_va = heap_end;
+            return Ok((entry.root_node, entry.address_space, heap_base, start_slot));
         }
 
         Err(CapabilityError::InvalidArgument)
@@ -419,27 +394,21 @@ impl ProcessManager {
             .checked_mul(page_size)
             .ok_or(CapabilityError::InvalidArgument)?;
 
-        let mut i = 0usize;
-        while i < MAX_ACTIVE_PROCESSES {
-            if self.entries[i].used && self.entries[i].pid == pid {
-                if self.entries[i].user_heap_next_va == 0
-                    || self.entries[i].user_heap_limit_va <= self.entries[i].user_heap_next_va
-                {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-
-                let gap_base = self.entries[i].user_heap_next_va;
-                let gap_end = gap_base
-                    .checked_add(bytes)
-                    .ok_or(CapabilityError::InvalidArgument)?;
-                if gap_end > self.entries[i].user_heap_limit_va {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-
-                self.entries[i].user_heap_next_va = gap_end;
-                return Ok(gap_base);
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            if entry.user_heap_next_va == 0 || entry.user_heap_limit_va <= entry.user_heap_next_va {
+                return Err(CapabilityError::InvalidArgument);
             }
-            i += 1;
+
+            let gap_base = entry.user_heap_next_va;
+            let gap_end = gap_base
+                .checked_add(bytes)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if gap_end > entry.user_heap_limit_va {
+                return Err(CapabilityError::InvalidArgument);
+            }
+
+            entry.user_heap_next_va = gap_end;
+            return Ok(gap_base);
         }
 
         Err(CapabilityError::InvalidArgument)

@@ -101,18 +101,10 @@ impl DisplayDriver {
             if i == 0 {
                 match nun::arch::frame::get_address(frame) {
                     Ok(pa) => {
-                        crate::info!(
-                            "get_address ok pa={:#018x} frame={:#018x}",
-                            pa,
-                            frame
-                        );
+                        crate::info!("get_address ok pa={:#018x} frame={:#018x}", pa, frame);
                     }
                     Err(e) => {
-                        crate::info!(
-                            "get_address err={:?} frame={:#018x}",
-                            e,
-                            frame
-                        );
+                        crate::info!("get_address err={:?} frame={:#018x}", e, frame);
                     }
                 }
             }
@@ -234,7 +226,8 @@ fn find_framebuffer_generic_range(
 }
 
 fn make_generic_descriptor(root_radix: usize, generic_index: usize) -> CapabilityDescriptor {
-    let generic_node = make_root_slot_descriptor(root_radix, nun::InitSlotOffset::GenericNode as usize);
+    let generic_node =
+        make_root_slot_descriptor(root_radix, nun::InitSlotOffset::GenericNode as usize);
     make_child_slot_descriptor(generic_node, GENERIC_NODE_RADIX, generic_index)
 }
 

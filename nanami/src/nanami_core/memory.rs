@@ -1,6 +1,6 @@
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
 use crate::nanami_core::physical_allocator::{PhysicalAllocError, PhysicalAllocator};
-use crate::nanami_core::vm_space::VmSpace;
+use crate::nanami_core::vm_space::VmTracker;
 use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use nun::{
     arch, CapabilityDescriptor, CapabilityError, CapabilityResult, CapabilityType, InitInfo, Word,
@@ -177,7 +177,7 @@ impl MemoryManager {
         address_space: CapabilityDescriptor,
         frame_descriptor: CapabilityDescriptor,
         virtual_address: usize,
-        vm_space: &mut VmSpace,
+        vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
         self.ensure_page_tables(address_space, virtual_address, vm_space)?;
 
@@ -608,7 +608,7 @@ impl MemoryManager {
         &mut self,
         address_space: CapabilityDescriptor,
         virtual_address: usize,
-        vm_space: &mut VmSpace,
+        vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
         loop {
             let depth =

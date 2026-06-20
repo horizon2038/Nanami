@@ -54,12 +54,7 @@ impl<const N: usize> StaticAvlTree<N> {
         None
     }
 
-    fn insert_at(
-        &mut self,
-        current: Option<usize>,
-        key: usize,
-        value: usize,
-    ) -> Result<usize, ()> {
+    fn insert_at(&mut self, current: Option<usize>, key: usize, value: usize) -> Result<usize, ()> {
         let Some(index) = current else {
             return self.allocate_node(key, value);
         };
@@ -113,11 +108,17 @@ impl<const N: usize> StaticAvlTree<N> {
     fn recompute_height(&mut self, index: usize) {
         let left_h = self.height(self.nodes[index].left);
         let right_h = self.height(self.nodes[index].right);
-        self.nodes[index].height = if left_h > right_h { left_h + 1 } else { right_h + 1 };
+        self.nodes[index].height = if left_h > right_h {
+            left_h + 1
+        } else {
+            right_h + 1
+        };
     }
 
     fn rotate_left(&mut self, x: usize) -> usize {
-        let y = self.nodes[x].right.expect("rotate_left requires right child");
+        let y = self.nodes[x]
+            .right
+            .expect("rotate_left requires right child");
         let t2 = self.nodes[y].left;
 
         self.nodes[y].left = Some(x);
@@ -129,7 +130,9 @@ impl<const N: usize> StaticAvlTree<N> {
     }
 
     fn rotate_right(&mut self, y: usize) -> usize {
-        let x = self.nodes[y].left.expect("rotate_right requires left child");
+        let x = self.nodes[y]
+            .left
+            .expect("rotate_right requires left child");
         let t2 = self.nodes[x].right;
 
         self.nodes[x].right = Some(y);
@@ -144,7 +147,9 @@ impl<const N: usize> StaticAvlTree<N> {
         let bf = self.balance_factor(index);
 
         if bf > 1 {
-            let left = self.nodes[index].left.expect("left-heavy without left child");
+            let left = self.nodes[index]
+                .left
+                .expect("left-heavy without left child");
             if self.balance_factor(left) < 0 {
                 let new_left = self.rotate_left(left);
                 self.nodes[index].left = Some(new_left);

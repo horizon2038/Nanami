@@ -35,7 +35,11 @@ const PROCESS_SLOT_L1_NODE: usize = 6;
 const PROCESS_SLOT_FRAME_NODE: usize = 7;
 const PROCESS_SLOT_SERVICE_PORT: usize = 20;
 const PROCESS_SLOT_NOTIFICATION_PORT: usize = 21;
+const PROCESS_FRAME_DIRECTORY_RADIX: usize = 8;
 const PROCESS_FRAME_NODE_RADIX: usize = 14;
+const PROCESS_FRAME_CHUNK_PAGES: usize = 1 << PROCESS_FRAME_NODE_RADIX;
+const PROCESS_FRAME_TOTAL_PAGES: usize =
+    (1 << PROCESS_FRAME_DIRECTORY_RADIX) * PROCESS_FRAME_CHUNK_PAGES;
 const PAGE_TABLE_NODE_RADIX: usize = 7;
 const PAGE_SIZE: usize = 4096;
 const USER_STACK_BASE: usize = 0x0400_0000;
@@ -69,6 +73,21 @@ const FRAMEBUFFER_INFORMATION_REGION: usize = 0;
 const FRAMEBUFFER_INFORMATION_GEOMETRY: usize = 1;
 const FRAMEBUFFER_INFORMATION_FORMAT: usize = 2;
 const FRAMEBUFFER_INFORMATION_COLOR_AND_ID: usize = 3;
+const PROCESS_ROOT_RESERVED_SLOTS: [usize; 13] = [
+    1024,
+    1025,
+    1026,
+    1027, // physical generic node candidates
+    1100,
+    1101,
+    1102,
+    1103, // physical frame node candidates
+    1200,
+    1201,
+    1202,
+    1203, // page-table pool node candidates
+    ALPHA_RUNTIME_STACK_NODE_SLOT,
+];
 
 const INITRAMFS_IMAGE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -140,8 +159,13 @@ impl Alpha {
             "alpha address space descriptor={:#018x}",
             alpha_address_space
         );
-        let mut processes =
-            ProcessManager::new_alpha(root.root_descriptor, alpha_address_space, os_port);
+        let mut processes = ProcessManager::new_alpha(
+            root.root_descriptor,
+            alpha_address_space,
+            os_port,
+            1usize << root.root_radix,
+            &PROCESS_ROOT_RESERVED_SLOTS,
+        );
         let communication = CommunicationManager::new(os_port);
         info!("managers ready");
 
@@ -206,6 +230,69 @@ impl Alpha {
     pub fn start(&mut self) {
         self.spawn_components_from_initramfs();
         info!("alpha online");
+    }
+
+    fn ensure_process_frame_chunks(
+        &mut self,
+        pid: usize,
+        process_root: CapabilityDescriptor,
+        start_slot: usize,
+        page_count: usize,
+    ) -> Result<(), CapabilityError> {
+        if page_count == 0 {
+            return Ok(());
+        }
+        let end_slot = start_slot
+            .checked_add(page_count)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if end_slot > PROCESS_FRAME_TOTAL_PAGES {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let frame_directory = process_frame_directory_descriptor(process_root);
+        let mut chunk = start_slot / PROCESS_FRAME_CHUNK_PAGES;
+        let last_chunk = (end_slot - 1) / PROCESS_FRAME_CHUNK_PAGES;
+        while chunk <= last_chunk {
+            if !self.processes.has_frame_chunk(pid, chunk) {
+                arch::generic::convert(
+                    self.root.bootstrap_generic,
+                    CapabilityType::Node,
+                    PROCESS_FRAME_NODE_RADIX as Word,
+                    1,
+                    frame_directory,
+                    chunk as Word,
+                )?;
+                self.processes.register_frame_chunk(pid, chunk)?;
+            }
+            chunk += 1;
+        }
+        Ok(())
+    }
+
+    fn allocate_process_frames(
+        &mut self,
+        pid: usize,
+        process_root: CapabilityDescriptor,
+        start_slot: usize,
+        page_count: usize,
+    ) -> Result<(), CapabilityError> {
+        self.ensure_process_frame_chunks(pid, process_root, start_slot, page_count)?;
+        let mut done = 0usize;
+        while done < page_count {
+            let global_slot = start_slot + done;
+            let chunk = global_slot / PROCESS_FRAME_CHUNK_PAGES;
+            let chunk_offset = global_slot % PROCESS_FRAME_CHUNK_PAGES;
+            let chunk_remaining = PROCESS_FRAME_CHUNK_PAGES - chunk_offset;
+            let batch = chunk_remaining.min(page_count - done);
+            self.memory.allocate_process_frames(
+                process_frame_chunk_descriptor(process_root, chunk),
+                PROCESS_FRAME_NODE_RADIX,
+                chunk_offset,
+                batch,
+            )?;
+            done += batch;
+        }
+        Ok(())
     }
 
     fn spawn_components_from_initramfs(&mut self) {
@@ -327,8 +414,7 @@ impl Alpha {
             elf.entry_point, elf.segment_count
         );
 
-        let pid = self.processes.alloc_process_slot()?;
-        let process_root_slot = ProcessManager::process_root_slot_for_pid(pid)?;
+        let (pid, process_root_slot) = self.processes.alloc_process_slot()?;
         let child_root = make_root_slot_descriptor(self.root.root_radix, process_root_slot);
         let child_pcb =
             make_child_slot_descriptor(child_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_PCB);
@@ -336,8 +422,6 @@ impl Alpha {
             make_child_slot_descriptor(child_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_OS_PORT);
         let child_address_space =
             make_child_slot_descriptor(child_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_ADDRESS_SPACE);
-        let child_frame_node =
-            make_child_slot_descriptor(child_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
         let child_notification = make_child_slot_descriptor(
             child_root,
             PROCESS_ROOT_RADIX,
@@ -406,7 +490,7 @@ impl Alpha {
         arch::generic::convert(
             self.root.bootstrap_generic,
             CapabilityType::Node,
-            PROCESS_FRAME_NODE_RADIX as Word,
+            PROCESS_FRAME_DIRECTORY_RADIX as Word,
             1,
             child_root,
             PROCESS_SLOT_FRAME_NODE as Word,
@@ -468,11 +552,8 @@ impl Alpha {
             return Err(CapabilityError::InvalidArgument);
         }
         let ipc_buffer_frame_slot = (ipc_buffer_va - image_base) / PAGE_SIZE;
-        let ipc_buffer_frame = make_child_slot_descriptor(
-            child_frame_node,
-            PROCESS_FRAME_NODE_RADIX,
-            ipc_buffer_frame_slot,
-        );
+        self.ensure_process_frame_chunks(pid, child_root, 0, total_frames)?;
+        let ipc_buffer_frame = process_frame_descriptor(child_root, ipc_buffer_frame_slot);
         let ipc_buffer_tls_base = ipc_buffer_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS;
 
         debug!(
@@ -485,12 +566,7 @@ impl Alpha {
             temp_base
         );
 
-        self.memory.allocate_process_frames(
-            child_frame_node,
-            PROCESS_FRAME_NODE_RADIX,
-            0,
-            total_frames,
-        )?;
+        self.allocate_process_frames(pid, child_root, 0, total_frames)?;
         self.processes.ensure_vm_space_for_pid(pid)?;
 
         let alpha_address_space = self.processes.alpha_entry().address_space;
@@ -499,8 +575,7 @@ impl Alpha {
 
         let mut page = 0usize;
         while page < image_pages {
-            let frame =
-                make_child_slot_descriptor(child_frame_node, PROCESS_FRAME_NODE_RADIX, page);
+            let frame = process_frame_descriptor(child_root, page);
             let user_va = image_base + page * PAGE_SIZE;
             let temp_va = temp_base + page * PAGE_SIZE;
             {
@@ -521,11 +596,7 @@ impl Alpha {
 
         let mut sp = 0usize;
         while sp < USER_STACK_PAGES {
-            let frame = make_child_slot_descriptor(
-                child_frame_node,
-                PROCESS_FRAME_NODE_RADIX,
-                image_pages + sp,
-            );
+            let frame = process_frame_descriptor(child_root, image_pages + sp);
             let user_va = USER_STACK_BASE + sp * PAGE_SIZE;
             let temp_va = temp_base + (image_pages + sp) * PAGE_SIZE;
             {
@@ -1201,23 +1272,14 @@ impl Alpha {
 
         let (root_node, address_space, heap_base, start_slot) = self
             .processes
-            .reserve_process_heap(pid, page_count, PAGE_SIZE, 1 << PROCESS_FRAME_NODE_RADIX)?;
-        let frame_node =
-            make_child_slot_descriptor(root_node, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
-
-        self.memory.allocate_process_frames(
-            frame_node,
-            PROCESS_FRAME_NODE_RADIX,
-            start_slot,
-            page_count,
-        )?;
+            .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
+        self.allocate_process_frames(pid, root_node, start_slot, page_count)?;
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
         let mut i = 0usize;
         while i < page_count {
-            let frame =
-                make_child_slot_descriptor(frame_node, PROCESS_FRAME_NODE_RADIX, start_slot + i);
+            let frame = process_frame_descriptor(root_node, start_slot + i);
             let va = heap_base + i * PAGE_SIZE;
             let vm = processes
                 .vm_space_mut(pid)
@@ -1248,21 +1310,23 @@ impl Alpha {
             pid,
             page_count,
             PAGE_SIZE,
-            1 << PROCESS_FRAME_NODE_RADIX,
+            PROCESS_FRAME_TOTAL_PAGES,
         )?;
         let base_page = self.memory.allocate_physical_any(mapped_size)?;
         let base_paddr = base_page * PAGE_SIZE;
 
-        let frame_node =
-            make_child_slot_descriptor(root_node, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
+        self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
         let mut i = 0usize;
         while i < page_count {
             let frame_index = base_page + i;
             self.memory.copy_alpha_frame_to_process_node(
                 frame_index,
-                frame_node,
+                process_frame_chunk_descriptor(
+                    root_node,
+                    (start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+                ),
                 PROCESS_FRAME_NODE_RADIX,
-                start_slot + i,
+                (start_slot + i) % PROCESS_FRAME_CHUNK_PAGES,
             )?;
             i += 1;
         }
@@ -1271,8 +1335,7 @@ impl Alpha {
         let processes = &mut self.processes;
         let mut j = 0usize;
         while j < page_count {
-            let frame =
-                make_child_slot_descriptor(frame_node, PROCESS_FRAME_NODE_RADIX, start_slot + j);
+            let frame = process_frame_descriptor(root_node, start_slot + j);
             let va = base_va + j * PAGE_SIZE;
             let vm = processes
                 .vm_space_mut(pid)
@@ -1354,21 +1417,19 @@ impl Alpha {
 
         let (caller_root, caller_as, caller_va, caller_start_slot) = self
             .processes
-            .reserve_process_heap(pid, page_count, PAGE_SIZE, 1 << PROCESS_FRAME_NODE_RADIX)?;
+            .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
         let (peer_root, peer_as, peer_va, peer_start_slot) = self.processes.reserve_process_heap(
             peer_pid,
             page_count,
             PAGE_SIZE,
-            1 << PROCESS_FRAME_NODE_RADIX,
+            PROCESS_FRAME_TOTAL_PAGES,
         )?;
 
         let base_page = self.memory.allocate_physical_any(mapped_size)?;
         let base_paddr = base_page * PAGE_SIZE;
 
-        let caller_frame_node =
-            make_child_slot_descriptor(caller_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
-        let peer_frame_node =
-            make_child_slot_descriptor(peer_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
+        self.ensure_process_frame_chunks(pid, caller_root, caller_start_slot, page_count)?;
+        self.ensure_process_frame_chunks(peer_pid, peer_root, peer_start_slot, page_count)?;
 
         let mut i = 0usize;
         while i < page_count {
@@ -1383,11 +1444,21 @@ impl Alpha {
                 .physical_frame_descriptor_from_index(frame_index)
                 .ok_or(CapabilityError::InvalidArgument)?;
             arch::node::copy(
-                caller_frame_node,
-                (caller_start_slot + i) as Word,
+                process_frame_chunk_descriptor(
+                    caller_root,
+                    (caller_start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+                ),
+                ((caller_start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
                 source_frame,
             )?;
-            arch::node::copy(peer_frame_node, (peer_start_slot + i) as Word, source_frame)?;
+            arch::node::copy(
+                process_frame_chunk_descriptor(
+                    peer_root,
+                    (peer_start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+                ),
+                ((peer_start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                source_frame,
+            )?;
             i += 1;
         }
 
@@ -1395,22 +1466,14 @@ impl Alpha {
         let processes = &mut self.processes;
         let mut j = 0usize;
         while j < page_count {
-            let caller_frame = make_child_slot_descriptor(
-                caller_frame_node,
-                PROCESS_FRAME_NODE_RADIX,
-                caller_start_slot + j,
-            );
+            let caller_frame = process_frame_descriptor(caller_root, caller_start_slot + j);
             let caller_page_va = caller_va + j * PAGE_SIZE;
             let caller_vm = processes
                 .vm_space_mut(pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
             memory.map_frame(caller_as, caller_frame, caller_page_va, caller_vm)?;
 
-            let peer_frame = make_child_slot_descriptor(
-                peer_frame_node,
-                PROCESS_FRAME_NODE_RADIX,
-                peer_start_slot + j,
-            );
+            let peer_frame = process_frame_descriptor(peer_root, peer_start_slot + j);
             let peer_page_va = peer_va + j * PAGE_SIZE;
             let peer_vm = processes
                 .vm_space_mut(peer_pid)
@@ -1472,12 +1535,8 @@ impl Alpha {
         // consumes thousands of process frame slots at 1920x1080.
         let (peer_root, peer_as, peer_base_va, peer_start_slot) = match self
             .processes
-            .reserve_process_heap(
-                peer_pid,
-                page_count,
-                PAGE_SIZE,
-                1 << PROCESS_FRAME_NODE_RADIX,
-            ) {
+            .reserve_process_heap(peer_pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)
+        {
             Ok(v) => v,
             Err(e) => {
                 match self.processes.find_entry_by_pid(peer_pid) {
@@ -1487,7 +1546,7 @@ impl Alpha {
                             peer_pid,
                             page_count,
                             entry.next_frame_slot,
-                            1usize << PROCESS_FRAME_NODE_RADIX,
+                            PROCESS_FRAME_TOTAL_PAGES,
                             entry.user_heap_next_va,
                             entry.user_heap_limit_va,
                             e
@@ -1525,8 +1584,7 @@ impl Alpha {
             return Err(CapabilityError::InvalidArgument);
         }
 
-        let peer_frame_node =
-            make_child_slot_descriptor(peer_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
+        self.ensure_process_frame_chunks(peer_pid, peer_root, peer_start_slot, page_count)?;
 
         let mut i = 0usize;
         while i < page_count {
@@ -1534,15 +1592,18 @@ impl Alpha {
                 .memory
                 .physical_frame_descriptor_from_index(converted_base_index + skip_pages + i)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            if let Err(e) =
-                arch::node::copy(peer_frame_node, (peer_start_slot + i) as Word, source_frame)
-            {
+            let dst_node = process_frame_chunk_descriptor(
+                peer_root,
+                (peer_start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+            );
+            let dst_slot = (peer_start_slot + i) % PROCESS_FRAME_CHUNK_PAGES;
+            if let Err(e) = arch::node::copy(dst_node, dst_slot as Word, source_frame) {
                 info!(
                     "[fb-shm.err] copy frame i={} dst_slot={} src={:#018x} peer_node={:#018x} err={:?}",
                     i,
-                    peer_start_slot + i,
+                    dst_slot,
                     source_frame,
-                    peer_frame_node,
+                    dst_node,
                     e
                 );
                 return Err(e);
@@ -1554,11 +1615,7 @@ impl Alpha {
         let processes = &mut self.processes;
         let mut j = 0usize;
         while j < page_count {
-            let peer_frame = make_child_slot_descriptor(
-                peer_frame_node,
-                PROCESS_FRAME_NODE_RADIX,
-                peer_start_slot + j,
-            );
+            let peer_frame = process_frame_descriptor(peer_root, peer_start_slot + j);
             let peer_page_va = peer_base_va + j * PAGE_SIZE;
             let peer_vm = processes
                 .vm_space_mut(peer_pid)
@@ -1601,7 +1658,7 @@ impl Alpha {
             pid,
             page_count,
             PAGE_SIZE,
-            1 << PROCESS_FRAME_NODE_RADIX,
+            PROCESS_FRAME_TOTAL_PAGES,
         )?;
         let base_page = self
             .memory
@@ -1621,15 +1678,21 @@ impl Alpha {
             return Err(CapabilityError::InvalidArgument);
         }
 
-        let frame_node =
-            make_child_slot_descriptor(root_node, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE);
+        self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
         let mut i = 0usize;
         while i < page_count {
             let source_frame = self
                 .memory
                 .physical_frame_descriptor_from_index(converted_base_index + skip_pages + i)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            arch::node::copy(frame_node, (start_slot + i) as Word, source_frame)?;
+            arch::node::copy(
+                process_frame_chunk_descriptor(
+                    root_node,
+                    (start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+                ),
+                ((start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                source_frame,
+            )?;
             i += 1;
         }
 
@@ -1637,8 +1700,7 @@ impl Alpha {
         let processes = &mut self.processes;
         let mut j = 0usize;
         while j < page_count {
-            let frame =
-                make_child_slot_descriptor(frame_node, PROCESS_FRAME_NODE_RADIX, start_slot + j);
+            let frame = process_frame_descriptor(root_node, start_slot + j);
             let va = base_va + j * PAGE_SIZE;
             let vm = processes
                 .vm_space_mut(pid)
@@ -1741,7 +1803,7 @@ impl Alpha {
         root_radix: usize,
         bootstrap_generic: CapabilityDescriptor,
         alpha_address_space: CapabilityDescriptor,
-        alpha_vm_space: &mut crate::nanami_core::vm_space::VmSpace,
+        alpha_vm_space: &mut crate::nanami_core::vm_space::BootstrapVmSpace,
     ) -> Result<usize, CapabilityError> {
         let mut selected: Option<(usize, usize)> = None;
         let needed_bytes = ALPHA_HEAP_PAGES * PAGE_SIZE;
@@ -1848,6 +1910,32 @@ fn validate_process_device_slot(slot: usize) -> Result<(), CapabilityError> {
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(())
+}
+
+fn process_frame_directory_descriptor(process_root: CapabilityDescriptor) -> CapabilityDescriptor {
+    make_child_slot_descriptor(process_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_FRAME_NODE)
+}
+
+fn process_frame_chunk_descriptor(
+    process_root: CapabilityDescriptor,
+    chunk_index: usize,
+) -> CapabilityDescriptor {
+    make_child_slot_descriptor(
+        process_frame_directory_descriptor(process_root),
+        PROCESS_FRAME_DIRECTORY_RADIX,
+        chunk_index,
+    )
+}
+
+fn process_frame_descriptor(
+    process_root: CapabilityDescriptor,
+    global_slot: usize,
+) -> CapabilityDescriptor {
+    make_child_slot_descriptor(
+        process_frame_chunk_descriptor(process_root, global_slot / PROCESS_FRAME_CHUNK_PAGES),
+        PROCESS_FRAME_NODE_RADIX,
+        global_slot % PROCESS_FRAME_CHUNK_PAGES,
+    )
 }
 
 fn select_irq_notification_alias_slot(

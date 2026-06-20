@@ -10,6 +10,3 @@
 *.elf
 *.obj
 *.bin
-
-# temporary ignore (TODO: remove this line after the documentation is complete)
-*.md 

@@ -1,0 +1,17 @@
+[package]
+name = "honoka"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fontdue = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

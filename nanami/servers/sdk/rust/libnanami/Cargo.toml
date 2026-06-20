@@ -1,0 +1,10 @@
+[package]
+name = "libnanami"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+a9n_abi = { version = "0.3.0" }
+a9n-types = { version = "0.3.0" }
+
+[workspace]

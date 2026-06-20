@@ -1,0 +1,18 @@
+[package]
+name = "rust_hello"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+a9n_abi = { version = "0.3.0" }
+a9n-types = { version = "0.3.0" }
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

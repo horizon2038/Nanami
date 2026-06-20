@@ -1,0 +1,18 @@
+[package]
+name = "image-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+embedded-graphics = "0.8.2"
+tinybmp = "0.6.0"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

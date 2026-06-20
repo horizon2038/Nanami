@@ -1,0 +1,3 @@
+[submodule "spencer"]
+	path = spencer
+	url = git@github.com:horizon2038/spencer.git

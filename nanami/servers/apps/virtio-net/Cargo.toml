@@ -1,0 +1,17 @@
+[package]
+name = "virtio_net"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+net_wire = { path = "../../libs/net-wire" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

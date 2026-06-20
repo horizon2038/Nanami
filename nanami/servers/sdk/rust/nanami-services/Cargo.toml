@@ -1,0 +1,10 @@
+[package]
+name = "nanami-services"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libnanami = { path = "../libnanami" }
+a9n_abi = { version = "0.3.0" }
+
+[workspace]

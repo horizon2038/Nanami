@@ -1,0 +1,15 @@
+.DS_Store
+/target/
+/out/
+/init.map
+/nanami/servers/build/
+/nanami/servers/initramfs.cpio
+**/target/
+*.map
+*.o
+*.elf
+*.obj
+*.bin
+
+# temporary ignore (TODO: remove this line after the documentation is complete)
+*.md 

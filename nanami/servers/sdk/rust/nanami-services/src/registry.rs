@@ -9,6 +9,8 @@ pub const DISPLAY_SERVICE: &str = "display_service";
 pub const INPUT_SERVICE: &str = "input-service";
 pub const HONOKA_SERVICE: &str = "honoka-service";
 pub const RTC_SERVICE: &str = "rtc-service";
+pub const BLOCK_DEVICE: &str = "block-device";
+pub const VFS_SERVICE: &str = "vfs-service";
 
 pub const SERVICE_KIND_NET_DEVICE: Word = 1;
 pub const SERVICE_KIND_NETWORK_SERVICE: Word = 2;
@@ -17,6 +19,8 @@ pub const SERVICE_KIND_DISPLAY_SERVICE: Word = 4;
 pub const SERVICE_KIND_INPUT_SERVICE: Word = 5;
 pub const SERVICE_KIND_HONOKA_SERVICE: Word = 6;
 pub const SERVICE_KIND_RTC_SERVICE: Word = 7;
+pub const SERVICE_KIND_BLOCK_DEVICE: Word = 8;
+pub const SERVICE_KIND_VFS_SERVICE: Word = 9;
 
 pub fn register_service(name: &str) -> Result<(), RequestError> {
     let _ = register_service_with_pid(name)?;
@@ -63,6 +67,14 @@ pub fn register_rtc_service() -> Result<(), RequestError> {
     register_service(RTC_SERVICE)
 }
 
+pub fn register_block_device() -> Result<(), RequestError> {
+    register_service(BLOCK_DEVICE)
+}
+
+pub fn register_vfs_service() -> Result<(), RequestError> {
+    register_service(VFS_SERVICE)
+}
+
 pub fn connect_net_device_with_pid(destination_slot: Word) -> Result<Word, RequestError> {
     connect_service_with_pid(NET_DEVICE, destination_slot)
 }
@@ -77,6 +89,18 @@ pub fn connect_timer_service(destination_slot: Word) -> Result<(), RequestError>
 
 pub fn connect_rtc_service(destination_slot: Word) -> Result<(), RequestError> {
     connect_service(RTC_SERVICE, destination_slot)
+}
+
+pub fn connect_block_device_with_pid(destination_slot: Word) -> Result<Word, RequestError> {
+    connect_service_with_pid(BLOCK_DEVICE, destination_slot)
+}
+
+pub fn connect_block_device(destination_slot: Word) -> Result<(), RequestError> {
+    connect_service(BLOCK_DEVICE, destination_slot)
+}
+
+pub fn connect_vfs_service(destination_slot: Word) -> Result<(), RequestError> {
+    connect_service(VFS_SERVICE, destination_slot)
 }
 
 pub fn connect_display_service(destination_slot: Word) -> Result<(), RequestError> {
@@ -104,6 +128,8 @@ pub fn service_name_from_kind(kind: Word) -> &'static [u8] {
         SERVICE_KIND_INPUT_SERVICE => b"input-service",
         SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
         SERVICE_KIND_RTC_SERVICE => b"rtc-service",
+        SERVICE_KIND_BLOCK_DEVICE => b"block-device",
+        SERVICE_KIND_VFS_SERVICE => b"vfs-service",
         _ => b"unknown",
     }
 }

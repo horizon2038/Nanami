@@ -2141,7 +2141,11 @@ fn process_priority_for_image(image_name: &str) -> Word {
         // GUI servers are above GUI clients, but below timer/input IRQ-facing services.
         "fb-server.elf" | "honoka.elf" => PROCESS_PRIORITY_GUI_SERVER,
         // Background servers stay above clients, but below the GUI critical path.
+        "block-device-server.elf" | "virtio-blk-server.elf" => {
+            PROCESS_PRIORITY_BACKGROUND_SERVER + 2
+        }
         "virtio-net.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
+        "ext2-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
         "net-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
         "rtc-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
         "http-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER,

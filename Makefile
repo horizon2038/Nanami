@@ -1,4 +1,4 @@
-.PHONY: all servers init image run clean
+.PHONY: all servers init image fs-image run clean
 
 all: image
 
@@ -19,6 +19,9 @@ init: servers
 
 image:
 	./scripts/build-image.sh
+
+fs-image:
+	./scripts/create-ext2-image.sh $${SIZE_MB:-8} $${OUT:-out/ext2.img}
 
 run:
 	./scripts/run-qemu.sh

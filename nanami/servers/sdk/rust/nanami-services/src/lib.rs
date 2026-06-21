@@ -1,11 +1,13 @@
 #![no_std]
 
+pub mod block;
 pub mod gfx;
 pub mod input;
 pub mod net;
 pub mod registry;
 pub mod rtc;
 pub mod timer;
+pub mod vfs;
 
 use a9n_abi::CapabilityDescriptor;
 

@@ -20,6 +20,8 @@ QEMU_SMP="${QEMU_SMP:-1}"
 QEMU_ACCEL="${QEMU_ACCEL:-auto}"
 NET_MODE="${NET_MODE:-}"
 NET_DEVICE="${NET_DEVICE:-virtio}"
+BLOCK_IMAGE="${BLOCK_IMAGE:-}"
+BLOCK_IMAGE_FORMAT="${BLOCK_IMAGE_FORMAT:-raw}"
 BRIDGE_IF="${BRIDGE_IF:-en0}"
 HOSTFWD_HTTP="${HOSTFWD_HTTP:-tcp:127.0.0.1:1234-:80}"
 PCAP="${PCAP:-$ROOT_DIR/out/net0.pcap}"
@@ -35,6 +37,12 @@ if [ -z "$NET_MODE" ]; then
     NET_MODE="bridged"
   else
     NET_MODE="user"
+  fi
+fi
+
+if [ -z "$BLOCK_IMAGE" ]; then
+  if [ -f "out/ext2.img" ]; then
+    BLOCK_IMAGE="$(pwd)/out/ext2.img"
   fi
 fi
 
@@ -57,6 +65,22 @@ args=(
   -drive "format=raw,file=$IMG"
   --no-reboot
   --no-shutdown
+)
+
+if [ -z "$BLOCK_IMAGE" ]; then
+  echo "[nanami-run] BLOCK_IMAGE is required because ramdisk block-device-server is disabled." >&2
+  echo "[nanami-run] Set BLOCK_IMAGE=/path/to/ext2.img, or place ext2.img under out/, nanami/servers/, or repository root." >&2
+  exit 1
+fi
+
+if [ ! -f "$BLOCK_IMAGE" ]; then
+  echo "[nanami-run] BLOCK_IMAGE not found: $BLOCK_IMAGE" >&2
+  exit 1
+fi
+
+args+=(
+  -drive "if=none,id=blk0,format=$BLOCK_IMAGE_FORMAT,file=$BLOCK_IMAGE"
+  -device "virtio-blk-pci,drive=blk0,disable-legacy=off,disable-modern=on"
 )
 
 if [ "$QEMU_ACCEL" = "auto" ]; then

@@ -9,12 +9,14 @@ use libnanami::{RequestError, Word};
 
 #[path = "app/font.rs"]
 mod font;
+mod file;
 
 use font::TextRenderer;
 
 const SLOT_HONOKA_SERVICE: Word = 22;
 const SLOT_HONOKA_PRESENT_NOTIFICATION: Word = 23;
 const SLOT_NETWORK_SERVICE: Word = 24;
+const SLOT_VFS_SERVICE: Word = 25;
 const WINDOW_X: Word = 90;
 const WINDOW_Y: Word = 78;
 const CONTENT_WIDTH: usize = 712;
@@ -120,6 +122,7 @@ struct Shell {
     input: [u8; MAX_LINE],
     input_len: usize,
     shift_down: bool,
+    files: file::FileShell,
 }
 
 impl Shell {
@@ -143,6 +146,7 @@ impl Shell {
             input: [0; MAX_LINE],
             input_len: 0,
             shift_down: false,
+            files: file::FileShell::new(),
         }
     }
 
@@ -276,11 +280,22 @@ impl Shell {
             return;
         }
         if bytes_eq(&self.input[..self.input_len], b"help") {
-            self.push_line_bytes(b"commands: help, services, netinfo, clear, echo, about");
+            self.push_line_bytes(b"commands: help, services, netinfo, fstest");
+            self.push_line_bytes(b"          ls, cat, rm, mkdir, cd");
+            self.push_line_bytes(b"          clear, echo, about");
         } else if bytes_eq(&self.input[..self.input_len], b"services") {
             self.show_services();
         } else if bytes_eq(&self.input[..self.input_len], b"netinfo") {
             self.show_netinfo();
+        } else if bytes_eq(&self.input[..self.input_len], b"fstest") {
+            self.run_fs_test();
+            self.files.invalidate_vfs_session();
+        } else if let Some(output) = self.files.execute(&self.input[..self.input_len]) {
+            let mut i = 0usize;
+            while i < output.len() {
+                self.push_line(output.line(i));
+                i += 1;
+            }
         } else if bytes_eq(&self.input[..self.input_len], b"clear") {
             self.row_count = 0;
         } else if bytes_eq(&self.input[..self.input_len], b"about") {
@@ -337,18 +352,12 @@ impl Shell {
     }
 
     fn show_netinfo(&mut self) {
-        match nanami_services::registry::connect_network_service(SLOT_NETWORK_SERVICE) {
-            Ok(()) => {}
-            Err(_) => {
-                self.push_line_bytes(b"netinfo: network-service unavailable");
-                return;
-            }
-        }
+        let _ = nanami_services::registry::connect_network_service(SLOT_NETWORK_SERVICE);
         let net_port = libnanami::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
         let (ip, gateway, dns) = match nanami_services::net::net_service_ipv4_config(net_port) {
             Ok(v) => v,
             Err(_) => {
-                self.push_line_bytes(b"netinfo: ipv4 query failed");
+                self.push_line_bytes(b"netinfo: network-service unavailable");
                 return;
             }
         };
@@ -365,6 +374,173 @@ impl Shell {
         self.push_line(format_ipv4_line(b"  gateway ", gateway));
         self.push_line(format_ipv4_line(b"  dns     ", dns));
         self.push_line(format_mac_line(b"  mac     ", mac));
+    }
+
+    fn run_fs_test(&mut self) {
+        self.push_line_bytes(b"fstest: connect vfs-service");
+        let _ = nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE);
+        let vfs_port = libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
+        let (shm, shm_size) =
+            match nanami_services::vfs::vfs_attach_shared_memory(vfs_port, 0x4000) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.push_line_bytes(b"fstest: vfs-service unavailable");
+                    return;
+                }
+            };
+        if shm_size < 0x1000 {
+            self.push_line_bytes(b"fstest: shm too small");
+            return;
+        }
+
+        if !self.fs_ls_root(vfs_port, shm) {
+            return;
+        }
+        if !self.fs_create_write_read(vfs_port, shm) {
+            return;
+        }
+        self.push_line_bytes(b"fstest: ok");
+    }
+
+    fn fs_stat(&mut self, vfs_port: Word, shm: Word, path: &[u8], label: &[u8]) -> bool {
+        write_shm_bytes(shm, 0, path);
+        match nanami_services::vfs::vfs_stat(vfs_port, 0, path.len() as Word) {
+            Ok((inode, size, kind)) => {
+                let mut line = [0u8; COLS];
+                let mut pos = 0usize;
+                pos = append_bytes(&mut line, pos, label);
+                pos = append_bytes(&mut line, pos, b": inode=");
+                pos = append_decimal(&mut line, pos, inode);
+                pos = append_bytes(&mut line, pos, b" size=");
+                pos = append_decimal(&mut line, pos, size);
+                pos = append_bytes(&mut line, pos, b" type=");
+                let _ = append_decimal(&mut line, pos, kind);
+                self.push_line(line);
+                true
+            }
+            Err(_) => {
+                self.push_line_bytes(b"fstest: stat failed");
+                false
+            }
+        }
+    }
+
+    fn fs_cat(&mut self, vfs_port: Word, shm: Word, path: &[u8]) -> bool {
+        write_shm_bytes(shm, 0, path);
+        let handle = match nanami_services::vfs::vfs_open(vfs_port, 0, path.len() as Word) {
+            Ok(h) => h,
+            Err(_) => {
+                self.push_line_bytes(b"fstest: open /hello.txt failed");
+                return false;
+            }
+        };
+        let bytes = match nanami_services::vfs::vfs_read(vfs_port, handle, 0, 64, 512) {
+            Ok(n) => n as usize,
+            Err(_) => {
+                let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+                self.push_line_bytes(b"fstest: read /hello.txt failed");
+                return false;
+            }
+        };
+        let mut line = [0u8; COLS];
+        let mut pos = append_bytes(&mut line, 0, b"cat /hello.txt: ");
+        pos = append_shm_text(&mut line, pos, shm, 512, bytes.min(48));
+        let _ = pos;
+        self.push_line(line);
+        let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        true
+    }
+
+    fn fs_ls_root(&mut self, vfs_port: Word, shm: Word) -> bool {
+        write_shm_bytes(shm, 0, b"/");
+        let handle = match nanami_services::vfs::vfs_open(vfs_port, 0, 1) {
+            Ok(h) => h,
+            Err(_) => {
+                self.push_line_bytes(b"fstest: open / failed");
+                return false;
+            }
+        };
+        let (entries, _) = match nanami_services::vfs::vfs_read_dir(vfs_port, handle, 0, 4, 512) {
+            Ok(v) => v,
+            Err(_) => {
+                let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+                self.push_line_bytes(b"fstest: readdir / failed");
+                return false;
+            }
+        };
+        self.push_line_bytes(b"ls /:");
+        let mut i = 0usize;
+        while i < entries as usize && i < 4 {
+            self.push_line(format_dirent_line(
+                shm,
+                512 + i * nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES,
+            ));
+            i += 1;
+        }
+        let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        true
+    }
+
+    fn fs_create_write_read(&mut self, vfs_port: Word, shm: Word) -> bool {
+        let path = b"/fstest.txt";
+        let renamed = b"/fstest-renamed.txt";
+        let body = b"Nanami ext2 write path ok";
+
+        write_shm_bytes(shm, 0, path);
+        let _ = nanami_services::vfs::vfs_remove(vfs_port, 0, path.len() as Word);
+        write_shm_bytes(shm, 0, renamed);
+        let _ = nanami_services::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word);
+
+        write_shm_bytes(shm, 0, path);
+        if nanami_services::vfs::vfs_create(vfs_port, 0, path.len() as Word).is_err() {
+            self.push_line_bytes(b"fstest: create failed");
+            return false;
+        }
+        let handle = match nanami_services::vfs::vfs_open(vfs_port, 0, path.len() as Word) {
+            Ok(h) => h,
+            Err(_) => {
+                self.push_line_bytes(b"fstest: open new file failed");
+                return false;
+            }
+        };
+        write_shm_bytes(shm, 512, body);
+        if nanami_services::vfs::vfs_write(vfs_port, handle, 0, body.len() as Word, 512).is_err() {
+            let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+            self.push_line_bytes(b"fstest: write failed");
+            return false;
+        }
+        if nanami_services::vfs::vfs_read(vfs_port, handle, 0, body.len() as Word, 768).is_err() {
+            let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+            self.push_line_bytes(b"fstest: readback failed");
+            return false;
+        }
+        let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        if !shm_bytes_eq(shm, 768, body) {
+            self.push_line_bytes(b"fstest: readback mismatch");
+            return false;
+        }
+
+        write_shm_bytes(shm, 0, path);
+        write_shm_bytes(shm, 256, renamed);
+        if nanami_services::vfs::vfs_rename(
+            vfs_port,
+            0,
+            path.len() as Word,
+            256,
+            renamed.len() as Word,
+        )
+        .is_err()
+        {
+            self.push_line_bytes(b"fstest: rename failed");
+            return false;
+        }
+        write_shm_bytes(shm, 0, renamed);
+        if nanami_services::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word).is_err() {
+            self.push_line_bytes(b"fstest: remove failed");
+            return false;
+        }
+        self.push_line_bytes(b"fstest: create/write/read/rename/remove ok");
+        true
     }
 
     fn push_prompt(&mut self) {
@@ -770,6 +946,70 @@ fn append_decimal(dst: &mut [u8], pos: usize, mut value: Word) -> usize {
     out
 }
 
+fn read_shm_word(base: Word, offset: usize) -> Word {
+    unsafe { core::ptr::read_unaligned((base as usize + offset) as *const Word) }
+}
+
+fn read_shm_byte(base: Word, offset: usize) -> u8 {
+    unsafe { core::ptr::read_volatile((base as usize + offset) as *const u8) }
+}
+
+fn write_shm_bytes(base: Word, offset: usize, bytes: &[u8]) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), (base as usize + offset) as *mut u8, bytes.len());
+    }
+}
+
+fn shm_bytes_eq(base: Word, offset: usize, expected: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i < expected.len() {
+        if read_shm_byte(base, offset + i) != expected[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn append_shm_text(dst: &mut [u8], mut pos: usize, base: Word, offset: usize, len: usize) -> usize {
+    let mut i = 0usize;
+    while pos < dst.len() && i < len {
+        let byte = read_shm_byte(base, offset + i);
+        dst[pos] = match byte {
+            b'\n' | b'\r' | b'\t' => b' ',
+            0x20..=0x7e => byte,
+            _ => b'.',
+        };
+        pos += 1;
+        i += 1;
+    }
+    pos
+}
+
+fn format_dirent_line(base: Word, offset: usize) -> [u8; COLS] {
+    let inode = read_shm_word(base, offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET);
+    let kind = read_shm_word(base, offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET);
+    let name_len = read_shm_word(
+        base,
+        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET,
+    ) as usize;
+    let name_len = name_len.min(nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES);
+    let mut line = [0u8; COLS];
+    let mut pos = append_bytes(&mut line, 0, b"  ");
+    pos = append_shm_text(
+        &mut line,
+        pos,
+        base,
+        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET,
+        name_len,
+    );
+    pos = append_bytes(&mut line, pos, b" inode=");
+    pos = append_decimal(&mut line, pos, inode);
+    pos = append_bytes(&mut line, pos, b" type=");
+    let _ = append_decimal(&mut line, pos, kind);
+    line
+}
+
 fn append_hex_byte(dst: &mut [u8], pos: usize, value: u8) -> usize {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = pos;
@@ -819,6 +1059,8 @@ fn service_name(kind: Word) -> &'static [u8] {
         nanami_services::registry::SERVICE_KIND_DISPLAY_SERVICE => b"display_service",
         nanami_services::registry::SERVICE_KIND_INPUT_SERVICE => b"input-service",
         nanami_services::registry::SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
+        nanami_services::registry::SERVICE_KIND_VFS_SERVICE => b"vfs-service",
+        nanami_services::registry::SERVICE_KIND_BLOCK_DEVICE => b"block-device",
         _ => b"unknown-service",
     }
 }

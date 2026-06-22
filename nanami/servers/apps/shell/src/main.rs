@@ -580,6 +580,9 @@ impl Shell {
         if !self.posix_process_memory_test(posix_port) {
             return;
         }
+        if !self.posix_environment_test(posix_port, shm) {
+            return;
+        }
         if !self.posix_process_lifecycle_test(posix_port) {
             return;
         }
@@ -695,6 +698,74 @@ impl Shell {
             return false;
         }
         self.push_line_bytes(b"posixtest: process/memory ok");
+        true
+    }
+
+    fn posix_environment_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        write_shm_bytes(shm, 0, b"PATH");
+        match nanami_services::posix::posix_getenv(posix_port, 0, 4, 512, 64) {
+            Ok(len) if len > 0 => {}
+            _ => {
+                self.push_line_bytes(b"posixtest: getenv PATH failed");
+                return false;
+            }
+        }
+
+        write_shm_bytes(shm, 0, b"NANAMI_ENV");
+        write_shm_bytes(shm, 128, b"working");
+        if nanami_services::posix::posix_setenv(posix_port, 0, 10, 128, 7).is_err() {
+            self.push_line_bytes(b"posixtest: setenv failed");
+            return false;
+        }
+        match nanami_services::posix::posix_getenv(posix_port, 0, 10, 512, 32) {
+            Ok(7) if shm_bytes_eq(shm, 512, b"working") => {}
+            _ => {
+                self.push_line_bytes(b"posixtest: getenv mismatch");
+                return false;
+            }
+        }
+
+        let count = match nanami_services::posix::posix_env_count(posix_port) {
+            Ok(count) if count >= 4 => count,
+            _ => {
+                self.push_line_bytes(b"posixtest: env count failed");
+                return false;
+            }
+        };
+        let mut found = false;
+        let mut index = 0;
+        while index < count {
+            match nanami_services::posix::posix_env_at(posix_port, index, 768, 64) {
+                Ok((10, 7)) if shm_bytes_eq(shm, 768, b"NANAMI_ENV=working") => {
+                    found = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    self.push_line_bytes(b"posixtest: env_at failed");
+                    return false;
+                }
+            }
+            index += 1;
+        }
+        if !found {
+            self.push_line_bytes(b"posixtest: env_at missing variable");
+            return false;
+        }
+
+        write_shm_bytes(shm, 0, b"NANAMI_ENV");
+        if nanami_services::posix::posix_unsetenv(posix_port, 0, 10).is_err() {
+            self.push_line_bytes(b"posixtest: unsetenv failed");
+            return false;
+        }
+        if !matches!(
+            nanami_services::posix::posix_getenv(posix_port, 0, 10, 512, 32),
+            Err(libnanami::RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR))
+        ) {
+            self.push_line_bytes(b"posixtest: unsetenv still visible");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: environment ok");
         true
     }
 

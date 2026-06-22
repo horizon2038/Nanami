@@ -34,12 +34,19 @@ pub const POSIX_REQUEST_SPAWN: Word = 0xa11f;
 pub const POSIX_REQUEST_DUP: Word = 0xa120;
 pub const POSIX_REQUEST_DUP2: Word = 0xa121;
 pub const POSIX_REQUEST_FCNTL: Word = 0xa122;
+pub const POSIX_REQUEST_GETENV: Word = 0xa123;
+pub const POSIX_REQUEST_SETENV: Word = 0xa124;
+pub const POSIX_REQUEST_UNSETENV: Word = 0xa125;
+pub const POSIX_REQUEST_ENV_COUNT: Word = 0xa126;
+pub const POSIX_REQUEST_ENV_AT: Word = 0xa127;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_WAIT_NOHANG: Word = 1;
 
 pub const POSIX_DEFAULT_SHM_BYTES: Word = 0x4000;
 pub const POSIX_PATH_MAX: usize = 128;
+pub const POSIX_ENV_NAME_MAX: usize = 32;
+pub const POSIX_ENV_VALUE_MAX: usize = 128;
 
 pub const POSIX_O_CREAT: Word = 1 << 0;
 pub const POSIX_O_TRUNC: Word = 1 << 1;

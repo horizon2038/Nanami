@@ -308,6 +308,92 @@ pub fn posix_fcntl_setfd(
     Ok(())
 }
 
+pub fn posix_getenv(
+    service_port: CapabilityDescriptor,
+    name_offset: Word,
+    name_len: Word,
+    out_offset: Word,
+    max_len: Word,
+) -> Result<Word, RequestError> {
+    let (status, value_len, _) = call_port(
+        service_port,
+        POSIX_REQUEST_GETENV,
+        name_offset,
+        name_len,
+        out_offset,
+        max_len,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(value_len)
+}
+
+pub fn posix_setenv(
+    service_port: CapabilityDescriptor,
+    name_offset: Word,
+    name_len: Word,
+    value_offset: Word,
+    value_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_SETENV,
+        name_offset,
+        name_len,
+        value_offset,
+        value_len,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn posix_unsetenv(
+    service_port: CapabilityDescriptor,
+    name_offset: Word,
+    name_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) =
+        call_port(service_port, POSIX_REQUEST_UNSETENV, name_offset, name_len, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn posix_env_count(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
+    let (status, count, _) = call_port(service_port, POSIX_REQUEST_ENV_COUNT, 0, 0, 0, 0, 1)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(count)
+}
+
+pub fn posix_env_at(
+    service_port: CapabilityDescriptor,
+    index: Word,
+    out_offset: Word,
+    max_len: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, name_len, value_len) = call_port(
+        service_port,
+        POSIX_REQUEST_ENV_AT,
+        index,
+        out_offset,
+        max_len,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((name_len, value_len))
+}
+
 pub fn posix_read(
     service_port: CapabilityDescriptor,
     fd: Word,

@@ -35,6 +35,10 @@ pub const OS_REQUEST_NOTIFICATION_PORT_COPY: usize = 0x100d;
 pub const OS_REQUEST_SHARED_FRAMEBUFFER_CREATE: usize = 0x100e;
 pub const OS_REQUEST_HEAP_ALLOC: usize = 0x100f;
 pub const OS_REQUEST_SERVICE_LIST: usize = 0x1010;
+pub const OS_REQUEST_PROCESS_SPAWN: usize = 0x1011;
+pub const OS_REQUEST_PROCESS_STATUS: usize = 0x1012;
+pub const OS_REQUEST_PROCESS_REAP: usize = 0x1013;
+pub const OS_REQUEST_MAPPING_RELEASE: usize = 0x1014;
 pub const OS_REQUEST_DEBUG_PING: usize = 0x10ff;
 
 pub const OS_RESPONSE_OK: usize = 0;

@@ -11,6 +11,7 @@ pub const HONOKA_SERVICE: &str = "honoka-service";
 pub const RTC_SERVICE: &str = "rtc-service";
 pub const BLOCK_DEVICE: &str = "block-device";
 pub const VFS_SERVICE: &str = "vfs-service";
+pub const POSIX_SERVICE: &str = "posix-service";
 
 pub const SERVICE_KIND_NET_DEVICE: Word = 1;
 pub const SERVICE_KIND_NETWORK_SERVICE: Word = 2;
@@ -75,6 +76,10 @@ pub fn register_vfs_service() -> Result<(), RequestError> {
     register_service(VFS_SERVICE)
 }
 
+pub fn register_posix_service() -> Result<(), RequestError> {
+    register_service(POSIX_SERVICE)
+}
+
 pub fn connect_net_device_with_pid(destination_slot: Word) -> Result<Word, RequestError> {
     connect_service_with_pid(NET_DEVICE, destination_slot)
 }
@@ -101,6 +106,10 @@ pub fn connect_block_device(destination_slot: Word) -> Result<(), RequestError> 
 
 pub fn connect_vfs_service(destination_slot: Word) -> Result<(), RequestError> {
     connect_service(VFS_SERVICE, destination_slot)
+}
+
+pub fn connect_posix_service(destination_slot: Word) -> Result<(), RequestError> {
+    connect_service(POSIX_SERVICE, destination_slot)
 }
 
 pub fn connect_display_service(destination_slot: Word) -> Result<(), RequestError> {

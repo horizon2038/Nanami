@@ -8,8 +8,11 @@ use libnanami::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
+const SLOT_TIMER_SERVICE: Word = 24;
 const BLOCK_SHM_BYTES: Word = 0x4000;
 const BLOCK_BUFFER_OFFSET: Word = 0;
+const BLOCK_CONNECT_RETRIES: usize = 64;
+const BLOCK_CONNECT_RETRY_MS: Word = 100;
 const MAX_SESSIONS: usize = 16;
 const MAX_HANDLES: usize = 64;
 const EXT2_MAGIC: u16 = 0xef53;
@@ -108,7 +111,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[ext2-server] bootstrap\n");
-    let block_port = connect_block_device();
+    let block_port = connect_block_device()
+        .map_err(|e| log_error("[ext2-server] block-device unavailable: ", e))?;
     let (block_shm, block_shm_size) =
         nanami_services::block::block_device_attach_shared_memory(block_port, BLOCK_SHM_BYTES)
             .map_err(|e| log_error("[ext2-server] block shm attach failed: ", e))?;
@@ -178,20 +182,37 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 }
 
-fn connect_block_device() -> Word {
+fn connect_block_device() -> Result<Word, RequestError> {
+    let timer_port = match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+        Ok(()) => Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
+        Err(e) => {
+            log_request_error("[ext2-server] timer connect failed: ", e);
+            None
+        }
+    };
     let mut tries = 0usize;
     loop {
         match nanami_services::registry::connect_block_device_with_pid(SLOT_BLOCK_DEVICE) {
-            Ok(_) => return libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE),
+            Ok(_) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE)),
             Err(e) => {
-                if tries == 0 {
+                if tries == 0 || tries + 1 == BLOCK_CONNECT_RETRIES {
                     log_request_error("[ext2-server] waiting block-device: ", e);
                 }
                 tries += 1;
-                let mut spin = 0usize;
-                while spin < 200_000 {
-                    core::hint::spin_loop();
-                    spin += 1;
+                if tries >= BLOCK_CONNECT_RETRIES {
+                    return Err(e);
+                }
+                if let Some(timer) = timer_port {
+                    let _ = nanami_services::timer::timer_service_sleep_milliseconds(
+                        timer,
+                        BLOCK_CONNECT_RETRY_MS,
+                    );
+                } else {
+                    let mut spin = 0usize;
+                    while spin < 200_000 {
+                        core::hint::spin_loop();
+                        spin += 1;
+                    }
                 }
             }
         }

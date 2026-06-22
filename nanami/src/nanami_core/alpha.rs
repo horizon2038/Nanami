@@ -3,12 +3,14 @@ use crate::nanami_core::communication::{
     CommunicationEvent, CommunicationManager, KernelFaultEvent, NotificationEvent, OsRequestEvent,
     OS_REQUEST_DEBUG_PING, OS_REQUEST_DMA_REQUEST, OS_REQUEST_EXIT, OS_REQUEST_HEAP_ALLOC,
     OS_REQUEST_INITIAL_FRAMEBUFFER_INFORMATION, OS_REQUEST_IO_PORT_CONTROL, OS_REQUEST_IRQ_CONTROL,
-    OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NOTIFICATION_PORT_COPY,
+    OS_REQUEST_MAPPING_RELEASE, OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NOTIFICATION_PORT_COPY,
     OS_REQUEST_NOTIFICATION_PORT_CREATE, OS_REQUEST_PAGE_ALLOC, OS_REQUEST_SELF_PID,
-    OS_REQUEST_SERVICE_CONNECT, OS_REQUEST_SERVICE_LIST, OS_REQUEST_SERVICE_REGISTER,
-    OS_REQUEST_SHARED_FRAMEBUFFER_CREATE, OS_REQUEST_SHARED_MEMORY_CREATE, OS_RESPONSE_FATAL,
-    OS_RESPONSE_ILLEGAL_OPERATION, OS_RESPONSE_INVALID_ARGUMENT, OS_RESPONSE_INVALID_DESCRIPTOR,
-    OS_RESPONSE_OK, OS_RESPONSE_PERMISSION_DENIED, OS_RESPONSE_PONG_MAGIC,
+    OS_REQUEST_PROCESS_REAP, OS_REQUEST_PROCESS_SPAWN, OS_REQUEST_PROCESS_STATUS,
+    OS_REQUEST_SERVICE_CONNECT,
+    OS_REQUEST_SERVICE_LIST, OS_REQUEST_SERVICE_REGISTER, OS_REQUEST_SHARED_FRAMEBUFFER_CREATE,
+    OS_REQUEST_SHARED_MEMORY_CREATE, OS_RESPONSE_FATAL, OS_RESPONSE_ILLEGAL_OPERATION,
+    OS_RESPONSE_INVALID_ARGUMENT, OS_RESPONSE_INVALID_DESCRIPTOR, OS_RESPONSE_OK,
+    OS_RESPONSE_PERMISSION_DENIED, OS_RESPONSE_PONG_MAGIC,
 };
 use crate::nanami_core::cpio;
 use crate::nanami_core::elf_loader::parse_elf64;
@@ -17,6 +19,7 @@ use crate::nanami_core::process::ProcessManager;
 use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use crate::nanami_utils::heap::init_global_heap;
 use crate::{debug, error, info, warn};
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::ptr;
 use nun::{
@@ -61,7 +64,7 @@ const ALPHA_RUNTIME_STACK_NODE_RADIX: usize = 12;
 const ALPHA_RUNTIME_STACK_BASE: usize = 0x5000_0000;
 const ALPHA_RUNTIME_STACK_PAGES: usize = 1024;
 const ALPHA_HEAP_BASE: usize = 0x5800_0000;
-const ALPHA_HEAP_PAGES: usize = 1024;
+const ALPHA_HEAP_PAGES: usize = 8192;
 const GENERIC_NODE_RADIX: usize = 7;
 const PROCESS_DEVICE_SLOT_MIN: usize = 8;
 const PROCESS_DEVICE_SLOT_MAX: usize = (1 << PROCESS_ROOT_RADIX) - 1;
@@ -275,8 +278,9 @@ impl Alpha {
         process_root: CapabilityDescriptor,
         start_slot: usize,
         page_count: usize,
-    ) -> Result<(), CapabilityError> {
+    ) -> Result<Vec<(usize, usize)>, CapabilityError> {
         self.ensure_process_frame_chunks(pid, process_root, start_slot, page_count)?;
+        let mut allocated = Vec::new();
         let mut done = 0usize;
         while done < page_count {
             let global_slot = start_slot + done;
@@ -284,15 +288,19 @@ impl Alpha {
             let chunk_offset = global_slot % PROCESS_FRAME_CHUNK_PAGES;
             let chunk_remaining = PROCESS_FRAME_CHUNK_PAGES - chunk_offset;
             let batch = chunk_remaining.min(page_count - done);
-            self.memory.allocate_process_frames(
+            let allocated_pages = self.memory.allocate_process_frames(
                 process_frame_chunk_descriptor(process_root, chunk),
                 PROCESS_FRAME_NODE_RADIX,
                 chunk_offset,
                 batch,
             )?;
+            for (offset, page) in allocated_pages.iter().enumerate() {
+                let slot = global_slot + offset;
+                allocated.push((slot, *page));
+            }
             done += batch;
         }
-        Ok(())
+        Ok(allocated)
     }
 
     fn spawn_components_from_initramfs(&mut self) {
@@ -304,8 +312,8 @@ impl Alpha {
             if !entry.name.ends_with(".elf") {
                 return Ok(());
             }
-            match self.spawn_process_from_elf(entry.name, entry.data) {
-                Ok(()) => {
+            match self.spawn_process_from_elf(entry.name, entry.data, 0) {
+                Ok(_) => {
                     spawned += 1;
 
                     // busy wait
@@ -406,7 +414,8 @@ impl Alpha {
         &mut self,
         image_name: &str,
         image_bytes: &[u8],
-    ) -> Result<(), CapabilityError> {
+        reaper_pid: usize,
+    ) -> Result<usize, CapabilityError> {
         info!("[proc] parse elf: {}", image_name);
         let elf = parse_elf64(image_bytes)?;
         info!(
@@ -556,7 +565,7 @@ impl Alpha {
         let ipc_buffer_frame = process_frame_descriptor(child_root, ipc_buffer_frame_slot);
         let ipc_buffer_tls_base = ipc_buffer_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS;
 
-        debug!(
+        info!(
             "[proc] map plan image=[{:#018x}..{:#018x}) image_pages={:>3} stack_pages={:>3} ipc={:#018x} temp={:#018x}",
             image_base,
             image_end,
@@ -566,13 +575,24 @@ impl Alpha {
             temp_base
         );
 
-        self.allocate_process_frames(pid, child_root, 0, total_frames)?;
+        info!(
+            "[proc] ensure frame chunks pid={:>3} frames={:>4}",
+            pid, total_frames
+        );
+        let allocated_frames = self.allocate_process_frames(pid, child_root, 0, total_frames)?;
+        for (slot, page) in allocated_frames {
+            self.processes
+                .register_physical_allocation(pid, 0, slot, page, 1)?;
+        }
+        info!("[proc] frame allocation complete pid={:>3}", pid);
         self.processes.ensure_vm_space_for_pid(pid)?;
+        info!("[proc] vm tracker ready pid={:>3}", pid);
 
         let alpha_address_space = self.processes.alpha_entry().address_space;
         let memory = &mut self.memory;
         let processes = &mut self.processes;
 
+        info!("[proc] map image frames pid={:>3}", pid);
         let mut page = 0usize;
         while page < image_pages {
             let frame = process_frame_descriptor(child_root, page);
@@ -582,11 +602,23 @@ impl Alpha {
                 let vm = processes
                     .vm_space_mut(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
-                memory.map_frame(child_address_space, frame, user_va, vm)?;
+                if let Err(e) = memory.map_frame(child_address_space, frame, user_va, vm) {
+                    info!(
+                        "[proc.err] map image user pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
+                        pid, page, user_va, frame, e
+                    );
+                    return Err(e);
+                }
             }
             {
                 let vm = processes.alpha_vm_space_mut();
-                memory.map_frame(alpha_address_space, frame, temp_va, vm)?;
+                if let Err(e) = memory.map_frame(alpha_address_space, frame, temp_va, vm) {
+                    info!(
+                        "[proc.err] map image temp pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
+                        pid, page, temp_va, frame, e
+                    );
+                    return Err(e);
+                }
             }
             unsafe {
                 ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
@@ -594,6 +626,7 @@ impl Alpha {
             page += 1;
         }
 
+        info!("[proc] map stack frames pid={:>3}", pid);
         let mut sp = 0usize;
         while sp < USER_STACK_PAGES {
             let frame = process_frame_descriptor(child_root, image_pages + sp);
@@ -603,11 +636,23 @@ impl Alpha {
                 let vm = processes
                     .vm_space_mut(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
-                memory.map_frame(child_address_space, frame, user_va, vm)?;
+                if let Err(e) = memory.map_frame(child_address_space, frame, user_va, vm) {
+                    info!(
+                        "[proc.err] map stack user pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
+                        pid, sp, user_va, frame, e
+                    );
+                    return Err(e);
+                }
             }
             {
                 let vm = processes.alpha_vm_space_mut();
-                memory.map_frame(alpha_address_space, frame, temp_va, vm)?;
+                if let Err(e) = memory.map_frame(alpha_address_space, frame, temp_va, vm) {
+                    info!(
+                        "[proc.err] map stack temp pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
+                        pid, sp, temp_va, frame, e
+                    );
+                    return Err(e);
+                }
             }
             unsafe {
                 ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
@@ -615,6 +660,7 @@ impl Alpha {
             sp += 1;
         }
 
+        info!("[proc] copy elf image pid={:>3}", pid);
         let mut si = 0usize;
         while si < elf.segment_count {
             let seg = elf.segments[si];
@@ -649,6 +695,14 @@ impl Alpha {
             );
         }
 
+        let mut temp_page = 0usize;
+        while temp_page < total_frames {
+            let frame = process_frame_descriptor(child_root, temp_page);
+            let temp_va = temp_base + temp_page * PAGE_SIZE;
+            let _ = arch::address_space::unmap(alpha_address_space, frame, temp_va);
+            temp_page += 1;
+        }
+
         let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
             true,  // address_space
             true,  // root_node
@@ -662,7 +716,7 @@ impl Alpha {
             false, // affinity
         );
 
-        debug!(
+        info!(
             "[proc] configure pcb={:#018x} root={:#018x} as={:#018x} ip={:#018x} sp={:#018x}",
             child_pcb, child_root, child_address_space, elf.entry_point, stack_top
         );
@@ -684,6 +738,8 @@ impl Alpha {
 
         processes.install_process(
             pid,
+            reaper_pid,
+            process_root_slot,
             child_root,
             child_pcb,
             child_address_space,
@@ -698,7 +754,7 @@ impl Alpha {
             "[proc] child resumed image={} pid={:>3} priority={:>2} root={:#018x} entry={:#018x}",
             image_name, pid, priority, child_root, elf.entry_point
         );
-        Ok(())
+        Ok(pid)
     }
 
     fn handle_kernel_fault_event(&mut self, fault: KernelFaultEvent) {
@@ -879,6 +935,15 @@ impl Alpha {
             );
             return (status, detail0, detail1);
         }
+        if request.code == OS_REQUEST_MAPPING_RELEASE {
+            let result = self.handle_mapping_release_request(request);
+            let (status, detail0) = map_request_result_to_status(result);
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
         if request.code == OS_REQUEST_SHARED_FRAMEBUFFER_CREATE {
             let result = self.handle_shared_framebuffer_request(request);
             let (status, detail0, detail1) = match result {
@@ -928,6 +993,45 @@ impl Alpha {
                 request.identifier, status, detail0, detail1
             );
             return (status, detail0, detail1);
+        }
+        if request.code == OS_REQUEST_PROCESS_SPAWN {
+            let result = self.handle_process_spawn_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_STATUS {
+            let result = self.handle_process_status_request(request);
+            let (status, detail0, detail1) = match result {
+                Ok((exited, exit_code)) => (OS_RESPONSE_OK, exited, exit_code),
+                Err(e) => {
+                    let (s, d0) = map_request_result_to_status(Err(e));
+                    (s, d0, 0)
+                }
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, detail1
+            );
+            return (status, detail0, detail1);
+        }
+        if request.code == OS_REQUEST_PROCESS_REAP {
+            let result = self.handle_process_reap_request(request);
+            let (status, detail0) = match result {
+                Ok(()) => (OS_RESPONSE_OK, 0),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
         }
 
         let result = match request.code {
@@ -1196,9 +1300,98 @@ impl Alpha {
         arch::process_control_block::suspend(process_entry.pcb)?;
         let is_ok = request.arg0;
         let error_value = request.arg1;
+        self.processes.mark_exited(pid, is_ok, error_value)?;
         info!(
             "[proc] exited pid={:>3} pcb={:#018x} is_ok={} error={:#018x}",
             pid, process_entry.pcb, is_ok, error_value
+        );
+        Ok(())
+    }
+
+    fn handle_process_spawn_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let (raw_name, raw_len) = decode_service_name_24(request.arg0, request.arg1, request.arg2)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let image_name = core::str::from_utf8(&raw_name[..raw_len])
+            .map_err(|_| CapabilityError::InvalidArgument)?;
+
+        let mut spawned_pid = None;
+        cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
+            if spawned_pid.is_some() || !entry.name.ends_with(".elf") {
+                return Ok(());
+            }
+            if initramfs_image_name_matches(entry.name, image_name) {
+                spawned_pid =
+                    Some(self.spawn_process_from_elf(entry.name, entry.data, request.identifier)?);
+            }
+            Ok(())
+        })?;
+
+        let pid = spawned_pid.ok_or(CapabilityError::InvalidArgument)?;
+        info!(
+            "[proc] spawned by request caller={:>3} image={} pid={:>3}",
+            request.identifier, image_name, pid
+        );
+        Ok(pid)
+    }
+
+    fn handle_process_status_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(usize, usize), CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let pid = request.arg0;
+        if pid == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let entry = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        validate_process_observer(request.identifier, entry.pid, entry.reaper_pid)?;
+        Ok((entry.exited as usize, entry.exit_code))
+    }
+
+    fn handle_process_reap_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let pid = request.arg0;
+        if pid == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let entry = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        validate_process_observer(request.identifier, entry.pid, entry.reaper_pid)?;
+        if !entry.exited {
+            return Err(CapabilityError::IllegalOperation);
+        }
+        arch::node::revoke(self.root.root_descriptor, entry.root_slot as Word)?;
+        arch::node::remove(self.root.root_descriptor, entry.root_slot as Word)?;
+        let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
+        for allocation in physical_allocations.iter() {
+            self.memory.free_physical(
+                allocation.base_page * PAGE_SIZE,
+                allocation.page_count * PAGE_SIZE,
+            )?;
+        }
+        self.processes.drop_physical_allocations_for_pid(pid);
+        self.processes.reap_process(pid, true)?;
+        info!(
+            "[proc] reaped pid={:>3} root_slot={:>3}",
+            pid, entry.root_slot
         );
         Ok(())
     }
@@ -1273,7 +1466,13 @@ impl Alpha {
         let (root_node, address_space, heap_base, start_slot) = self
             .processes
             .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
-        self.allocate_process_frames(pid, root_node, start_slot, page_count)?;
+        let allocated_frames =
+            self.allocate_process_frames(pid, root_node, start_slot, page_count)?;
+        for (slot, page) in allocated_frames {
+            let va = heap_base + (slot - start_slot) * PAGE_SIZE;
+            self.processes
+                .register_physical_allocation(pid, va, slot, page, 1)?;
+        }
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
@@ -1314,6 +1513,13 @@ impl Alpha {
         )?;
         let base_page = self.memory.allocate_physical_any(mapped_size)?;
         let base_paddr = base_page * PAGE_SIZE;
+        self.processes.register_physical_allocation(
+            pid,
+            base_va,
+            start_slot,
+            base_page,
+            page_count,
+        )?;
 
         self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
         let mut i = 0usize;
@@ -1427,6 +1633,20 @@ impl Alpha {
 
         let base_page = self.memory.allocate_physical_any(mapped_size)?;
         let base_paddr = base_page * PAGE_SIZE;
+        self.processes.register_physical_allocation(
+            pid,
+            caller_va,
+            caller_start_slot,
+            base_page,
+            page_count,
+        )?;
+        self.processes.register_physical_allocation(
+            peer_pid,
+            peer_va,
+            peer_start_slot,
+            base_page,
+            page_count,
+        )?;
 
         self.ensure_process_frame_chunks(pid, caller_root, caller_start_slot, page_count)?;
         self.ensure_process_frame_chunks(peer_pid, peer_root, peer_start_slot, page_count)?;
@@ -1487,6 +1707,92 @@ impl Alpha {
             pid, peer_pid, mapped_size, base_paddr, caller_va, peer_va
         );
         Ok((caller_va, peer_va))
+    }
+
+    fn handle_mapping_release_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        let pid = request.identifier;
+        if pid == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let base_va = request.arg0;
+        let size_bytes = request.arg1;
+        if size_bytes == 0 || (base_va & (PAGE_SIZE - 1)) != 0 {
+            info!(
+                "[map.err] release invalid args pid={:>3} va={:#018x} bytes={:#x}",
+                pid, base_va, size_bytes
+            );
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let mapped_size = align_up(size_bytes, PAGE_SIZE);
+        let page_count = mapped_size / PAGE_SIZE;
+        let entry = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or_else(|| {
+                info!("[map.err] release unknown pid={:>3}", pid);
+                CapabilityError::InvalidArgument
+            })?;
+        let allocation = match self
+            .processes
+            .find_active_physical_allocation_reference(pid, base_va, page_count)
+        {
+            Some(allocation) => allocation,
+            None => {
+                info!(
+                    "[map.err] release lookup failed pid={:>3} va={:#018x} bytes={:#x} pages={}",
+                    pid, base_va, mapped_size, page_count
+                );
+                return Err(CapabilityError::InvalidArgument);
+            }
+        };
+
+        let mut i = 0usize;
+        while i < page_count {
+            let slot = allocation.start_slot + i;
+            let frame = process_frame_descriptor(entry.root_node, slot);
+            let va = base_va + i * PAGE_SIZE;
+            if let Err(e) = arch::address_space::unmap(entry.address_space, frame, va) {
+                info!(
+                    "[map.err] unmap pid={:>3} va={:#018x} frame={:#018x} slot={} err={:?}",
+                    pid, va, frame, slot, e
+                );
+                return Err(e);
+            }
+            if let Err(e) = arch::node::remove(
+                process_frame_chunk_descriptor(entry.root_node, slot / PROCESS_FRAME_CHUNK_PAGES),
+                (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
+            ) {
+                info!(
+                    "[map.warn] frame cap remove deferred pid={:>3} frame={:#018x} slot={} err={:?}",
+                    pid, frame, slot, e
+                );
+            }
+            i += 1;
+        }
+
+        let (allocation, is_last_reference) = self
+            .processes
+            .release_physical_allocation_reference(pid, base_va, page_count)?;
+        if is_last_reference {
+            self.memory.free_physical(
+                allocation.base_page * PAGE_SIZE,
+                allocation.page_count * PAGE_SIZE,
+            )?;
+        }
+        info!(
+            "[map] released pid={:>3} va=[{:#018x}..{:#018x}) pages={} frame_slot={} last_ref={}",
+            pid,
+            base_va,
+            base_va + mapped_size,
+            page_count,
+            allocation.start_slot,
+            is_last_reference as usize
+        );
+        Ok(())
     }
 
     fn handle_shared_framebuffer_request(
@@ -1805,7 +2111,7 @@ impl Alpha {
         alpha_address_space: CapabilityDescriptor,
         alpha_vm_space: &mut crate::nanami_core::vm_space::BootstrapVmSpace,
     ) -> Result<usize, CapabilityError> {
-        let mut selected: Option<(usize, usize)> = None;
+        let mut selected: Option<(usize, usize, usize, usize)> = None;
         let needed_bytes = ALPHA_HEAP_PAGES * PAGE_SIZE;
         let count = init_info.generic_list_count as usize;
 
@@ -1822,29 +2128,58 @@ impl Alpha {
             if desc == bootstrap_generic {
                 continue;
             }
+            let consumed = memory.initial_generic_consumed_bytes_for_public(i);
+            let Some(split_start) =
+                align_up_checked((g.address as usize).saturating_add(consumed), PAGE_SIZE)
+            else {
+                continue;
+            };
+            let end = (g.address as usize).saturating_add(size_bytes);
+            let Some(heap_end) = split_start.checked_add(needed_bytes) else {
+                continue;
+            };
+            if heap_end > end {
+                continue;
+            }
+            let Some(base_page) = memory.physical_page_index_from_address(split_start) else {
+                continue;
+            };
+            if memory
+                .physical_frame_descriptor_from_index(base_page + ALPHA_HEAP_PAGES - 1)
+                .is_none()
+            {
+                continue;
+            }
+            let usable_bytes = end - split_start;
 
             match selected {
-                None => selected = Some((i, size_bytes)),
-                Some((_, best_size)) if size_bytes < best_size => selected = Some((i, size_bytes)),
+                None => selected = Some((i, split_start, base_page, usable_bytes)),
+                Some((_, _, _, best_size)) if usable_bytes < best_size => {
+                    selected = Some((i, split_start, base_page, usable_bytes))
+                }
                 _ => {}
             }
         }
 
-        let (generic_idx, _) = selected.ok_or(CapabilityError::InvalidArgument)?;
-        let g = init_info.generic_list[generic_idx];
-        let base_address = g.address as usize;
-        let base_page = memory
-            .physical_page_index_from_address(base_address)
-            .ok_or(CapabilityError::InvalidArgument)?;
-
-        debug!(
-            "heap generic idx={:>3} addr={:#018x} size_radix={:>2} pages={:>4}",
-            generic_idx, base_address, g.size_radix, ALPHA_HEAP_PAGES
+        let (generic_idx, base_address, base_page, usable_bytes) =
+            selected.ok_or(CapabilityError::InvalidArgument)?;
+        info!(
+            "heap generic idx={:>3} addr={:#018x} usable={:#x} pages={:>4}",
+            generic_idx, base_address, usable_bytes, ALPHA_HEAP_PAGES
         );
 
         let mut i = 0usize;
         while i < ALPHA_HEAP_PAGES {
-            memory.ensure_alpha_frame_at_physical_index(base_page + i)?;
+            if let Err(e) = memory.ensure_alpha_frame_at_physical_index(base_page + i) {
+                info!(
+                    "[heap.err] ensure frame idx={:>3} page={} frame_index={} err={:?}",
+                    generic_idx,
+                    i,
+                    base_page + i,
+                    e
+                );
+                return Err(e);
+            }
             i += 1;
         }
 
@@ -1854,7 +2189,13 @@ impl Alpha {
                 .physical_frame_descriptor_from_index(base_page + j)
                 .ok_or(CapabilityError::InvalidArgument)?;
             let va = ALPHA_HEAP_BASE + j * PAGE_SIZE;
-            memory.map_frame(alpha_address_space, frame, va, alpha_vm_space)?;
+            if let Err(e) = memory.map_frame(alpha_address_space, frame, va, alpha_vm_space) {
+                info!(
+                    "[heap.err] map idx={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
+                    generic_idx, j, va, frame, e
+                );
+                return Err(e);
+            }
             unsafe {
                 ptr::write_bytes(va as *mut u8, 0, PAGE_SIZE);
             }
@@ -1879,7 +2220,7 @@ impl Alpha {
             Err(e) => return Err(e),
         }
 
-        self.memory.allocate_process_frames(
+        let _ = self.memory.allocate_process_frames(
             stack_node,
             ALPHA_RUNTIME_STACK_NODE_RADIX,
             0,
@@ -1910,6 +2251,17 @@ fn validate_process_device_slot(slot: usize) -> Result<(), CapabilityError> {
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(())
+}
+
+fn validate_process_observer(
+    caller_pid: usize,
+    target_pid: usize,
+    reaper_pid: usize,
+) -> Result<(), CapabilityError> {
+    if caller_pid == target_pid || reaper_pid == 0 || caller_pid == reaper_pid {
+        return Ok(());
+    }
+    Err(CapabilityError::PermissionDenied)
 }
 
 fn process_frame_directory_descriptor(process_root: CapabilityDescriptor) -> CapabilityDescriptor {
@@ -2037,6 +2389,11 @@ fn align_down(value: usize, align: usize) -> usize {
 #[inline(always)]
 fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
+}
+
+fn align_up_checked(value: usize, align: usize) -> Option<usize> {
+    debug_assert!(align.is_power_of_two());
+    value.checked_add(align - 1).map(|v| v & !(align - 1))
 }
 
 fn create_alpha_os_port(
@@ -2179,4 +2536,26 @@ fn decode_service_name_24(arg1: Word, arg2: Word, arg3: Word) -> Option<([u8; 24
         return None;
     }
     Some((raw, len))
+}
+
+fn initramfs_image_name_matches(entry_name: &str, requested_name: &str) -> bool {
+    if entry_name == requested_name {
+        return true;
+    }
+    let entry_base = path_basename(entry_name);
+    let requested_base = path_basename(requested_name);
+    entry_base == requested_name || entry_name == requested_base || entry_base == requested_base
+}
+
+fn path_basename(path: &str) -> &str {
+    let bytes = path.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'/' {
+            start = i + 1;
+        }
+        i += 1;
+    }
+    &path[start..]
 }

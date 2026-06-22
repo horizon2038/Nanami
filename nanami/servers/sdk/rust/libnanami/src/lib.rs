@@ -79,6 +79,10 @@ const OS_REQUEST_NOTIFICATION_PORT_COPY: Word = 0x100d;
 const OS_REQUEST_SHARED_FRAMEBUFFER_CREATE: Word = 0x100e;
 const OS_REQUEST_HEAP_ALLOC: Word = 0x100f;
 const OS_REQUEST_SERVICE_LIST: Word = 0x1010;
+const OS_REQUEST_PROCESS_SPAWN: Word = 0x1011;
+const OS_REQUEST_PROCESS_STATUS: Word = 0x1012;
+const OS_REQUEST_PROCESS_REAP: Word = 0x1013;
+const OS_REQUEST_MAPPING_RELEASE: Word = 0x1014;
 const OS_REQUEST_DEBUG_PING: Word = 0x10ff;
 
 pub const OS_RESPONSE_OK: Word = 0;
@@ -373,6 +377,56 @@ pub fn service_info_by_ordinal(ordinal: Word) -> Result<(Word, Word), RequestErr
     Ok((owner_pid, service_kind))
 }
 
+pub fn request_process_spawn(image_name: &str) -> Result<Word, RequestError> {
+    let (name0, name1, name2) = pack_name_24(image_name)?;
+    let (status, child_pid, _) =
+        call_os_port(OS_REQUEST_PROCESS_SPAWN, name0, name1, name2, 0, 4)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(child_pid)
+}
+
+pub fn request_process_status(pid: Word) -> Result<(bool, Word), RequestError> {
+    if pid == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, exited, exit_code) = call_os_port(OS_REQUEST_PROCESS_STATUS, pid, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((exited != 0, exit_code))
+}
+
+pub fn request_process_reap(pid: Word) -> Result<(), RequestError> {
+    if pid == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, _, _) = call_os_port(OS_REQUEST_PROCESS_REAP, pid, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn request_mapping_release(base_vaddr: Word, size_bytes: Word) -> Result<(), RequestError> {
+    if base_vaddr == 0 || size_bytes == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, _, _) = call_os_port(
+        OS_REQUEST_MAPPING_RELEASE,
+        base_vaddr,
+        size_bytes,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
 pub fn request_irq(
     irq_number: Word,
     notification_slot: Word,
@@ -514,7 +568,7 @@ fn call_os_port(
     )
 }
 
-fn pack_service_name_24(name: &str) -> Result<(Word, Word, Word), RequestError> {
+fn pack_name_24(name: &str) -> Result<(Word, Word, Word), RequestError> {
     const NAME_BYTES: usize = 24;
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > NAME_BYTES {
@@ -534,4 +588,8 @@ fn pack_service_name_24(name: &str) -> Result<(Word, Word, Word), RequestError> 
         Word::from_le_bytes(chunk1),
         Word::from_le_bytes(chunk2),
     ))
+}
+
+fn pack_service_name_24(name: &str) -> Result<(Word, Word, Word), RequestError> {
+    pack_name_24(name)
 }

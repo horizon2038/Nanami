@@ -25,6 +25,8 @@ impl IoPortRange {
 pub struct ProcessEntry {
     pub used: bool,
     pub pid: usize,
+    pub reaper_pid: usize,
+    pub root_slot: usize,
     pub root_node: CapabilityDescriptor,
     pub pcb: CapabilityDescriptor,
     pub address_space: CapabilityDescriptor,
@@ -37,6 +39,9 @@ pub struct ProcessEntry {
     pub next_frame_slot: usize,
     pub user_heap_next_va: usize,
     pub user_heap_limit_va: usize,
+    pub exited: bool,
+    pub exit_is_ok: Word,
+    pub exit_code: Word,
 }
 
 impl ProcessEntry {
@@ -66,6 +71,7 @@ pub struct ProcessManager {
     used_root_slots: Vec<usize>,
     vm_spaces: Vec<ProcessVmSpace>,
     frame_chunks: Vec<ProcessFrameChunk>,
+    physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
 }
 
 struct ProcessVmSpace {
@@ -76,6 +82,19 @@ struct ProcessVmSpace {
 struct ProcessFrameChunk {
     pid: usize,
     chunk_index: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct ProcessPhysicalAllocation {
+    pub base_va: usize,
+    pub start_slot: usize,
+    pub base_page: usize,
+    pub page_count: usize,
+}
+
+struct ProcessPhysicalAllocationEntry {
+    pid: usize,
+    allocation: ProcessPhysicalAllocation,
 }
 
 impl ProcessManager {
@@ -90,6 +109,8 @@ impl ProcessManager {
         let alpha_entry = ProcessEntry {
             used: true,
             pid: 0,
+            reaper_pid: 0,
+            root_slot: 0,
             root_node: alpha_root_node,
             pcb: 0,
             address_space: alpha_address_space,
@@ -102,6 +123,9 @@ impl ProcessManager {
             next_frame_slot: 0,
             user_heap_next_va: 0,
             user_heap_limit_va: 0,
+            exited: false,
+            exit_is_ok: 0,
+            exit_code: 0,
         };
         let alpha_vm_space = core::ptr::addr_of_mut!(ALPHA_VM_SPACE);
         Self {
@@ -114,6 +138,7 @@ impl ProcessManager {
             used_root_slots: Vec::new(),
             vm_spaces: Vec::new(),
             frame_chunks: Vec::new(),
+            physical_allocations: Vec::new(),
         }
     }
 
@@ -176,9 +201,106 @@ impl ProcessManager {
         Ok(())
     }
 
+    pub fn register_physical_allocation(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        start_slot: usize,
+        base_page: usize,
+        page_count: usize,
+    ) -> Result<(), CapabilityError> {
+        if pid == 0 || page_count == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.physical_allocations
+            .push(ProcessPhysicalAllocationEntry {
+                pid,
+                allocation: ProcessPhysicalAllocation {
+                    base_va,
+                    start_slot,
+                    base_page,
+                    page_count,
+                },
+            });
+        Ok(())
+    }
+
+    pub fn releasable_physical_allocations_for_pid(
+        &self,
+        pid: usize,
+    ) -> Vec<ProcessPhysicalAllocation> {
+        let mut allocations = Vec::new();
+        for entry in self.physical_allocations.iter() {
+            if entry.pid == pid {
+                let mut ref_count = 0usize;
+                for candidate in self.physical_allocations.iter() {
+                    if candidate.allocation.base_page == entry.allocation.base_page
+                        && candidate.allocation.page_count == entry.allocation.page_count
+                    {
+                        ref_count += 1;
+                    }
+                }
+                if ref_count == 1 {
+                    allocations.push(entry.allocation);
+                }
+            }
+        }
+        allocations
+    }
+
+    pub fn drop_physical_allocations_for_pid(&mut self, pid: usize) {
+        self.physical_allocations.retain(|entry| entry.pid != pid);
+    }
+
+    pub fn find_active_physical_allocation_reference(
+        &self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+    ) -> Option<ProcessPhysicalAllocation> {
+        for entry in self.physical_allocations.iter() {
+            if entry.pid == pid
+                && entry.allocation.base_va == base_va
+                && entry.allocation.page_count == page_count
+            {
+                return Some(entry.allocation);
+            }
+        }
+        None
+    }
+
+    pub fn release_physical_allocation_reference(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+    ) -> Result<(ProcessPhysicalAllocation, bool), CapabilityError> {
+        let Some(index) = self.physical_allocations.iter().position(|entry| {
+            entry.pid == pid
+                && entry.allocation.base_va == base_va
+                && entry.allocation.page_count == page_count
+        }) else {
+            return Err(CapabilityError::InvalidArgument);
+        };
+
+        let allocation = self.physical_allocations[index].allocation;
+        let mut ref_count = 0usize;
+        for entry in self.physical_allocations.iter() {
+            if entry.allocation.base_page == allocation.base_page
+                && entry.allocation.page_count == allocation.page_count
+            {
+                ref_count += 1;
+            }
+        }
+        self.physical_allocations.swap_remove(index);
+        Ok((allocation, ref_count == 1))
+    }
+
     pub fn install_process(
         &mut self,
         pid: usize,
+        reaper_pid: usize,
+        root_slot: usize,
         root_node: CapabilityDescriptor,
         pcb: CapabilityDescriptor,
         address_space: CapabilityDescriptor,
@@ -191,6 +313,8 @@ impl ProcessManager {
         let entry = ProcessEntry {
             used: true,
             pid,
+            reaper_pid,
+            root_slot,
             root_node,
             pcb,
             address_space,
@@ -203,6 +327,9 @@ impl ProcessManager {
             next_frame_slot,
             user_heap_next_va,
             user_heap_limit_va,
+            exited: false,
+            exit_is_ok: 0,
+            exit_code: 0,
         };
 
         if pid == 0 {
@@ -252,6 +379,59 @@ impl ProcessManager {
             }
         }
         None
+    }
+
+    pub fn mark_exited(
+        &mut self,
+        pid: usize,
+        is_ok: Word,
+        exit_code: Word,
+    ) -> Result<(), CapabilityError> {
+        let entry = self
+            .entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        entry.exited = true;
+        entry.exit_is_ok = is_ok;
+        entry.exit_code = exit_code;
+        Ok(())
+    }
+
+    pub fn reap_process(
+        &mut self,
+        pid: usize,
+        release_root_slot: bool,
+    ) -> Result<(), CapabilityError> {
+        if pid == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.used && entry.pid == pid)
+        else {
+            return Err(CapabilityError::InvalidArgument);
+        };
+        if !self.entries[index].exited {
+            return Err(CapabilityError::IllegalOperation);
+        }
+        let root_slot = self.entries[index].root_slot;
+        self.entries.swap_remove(index);
+
+        if release_root_slot {
+            if let Some(slot_index) = self
+                .used_root_slots
+                .iter()
+                .position(|slot| *slot == root_slot)
+            {
+                self.used_root_slots.swap_remove(slot_index);
+            }
+        }
+        if let Some(vm_index) = self.vm_spaces.iter().position(|vm| vm.pid == pid) {
+            self.vm_spaces.swap_remove(vm_index);
+        }
+        self.frame_chunks.retain(|chunk| chunk.pid != pid);
+        self.drop_physical_allocations_for_pid(pid);
+        Ok(())
     }
 
     pub fn assign_irq_to_pid(

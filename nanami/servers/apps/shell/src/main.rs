@@ -17,6 +17,8 @@ const SLOT_HONOKA_SERVICE: Word = 22;
 const SLOT_HONOKA_PRESENT_NOTIFICATION: Word = 23;
 const SLOT_NETWORK_SERVICE: Word = 24;
 const SLOT_VFS_SERVICE: Word = 25;
+const SLOT_POSIX_SERVICE: Word = 26;
+const SLOT_POSIX_TEST_TIMER_SERVICE: Word = 27;
 const WINDOW_X: Word = 90;
 const WINDOW_Y: Word = 78;
 const CONTENT_WIDTH: usize = 712;
@@ -280,7 +282,7 @@ impl Shell {
             return;
         }
         if bytes_eq(&self.input[..self.input_len], b"help") {
-            self.push_line_bytes(b"commands: help, services, netinfo, fstest");
+            self.push_line_bytes(b"commands: help, services, netinfo, fstest, posixtest");
             self.push_line_bytes(b"          ls, cat, rm, mkdir, cd");
             self.push_line_bytes(b"          clear, echo, about");
         } else if bytes_eq(&self.input[..self.input_len], b"services") {
@@ -290,6 +292,8 @@ impl Shell {
         } else if bytes_eq(&self.input[..self.input_len], b"fstest") {
             self.run_fs_test();
             self.files.invalidate_vfs_session();
+        } else if bytes_eq(&self.input[..self.input_len], b"posixtest") {
+            self.run_posix_test();
         } else if let Some(output) = self.files.execute(&self.input[..self.input_len]) {
             let mut i = 0usize;
             while i < output.len() {
@@ -540,6 +544,589 @@ impl Shell {
             return false;
         }
         self.push_line_bytes(b"fstest: create/write/read/rename/remove ok");
+        true
+    }
+
+    fn run_posix_test(&mut self) {
+        self.push_line_bytes(b"posixtest: connect posix-service");
+        let _ = nanami_services::registry::connect_posix_service(SLOT_POSIX_SERVICE);
+        let posix_port = libnanami::ipc::process_slot_descriptor(SLOT_POSIX_SERVICE);
+        let (shm, shm_size) =
+            match nanami_services::posix::posix_attach_shared_memory(posix_port, 0x4000) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.push_line_bytes(b"posixtest: posix-service unavailable");
+                    return;
+                }
+            };
+        if shm_size < 0x1000 {
+            self.push_line_bytes(b"posixtest: shm too small");
+            return;
+        }
+
+        match nanami_services::posix::posix_getpid(posix_port) {
+            Ok(pid) => {
+                let mut line = [0u8; COLS];
+                let pos = append_bytes(&mut line, 0, b"posix pid=");
+                let _ = append_decimal(&mut line, pos, pid);
+                self.push_line(line);
+            }
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: getpid failed");
+                return;
+            }
+        }
+
+        if !self.posix_process_memory_test(posix_port) {
+            return;
+        }
+        if !self.posix_process_lifecycle_test(posix_port) {
+            return;
+        }
+        if !self.posix_spawn_test(posix_port, shm) {
+            return;
+        }
+        if !self.posix_dev_zero_test(posix_port, shm) {
+            return;
+        }
+        if !self.posix_dir_test(posix_port, shm) {
+            return;
+        }
+        if !self.posix_file_test(posix_port, shm) {
+            return;
+        }
+        if !self.posix_stat_test(posix_port, shm) {
+            return;
+        }
+        self.push_line_bytes(b"posixtest: ok");
+    }
+
+    fn posix_process_memory_test(&mut self, posix_port: Word) -> bool {
+        let ppid = match nanami_services::posix::posix_getppid(posix_port) {
+            Ok(ppid) => ppid,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: getppid failed");
+                return false;
+            }
+        };
+        if ppid != nanami_services::posix::POSIX_PROCESS_ROOT_PID {
+            self.push_line_bytes(b"posixtest: ppid mismatch");
+            return false;
+        }
+        if nanami_services::posix::posix_get_native_pid(posix_port).is_err() {
+            self.push_line_bytes(b"posixtest: native pid failed");
+            return false;
+        }
+        if nanami_services::posix::posix_getuid(posix_port).ok() != Some(nanami_services::posix::POSIX_ROOT_UID)
+            || nanami_services::posix::posix_geteuid(posix_port).ok() != Some(nanami_services::posix::POSIX_ROOT_UID)
+            || nanami_services::posix::posix_getgid(posix_port).ok() != Some(nanami_services::posix::POSIX_ROOT_GID)
+            || nanami_services::posix::posix_getegid(posix_port).ok() != Some(nanami_services::posix::POSIX_ROOT_GID)
+        {
+            self.push_line_bytes(b"posixtest: credential mismatch");
+            return false;
+        }
+        let pid = match nanami_services::posix::posix_getpid(posix_port) {
+            Ok(pid) => pid,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: getpid recheck failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
+            || nanami_services::posix::posix_getsid(posix_port, 0).ok() != Some(nanami_services::posix::POSIX_PROCESS_ROOT_PID)
+        {
+            self.push_line_bytes(b"posixtest: process group mismatch");
+            return false;
+        }
+        if nanami_services::posix::posix_setpgid(posix_port, 0, 0).is_err()
+            || nanami_services::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
+        {
+            self.push_line_bytes(b"posixtest: setpgid failed");
+            return false;
+        }
+        if nanami_services::posix::posix_getpagesize() != 4096 {
+            self.push_line_bytes(b"posixtest: pagesize mismatch");
+            return false;
+        }
+        let (base, mapped) = match nanami_services::posix::posix_mmap_anonymous(4096) {
+            Ok(v) => v,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: mmap anon failed");
+                return false;
+            }
+        };
+        if base == 0 || mapped < 4096 {
+            self.push_line_bytes(b"posixtest: mmap anon invalid");
+            return false;
+        }
+        unsafe {
+            core::ptr::write_volatile(base as *mut u64, 0x706f_7369_782d_6d6d);
+            if core::ptr::read_volatile(base as *const u64) != 0x706f_7369_782d_6d6d {
+                self.push_line_bytes(b"posixtest: mmap anon rw failed");
+                return false;
+            }
+        }
+        let (base2, mapped2) = match nanami_services::posix::posix_mmap(
+            4096,
+            nanami_services::posix::POSIX_PROT_READ | nanami_services::posix::POSIX_PROT_WRITE,
+            nanami_services::posix::POSIX_MAP_PRIVATE | nanami_services::posix::POSIX_MAP_ANONYMOUS,
+        )
+        {
+            Ok(v) => v,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: mmap flags failed");
+                return false;
+            }
+        };
+        if !is_unsupported(nanami_services::posix::posix_mprotect(
+            base,
+            4096,
+            nanami_services::posix::POSIX_PROT_READ,
+        )) {
+            self.push_line_bytes(b"posixtest: mprotect should be unsupported");
+            return false;
+        }
+        if let Err(e) = nanami_services::posix::posix_munmap(base, 4096) {
+            self.push_posix_error(b"posixtest: munmap failed ", e);
+            return false;
+        }
+        if let Err(e) = nanami_services::posix::posix_munmap(base2, mapped2) {
+            self.push_posix_error(b"posixtest: munmap second failed ", e);
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: process/memory ok");
+        true
+    }
+
+    fn posix_process_lifecycle_test(&mut self, posix_port: Word) -> bool {
+        if !is_unsupported(nanami_services::posix::posix_fork(posix_port)) {
+            self.push_line_bytes(b"posixtest: fork should be unsupported");
+            return false;
+        }
+        if !is_unsupported(nanami_services::posix::posix_kill(posix_port, 0, 0)) {
+            self.push_line_bytes(b"posixtest: kill should be unsupported");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: lifecycle unsupported ok");
+        true
+    }
+
+    fn posix_spawn_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        let path = b"/posix-inherit.txt";
+        let body = b"POSIX inherited fd works";
+        write_shm_bytes(shm, 0, path);
+        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        let fd = match nanami_services::posix::posix_open(
+            posix_port,
+            0,
+            path.len() as Word,
+            nanami_services::posix::POSIX_O_CREAT | nanami_services::posix::POSIX_O_TRUNC,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: inherit file open failed");
+                return false;
+            }
+        };
+        if fd != 3 {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: inherit fd was not 3");
+            return false;
+        }
+        write_shm_bytes(shm, 512, body);
+        if nanami_services::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err()
+            || nanami_services::posix::posix_seek(
+                posix_port,
+                fd,
+                0,
+                nanami_services::posix::POSIX_SEEK_SET,
+            )
+            .is_err()
+        {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: inherit file setup failed");
+            return false;
+        }
+
+        let image = b"posix-child.elf";
+        write_shm_bytes(shm, 0, image);
+        let pid = match nanami_services::posix::posix_spawn(posix_port, 0, image.len() as Word) {
+            Ok(pid) => pid,
+            Err(e) => {
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                self.push_posix_error(b"posixtest: spawn failed ", e);
+                return false;
+            }
+        };
+        if pid == 0 {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: spawn invalid pid");
+            return false;
+        }
+        let status = match self.wait_posix_child(posix_port, pid) {
+            Some(status) => status,
+            None => {
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                self.push_line_bytes(b"posixtest: child did not exit");
+                return false;
+            }
+        };
+        if status != 0 {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: inherited fd child failed");
+            return false;
+        }
+
+        let cloexec_fd = match nanami_services::posix::posix_dup(posix_port, fd) {
+            Ok(fd) => fd,
+            Err(_) => {
+                write_shm_bytes(shm, 0, path);
+                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                self.push_line_bytes(b"posixtest: cloexec dup failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_fcntl_setfd(
+            posix_port,
+            cloexec_fd,
+            nanami_services::posix::POSIX_FD_CLOEXEC,
+        )
+        .is_err()
+        {
+            let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            write_shm_bytes(shm, 0, path);
+            let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+            self.push_line_bytes(b"posixtest: cloexec setfd failed");
+            return false;
+        }
+        match nanami_services::posix::posix_fcntl_getfd(posix_port, cloexec_fd) {
+            Ok(flags) if (flags & nanami_services::posix::POSIX_FD_CLOEXEC) != 0 => {}
+            _ => {
+                let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                write_shm_bytes(shm, 0, path);
+                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                self.push_line_bytes(b"posixtest: cloexec flag mismatch");
+                return false;
+            }
+        }
+        let dup_fd = match nanami_services::posix::posix_dup(posix_port, cloexec_fd) {
+            Ok(dup_fd) => dup_fd,
+            Err(_) => {
+                let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                write_shm_bytes(shm, 0, path);
+                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                self.push_line_bytes(b"posixtest: cloexec dup clear failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_fcntl_getfd(posix_port, dup_fd).ok() != Some(0) {
+            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            write_shm_bytes(shm, 0, path);
+            let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+            self.push_line_bytes(b"posixtest: dup inherited cloexec flag");
+            return false;
+        }
+        let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+        let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
+        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        write_shm_bytes(shm, 0, path);
+        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        self.push_line_bytes(b"posixtest: spawn/wait/fd inherit/fcntl ok");
+        true
+    }
+
+    fn wait_posix_child(&mut self, posix_port: Word, pid: Word) -> Option<Word> {
+        let _ = nanami_services::registry::connect_timer_service(SLOT_POSIX_TEST_TIMER_SERVICE);
+        let timer_port = libnanami::ipc::process_slot_descriptor(SLOT_POSIX_TEST_TIMER_SERVICE);
+        let mut retry = 0usize;
+        while retry < 64 {
+            match nanami_services::posix::posix_waitpid(
+                posix_port,
+                pid,
+                nanami_services::posix::POSIX_WAIT_NOHANG,
+            ) {
+                Ok((0, _)) => {}
+                Ok((waited_pid, status)) if waited_pid == pid => {
+                    return Some(status);
+                }
+                Ok(_) => {
+                    return None;
+                }
+                Err(_) => {
+                    return None;
+                }
+            }
+            let _ = nanami_services::timer::timer_service_sleep_blocking_server_milliseconds(
+                timer_port, 10,
+            );
+            retry += 1;
+        }
+        None
+    }
+
+    fn push_posix_error(&mut self, prefix: &[u8], error: libnanami::RequestError) {
+        let mut line = [0u8; COLS];
+        let mut pos = append_bytes(&mut line, 0, prefix);
+        match error {
+            libnanami::RequestError::Status(status) => {
+                pos = append_bytes(&mut line, pos, b"status=");
+                let _ = append_decimal(&mut line, pos, status);
+            }
+            libnanami::RequestError::InvalidArgument => {
+                let _ = append_bytes(&mut line, pos, b"invalid-argument");
+            }
+            libnanami::RequestError::Unsupported => {
+                let _ = append_bytes(&mut line, pos, b"unsupported");
+            }
+            libnanami::RequestError::Transport => {
+                let _ = append_bytes(&mut line, pos, b"transport");
+            }
+            libnanami::RequestError::Protocol => {
+                let _ = append_bytes(&mut line, pos, b"protocol");
+            }
+        }
+        self.push_line(line);
+    }
+
+    fn posix_dev_zero_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        write_shm_bytes(shm, 0, b"/dev/zero");
+        let fd = match nanami_services::posix::posix_open(posix_port, 0, 9, 0) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: open /dev/zero failed");
+                return false;
+            }
+        };
+        let bytes = match nanami_services::posix::posix_read(posix_port, fd, 512, 16) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                self.push_line_bytes(b"posixtest: read /dev/zero failed");
+                return false;
+            }
+        };
+        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if bytes != 16 || !shm_zeroes(shm, 512, 16) {
+            self.push_line_bytes(b"posixtest: /dev/zero mismatch");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: /dev/zero ok");
+        true
+    }
+
+    fn posix_dir_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        let path = b"/posixdir";
+        write_shm_bytes(shm, 0, path);
+        let _ = nanami_services::posix::posix_rmdir(posix_port, 0, path.len() as Word);
+        if nanami_services::posix::posix_mkdir(posix_port, 0, path.len() as Word).is_err() {
+            self.push_line_bytes(b"posixtest: mkdir failed");
+            return false;
+        }
+        if nanami_services::posix::posix_chdir(posix_port, 0, path.len() as Word).is_err() {
+            self.push_line_bytes(b"posixtest: chdir failed");
+            return false;
+        }
+        match nanami_services::posix::posix_getcwd(posix_port, 512, 64) {
+            Ok(len) if len == path.len() as Word && shm_bytes_eq(shm, 512, path) => {}
+            _ => {
+                self.push_line_bytes(b"posixtest: getcwd mismatch");
+                return false;
+            }
+        }
+
+        write_shm_bytes(shm, 0, b".");
+        let fd = match nanami_services::posix::posix_open(
+            posix_port,
+            0,
+            1,
+            nanami_services::posix::POSIX_O_DIRECTORY,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: open directory failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_read_dir(posix_port, fd, 4, 768).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: readdir failed");
+            return false;
+        }
+        let _ = nanami_services::posix::posix_close(posix_port, fd);
+
+        write_shm_bytes(shm, 0, b"/");
+        if nanami_services::posix::posix_chdir(posix_port, 0, 1).is_err() {
+            self.push_line_bytes(b"posixtest: chdir / failed");
+            return false;
+        }
+        write_shm_bytes(shm, 0, path);
+        if nanami_services::posix::posix_rmdir(posix_port, 0, path.len() as Word).is_err() {
+            self.push_line_bytes(b"posixtest: rmdir failed");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: cwd/readdir ok");
+        true
+    }
+
+    fn posix_file_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        let path = b"/posixtest.txt";
+        let renamed = b"/posixtest-renamed.txt";
+        let body = b"POSIX facade write path ok";
+
+        write_shm_bytes(shm, 0, path);
+        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        write_shm_bytes(shm, 0, renamed);
+        let _ = nanami_services::posix::posix_unlink(posix_port, 0, renamed.len() as Word);
+
+        write_shm_bytes(shm, 0, path);
+        let fd = match nanami_services::posix::posix_open(
+            posix_port,
+            0,
+            path.len() as Word,
+            nanami_services::posix::POSIX_O_CREAT | nanami_services::posix::POSIX_O_TRUNC,
+        ) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: create/open failed");
+                return false;
+            }
+        };
+        write_shm_bytes(shm, 512, body);
+        if nanami_services::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: write failed");
+            return false;
+        }
+        match nanami_services::posix::posix_fstat(posix_port, fd) {
+            Ok((_, size, kind, _, _))
+                if size == body.len() as Word
+                    && kind == nanami_services::posix::POSIX_FILE_TYPE_REGULAR => {}
+            _ => {
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                self.push_line_bytes(b"posixtest: fstat mismatch");
+                return false;
+            }
+        }
+        if nanami_services::posix::posix_seek(posix_port, fd, 0, nanami_services::posix::POSIX_SEEK_SET).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: seek failed");
+            return false;
+        }
+        if nanami_services::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: read after seek failed");
+            return false;
+        }
+        if !shm_bytes_eq(shm, 768, body) {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: seek read mismatch");
+            return false;
+        }
+        if nanami_services::posix::posix_seek(posix_port, fd, 0, nanami_services::posix::POSIX_SEEK_SET).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: dup seek failed");
+            return false;
+        }
+        let dup_fd = match nanami_services::posix::posix_dup(posix_port, fd) {
+            Ok(dup_fd) => dup_fd,
+            Err(_) => {
+                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                self.push_line_bytes(b"posixtest: dup failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_dup2(posix_port, dup_fd, 7).ok() != Some(7) {
+            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: dup2 failed");
+            return false;
+        }
+        if nanami_services::posix::posix_read(posix_port, 7, 768, body.len() as Word).is_err()
+            || !shm_bytes_eq(shm, 768, body)
+        {
+            let _ = nanami_services::posix::posix_close(posix_port, 7);
+            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: dup2 read mismatch");
+            return false;
+        }
+        let eof = nanami_services::posix::posix_read(posix_port, fd, 768, 1).unwrap_or(1);
+        if eof != 0 {
+            let _ = nanami_services::posix::posix_close(posix_port, 7);
+            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: dup offset mismatch");
+            return false;
+        }
+        let _ = nanami_services::posix::posix_close(posix_port, 7);
+        let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
+        let _ = nanami_services::posix::posix_close(posix_port, fd);
+
+        write_shm_bytes(shm, 0, path);
+        let fd = match nanami_services::posix::posix_open(posix_port, 0, path.len() as Word, 0) {
+            Ok(fd) => fd,
+            Err(_) => {
+                self.push_line_bytes(b"posixtest: reopen failed");
+                return false;
+            }
+        };
+        if nanami_services::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
+            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            self.push_line_bytes(b"posixtest: readback failed");
+            return false;
+        }
+        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if !shm_bytes_eq(shm, 768, body) {
+            self.push_line_bytes(b"posixtest: readback mismatch");
+            return false;
+        }
+
+        write_shm_bytes(shm, 0, path);
+        write_shm_bytes(shm, 256, renamed);
+        if nanami_services::posix::posix_rename(
+            posix_port,
+            0,
+            path.len() as Word,
+            256,
+            renamed.len() as Word,
+        )
+        .is_err()
+        {
+            self.push_line_bytes(b"posixtest: rename failed");
+            return false;
+        }
+        write_shm_bytes(shm, 0, renamed);
+        if nanami_services::posix::posix_unlink(posix_port, 0, renamed.len() as Word).is_err() {
+            self.push_line_bytes(b"posixtest: unlink failed");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: file io ok");
+        true
+    }
+
+    fn posix_stat_test(&mut self, posix_port: Word, shm: Word) -> bool {
+        write_shm_bytes(shm, 0, b"/dev/null");
+        let (_, _, kind, major, minor) =
+            match nanami_services::posix::posix_stat(posix_port, 0, 9) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.push_line_bytes(b"posixtest: stat /dev/null failed");
+                    return false;
+                }
+            };
+        if kind != nanami_services::posix::POSIX_FILE_TYPE_CHAR_DEVICE
+            || major != nanami_services::posix::POSIX_DEV_NULL_MAJOR
+            || minor != nanami_services::posix::POSIX_DEV_NULL_MINOR
+        {
+            self.push_line_bytes(b"posixtest: device stat mismatch");
+            return false;
+        }
+        self.push_line_bytes(b"posixtest: stat ok");
         true
     }
 
@@ -969,6 +1556,25 @@ fn shm_bytes_eq(base: Word, offset: usize, expected: &[u8]) -> bool {
         i += 1;
     }
     true
+}
+
+fn shm_zeroes(base: Word, offset: usize, len: usize) -> bool {
+    let mut i = 0usize;
+    while i < len {
+        if read_shm_byte(base, offset + i) != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn is_unsupported<T>(result: Result<T, RequestError>) -> bool {
+    match result {
+        Err(RequestError::Unsupported) => true,
+        Err(RequestError::Status(status)) if status == libnanami::OS_RESPONSE_ILLEGAL_OPERATION => true,
+        _ => false,
+    }
 }
 
 fn append_shm_text(dst: &mut [u8], mut pos: usize, base: Word, offset: usize, len: usize) -> usize {

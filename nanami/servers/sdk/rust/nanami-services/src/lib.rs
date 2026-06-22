@@ -4,6 +4,7 @@ pub mod block;
 pub mod gfx;
 pub mod input;
 pub mod net;
+pub mod posix;
 pub mod registry;
 pub mod rtc;
 pub mod timer;

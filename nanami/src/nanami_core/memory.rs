@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
 use crate::nanami_core::physical_allocator::{PhysicalAllocError, PhysicalAllocator};
 use crate::nanami_core::vm_space::VmTracker;
@@ -10,14 +12,18 @@ const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 
 const PHYSICAL_NODE_RADIX: usize = 21;
+const ALPHA_FRAME_CAP_BITMAP_WORDS: usize = (1 << PHYSICAL_NODE_RADIX) / usize::BITS as usize;
 const GENERIC_NODE_RADIX: usize = 7;
-const PAGE_TABLE_POOL_RADIX: usize = 7;
+const PAGE_TABLE_POOL_RADIX: usize = 10;
 const PAGE_TABLE_POOL_SLOTS: usize = 1 << PAGE_TABLE_POOL_RADIX;
 
 const PHYSICAL_GENERIC_NODE_SLOT_CANDIDATES: [usize; 4] = [1024, 1025, 1026, 1027];
 const PHYSICAL_FRAME_NODE_SLOT_CANDIDATES: [usize; 4] = [1100, 1101, 1102, 1103];
 const PAGE_TABLE_POOL_SLOT_CANDIDATES: [usize; 4] = [1200, 1201, 1202, 1203];
 const INITIAL_GENERIC_CAPACITY: usize = 128;
+
+static mut ALPHA_FRAME_CAP_BITMAP: [usize; ALPHA_FRAME_CAP_BITMAP_WORDS] =
+    [0; ALPHA_FRAME_CAP_BITMAP_WORDS];
 
 pub struct MemoryManager {
     pub root_descriptor: CapabilityDescriptor,
@@ -156,6 +162,10 @@ impl MemoryManager {
             return Err(CapabilityError::InvalidArgument);
         }
 
+        if alpha_frame_caps_are_marked(destination_base_frame_index, count) {
+            return Ok(());
+        }
+
         match arch::generic::convert(
             source_generic,
             CapabilityType::Frame,
@@ -164,9 +174,12 @@ impl MemoryManager {
             self.physical_frame_node,
             destination_base_frame_index as Word,
         ) {
-            Ok(()) => Ok(()),
-            Err(CapabilityError::InvalidArgument) | Err(CapabilityError::IllegalOperation) => {
+            Ok(()) => {
+                self.mark_alpha_frame_caps(destination_base_frame_index, count)?;
                 Ok(())
+            }
+            Err(CapabilityError::InvalidArgument) | Err(CapabilityError::IllegalOperation) => {
+                Err(CapabilityError::InvalidArgument)
             }
             Err(e) => Err(e),
         }
@@ -224,6 +237,9 @@ impl MemoryManager {
             if g.size_radix < PAGE_BITS as u8 {
                 continue;
             }
+            if g.is_device {
+                continue;
+            }
             let size_bytes = 1usize << g.size_radix;
             if size_bytes < PAGE_SIZE {
                 continue;
@@ -246,13 +262,21 @@ impl MemoryManager {
                     .map_err(map_physical_alloc_error)?;
             }
             if consumed < size_bytes {
+                let mut free_start = (g.address as usize).saturating_add(consumed);
+                let mut free_size = size_bytes - consumed;
+                if free_start == 0 {
+                    let reserved = PAGE_SIZE.min(free_size);
+                    allocator
+                        .add_region(0, reserved, g.is_device, true)
+                        .map_err(map_physical_alloc_error)?;
+                    free_start = free_start.saturating_add(reserved);
+                    free_size -= reserved;
+                }
+                if free_size == 0 {
+                    continue;
+                }
                 allocator
-                    .add_region(
-                        (g.address as usize).saturating_add(consumed),
-                        size_bytes - consumed,
-                        g.is_device,
-                        false,
-                    )
+                    .add_region(free_start, free_size, g.is_device, false)
                     .map_err(map_physical_alloc_error)?;
             }
         }
@@ -267,14 +291,25 @@ impl MemoryManager {
         size_bytes: usize,
         allow_device: bool,
     ) -> Result<usize, CapabilityError> {
-        let allocator = self
-            .physical_allocator
-            .as_mut()
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let allocation = allocator
-            .allocate_at(physical_address, size_bytes, allow_device)
-            .map_err(map_physical_alloc_error)?;
-        Ok(allocation.base_page)
+        let allocation_result = {
+            let allocator = self
+                .physical_allocator
+                .as_mut()
+                .ok_or(CapabilityError::InvalidArgument)?;
+            allocator.allocate_at(physical_address, size_bytes, allow_device)
+        };
+        match allocation_result {
+            Ok(allocation) => Ok(allocation.base_page),
+            Err(PhysicalAllocError::OutOfMemory) if allow_device => {
+                if self.initial_range_is_device(physical_address, size_bytes) {
+                    return self
+                        .physical_page_index_from_address(physical_address)
+                        .ok_or(CapabilityError::InvalidArgument);
+                }
+                Err(CapabilityError::InvalidArgument)
+            }
+            Err(e) => Err(map_physical_alloc_error(e)),
+        }
     }
 
     pub fn allocate_physical_any(&mut self, size_bytes: usize) -> Result<usize, CapabilityError> {
@@ -308,26 +343,38 @@ impl MemoryManager {
         destination_frame_node_radix: usize,
         destination_base_slot: usize,
         count: usize,
-    ) -> Result<(), CapabilityError> {
+    ) -> Result<Vec<usize>, CapabilityError> {
         let max_slots = 1usize << destination_frame_node_radix;
         if destination_base_slot + count > max_slots {
             return Err(CapabilityError::InvalidArgument);
         }
 
         if self.physical_allocator.is_some() {
+            let mut allocated = Vec::new();
             let mut copied = 0usize;
             while copied < count {
                 let dst_slot = destination_base_slot + copied;
                 let frame_index = self.allocate_physical_any(PAGE_SIZE)?;
-                self.copy_alpha_frame_to_process_node(
+                if let Err(e) = self.copy_alpha_frame_to_process_node(
                     frame_index,
                     destination_frame_node,
                     destination_frame_node_radix,
                     dst_slot,
-                )?;
+                ) {
+                    crate::info!(
+                        "[frame.copy.err] pfn={:#x} dst_node={:#018x} dst_slot={:>6} err={:?}",
+                        frame_index,
+                        destination_frame_node,
+                        dst_slot,
+                        e
+                    );
+                    let _ = self.free_physical(frame_index * PAGE_SIZE, PAGE_SIZE);
+                    return Err(e);
+                }
+                allocated.push(frame_index);
                 copied += 1;
             }
-            return Ok(());
+            return Ok(allocated);
         }
 
         let mut copied = 0usize;
@@ -359,7 +406,7 @@ impl MemoryManager {
             return Err(CapabilityError::InvalidArgument);
         }
         self.next_process_frame_index = src_index;
-        Ok(())
+        Ok(Vec::new())
     }
 
     pub fn copy_alpha_frame_to_process_node(
@@ -398,6 +445,9 @@ impl MemoryManager {
         if frame_index >= (1 << PHYSICAL_NODE_RADIX) {
             return Err(CapabilityError::InvalidArgument);
         }
+        if alpha_frame_cap_is_marked(frame_index) {
+            return Ok(());
+        }
         let source_generic = make_child_slot_descriptor(
             self.physical_generic_node,
             PHYSICAL_NODE_RADIX,
@@ -412,11 +462,35 @@ impl MemoryManager {
             self.physical_frame_node,
             frame_index as Word,
         ) {
-            Ok(())
-            | Err(CapabilityError::InvalidArgument)
-            | Err(CapabilityError::IllegalOperation) => Ok(()),
+            Ok(()) => {
+                self.mark_alpha_frame_caps(frame_index, 1)?;
+                Ok(())
+            }
+            Err(CapabilityError::InvalidArgument) | Err(CapabilityError::IllegalOperation) => {
+                crate::info!(
+                    "[frame.convert.err] pfn={:#x} src_generic={:#018x} dst_node={:#018x} dst_slot={:>6}",
+                    frame_index,
+                    source_generic,
+                    self.physical_frame_node,
+                    frame_index
+                );
+                Err(CapabilityError::InvalidArgument)
+            }
             Err(e) => Err(e),
         }
+    }
+
+    fn mark_alpha_frame_caps(
+        &mut self,
+        base_frame_index: usize,
+        count: usize,
+    ) -> Result<(), CapabilityError> {
+        let mut i = 0usize;
+        while i < count {
+            mark_alpha_frame_cap(base_frame_index + i)?;
+            i += 1;
+        }
+        Ok(())
     }
 
     pub fn ensure_alpha_frames_for_range_from_initial_generic(
@@ -800,6 +874,28 @@ impl MemoryManager {
             .copied()
             .unwrap_or(0)
     }
+
+    pub fn initial_generic_consumed_bytes_for_public(&self, index: usize) -> usize {
+        self.initial_generic_consumed_bytes_for_index(index)
+    }
+
+    fn initial_range_is_device(&self, physical_address: usize, size_bytes: usize) -> bool {
+        if size_bytes == 0 {
+            return false;
+        }
+        let requested_end = physical_address.saturating_add(size_bytes);
+        let mut i = 0usize;
+        while i < self.initial_generic_count {
+            let g = self.initial_generics[i];
+            let start = g.address as usize;
+            let end = start.saturating_add(1usize << g.size_radix);
+            if physical_address >= start && requested_end <= end {
+                return g.is_device;
+            }
+            i += 1;
+        }
+        false
+    }
 }
 
 fn create_root_node(
@@ -837,6 +933,47 @@ fn map_physical_alloc_error(error: PhysicalAllocError) -> CapabilityError {
         PhysicalAllocError::PermissionDenied => CapabilityError::PermissionDenied,
         PhysicalAllocError::OutOfMemory => CapabilityError::InvalidArgument,
     }
+}
+
+fn alpha_frame_cap_is_marked(frame_index: usize) -> bool {
+    if frame_index >= (1 << PHYSICAL_NODE_RADIX) {
+        return false;
+    }
+    let word = frame_index / usize::BITS as usize;
+    let bit = frame_index % usize::BITS as usize;
+    unsafe { (ALPHA_FRAME_CAP_BITMAP[word] & (1usize << bit)) != 0 }
+}
+
+fn alpha_frame_caps_are_marked(base_frame_index: usize, count: usize) -> bool {
+    if count == 0 {
+        return true;
+    }
+    if base_frame_index >= (1 << PHYSICAL_NODE_RADIX)
+        || base_frame_index + count > (1 << PHYSICAL_NODE_RADIX)
+    {
+        return false;
+    }
+
+    let mut i = 0usize;
+    while i < count {
+        if !alpha_frame_cap_is_marked(base_frame_index + i) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn mark_alpha_frame_cap(frame_index: usize) -> Result<(), CapabilityError> {
+    if frame_index >= (1 << PHYSICAL_NODE_RADIX) {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    let word = frame_index / usize::BITS as usize;
+    let bit = frame_index % usize::BITS as usize;
+    unsafe {
+        ALPHA_FRAME_CAP_BITMAP[word] |= 1usize << bit;
+    }
+    Ok(())
 }
 
 fn checked_align_up(value: usize, align: usize) -> Option<usize> {

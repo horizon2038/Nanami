@@ -1,5 +1,4 @@
-use a9n_abi::{CapabilityDescriptor, CapabilityError, KernelCallType, Sword};
-use core::arch::asm;
+use a9n_abi::{CapabilityDescriptor, CapabilityError};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{map_capability_error, RequestError, Word};
@@ -94,55 +93,12 @@ pub fn interrupt_ack(interrupt_descriptor: CapabilityDescriptor) -> Result<(), R
 fn notification_poll_zeroed(
     notification_descriptor: CapabilityDescriptor,
 ) -> Result<Word, CapabilityError> {
-    notification_call_with_identifier(
-        notification_descriptor,
-        a9n_abi::capability_call::notification_port::OperationType::Poll as Word,
-    )
+    a9n_abi::arch::notification_port::poll(notification_descriptor)
 }
 
 #[inline(always)]
 fn notification_wait_zeroed(
     notification_descriptor: CapabilityDescriptor,
 ) -> Result<Word, CapabilityError> {
-    notification_call_with_identifier(
-        notification_descriptor,
-        a9n_abi::capability_call::notification_port::OperationType::Wait as Word,
-    )
-}
-
-#[inline(always)]
-fn notification_call_with_identifier(
-    notification_descriptor: CapabilityDescriptor,
-    operation: Word,
-) -> Result<Word, CapabilityError> {
-    let mut a0 = notification_descriptor;
-    let mut a1 = operation;
-    let mut a2 = 0usize;
-
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") KernelCallType::CapabilityCall as Sword,
-            inout("rdi") a0 => a0,
-            inout("rsi") a1 => a1,
-            inout("rdx") a2 => a2,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-            options(nomem),
-        );
-    }
-
-    match a0 {
-        0 => Err(match a1 {
-            0 => CapabilityError::IllegalOperation,
-            1 => CapabilityError::PermissionDenied,
-            2 => CapabilityError::InvalidDescriptor,
-            3 => CapabilityError::InvalidDepth,
-            4 => CapabilityError::InvalidArgument,
-            5 => CapabilityError::Fatal,
-            _ => CapabilityError::DebugUnimplemented,
-        }),
-        _ => Ok(a2 as Word),
-    }
+    a9n_abi::arch::notification_port::wait(notification_descriptor)
 }

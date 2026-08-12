@@ -192,60 +192,8 @@ pub(super) fn response_from_details_result(
     }
 }
 
-pub(super) fn io_port_mint(
-    root_io_port: CapabilityDescriptor,
-    range_min: Word,
-    range_max: Word,
-    destination_node: CapabilityDescriptor,
-    destination_index: Word,
-) -> Result<(), CapabilityError> {
-    let mut a0 = root_io_port;
-    let mut a1 = nun::capability_call::io_port::OperationType::Mint as Word;
-    let a2 = range_min;
-    let a3 = range_max;
-    let a4 = destination_node as Word;
-    let a5 = destination_index;
-
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") KernelCallType::CapabilityCall as Sword,
-            inout("rdi") a0 => a0,
-            inout("rsi") a1 => a1,
-            in("rdx") a2,
-            in("r8") a3,
-            in("r9") a4,
-            in("r10") a5,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-        );
-    }
-
-    convert_capability_result(a0, a1)
-}
-
-pub(super) extern "C" fn run_on_relocated_stack(alpha_ptr: *mut Alpha) -> ! {
-    let alpha = unsafe { &mut *alpha_ptr };
-    info!("[stack] switched to runtime stack");
-    alpha.run_event_loop();
-}
-
 pub(super) unsafe fn jump_to_relocated_stack(alpha_ptr: *mut Alpha, new_sp: usize) -> ! {
-    asm!(
-        "mov rdi, {alpha}",
-        "mov rsp, {stack}",
-        // We enter by `jmp` (not `call`), so synthesize a call frame to satisfy SysV ABI.
-        // On function entry, rsp must be 8 mod 16.
-        "and rsp, -16",
-        "sub rsp, 8",
-        "mov rbp, rsp",
-        "jmp {entry}",
-        alpha = in(reg) alpha_ptr,
-        stack = in(reg) new_sp,
-        entry = in(reg) run_on_relocated_stack as extern "C" fn(*mut Alpha) -> !,
-        options(noreturn)
-    )
+    unsafe { arch_impl::jump_to_relocated_stack(alpha_ptr, new_sp) }
 }
 
 #[inline(always)]

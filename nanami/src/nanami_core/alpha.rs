@@ -4,6 +4,10 @@ mod memory_requests;
 mod process_requests;
 mod support;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "alpha/arch/x86_64.rs"]
+mod arch_impl;
+
 use self::support::*;
 
 use crate::nanami_core::capability_space::RootCapabilitySpace;
@@ -34,11 +38,10 @@ use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot
 use crate::nanami_utils::heap::init_global_heap;
 use crate::{debug, error, info, warn};
 use alloc::vec::Vec;
-use core::arch::asm;
 use core::ptr;
 use nun::{
-    arch, convert_capability_result, CapabilityDescriptor, CapabilityError, CapabilityType,
-    FramebufferInfo, InitInfo, InitSlotOffset, KernelCallType, Sword, Word,
+    arch, CapabilityDescriptor, CapabilityError, CapabilityType, FramebufferInfo, InitInfo,
+    InitSlotOffset, Word,
 };
 
 const ORIGINAL_OS_PORT_SLOT: usize = 64;

@@ -1,7 +1,9 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
+mod arch;
+
+use arch::{linux_exit_group, linux_getpid, linux_write};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -18,48 +20,6 @@ pub extern "C" fn _start() -> ! {
     println("\x1b[32mLinux syscall smoke test passed!\x1b[0m\n");
 
     linux_exit_group(0)
-}
-
-fn linux_getpid() -> usize {
-    let pid: usize;
-    unsafe {
-        asm!(
-            "syscall",
-            inlateout("rax") 39usize => pid,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    pid
-}
-
-fn linux_exit_group(status: usize) -> ! {
-    unsafe {
-        asm!(
-            "syscall",
-            in("rax") 231usize,
-            in("rdi") status,
-            options(noreturn),
-        )
-    }
-}
-
-fn linux_write(fd: usize, buf: *const u8, count: usize) -> isize {
-    let ret: isize;
-    unsafe {
-        asm!(
-            "syscall",
-            inlateout("rax") 1usize => ret,
-            in("rdi") fd,
-            in("rsi") buf,
-            in("rdx") count,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
 }
 
 fn println(s: &str) {

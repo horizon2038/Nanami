@@ -1,4 +1,5 @@
 #include <a9n/abi/debug_call.hpp>
+#include <a9n/abi/ipc_port.hpp>
 #include <a9n/types/types.hpp>
 #include <nanami/nanami.hpp>
 
@@ -22,12 +23,6 @@ constexpr a9n::Word OS_SERVICE_NET_DEVICE = 1;
 constexpr a9n::Word OS_SERVICE_PORT_SLOT_NET_DEVICE = 20;
 constexpr a9n::Word OS_RESPONSE_PONG_MAGIC = 0x504f4e47;
 
-inline a9n::Word make_message_info(bool is_block, unsigned message_length) {
-    return (static_cast<a9n::Word>(is_block) << 0)
-        | ((static_cast<a9n::Word>(message_length) & 0xFF) << 1)
-        | (0ull << 13); // MessageSource::Normal
-}
-
 inline a9n::NanamiStatus map_status(a9n::Word status) {
     if (status == OS_RESPONSE_OK) {
         return a9n::NanamiStatus::Ok;
@@ -50,46 +45,32 @@ inline a9n::NanamiStatus call_port(
     a9n::Word* out_detail0,
     a9n::Word* out_detail1
 ) {
-    register a9n::Sword kernel_call_no __asm__("rax") =
-        static_cast<a9n::Sword>(a9n::KernelCallType::CapabilityCall);
-    register a9n::Word a0 __asm__("rdi") = target_descriptor;
-    register a9n::Word a1 __asm__("rsi") = 3; // ipc_port::OperationType::Call
-    register a9n::Word a2 __asm__("rdx") = make_message_info(true, message_length);
-    register a9n::Word a3 __asm__("r8") = 0;
-    register a9n::Word a4 __asm__("r9") = request_code;
-    register a9n::Word a5 __asm__("r10") = arg0;
-    register a9n::Word a6 __asm__("r12") = arg1;
-    register a9n::Word a7 __asm__("r13") = arg2;
-    register a9n::Word a8 __asm__("r14") = arg3;
-    register a9n::Word a9 __asm__("r15") = 0;
-
-    __asm__ volatile(
-        "syscall"
-        : "+a"(kernel_call_no), "+D"(a0), "+S"(a1), "+d"(a2),
-          "+r"(a4), "+r"(a5), "+r"(a6), "+r"(a7), "+r"(a8), "+r"(a9),
-          "=r"(a3)
-        :
-        : "rcx", "r11", "memory");
-
-    if (a0 == 0) {
+    a9n::Word info = a9n::abi::make_normal_message_info(true, message_length);
+    a9n::Word identifier = 0;
+    a9n::Word message_registers[6] = {request_code, arg0, arg1, arg2, arg3, 0};
+    if (!a9n::abi::ipc_port_call(
+            target_descriptor,
+            &info,
+            &identifier,
+            message_registers
+        )) {
         return a9n::NanamiStatus::Unsupported;
     }
-    const a9n::Word source = (a2 >> 13) & 0x3;
-    if (source != 0 || (((a2 >> 1) & 0xFF) < 3)) {
+    if (!a9n::abi::is_normal_message(info) || a9n::abi::message_length(info) < 3) {
         return a9n::NanamiStatus::Unsupported;
     }
 
     if (out_status) {
-        *out_status = a4;
+        *out_status = message_registers[0];
     }
     if (out_detail0) {
-        *out_detail0 = a5;
+        *out_detail0 = message_registers[1];
     }
     if (out_detail1) {
-        *out_detail1 = a6;
+        *out_detail1 = message_registers[2];
     }
 
-    return map_status(a4);
+    return map_status(message_registers[0]);
 }
 
 inline a9n::NanamiStatus os_call(

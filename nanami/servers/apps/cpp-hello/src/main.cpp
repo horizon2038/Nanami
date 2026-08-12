@@ -1,3 +1,4 @@
+#include <a9n/abi/processor.hpp>
 #include <nanami/nanami.hpp>
 
 extern "C" int main(void) {
@@ -12,13 +13,7 @@ extern "C" int main(void) {
   (void)nanami::request_pages(1);
   if (nanami::request_exit() != a9n::NanamiStatus::Ok) {
     nanami::write_string("[user-app/cpp] exit failed\n");
-    for (;;) {
-      asm volatile("pause");
-    }
+    a9n::abi::idle();
   }
-  // request_exit may return before scheduler actually tears down this task.
-  // Never return to the process entry trampoline.
-  for (;;) {
-    asm volatile("pause");
-  }
+  a9n::abi::idle();
 }

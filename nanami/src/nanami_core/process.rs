@@ -1,5 +1,6 @@
 use alloc::{boxed::Box, vec::Vec};
 
+use crate::nanami_core::elf_loader::ElfImage;
 use crate::nanami_core::vm_space::{BootstrapVmSpace, VmSpace};
 use nun::{CapabilityDescriptor, CapabilityError, Word};
 
@@ -8,6 +9,7 @@ pub const MAX_IO_RANGES_PER_PROCESS: usize = 16;
 pub const MAX_IRQS_PER_PROCESS: usize = 8;
 
 const INVALID_IRQ: Word = usize::MAX;
+const USER_PAGE_SIZE: usize = 4096;
 
 static mut ALPHA_VM_SPACE: BootstrapVmSpace = BootstrapVmSpace::new();
 
@@ -44,6 +46,12 @@ pub struct ProcessEntry {
     pub exit_code: Word,
 }
 
+#[derive(Clone, Copy)]
+pub struct ProcessStatistics {
+    pub running: usize,
+    pub exited: usize,
+}
+
 impl ProcessEntry {
     pub fn has_irq(&self) -> bool {
         self.irq_count > 0
@@ -72,6 +80,8 @@ pub struct ProcessManager {
     vm_spaces: Vec<ProcessVmSpace>,
     frame_chunks: Vec<ProcessFrameChunk>,
     physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
+    deferred_physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
+    lazy_mappings: Vec<ProcessLazyMappingEntry>,
 }
 
 struct ProcessVmSpace {
@@ -82,6 +92,25 @@ struct ProcessVmSpace {
 struct ProcessFrameChunk {
     pid: usize,
     chunk_index: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum ProcessLazyMappingKind {
+    Image { image: &'static [u8], elf: ElfImage },
+    Zero,
+}
+
+#[derive(Clone, Copy)]
+pub struct ProcessLazyMapping {
+    pub base_va: usize,
+    pub page_count: usize,
+    pub start_slot: usize,
+    pub kind: ProcessLazyMappingKind,
+}
+
+struct ProcessLazyMappingEntry {
+    pid: usize,
+    mapping: ProcessLazyMapping,
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +168,8 @@ impl ProcessManager {
             vm_spaces: Vec::new(),
             frame_chunks: Vec::new(),
             physical_allocations: Vec::new(),
+            deferred_physical_allocations: Vec::new(),
+            lazy_mappings: Vec::new(),
         }
     }
 
@@ -225,6 +256,54 @@ impl ProcessManager {
         Ok(())
     }
 
+    pub fn register_lazy_mapping(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+        start_slot: usize,
+        kind: ProcessLazyMappingKind,
+    ) -> Result<(), CapabilityError> {
+        if pid == 0 || page_count == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.lazy_mappings.push(ProcessLazyMappingEntry {
+            pid,
+            mapping: ProcessLazyMapping {
+                base_va,
+                page_count,
+                start_slot,
+                kind,
+            },
+        });
+        Ok(())
+    }
+
+    pub fn find_lazy_mapping(
+        &self,
+        pid: usize,
+        virtual_address: usize,
+    ) -> Option<ProcessLazyMapping> {
+        for entry in self.lazy_mappings.iter() {
+            if entry.pid != pid {
+                continue;
+            }
+            let start = entry.mapping.base_va;
+            let bytes = entry.mapping.page_count.checked_mul(USER_PAGE_SIZE)?;
+            let end = start.checked_add(bytes)?;
+            if virtual_address >= start && virtual_address < end {
+                return Some(entry.mapping);
+            }
+        }
+        None
+    }
+
+    pub fn drop_image_lazy_mappings_for_pid(&mut self, pid: usize) {
+        self.lazy_mappings.retain(|entry| {
+            entry.pid != pid || !matches!(entry.mapping.kind, ProcessLazyMappingKind::Image { .. })
+        });
+    }
+
     pub fn releasable_physical_allocations_for_pid(
         &self,
         pid: usize,
@@ -250,6 +329,117 @@ impl ProcessManager {
 
     pub fn drop_physical_allocations_for_pid(&mut self, pid: usize) {
         self.physical_allocations.retain(|entry| entry.pid != pid);
+        self.deferred_physical_allocations
+            .retain(|entry| entry.pid != pid);
+    }
+
+    pub fn defer_physical_allocation_for_pid(
+        &mut self,
+        pid: usize,
+        allocation: ProcessPhysicalAllocation,
+    ) {
+        self.deferred_physical_allocations
+            .push(ProcessPhysicalAllocationEntry { pid, allocation });
+    }
+
+    pub fn take_deferred_physical_allocation(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+    ) -> Option<ProcessPhysicalAllocation> {
+        let index = self
+            .deferred_physical_allocations
+            .iter()
+            .position(|entry| {
+                entry.pid == pid
+                    && entry.allocation.base_va == base_va
+                    && entry.allocation.page_count == page_count
+            })?;
+        Some(
+            self.deferred_physical_allocations
+                .swap_remove(index)
+                .allocation,
+        )
+    }
+
+    pub fn releasable_deferred_physical_allocations_for_pid(
+        &self,
+        pid: usize,
+    ) -> Vec<ProcessPhysicalAllocation> {
+        let mut allocations = Vec::new();
+        for entry in self.deferred_physical_allocations.iter() {
+            if entry.pid == pid {
+                let mut ref_count = 0usize;
+                for active in self.physical_allocations.iter() {
+                    if active.allocation.base_page == entry.allocation.base_page
+                        && active.allocation.page_count == entry.allocation.page_count
+                    {
+                        ref_count += 1;
+                    }
+                }
+                for deferred in self.deferred_physical_allocations.iter() {
+                    if deferred.allocation.base_page == entry.allocation.base_page
+                        && deferred.allocation.page_count == entry.allocation.page_count
+                    {
+                        ref_count += 1;
+                    }
+                }
+                if ref_count == 1 {
+                    allocations.push(entry.allocation);
+                }
+            }
+        }
+        allocations
+    }
+
+    pub fn drop_deferred_physical_allocations_for_pid(&mut self, pid: usize) {
+        self.deferred_physical_allocations
+            .retain(|entry| entry.pid != pid);
+    }
+
+    pub fn reset_runtime_memory_for_exec(
+        &mut self,
+        pid: usize,
+        next_frame_slot: usize,
+        user_heap_next_va: usize,
+        user_heap_limit_va: usize,
+    ) -> Result<Vec<(ProcessPhysicalAllocation, bool)>, CapabilityError> {
+        let Some(entry) = self.entry_mut_by_pid(pid) else {
+            return Err(CapabilityError::InvalidArgument);
+        };
+        entry.next_frame_slot = next_frame_slot;
+        entry.user_heap_next_va = user_heap_next_va;
+        entry.user_heap_limit_va = user_heap_limit_va;
+        entry.exited = false;
+        entry.exit_is_ok = 0;
+        entry.exit_code = 0;
+
+        self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        if let Some(vm) = self.vm_spaces.iter_mut().find(|vm| vm.pid == pid) {
+            vm.space = Box::new(VmSpace::new());
+        }
+
+        let mut allocations = Vec::new();
+        let mut index = 0usize;
+        while index < self.physical_allocations.len() {
+            if self.physical_allocations[index].pid != pid {
+                index += 1;
+                continue;
+            }
+            let allocation = self.physical_allocations[index].allocation;
+            let mut ref_count = 0usize;
+            for entry in self.physical_allocations.iter() {
+                if entry.allocation.base_page == allocation.base_page
+                    && entry.allocation.page_count == allocation.page_count
+                {
+                    ref_count += 1;
+                }
+            }
+            self.physical_allocations.swap_remove(index);
+            allocations.push((allocation, ref_count == 1));
+        }
+        Ok(allocations)
     }
 
     pub fn find_active_physical_allocation_reference(
@@ -363,6 +553,26 @@ impl ProcessManager {
         Err(CapabilityError::InvalidArgument)
     }
 
+    pub fn release_process_slot_reservation(&mut self, root_slot: usize) {
+        if let Some(slot_index) = self
+            .used_root_slots
+            .iter()
+            .position(|slot| *slot == root_slot)
+        {
+            self.used_root_slots.swap_remove(slot_index);
+        }
+    }
+
+    pub fn discard_process_artifacts(&mut self, pid: usize, root_slot: usize) {
+        self.release_process_slot_reservation(root_slot);
+        if let Some(vm_index) = self.vm_spaces.iter().position(|vm| vm.pid == pid) {
+            self.vm_spaces.swap_remove(vm_index);
+        }
+        self.frame_chunks.retain(|chunk| chunk.pid != pid);
+        self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        self.drop_physical_allocations_for_pid(pid);
+    }
+
     fn is_root_slot_reserved(&self, slot: usize) -> bool {
         self.reserved_root_slots
             .iter()
@@ -379,6 +589,22 @@ impl ProcessManager {
             }
         }
         None
+    }
+
+    pub fn statistics(&self) -> ProcessStatistics {
+        let mut running = 0usize;
+        let mut exited = 0usize;
+        for entry in self.entries.iter() {
+            if !entry.used {
+                continue;
+            }
+            if entry.exited {
+                exited += 1;
+            } else {
+                running += 1;
+            }
+        }
+        ProcessStatistics { running, exited }
     }
 
     pub fn mark_exited(
@@ -430,6 +656,7 @@ impl ProcessManager {
             self.vm_spaces.swap_remove(vm_index);
         }
         self.frame_chunks.retain(|chunk| chunk.pid != pid);
+        self.lazy_mappings.retain(|mapping| mapping.pid != pid);
         self.drop_physical_allocations_for_pid(pid);
         Ok(())
     }
@@ -556,6 +783,30 @@ impl ProcessManager {
             entry.next_frame_slot += page_count;
             entry.user_heap_next_va = heap_end;
             return Ok((entry.root_node, entry.address_space, heap_base, start_slot));
+        }
+
+        Err(CapabilityError::InvalidArgument)
+    }
+
+    pub fn reserve_process_heap_at(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+        page_size: usize,
+        max_frame_slots: usize,
+    ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize), CapabilityError> {
+        if base_va == 0 || page_count == 0 || page_size == 0 || (base_va & (page_size - 1)) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            if entry.next_frame_slot + page_count > max_frame_slots {
+                return Err(CapabilityError::InvalidArgument);
+            }
+            let start_slot = entry.next_frame_slot;
+            entry.next_frame_slot += page_count;
+            return Ok((entry.root_node, entry.address_space, start_slot));
         }
 
         Err(CapabilityError::InvalidArgument)

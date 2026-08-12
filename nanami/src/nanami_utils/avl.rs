@@ -47,6 +47,12 @@ impl AvlTree {
         }
         None
     }
+
+    pub fn remove(&mut self, key: usize) -> Option<usize> {
+        let (root, removed) = remove_node(self.root.take(), key);
+        self.root = root;
+        removed
+    }
 }
 
 fn insert_node(node: Option<Box<AvlNode>>, key: usize, value: usize) -> Box<AvlNode> {
@@ -65,6 +71,58 @@ fn insert_node(node: Option<Box<AvlNode>>, key: usize, value: usize) -> Box<AvlN
 
     recompute_height(&mut node);
     rebalance(node)
+}
+
+fn remove_node(node: Option<Box<AvlNode>>, key: usize) -> (Option<Box<AvlNode>>, Option<usize>) {
+    let Some(mut node) = node else {
+        return (None, None);
+    };
+
+    let removed;
+    if key < node.key {
+        let (left, value) = remove_node(node.left.take(), key);
+        node.left = left;
+        removed = value;
+    } else if key > node.key {
+        let (right, value) = remove_node(node.right.take(), key);
+        node.right = right;
+        removed = value;
+    } else {
+        let value = node.value;
+        if node.left.is_none() {
+            return (node.right.take(), Some(value));
+        }
+        if node.right.is_none() {
+            return (node.left.take(), Some(value));
+        }
+        let (right, successor) = take_min_node(node.right.take());
+        let Some(mut successor) = successor else {
+            return (node.left.take(), Some(value));
+        };
+        successor.left = node.left.take();
+        successor.right = right;
+        recompute_height(&mut successor);
+        return (Some(rebalance(successor)), Some(value));
+    }
+
+    if removed.is_none() {
+        return (Some(node), None);
+    }
+    recompute_height(&mut node);
+    (Some(rebalance(node)), removed)
+}
+
+fn take_min_node(node: Option<Box<AvlNode>>) -> (Option<Box<AvlNode>>, Option<Box<AvlNode>>) {
+    let Some(mut node) = node else {
+        return (None, None);
+    };
+    if node.left.is_none() {
+        return (node.right.take(), Some(node));
+    }
+    let (left, min) = take_min_node(node.left.take());
+    node.left = left;
+    recompute_height(&mut node);
+    (Some(rebalance(node)), min)
 }
 
 fn height(node: &Option<Box<AvlNode>>) -> i16 {

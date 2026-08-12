@@ -1,5 +1,5 @@
 use crate::*;
-use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource};
+use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource, Word};
 
 const MAX_SERVICES: usize = 64;
 const MAX_SERVICE_NAME_LEN: usize = 32;
@@ -39,6 +39,21 @@ pub const OS_REQUEST_PROCESS_SPAWN: usize = 0x1011;
 pub const OS_REQUEST_PROCESS_STATUS: usize = 0x1012;
 pub const OS_REQUEST_PROCESS_REAP: usize = 0x1013;
 pub const OS_REQUEST_MAPPING_RELEASE: usize = 0x1014;
+pub const OS_REQUEST_PROCESS_KILL: usize = 0x1015;
+pub const OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER: usize = 0x1016;
+pub const OS_REQUEST_PROCESS_MEMORY_READ: usize = 0x1017;
+pub const OS_REQUEST_PROCESS_MEMORY_WRITE: usize = 0x1018;
+pub const OS_REQUEST_PROCESS_MAP_ANONYMOUS: usize = 0x1019;
+pub const OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER_SUSPENDED: usize = 0x101a;
+pub const OS_REQUEST_NANAMI_CONTROL: usize = 0x101b;
+pub const OS_REQUEST_PROCESS_SPAWN_MEMORY: usize = 0x101c;
+pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED: usize = 0x101d;
+pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED: usize = 0x101e;
+pub const OS_REQUEST_PROCESS_EXEC_MEMORY: usize = 0x101f;
+pub const OS_REQUEST_PROCESS_MEMORY_CLONE: usize = 0x1020;
+pub const OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN: usize = 0x1021;
+pub const OS_REQUEST_PROCESS_ALIVE: usize = 0x1022;
+pub const OS_REQUEST_NANAMI_INFO: usize = 0x1023;
 pub const OS_REQUEST_DEBUG_PING: usize = 0x10ff;
 
 pub const OS_RESPONSE_OK: usize = 0;
@@ -55,6 +70,12 @@ pub const OS_SERVICE_TIMER_SERVICE: usize = 3;
 pub const OS_SERVICE_DISPLAY_SERVICE: usize = 4;
 pub const OS_SERVICE_INPUT_SERVICE: usize = 5;
 pub const OS_SERVICE_HONOKA_SERVICE: usize = 6;
+pub const OS_SERVICE_RTC_SERVICE: usize = 7;
+pub const OS_SERVICE_BLOCK_DEVICE: usize = 8;
+pub const OS_SERVICE_VFS_SERVICE: usize = 9;
+pub const OS_SERVICE_POSIX_SERVICE: usize = 10;
+pub const OS_SERVICE_TERMINAL_SERVICE: usize = 11;
+pub const OS_SERVICE_EXEC_SERVICE: usize = 12;
 
 #[derive(Clone, Copy)]
 pub struct ServiceEntry {
@@ -128,6 +149,12 @@ impl CommunicationManager {
     ) -> Result<(), CapabilityError> {
         let bytes = name.as_bytes();
         if bytes.is_empty() || bytes.len() > MAX_SERVICE_NAME_LEN {
+            error!(
+                "[svc.err] invalid service name owner={} len={} max={}",
+                owner_pid,
+                bytes.len(),
+                MAX_SERVICE_NAME_LEN
+            );
             return Err(CapabilityError::InvalidArgument);
         }
 
@@ -150,6 +177,10 @@ impl CommunicationManager {
             i += 1;
         }
 
+        error!(
+            "[svc.err] service table full owner={} name={}",
+            owner_pid, name
+        );
         Err(CapabilityError::InvalidArgument)
     }
 
@@ -216,6 +247,19 @@ impl CommunicationManager {
         info.transfer_count(),
         identifier
     );
+        Ok(Self::decode_event(info, identifier))
+    }
+
+    pub fn reply_receive_fault_continue(
+        &mut self,
+        fault: KernelFaultEvent,
+    ) -> Result<CommunicationEvent, CapabilityError> {
+        let _ = fault;
+        // Fault continuation must not copy reply payload into the faulted task's message registers.
+        // A9N treats this zero-length reply as a resume request for the pending fault.
+        let mut info = MessageInfo::normal(true, 0, 0);
+        let mut identifier = 0usize;
+        arch::ipc_port::reply_receive(self.os_port, &mut info, &mut identifier)?;
         Ok(Self::decode_event(info, identifier))
     }
 
@@ -308,6 +352,18 @@ fn service_kind_from_name(name: &[u8]) -> usize {
         OS_SERVICE_INPUT_SERVICE
     } else if name == b"honoka-service" {
         OS_SERVICE_HONOKA_SERVICE
+    } else if name == b"rtc-service" {
+        OS_SERVICE_RTC_SERVICE
+    } else if name == b"block-device" {
+        OS_SERVICE_BLOCK_DEVICE
+    } else if name == b"vfs-service" {
+        OS_SERVICE_VFS_SERVICE
+    } else if name == b"posix-service" {
+        OS_SERVICE_POSIX_SERVICE
+    } else if name == b"terminal-service" {
+        OS_SERVICE_TERMINAL_SERVICE
+    } else if name == b"exec-service" {
+        OS_SERVICE_EXEC_SERVICE
     } else {
         0
     }

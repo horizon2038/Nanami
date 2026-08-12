@@ -4,11 +4,13 @@ const ELF64_HEADER_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
 const ELF64_SHDR_SIZE: usize = 64;
 const ELF64_SYM_SIZE: usize = 24;
+const ET_DYN: u16 = 3;
 const PT_LOAD: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_DYNSYM: u32 = 11;
 const MAX_LOAD_SEGMENTS: usize = 16;
 const IPC_BUFFER_SYMBOL: &[u8] = b"__ipc_buffer_start";
+const DYNAMIC_IMAGE_LOAD_BIAS: usize = 0x400000;
 
 #[derive(Clone, Copy)]
 pub struct LoadSegment {
@@ -43,6 +45,14 @@ impl ElfImage {
 }
 
 pub fn parse_elf64(image: &[u8]) -> Result<ElfImage, CapabilityError> {
+    parse_elf64_impl(image, true)
+}
+
+pub fn parse_elf64_header(image: &[u8]) -> Result<ElfImage, CapabilityError> {
+    parse_elf64_impl(image, false)
+}
+
+fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, CapabilityError> {
     if image.len() < ELF64_HEADER_SIZE {
         return Err(CapabilityError::InvalidArgument);
     }
@@ -53,7 +63,15 @@ pub fn parse_elf64(image: &[u8]) -> Result<ElfImage, CapabilityError> {
         return Err(CapabilityError::InvalidArgument);
     }
 
-    let entry = read_u64(image, 24)? as usize;
+    let elf_type = read_u16(image, 16)?;
+    let load_bias = if elf_type == ET_DYN {
+        DYNAMIC_IMAGE_LOAD_BIAS
+    } else {
+        0
+    };
+    let entry = (read_u64(image, 24)? as usize)
+        .checked_add(load_bias)
+        .ok_or(CapabilityError::InvalidArgument)?;
     let phoff = read_u64(image, 32)? as usize;
     let shoff = read_u64(image, 40)? as usize;
     let phentsize = read_u16(image, 54)? as usize;
@@ -85,17 +103,18 @@ pub fn parse_elf64(image: &[u8]) -> Result<ElfImage, CapabilityError> {
             }
 
             let offset = read_u64(image, base + 8)? as usize;
-            let vaddr = read_u64(image, base + 16)? as usize;
+            let vaddr = (read_u64(image, base + 16)? as usize)
+                .checked_add(load_bias)
+                .ok_or(CapabilityError::InvalidArgument)?;
             let filesz = read_u64(image, base + 32)? as usize;
             let memsz = read_u64(image, base + 40)? as usize;
             if memsz < filesz {
                 return Err(CapabilityError::InvalidArgument);
             }
-            if offset
+            let segment_file_end = offset
                 .checked_add(filesz)
-                .filter(|end| *end <= image.len())
-                .is_none()
-            {
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if require_full_image && segment_file_end > image.len() {
                 return Err(CapabilityError::InvalidArgument);
             }
 
@@ -114,9 +133,10 @@ pub fn parse_elf64(image: &[u8]) -> Result<ElfImage, CapabilityError> {
         return Err(CapabilityError::InvalidArgument);
     }
 
-    if shoff < image.len() && shentsize >= ELF64_SHDR_SIZE && shnum > 0 {
+    if require_full_image && shoff < image.len() && shentsize >= ELF64_SHDR_SIZE && shnum > 0 {
         out.ipc_buffer_start =
-            find_symbol_value(image, shoff, shentsize, shnum, IPC_BUFFER_SYMBOL)?;
+            find_symbol_value(image, shoff, shentsize, shnum, IPC_BUFFER_SYMBOL)?
+                .map(|value| value + load_bias);
     }
 
     Ok(out)

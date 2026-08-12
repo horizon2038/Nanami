@@ -1,12 +1,10 @@
 use crate::nanami_core::memory::MemoryManager;
 use crate::nanami_core::vm_space::VmSpace;
-use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use nun::{CapabilityDescriptor, CapabilityError, FramebufferInfo, InitInfo};
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 const FB_MAP_BASE_VA: usize = 0x6000_0000;
-const GENERIC_NODE_RADIX: usize = 7;
 
 pub struct DisplayDriver {
     info: FramebufferInfo,
@@ -23,7 +21,7 @@ impl DisplayDriver {
 
     pub fn map(
         &mut self,
-        init_info: &InitInfo,
+        _init_info: &InitInfo,
         memory: &mut MemoryManager,
         address_space: CapabilityDescriptor,
         vm_space: &mut VmSpace,
@@ -55,42 +53,19 @@ impl DisplayDriver {
         let total_span = offset + total_bytes;
         let page_count = (total_span + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        let (generic_idx, generic_start, _) =
-            find_framebuffer_generic_range(init_info, fb_addr, total_bytes)
-                .ok_or(CapabilityError::InvalidArgument)?;
-        let generic_desc = make_generic_descriptor(memory.root_radix(), generic_idx);
-        let generic_meta = init_info.generic_list[generic_idx];
-
-        let skip_pages = (fb_base.saturating_sub(generic_start)) / PAGE_SIZE;
-        let total_frames = skip_pages.saturating_add(page_count);
         match memory.allocate_physical_at(fb_base, page_count * PAGE_SIZE, true) {
             Ok(_) | Err(CapabilityError::InvalidArgument) => {}
             Err(e) => return Err(e),
         }
-        let base_frame_index = memory
-            .physical_page_index_from_address(generic_start)
-            .ok_or(CapabilityError::InvalidArgument)?;
-
-        crate::info!(
-            "convert type={:>2} src_idx={:>3} src_desc={:#018x} src_is_device={} src_radix={:>2} count={:>6} dst_node={:#018x} dst_slot={:>7}",
-            nun::CapabilityType::Frame as usize,
-            generic_idx,
-            generic_desc,
-            generic_meta.is_device,
-            generic_meta.size_radix,
-            total_frames,
-            memory.frame_node_descriptor(),
-            base_frame_index
-        );
-        memory.ensure_alpha_frames_from_generic(generic_desc, base_frame_index, total_frames)?;
-
-        crate::info!(
-            "fb_generic={:>3} skip_pages={:>6} frame_count={:>6} base_slot={:>7}",
-            generic_idx,
-            skip_pages,
-            total_frames,
-            base_frame_index + skip_pages
-        );
+        let (base_frame_index, skip_pages, converted_pages) = memory
+            .ensure_alpha_frames_for_range_from_initial_generic(
+                fb_base,
+                page_count * PAGE_SIZE,
+                true,
+            )?;
+        if converted_pages != page_count {
+            return Err(CapabilityError::InvalidArgument);
+        }
 
         let mut i = 0usize;
         while i < page_count {
@@ -183,52 +158,6 @@ impl DisplayDriver {
             p.write_volatile(pixel);
         }
     }
-}
-
-fn find_framebuffer_generic_range(
-    init_info: &InitInfo,
-    fb_addr: usize,
-    fb_size: usize,
-) -> Option<(usize, usize, usize)> {
-    let count = init_info.generic_list_count as usize;
-    let mut best: Option<(usize, usize, usize, usize)> = None;
-
-    for pass_device_only in [true, false] {
-        let mut i = 0;
-        while i < count {
-            let g = init_info.generic_list[i];
-            if pass_device_only && !g.is_device {
-                i += 1;
-                continue;
-            }
-
-            let start = g.address as usize;
-            let size = 1usize << g.size_radix;
-            let end = start.saturating_add(size);
-
-            if fb_addr >= start && fb_addr.saturating_add(fb_size) <= end {
-                match best {
-                    None => best = Some((i, start, end, size)),
-                    Some((_, _, _, best_size)) if size < best_size => {
-                        best = Some((i, start, end, size))
-                    }
-                    _ => {}
-                }
-            }
-            i += 1;
-        }
-        if best.is_some() {
-            break;
-        }
-    }
-
-    best.map(|(idx, start, end, _)| (idx, start, end))
-}
-
-fn make_generic_descriptor(root_radix: usize, generic_index: usize) -> CapabilityDescriptor {
-    let generic_node =
-        make_root_slot_descriptor(root_radix, nun::InitSlotOffset::GenericNode as usize);
-    make_child_slot_descriptor(generic_node, GENERIC_NODE_RADIX, generic_index)
 }
 
 fn pack_color(info: &FramebufferInfo, r: u8, g: u8, b: u8) -> u32 {

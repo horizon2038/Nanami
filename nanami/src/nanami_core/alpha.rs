@@ -3,19 +3,25 @@ use crate::nanami_core::communication::{
     CommunicationEvent, CommunicationManager, KernelFaultEvent, NotificationEvent, OsRequestEvent,
     OS_REQUEST_DEBUG_PING, OS_REQUEST_DMA_REQUEST, OS_REQUEST_EXIT, OS_REQUEST_HEAP_ALLOC,
     OS_REQUEST_INITIAL_FRAMEBUFFER_INFORMATION, OS_REQUEST_IO_PORT_CONTROL, OS_REQUEST_IRQ_CONTROL,
-    OS_REQUEST_MAPPING_RELEASE, OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NOTIFICATION_PORT_COPY,
-    OS_REQUEST_NOTIFICATION_PORT_CREATE, OS_REQUEST_PAGE_ALLOC, OS_REQUEST_SELF_PID,
-    OS_REQUEST_PROCESS_REAP, OS_REQUEST_PROCESS_SPAWN, OS_REQUEST_PROCESS_STATUS,
-    OS_REQUEST_SERVICE_CONNECT,
-    OS_REQUEST_SERVICE_LIST, OS_REQUEST_SERVICE_REGISTER, OS_REQUEST_SHARED_FRAMEBUFFER_CREATE,
-    OS_REQUEST_SHARED_MEMORY_CREATE, OS_RESPONSE_FATAL, OS_RESPONSE_ILLEGAL_OPERATION,
-    OS_RESPONSE_INVALID_ARGUMENT, OS_RESPONSE_INVALID_DESCRIPTOR, OS_RESPONSE_OK,
-    OS_RESPONSE_PERMISSION_DENIED, OS_RESPONSE_PONG_MAGIC,
+    OS_REQUEST_MAPPING_RELEASE, OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NANAMI_CONTROL,
+    OS_REQUEST_NANAMI_INFO, OS_REQUEST_NOTIFICATION_PORT_COPY, OS_REQUEST_NOTIFICATION_PORT_CREATE,
+    OS_REQUEST_PAGE_ALLOC, OS_REQUEST_PROCESS_ALIVE, OS_REQUEST_PROCESS_EXEC_MEMORY,
+    OS_REQUEST_PROCESS_KILL, OS_REQUEST_PROCESS_MAP_ANONYMOUS, OS_REQUEST_PROCESS_MEMORY_CLONE,
+    OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN, OS_REQUEST_PROCESS_MEMORY_READ,
+    OS_REQUEST_PROCESS_MEMORY_WRITE, OS_REQUEST_PROCESS_REAP, OS_REQUEST_PROCESS_SPAWN,
+    OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER, OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER_SUSPENDED,
+    OS_REQUEST_PROCESS_SPAWN_MEMORY, OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED,
+    OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED, OS_REQUEST_PROCESS_STATUS, OS_REQUEST_SELF_PID,
+    OS_REQUEST_SERVICE_CONNECT, OS_REQUEST_SERVICE_LIST, OS_REQUEST_SERVICE_REGISTER,
+    OS_REQUEST_SHARED_FRAMEBUFFER_CREATE, OS_REQUEST_SHARED_MEMORY_CREATE, OS_RESPONSE_FATAL,
+    OS_RESPONSE_ILLEGAL_OPERATION, OS_RESPONSE_INVALID_ARGUMENT, OS_RESPONSE_INVALID_DESCRIPTOR,
+    OS_RESPONSE_OK, OS_RESPONSE_PERMISSION_DENIED, OS_RESPONSE_PONG_MAGIC,
 };
 use crate::nanami_core::cpio;
 use crate::nanami_core::elf_loader::parse_elf64;
 use crate::nanami_core::memory::MemoryManager;
-use crate::nanami_core::process::ProcessManager;
+use crate::nanami_core::process::{ProcessLazyMappingKind, ProcessManager};
+use crate::nanami_core::vm_space::VmTracker;
 use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use crate::nanami_utils::heap::init_global_heap;
 use crate::{debug, error, info, warn};
@@ -38,8 +44,9 @@ const PROCESS_SLOT_L1_NODE: usize = 6;
 const PROCESS_SLOT_FRAME_NODE: usize = 7;
 const PROCESS_SLOT_SERVICE_PORT: usize = 20;
 const PROCESS_SLOT_NOTIFICATION_PORT: usize = 21;
-const PROCESS_FRAME_DIRECTORY_RADIX: usize = 8;
-const PROCESS_FRAME_NODE_RADIX: usize = 14;
+const PROCESS_SLOT_FAULT_RESOLVER: usize = 22;
+const PROCESS_FRAME_DIRECTORY_RADIX: usize = 10;
+const PROCESS_FRAME_NODE_RADIX: usize = 9;
 const PROCESS_FRAME_CHUNK_PAGES: usize = 1 << PROCESS_FRAME_NODE_RADIX;
 const PROCESS_FRAME_TOTAL_PAGES: usize =
     (1 << PROCESS_FRAME_DIRECTORY_RADIX) * PROCESS_FRAME_CHUNK_PAGES;
@@ -47,6 +54,7 @@ const PAGE_TABLE_NODE_RADIX: usize = 7;
 const PAGE_SIZE: usize = 4096;
 const USER_STACK_BASE: usize = 0x0400_0000;
 const USER_STACK_PAGES: usize = 64;
+const USER_ANONYMOUS_MAP_BASE: usize = 0x1000_0000;
 const PROCESS_PRIORITY_LOW: Word = 4;
 const PROCESS_PRIORITY_BACKGROUND_CLIENT: Word = 8;
 const PROCESS_PRIORITY_CLIENT: Word = 16;
@@ -58,7 +66,16 @@ const PROCESS_PRIORITY_TIMER_SERVER: Word = 30;
 const USER_HEAP_GUARD_PAGES: usize = 8;
 const USER_HEAP_LIMIT: usize = 0x7000_0000;
 const TEMP_MAP_BASE: usize = 0x7000_0000;
-const TEMP_MAP_STRIDE: usize = 0x0200_0000;
+const TEMP_MAP_STRIDE: usize = 0x0020_0000;
+const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
+const PROCESS_COPY_TEMP_WINDOW_SIZE: usize = 0x0100_0000;
+const PROCESS_ZERO_TEMP_BASE: usize = PROCESS_COPY_TEMP_BASE + PROCESS_COPY_TEMP_WINDOW_SIZE;
+const PROCESS_SPAWN_MEMORY_MAX_BYTES: usize = 64 * 1024 * 1024;
+const NANAMI_INFO_MEMORY: usize = 1;
+const NANAMI_INFO_PROCESS: usize = 2;
+static mut PROCESS_COPY_BOUNCE_BUFFER: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+static mut PROCESS_MEMORY_IMAGE_BUFFER: [u8; PROCESS_SPAWN_MEMORY_MAX_BYTES] =
+    [0; PROCESS_SPAWN_MEMORY_MAX_BYTES];
 const ALPHA_RUNTIME_STACK_NODE_SLOT: usize = 1300;
 const ALPHA_RUNTIME_STACK_NODE_RADIX: usize = 12;
 const ALPHA_RUNTIME_STACK_BASE: usize = 0x5000_0000;
@@ -76,7 +93,7 @@ const FRAMEBUFFER_INFORMATION_REGION: usize = 0;
 const FRAMEBUFFER_INFORMATION_GEOMETRY: usize = 1;
 const FRAMEBUFFER_INFORMATION_FORMAT: usize = 2;
 const FRAMEBUFFER_INFORMATION_COLOR_AND_ID: usize = 3;
-const PROCESS_ROOT_RESERVED_SLOTS: [usize; 13] = [
+const PROCESS_ROOT_RESERVED_SLOTS: [usize; 17] = [
     1024,
     1025,
     1026,
@@ -89,6 +106,10 @@ const PROCESS_ROOT_RESERVED_SLOTS: [usize; 13] = [
     1201,
     1202,
     1203, // page-table pool node candidates
+    1210,
+    1211,
+    1212,
+    1213, // process arena directory candidates
     ALPHA_RUNTIME_STACK_NODE_SLOT,
 ];
 
@@ -125,12 +146,29 @@ struct InitialFramebufferInformation {
     blue_size: usize,
 }
 
+#[derive(Clone, Copy)]
+struct BootListEntry<'a> {
+    _name: &'a str,
+    priority: Word,
+    image_path: &'a str,
+}
+
+enum FaultDisposition {
+    Continue(KernelFaultEvent),
+    ReceiveOnly,
+}
+
+enum PendingReply {
+    FaultContinue(KernelFaultEvent),
+    Status(usize, usize, usize),
+}
+
 impl Alpha {
     pub fn bootstrap(init_info: &InitInfo) -> Result<Self, CapabilityError> {
         info!("alpha bootstrap start");
 
         info!("root capability space bootstrap");
-        let root = RootCapabilitySpace::bootstrap(init_info)?;
+        let mut root = RootCapabilitySpace::bootstrap(init_info)?;
         info!(
             "root={:#018x} radix={:>2} bootstrap_generic={:#018x}",
             root.root_descriptor, root.root_radix, root.bootstrap_generic
@@ -141,8 +179,11 @@ impl Alpha {
             init_info,
             root.root_descriptor,
             root.root_radix,
-            root.bootstrap_generic,
+            root.bootstrap_generic_index,
+            root.root_generic_index,
+            root.root_generic_consumed_bytes,
         )?;
+        root.bootstrap_generic = memory.kernel_object_generic();
         info!("memory manager ready");
 
         info!("create alpha os port");
@@ -253,12 +294,13 @@ impl Alpha {
         }
 
         let frame_directory = process_frame_directory_descriptor(process_root);
+        let process_generic = self.process_arena_for_root(process_root)?;
         let mut chunk = start_slot / PROCESS_FRAME_CHUNK_PAGES;
         let last_chunk = (end_slot - 1) / PROCESS_FRAME_CHUNK_PAGES;
         while chunk <= last_chunk {
             if !self.processes.has_frame_chunk(pid, chunk) {
                 arch::generic::convert(
-                    self.root.bootstrap_generic,
+                    process_generic,
                     CapabilityType::Node,
                     PROCESS_FRAME_NODE_RADIX as Word,
                     1,
@@ -270,6 +312,22 @@ impl Alpha {
             chunk += 1;
         }
         Ok(())
+    }
+
+    fn process_arena_for_root(
+        &self,
+        process_root: CapabilityDescriptor,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
+        let payload_bits = nun::WORD_BITS - nun::BYTE_BITS;
+        let slot_shift = payload_bits
+            .checked_sub(self.root.root_radix)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let slot_mask = (1usize << self.root.root_radix) - 1;
+        let root_slot = (process_root >> slot_shift) & slot_mask;
+        if make_root_slot_descriptor(self.root.root_radix, root_slot) != process_root {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.memory.process_arena_descriptor(root_slot)
     }
 
     fn allocate_process_frames(
@@ -308,11 +366,49 @@ impl Alpha {
         let mut spawned = 0usize;
         let mut failed = 0usize;
 
+        if let Some(boot_list) = initramfs_entry_data("./nanami/boot-list") {
+            let mut line_number = 0usize;
+            for line in core::str::from_utf8(boot_list).unwrap_or("").lines() {
+                line_number += 1;
+                let Some(entry) = parse_boot_list_line(line) else {
+                    continue;
+                };
+                match self.spawn_initramfs_image(
+                    entry.image_path,
+                    0,
+                    None,
+                    true,
+                    Some(entry.priority),
+                ) {
+                    Ok(_) => {
+                        spawned += 1;
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        error!(
+                            "[proc.err] boot-list spawn failed line={} image={} err={:?}",
+                            line_number, entry.image_path, e
+                        );
+                    }
+                }
+            }
+            info!(
+                "[proc] boot-list spawn summary ok={:>3} failed={:>3}",
+                spawned, failed
+            );
+            return;
+        }
+
+        warn!("[proc] missing /nanami/boot-list; fallback to legacy initramfs scan");
         let result = cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
-            if !entry.name.ends_with(".elf") {
+            if !initramfs_image_is_auto_spawn_candidate(entry.name) {
                 return Ok(());
             }
-            match self.spawn_process_from_elf(entry.name, entry.data, 0) {
+            if initramfs_image_is_explicit_only(entry.name) {
+                info!("[proc] skip explicit-only image: {}", entry.name);
+                return Ok(());
+            }
+            match self.spawn_process_from_elf(entry.name, entry.data, 0, None, true, None) {
                 Ok(_) => {
                     spawned += 1;
 
@@ -355,8 +451,12 @@ impl Alpha {
         loop {
             let pending_reply = match event {
                 CommunicationEvent::KernelFault(fault) => {
-                    self.handle_kernel_fault_event(fault);
-                    Some((OS_RESPONSE_FATAL, 0, 0))
+                    match self.handle_kernel_fault_event(fault) {
+                        FaultDisposition::Continue(fault) => {
+                            Some(PendingReply::FaultContinue(fault))
+                        }
+                        FaultDisposition::ReceiveOnly => None,
+                    }
                 }
                 CommunicationEvent::Notification(notification) => {
                     self.handle_notification_event(notification);
@@ -367,15 +467,25 @@ impl Alpha {
                         "[ipc] os request received: id={:>3} code={:#018x}",
                         request.identifier, request.code
                     );
-                    Some(self.handle_os_request(request))
+                    let (status, detail0, detail1) = self.handle_os_request(request);
+                    if request.code == OS_REQUEST_EXIT && status == OS_RESPONSE_OK {
+                        None
+                    } else {
+                        Some(PendingReply::Status(status, detail0, detail1))
+                    }
                 }
             };
 
-            event = if let Some((status, detail0, detail1)) = pending_reply {
-                match self
-                    .communication
-                    .reply_receive_status(status, detail0, detail1)
-                {
+            event = if let Some(reply) = pending_reply {
+                let result = match reply {
+                    PendingReply::FaultContinue(fault) => {
+                        self.communication.reply_receive_fault_continue(fault)
+                    }
+                    PendingReply::Status(status, detail0, detail1) => self
+                        .communication
+                        .reply_receive_status(status, detail0, detail1),
+                };
+                match result {
                     Ok(event) => event,
                     Err(e) => {
                         error!("[ipc.err] reply_receive failed: {:?}", e);
@@ -413,8 +523,11 @@ impl Alpha {
     fn spawn_process_from_elf(
         &mut self,
         image_name: &str,
-        image_bytes: &[u8],
+        image_bytes: &'static [u8],
         reaper_pid: usize,
+        resolver_port: Option<CapabilityDescriptor>,
+        auto_resume: bool,
+        priority_override: Option<Word>,
     ) -> Result<usize, CapabilityError> {
         info!("[proc] parse elf: {}", image_name);
         let elf = parse_elf64(image_bytes)?;
@@ -424,6 +537,17 @@ impl Alpha {
         );
 
         let (pid, process_root_slot) = self.processes.alloc_process_slot()?;
+        macro_rules! spawn_try {
+            ($expr:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.cleanup_failed_spawn(pid, process_root_slot);
+                        return Err(error);
+                    }
+                }
+            };
+        }
         let child_root = make_root_slot_descriptor(self.root.root_radix, process_root_slot);
         let child_pcb =
             make_child_slot_descriptor(child_root, PROCESS_ROOT_RADIX, PROCESS_SLOT_PCB);
@@ -436,90 +560,91 @@ impl Alpha {
             PROCESS_ROOT_RADIX,
             PROCESS_SLOT_NOTIFICATION_PORT,
         );
+        let process_generic = spawn_try!(self.memory.ensure_process_arena(process_root_slot));
 
         info!(
             "[proc] create child root slot={:>3} desc={:#018x}",
             process_root_slot, child_root
         );
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::Node,
             PROCESS_ROOT_RADIX as Word,
             1,
             self.root.root_descriptor,
             process_root_slot as Word,
-        )?;
+        ));
 
         info!("[proc] populate child root");
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::ProcessControlBlock,
             14,
             1,
             child_root,
             PROCESS_SLOT_PCB as Word,
-        )?;
-        arch::node::copy(
+        ));
+        spawn_try!(arch::node::copy(
             child_root,
             PROCESS_SLOT_OS_PORT as Word,
             self.processes.alpha_entry().os_port,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::AddressSpace,
             0,
             1,
             child_root,
             PROCESS_SLOT_ADDRESS_SPACE as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::Node,
             PAGE_TABLE_NODE_RADIX as Word,
             1,
             child_root,
             PROCESS_SLOT_L3_NODE as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::Node,
             PAGE_TABLE_NODE_RADIX as Word,
             1,
             child_root,
             PROCESS_SLOT_L2_NODE as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::Node,
             PAGE_TABLE_NODE_RADIX as Word,
             1,
             child_root,
             PROCESS_SLOT_L1_NODE as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::Node,
             PROCESS_FRAME_DIRECTORY_RADIX as Word,
             1,
             child_root,
             PROCESS_SLOT_FRAME_NODE as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::IpcPort,
             0,
             1,
             child_root,
             PROCESS_SLOT_SERVICE_PORT as Word,
-        )?;
-        arch::generic::convert(
-            self.root.bootstrap_generic,
+        ));
+        spawn_try!(arch::generic::convert(
+            process_generic,
             CapabilityType::NotificationPort,
             0,
             1,
             child_root,
             PROCESS_SLOT_NOTIFICATION_PORT as Word,
-        )?;
+        ));
         let _ = arch::notification_port::identify(child_notification, 0);
         let _ = arch::ipc_port::identify(child_os_port, pid as Word);
 
@@ -541,202 +666,139 @@ impl Alpha {
         let image_pages = (image_end - image_base) / PAGE_SIZE;
         let total_frames = image_pages + USER_STACK_PAGES;
         let stack_top = USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE;
-        let heap_base = align_up(image_end.max(stack_top), PAGE_SIZE);
-        let temp_base = TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE;
-        let ipc_buffer_va = match elf.ipc_buffer_start {
-            Some(va) => va,
-            None => {
-                error!("[proc.err] missing required symbol __ipc_buffer_start");
-                return Err(CapabilityError::InvalidArgument);
-            }
-        };
-        if ipc_buffer_va < image_base
-            || ipc_buffer_va >= image_end
-            || (ipc_buffer_va & (PAGE_SIZE - 1)) != 0
-        {
-            error!(
-                "[proc.err] invalid __ipc_buffer_start={:#018x} image=[{:#018x}..{:#018x})",
-                ipc_buffer_va, image_base, image_end
-            );
-            return Err(CapabilityError::InvalidArgument);
-        }
-        let ipc_buffer_frame_slot = (ipc_buffer_va - image_base) / PAGE_SIZE;
-        self.ensure_process_frame_chunks(pid, child_root, 0, total_frames)?;
-        let ipc_buffer_frame = process_frame_descriptor(child_root, ipc_buffer_frame_slot);
-        let ipc_buffer_tls_base = ipc_buffer_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS;
+        // Native runtime reads argc, argv[0], and envp[0] from the initial stack.
+        // Keep these zero words inside the mapped stack even when argc == 0.
+        let initial_stack_pointer = stack_top - 32;
+        let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
+        let raw_fault_process = elf.ipc_buffer_start.is_none() && resolver_port.is_some();
+        let (has_ipc_buffer, ipc_buffer_va, ipc_buffer_frame_slot, ipc_buffer_tls_base) =
+            match elf.ipc_buffer_start {
+                Some(va) => {
+                    if va < image_base || va >= image_end || (va & (PAGE_SIZE - 1)) != 0 {
+                        error!(
+                        "[proc.err] invalid __ipc_buffer_start={:#018x} image=[{:#018x}..{:#018x})",
+                        va, image_base, image_end
+                    );
+                        return Err(CapabilityError::InvalidArgument);
+                    }
+                    let frame_slot = (va - image_base) / PAGE_SIZE;
+                    spawn_try!(self.ensure_process_frame_chunks(pid, child_root, frame_slot, 1));
+                    (
+                        true,
+                        va,
+                        frame_slot,
+                        va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS,
+                    )
+                }
+                None if raw_fault_process => {
+                    info!("[proc] raw fault-handler ELF without Nanami IPC buffer");
+                    (false, 0, 0, 0)
+                }
+                None => {
+                    error!("[proc.err] missing required symbol __ipc_buffer_start");
+                    return Err(CapabilityError::InvalidArgument);
+                }
+            };
 
         info!(
-            "[proc] map plan image=[{:#018x}..{:#018x}) image_pages={:>3} stack_pages={:>3} ipc={:#018x} temp={:#018x}",
+            "[proc] lazy map plan image=[{:#018x}..{:#018x}) image_pages={:>3} stack_pages={:>3} ipc={:#018x} temp={:#018x}",
             image_base,
             image_end,
             image_pages,
             USER_STACK_PAGES,
             ipc_buffer_va,
-            temp_base
+            TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE
         );
 
-        info!(
-            "[proc] ensure frame chunks pid={:>3} frames={:>4}",
-            pid, total_frames
-        );
-        let allocated_frames = self.allocate_process_frames(pid, child_root, 0, total_frames)?;
-        for (slot, page) in allocated_frames {
-            self.processes
-                .register_physical_allocation(pid, 0, slot, page, 1)?;
+        spawn_try!(self.processes.ensure_vm_space_for_pid(pid));
+        spawn_try!(self.processes.register_lazy_mapping(
+            pid,
+            image_base,
+            image_pages,
+            0,
+            ProcessLazyMappingKind::Image {
+                image: image_bytes,
+                elf,
+            },
+        ));
+        spawn_try!(self.processes.register_lazy_mapping(
+            pid,
+            USER_STACK_BASE,
+            USER_STACK_PAGES,
+            image_pages,
+            ProcessLazyMappingKind::Zero,
+        ));
+        info!("[proc] lazy vm tracker ready pid={:>3}", pid);
+
+        let mut image_page = 0usize;
+        while image_page < image_pages {
+            let image_va = image_base + image_page * PAGE_SIZE;
+            spawn_try!(self.materialize_lazy_page(pid, child_root, child_address_space, image_va));
+            image_page += 1;
         }
-        info!("[proc] frame allocation complete pid={:>3}", pid);
-        self.processes.ensure_vm_space_for_pid(pid)?;
-        info!("[proc] vm tracker ready pid={:>3}", pid);
-
-        let alpha_address_space = self.processes.alpha_entry().address_space;
-        let memory = &mut self.memory;
-        let processes = &mut self.processes;
-
-        info!("[proc] map image frames pid={:>3}", pid);
-        let mut page = 0usize;
-        while page < image_pages {
-            let frame = process_frame_descriptor(child_root, page);
-            let user_va = image_base + page * PAGE_SIZE;
-            let temp_va = temp_base + page * PAGE_SIZE;
-            {
-                let vm = processes
-                    .vm_space_mut(pid)
-                    .ok_or(CapabilityError::InvalidArgument)?;
-                if let Err(e) = memory.map_frame(child_address_space, frame, user_va, vm) {
-                    info!(
-                        "[proc.err] map image user pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
-                        pid, page, user_va, frame, e
-                    );
-                    return Err(e);
-                }
-            }
-            {
-                let vm = processes.alpha_vm_space_mut();
-                if let Err(e) = memory.map_frame(alpha_address_space, frame, temp_va, vm) {
-                    info!(
-                        "[proc.err] map image temp pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
-                        pid, page, temp_va, frame, e
-                    );
-                    return Err(e);
-                }
-            }
-            unsafe {
-                ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
-            }
-            page += 1;
-        }
-
-        info!("[proc] map stack frames pid={:>3}", pid);
-        let mut sp = 0usize;
-        while sp < USER_STACK_PAGES {
-            let frame = process_frame_descriptor(child_root, image_pages + sp);
-            let user_va = USER_STACK_BASE + sp * PAGE_SIZE;
-            let temp_va = temp_base + (image_pages + sp) * PAGE_SIZE;
-            {
-                let vm = processes
-                    .vm_space_mut(pid)
-                    .ok_or(CapabilityError::InvalidArgument)?;
-                if let Err(e) = memory.map_frame(child_address_space, frame, user_va, vm) {
-                    info!(
-                        "[proc.err] map stack user pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
-                        pid, sp, user_va, frame, e
-                    );
-                    return Err(e);
-                }
-            }
-            {
-                let vm = processes.alpha_vm_space_mut();
-                if let Err(e) = memory.map_frame(alpha_address_space, frame, temp_va, vm) {
-                    info!(
-                        "[proc.err] map stack temp pid={:>3} page={} va={:#018x} frame={:#018x} err={:?}",
-                        pid, sp, temp_va, frame, e
-                    );
-                    return Err(e);
-                }
-            }
-            unsafe {
-                ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
-            }
-            sp += 1;
-        }
-
-        info!("[proc] copy elf image pid={:>3}", pid);
-        let mut si = 0usize;
-        while si < elf.segment_count {
-            let seg = elf.segments[si];
-            if seg.memory_size == 0 {
-                si += 1;
-                continue;
-            }
-            let copy_va = temp_base + (seg.virtual_address - image_base);
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    image_bytes.as_ptr().add(seg.offset),
-                    copy_va as *mut u8,
-                    seg.file_size,
-                );
-                if seg.memory_size > seg.file_size {
-                    ptr::write_bytes(
-                        (copy_va + seg.file_size) as *mut u8,
-                        0,
-                        seg.memory_size - seg.file_size,
-                    );
-                }
-            }
-            si += 1;
-        }
-
-        let ipc_buffer_temp_va = temp_base + (ipc_buffer_va - image_base);
-        unsafe {
-            ptr::write(
-                (ipc_buffer_temp_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS)
-                    as *mut Word,
-                ipc_buffer_va as Word,
-            );
-        }
-
-        let mut temp_page = 0usize;
-        while temp_page < total_frames {
-            let frame = process_frame_descriptor(child_root, temp_page);
-            let temp_va = temp_base + temp_page * PAGE_SIZE;
-            let _ = arch::address_space::unmap(alpha_address_space, frame, temp_va);
-            temp_page += 1;
+        self.processes.drop_image_lazy_mappings_for_pid(pid);
+        let ipc_buffer_frame = if has_ipc_buffer {
+            process_frame_descriptor(child_root, ipc_buffer_frame_slot)
+        } else {
+            0
+        };
+        let mut stack_page = 0usize;
+        while stack_page < USER_STACK_PAGES {
+            let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
+            spawn_try!(self.materialize_lazy_page(pid, child_root, child_address_space, stack_va));
+            stack_page += 1;
         }
 
         let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
-            true,  // address_space
-            true,  // root_node
-            true,  // frame_ipc_buffer
-            true,  // notification_port
-            true,  // ipc_port_resolver
-            true,  // instruction_pointer
-            true,  // stack_pointer
-            true,  // thread_local_base
-            true,  // priority
-            false, // affinity
+            true,           // address_space
+            true,           // root_node
+            has_ipc_buffer, // frame_ipc_buffer
+            true,           // notification_port
+            true,           // ipc_port_resolver
+            true,           // instruction_pointer
+            true,           // stack_pointer
+            has_ipc_buffer, // thread_local_base
+            true,           // priority
+            false,          // affinity
         );
 
         info!(
             "[proc] configure pcb={:#018x} root={:#018x} as={:#018x} ip={:#018x} sp={:#018x}",
-            child_pcb, child_root, child_address_space, elf.entry_point, stack_top
+            child_pcb, child_root, child_address_space, elf.entry_point, initial_stack_pointer
         );
-        let priority = process_priority_for_image(image_name);
-        arch::process_control_block::configure(
+        let priority = priority_override.unwrap_or_else(|| process_priority_for_image(image_name));
+        let resolver_port = if let Some(external_resolver) = resolver_port {
+            spawn_try!(arch::node::copy(
+                child_root,
+                PROCESS_SLOT_FAULT_RESOLVER as Word,
+                external_resolver,
+            ));
+            let child_resolver = make_child_slot_descriptor(
+                child_root,
+                PROCESS_ROOT_RADIX,
+                PROCESS_SLOT_FAULT_RESOLVER,
+            );
+            spawn_try!(arch::ipc_port::identify(child_resolver, pid as Word));
+            child_resolver
+        } else {
+            child_os_port
+        };
+        spawn_try!(arch::process_control_block::configure(
             child_pcb,
             config,
             child_address_space,
             child_root,
             ipc_buffer_frame,
             child_notification,
-            child_os_port,
+            resolver_port,
             elf.entry_point,
-            stack_top,
+            initial_stack_pointer,
             ipc_buffer_tls_base,
             priority,
             0,
-        )?;
+        ));
 
-        processes.install_process(
+        spawn_try!(self.processes.install_process(
             pid,
             reaper_pid,
             process_root_slot,
@@ -748,16 +810,186 @@ impl Alpha {
             total_frames,
             heap_base,
             USER_HEAP_LIMIT,
-        )?;
-        arch::process_control_block::resume(child_pcb)?;
+        ));
+        if auto_resume {
+            spawn_try!(arch::process_control_block::resume(child_pcb));
+        }
         info!(
-            "[proc] child resumed image={} pid={:>3} priority={:>2} root={:#018x} entry={:#018x}",
-            image_name, pid, priority, child_root, elf.entry_point
+            "[proc] child {} image={} pid={:>3} priority={:>2} root={:#018x} entry={:#018x}",
+            if auto_resume { "resumed" } else { "prepared" },
+            image_name,
+            pid,
+            priority,
+            child_root,
+            elf.entry_point
         );
         Ok(pid)
     }
 
-    fn handle_kernel_fault_event(&mut self, fault: KernelFaultEvent) {
+    fn spawn_initramfs_image(
+        &mut self,
+        image_name: &str,
+        reaper_pid: usize,
+        resolver_port: Option<CapabilityDescriptor>,
+        auto_resume: bool,
+        priority_override: Option<Word>,
+    ) -> Result<usize, CapabilityError> {
+        let mut spawned_pid = None;
+        cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
+            if spawned_pid.is_some() || !initramfs_image_is_auto_spawn_candidate(entry.name) {
+                return Ok(());
+            }
+            if initramfs_image_name_matches(entry.name, image_name) {
+                spawned_pid = Some(self.spawn_process_from_elf(
+                    entry.name,
+                    entry.data,
+                    reaper_pid,
+                    resolver_port,
+                    auto_resume,
+                    priority_override,
+                )?);
+            }
+            Ok(())
+        })?;
+        spawned_pid.ok_or(CapabilityError::InvalidArgument)
+    }
+
+    fn cleanup_failed_spawn(&mut self, pid: usize, root_slot: usize) {
+        let _ = arch::node::revoke(self.root.root_descriptor, root_slot as Word);
+        let _ = arch::node::remove(self.root.root_descriptor, root_slot as Word);
+
+        let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
+        for allocation in physical_allocations.iter() {
+            let _ = self.memory.free_physical(
+                allocation.base_page * PAGE_SIZE,
+                allocation.page_count * PAGE_SIZE,
+            );
+        }
+        self.free_deferred_process_allocations(pid, None);
+
+        if self.processes.find_entry_by_pid(pid).is_some() {
+            let _ = self.processes.mark_exited(pid, 0, 1);
+            let _ = self.processes.reap_process(pid, true);
+        } else {
+            self.processes.discard_process_artifacts(pid, root_slot);
+        }
+        let _ = self.memory.reset_process_arena(root_slot);
+    }
+
+    fn free_deferred_process_allocations(
+        &mut self,
+        pid: usize,
+        process_root: Option<CapabilityDescriptor>,
+    ) {
+        let allocations = self
+            .processes
+            .releasable_deferred_physical_allocations_for_pid(pid);
+        for allocation in allocations.iter() {
+            if let Some(root_node) = process_root {
+                let mut i = 0usize;
+                while i < allocation.page_count {
+                    let slot = allocation.start_slot + i;
+                    let _ = arch::node::remove(
+                        process_frame_chunk_descriptor(root_node, slot / PROCESS_FRAME_CHUNK_PAGES),
+                        (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                    );
+                    i += 1;
+                }
+            }
+            let _ = self.memory.free_physical(
+                allocation.base_page * PAGE_SIZE,
+                allocation.page_count * PAGE_SIZE,
+            );
+        }
+        self.processes
+            .drop_deferred_physical_allocations_for_pid(pid);
+    }
+
+    fn try_handle_demand_page_fault(
+        &mut self,
+        fault: KernelFaultEvent,
+    ) -> Result<(), CapabilityError> {
+        if fault.identifier == 0 || fault.architecture_fault_code & 1 != 0 {
+            return Err(CapabilityError::IllegalOperation);
+        }
+
+        let page_va = align_down(fault.fault_address, PAGE_SIZE);
+        let entry = self
+            .processes
+            .find_entry_by_pid(fault.identifier)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let _ = self.materialize_lazy_page(
+            fault.identifier,
+            entry.root_node,
+            entry.address_space,
+            page_va,
+        )?;
+        debug!(
+            "[fault] demand page pid={:>3} va={:#018x}",
+            fault.identifier, page_va
+        );
+        Ok(())
+    }
+
+    fn materialize_lazy_page(
+        &mut self,
+        pid: usize,
+        process_root: CapabilityDescriptor,
+        address_space: CapabilityDescriptor,
+        page_va: usize,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
+        if page_va & (PAGE_SIZE - 1) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        if let Some(frame) = self
+            .processes
+            .vm_space_mut(pid)
+            .and_then(|vm| vm.find_frame(page_va))
+        {
+            return Ok(frame);
+        }
+        let mapping = self
+            .processes
+            .find_lazy_mapping(pid, page_va)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let page_offset = (page_va - mapping.base_va) / PAGE_SIZE;
+        let frame_slot = mapping.start_slot + page_offset;
+        let allocated = self.allocate_process_frames(pid, process_root, frame_slot, 1)?;
+        let base_page = allocated
+            .first()
+            .map(|(_, page)| *page)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        self.processes
+            .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
+
+        let frame = process_frame_descriptor(process_root, frame_slot);
+        {
+            let vm = self
+                .processes
+                .vm_space_mut(pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            self.memory.map_frame(address_space, frame, page_va, vm)?;
+        }
+
+        let temp_va = TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE + frame_slot * PAGE_SIZE;
+        self.map_alpha_temporary_frame(frame, temp_va)?;
+
+        fill_lazy_page(mapping.kind, page_va, temp_va)?;
+        if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
+            error!(
+                "[proc.err] unmap lazy temp pid={:>3} va={:#018x} temp={:#018x} frame={:#018x} err={:?}",
+                pid, page_va, temp_va, frame, e
+            );
+            return Err(e);
+        }
+        Ok(frame)
+    }
+
+    fn handle_kernel_fault_event(&mut self, fault: KernelFaultEvent) -> FaultDisposition {
+        if self.try_handle_demand_page_fault(fault).is_ok() {
+            return FaultDisposition::Continue(fault);
+        }
+
         error!(
             "[fault] id={:>3} reason={} pc={:#018x} addr={:#018x} arch_code={:#018x}",
             fault.identifier,
@@ -770,15 +1002,15 @@ impl Alpha {
         let pid = fault.identifier;
         if pid == 0 {
             error!("[fault] unknown sender id={:>3}, ignored", pid);
-            return;
+            return FaultDisposition::ReceiveOnly;
         }
         let Some(entry) = self.processes.find_entry_by_pid(pid) else {
             error!("[fault] unknown sender id={:>3}, no entry", pid);
-            return;
+            return FaultDisposition::ReceiveOnly;
         };
         if entry.pcb == 0 {
             error!("[fault] pid={:>3} has no active pcb", pid);
-            return;
+            return FaultDisposition::ReceiveOnly;
         }
 
         // show all registers
@@ -802,6 +1034,7 @@ impl Alpha {
 
         let _ = arch::process_control_block::suspend(entry.pcb);
         error!("[fault] pid={:>3} suspended (pcb={:#018x})", pid, entry.pcb);
+        FaultDisposition::ReceiveOnly
     }
 
     fn handle_notification_event(&mut self, notification: NotificationEvent) {
@@ -1006,6 +1239,78 @@ impl Alpha {
             );
             return (status, detail0, 0);
         }
+        if request.code == OS_REQUEST_PROCESS_SPAWN_MEMORY {
+            let result = self.handle_process_spawn_memory_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED {
+            let result = self.handle_process_spawn_memory_fault_handler_suspended_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED {
+            let result = self.handle_process_spawn_memory_suspended_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_EXEC_MEMORY {
+            let result = self.handle_process_exec_memory_request(request);
+            let (status, detail0) = match result {
+                Ok(entry_point) => (OS_RESPONSE_OK, entry_point),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER {
+            let result = self.handle_process_spawn_fault_handler_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER_SUSPENDED {
+            let result = self.handle_process_spawn_fault_handler_suspended_request(request);
+            let (status, detail0) = match result {
+                Ok(pid) => (OS_RESPONSE_OK, pid),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
         if request.code == OS_REQUEST_PROCESS_STATUS {
             let result = self.handle_process_status_request(request);
             let (status, detail0, detail1) = match result {
@@ -1021,6 +1326,18 @@ impl Alpha {
             );
             return (status, detail0, detail1);
         }
+        if request.code == OS_REQUEST_PROCESS_ALIVE {
+            let result = self.handle_process_alive_request(request);
+            let (status, detail0) = match result {
+                Ok(alive) => (OS_RESPONSE_OK, alive as usize),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
         if request.code == OS_REQUEST_PROCESS_REAP {
             let result = self.handle_process_reap_request(request);
             let (status, detail0) = match result {
@@ -1032,6 +1349,79 @@ impl Alpha {
                 request.identifier, status, detail0, 0usize
             );
             return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_KILL {
+            let result = self.handle_process_kill_request(request);
+            let (status, detail0) = match result {
+                Ok(()) => (OS_RESPONSE_OK, 0),
+                Err(e) => map_request_result_to_status(Err(e)),
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_MEMORY_READ {
+            let result = self.handle_process_memory_copy_request(request, false);
+            let (status, detail0) = map_request_result_to_status(result);
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_MEMORY_WRITE {
+            let result = self.handle_process_memory_copy_request(request, true);
+            let (status, detail0) = map_request_result_to_status(result);
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_MEMORY_CLONE {
+            let result = self.handle_process_memory_clone_request(request);
+            let (status, detail0) = map_request_result_to_status(result);
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN {
+            let result = self.handle_process_memory_copy_within_request(request);
+            let (status, detail0) = map_request_result_to_status(result);
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_PROCESS_MAP_ANONYMOUS {
+            let result = self.handle_process_map_anonymous_request(request);
+            let (status, detail0, detail1) = match result {
+                Ok((base, mapped)) => (OS_RESPONSE_OK, base, mapped),
+                Err(e) => {
+                    let (s, d0) = map_request_result_to_status(Err(e));
+                    (s, d0, 0)
+                }
+            };
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, detail1
+            );
+            return (status, detail0, detail1);
+        }
+        if request.code == OS_REQUEST_NANAMI_CONTROL {
+            let result = self.handle_nanami_control_request(request);
+            let (status, detail0) = map_request_result_to_status(result);
+            debug!(
+                "[ipc] rsp id={:>3} status={:#018x} detail0={:#018x} detail1={:#018x}",
+                request.identifier, status, detail0, 0usize
+            );
+            return (status, detail0, 0);
+        }
+        if request.code == OS_REQUEST_NANAMI_INFO {
+            return match self.handle_nanami_info_request(request) {
+                Ok((detail0, detail1)) => (OS_RESPONSE_OK, detail0, detail1),
+                Err(error) => {
+                    let (status, detail0) = map_request_result_to_status(Err(error));
+                    (status, detail0, 0)
+                }
+            };
         }
 
         let result = match request.code {
@@ -1058,6 +1448,50 @@ impl Alpha {
             request.identifier, status, detail0, 0usize
         );
         (status, detail0, 0)
+    }
+
+    fn handle_nanami_control_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        let property = decode_control_text(request.arg0, request.arg1);
+        let value = decode_control_text(request.arg2, request.arg3);
+        if bytes_equal(&property, b"os.log") {
+            if bytes_equal(&value, b"enable") {
+                crate::nanami_utils::log::set_info_enabled(true);
+                info!("[control] os.log enabled");
+                return Ok(());
+            }
+            if bytes_equal(&value, b"disable") {
+                info!("[control] os.log disabled");
+                crate::nanami_utils::log::set_info_enabled(false);
+                return Ok(());
+            }
+        }
+        Err(CapabilityError::InvalidArgument)
+    }
+
+    fn handle_nanami_info_request(
+        &self,
+        request: OsRequestEvent,
+    ) -> Result<(usize, usize), CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        match request.arg0 {
+            NANAMI_INFO_MEMORY => {
+                let info = self.memory.physical_memory_info()?;
+                Ok((
+                    info.total_pages.saturating_mul(PAGE_SIZE),
+                    info.free_pages.saturating_mul(PAGE_SIZE),
+                ))
+            }
+            NANAMI_INFO_PROCESS => {
+                let info = self.processes.statistics();
+                Ok((info.running, info.exited))
+            }
+            _ => Err(CapabilityError::InvalidArgument),
+        }
     }
 
     fn handle_irq_control_request(
@@ -1176,7 +1610,7 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?;
 
         arch::generic::convert(
-            self.root.bootstrap_generic,
+            self.process_arena_for_root(process_entry.root_node)?,
             CapabilityType::NotificationPort,
             0,
             1,
@@ -1225,6 +1659,7 @@ impl Alpha {
             source_notification_slot,
         );
 
+        let _ = arch::node::remove(caller_entry.root_node, destination_slot as Word);
         arch::node::copy(
             caller_entry.root_node,
             destination_slot,
@@ -1320,22 +1755,476 @@ impl Alpha {
         let image_name = core::str::from_utf8(&raw_name[..raw_len])
             .map_err(|_| CapabilityError::InvalidArgument)?;
 
-        let mut spawned_pid = None;
-        cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
-            if spawned_pid.is_some() || !entry.name.ends_with(".elf") {
-                return Ok(());
-            }
-            if initramfs_image_name_matches(entry.name, image_name) {
-                spawned_pid =
-                    Some(self.spawn_process_from_elf(entry.name, entry.data, request.identifier)?);
-            }
-            Ok(())
-        })?;
-
-        let pid = spawned_pid.ok_or(CapabilityError::InvalidArgument)?;
+        let pid = self.spawn_initramfs_image(image_name, request.identifier, None, true, None)?;
         info!(
             "[proc] spawned by request caller={:>3} image={} pid={:>3}",
             request.identifier, image_name, pid
+        );
+        Ok(pid)
+    }
+
+    fn handle_process_spawn_memory_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let image_vaddr = request.arg0;
+        let size_bytes = request.arg1;
+        let priority = request.arg2;
+        if image_vaddr == 0
+            || size_bytes == 0
+            || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
+            || self
+                .processes
+                .find_entry_by_pid(request.identifier)
+                .is_none()
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let image_bytes = self.read_process_memory_into_static_buffer(
+            request.identifier,
+            image_vaddr,
+            size_bytes,
+        )?;
+        let pid = self.spawn_process_from_elf(
+            "rootfs-memory.elf",
+            image_bytes,
+            request.identifier,
+            None,
+            true,
+            Some(priority),
+        )?;
+        info!(
+            "[proc] spawned from memory caller={:>3} pid={:>3} bytes={:#x} priority={:>2}",
+            request.identifier, pid, size_bytes, priority
+        );
+        Ok(pid)
+    }
+
+    fn handle_process_spawn_memory_suspended_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let caller = self
+            .processes
+            .find_entry_by_pid(request.identifier)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if caller.root_node == 0 {
+            return Err(CapabilityError::InvalidDescriptor);
+        }
+        let image_vaddr = request.arg0;
+        let size_bytes = request.arg1;
+        let priority = request.arg2;
+        let destination_slot = request.arg3;
+        if image_vaddr == 0
+            || size_bytes == 0
+            || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
+            || destination_slot == 0
+            || destination_slot >= (1 << PROCESS_ROOT_RADIX)
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let image_bytes = self.read_process_memory_into_static_buffer(
+            request.identifier,
+            image_vaddr,
+            size_bytes,
+        )?;
+        let pid = self.spawn_process_from_elf(
+            "rootfs-memory.elf",
+            image_bytes,
+            request.identifier,
+            None,
+            false,
+            Some(priority),
+        )?;
+        let child = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::Fatal)?;
+        let _ = arch::node::remove(caller.root_node, destination_slot as Word);
+        if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
+        {
+            self.cleanup_failed_spawn(pid, child.root_slot);
+            return Err(error);
+        }
+        info!(
+            "[proc] spawned memory suspended caller={:>3} pid={:>3} pcb_slot={:>3} bytes={:#x} priority={:>2}",
+            request.identifier, pid, destination_slot, size_bytes, priority
+        );
+        Ok(pid)
+    }
+
+    fn handle_process_spawn_memory_fault_handler_suspended_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let caller = self
+            .processes
+            .find_entry_by_pid(request.identifier)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if caller.root_node == 0 {
+            return Err(CapabilityError::InvalidDescriptor);
+        }
+        let image_vaddr = request.arg0;
+        let size_bytes = request.arg1;
+        let priority = request.arg2;
+        let destination_slot = request.arg3;
+        if image_vaddr == 0
+            || size_bytes == 0
+            || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
+            || destination_slot == 0
+            || destination_slot >= (1 << PROCESS_ROOT_RADIX)
+        {
+            error!(
+                "[proc.err] memory fault spawn invalid args caller={:>3} image={:#018x} bytes={:#x} priority={:>2} dst_slot={:>3}",
+                request.identifier, image_vaddr, size_bytes, priority, destination_slot
+            );
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let resolver_port = make_child_slot_descriptor(
+            caller.root_node,
+            PROCESS_ROOT_RADIX,
+            PROCESS_SLOT_SERVICE_PORT,
+        );
+        let image_bytes = self.read_process_memory_into_static_buffer(
+            request.identifier,
+            image_vaddr,
+            size_bytes,
+        )?;
+        let pid = self.spawn_process_from_elf(
+            "rootfs-linux.elf",
+            image_bytes,
+            request.identifier,
+            Some(resolver_port),
+            false,
+            Some(priority),
+        )?;
+        let child = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::Fatal)?;
+        let _ = arch::node::remove(caller.root_node, destination_slot as Word);
+        if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
+        {
+            error!(
+                "[proc.err] memory child pcb copy failed caller={:>3} pid={:>3} dst_slot={:>3} pcb={:#018x} err={:?}",
+                request.identifier, pid, destination_slot, child.pcb, error
+            );
+            self.cleanup_failed_spawn(pid, child.root_slot);
+            return Err(error);
+        }
+        info!(
+            "[proc] spawned memory with fault-handler caller={:>3} pid={:>3} pcb_slot={:>3} bytes={:#x} priority={:>2}",
+            request.identifier, pid, destination_slot, size_bytes, priority
+        );
+        Ok(pid)
+    }
+
+    fn handle_process_exec_memory_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        let caller_pid = request.identifier;
+        let target_pid = request.arg0;
+        let image_vaddr = request.arg1;
+        let size_bytes = request.arg2;
+        let priority = request.arg3;
+        if caller_pid == 0
+            || target_pid == 0
+            || image_vaddr == 0
+            || size_bytes == 0
+            || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let target = self
+            .processes
+            .find_entry_by_pid(target_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if target.reaper_pid != caller_pid && target_pid != caller_pid {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        if target.pcb == 0 || target.root_node == 0 || target.address_space == 0 {
+            return Err(CapabilityError::InvalidDescriptor);
+        }
+
+        let image_bytes =
+            self.read_process_memory_into_static_buffer(caller_pid, image_vaddr, size_bytes)?;
+        self.replace_process_image_from_memory(target_pid, target, image_bytes, priority)
+    }
+
+    fn replace_process_image_from_memory(
+        &mut self,
+        pid: usize,
+        target: crate::nanami_core::process::ProcessEntry,
+        image_bytes: &'static [u8],
+        _priority: Word,
+    ) -> Result<usize, CapabilityError> {
+        let elf = parse_elf64(image_bytes)?;
+        let mut image_base = usize::MAX;
+        let mut image_end = 0usize;
+        let mut i = 0usize;
+        while i < elf.segment_count {
+            let seg = elf.segments[i];
+            if seg.memory_size != 0 {
+                image_base = image_base.min(align_down(seg.virtual_address, PAGE_SIZE));
+                image_end =
+                    image_end.max(align_up(seg.virtual_address + seg.memory_size, PAGE_SIZE));
+            }
+            i += 1;
+        }
+        if image_base == usize::MAX || image_end <= image_base {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let image_pages = (image_end - image_base) / PAGE_SIZE;
+        let total_frames = image_pages + USER_STACK_PAGES;
+        let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
+
+        self.drop_process_runtime_mappings(pid, target)?;
+        self.recreate_process_address_space_for_exec(target)?;
+        self.processes.reset_runtime_memory_for_exec(
+            pid,
+            total_frames,
+            heap_base,
+            USER_HEAP_LIMIT,
+        )?;
+        self.processes.ensure_vm_space_for_pid(pid)?;
+        self.processes.register_lazy_mapping(
+            pid,
+            USER_STACK_BASE,
+            USER_STACK_PAGES,
+            image_pages,
+            ProcessLazyMappingKind::Zero,
+        )?;
+
+        let image_kind = ProcessLazyMappingKind::Image {
+            image: image_bytes,
+            elf,
+        };
+        let mut image_page = 0usize;
+        while image_page < image_pages {
+            let image_va = image_base + image_page * PAGE_SIZE;
+            self.materialize_exec_image_page(
+                pid,
+                target.root_node,
+                target.address_space,
+                image_kind,
+                image_va,
+                image_page,
+            )?;
+            image_page += 1;
+        }
+        let mut stack_page = 0usize;
+        while stack_page < USER_STACK_PAGES {
+            let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
+            self.materialize_lazy_page(pid, target.root_node, target.address_space, stack_va)?;
+            stack_page += 1;
+        }
+        info!(
+            "[proc] exec memory pid={:>3} image=[{:#018x}..{:#018x}) pages={} entry={:#018x}",
+            pid, image_base, image_end, image_pages, elf.entry_point
+        );
+        Ok(elf.entry_point)
+    }
+
+    fn materialize_exec_image_page(
+        &mut self,
+        pid: usize,
+        process_root: CapabilityDescriptor,
+        address_space: CapabilityDescriptor,
+        kind: ProcessLazyMappingKind,
+        page_va: usize,
+        page_index: usize,
+    ) -> Result<(), CapabilityError> {
+        let frame_slot = page_index;
+        let allocated = self.allocate_process_frames(pid, process_root, frame_slot, 1)?;
+        let base_page = allocated
+            .first()
+            .map(|(_, page)| *page)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        self.processes
+            .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
+
+        let frame = process_frame_descriptor(process_root, frame_slot);
+        {
+            let vm = self
+                .processes
+                .vm_space_mut(pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            self.memory
+                .map_frame_strict(address_space, frame, page_va, vm)?;
+        }
+
+        let temp_va = PROCESS_ZERO_TEMP_BASE + page_index * PAGE_SIZE;
+        self.map_alpha_temporary_frame(frame, temp_va)?;
+        fill_lazy_page(kind, page_va, temp_va)?;
+        if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
+            error!(
+                "[proc.exec.err] unmap image temp pid={:>3} va={:#018x} temp={:#018x} frame={:#018x} err={:?}",
+                pid, page_va, temp_va, frame, e
+            );
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn recreate_process_address_space_for_exec(
+        &mut self,
+        target: crate::nanami_core::process::ProcessEntry,
+    ) -> Result<(), CapabilityError> {
+        arch::node::remove(target.root_node, PROCESS_SLOT_ADDRESS_SPACE as Word)?;
+        arch::generic::convert(
+            self.process_arena_for_root(target.root_node)?,
+            CapabilityType::AddressSpace,
+            0,
+            1,
+            target.root_node,
+            PROCESS_SLOT_ADDRESS_SPACE as Word,
+        )?;
+        let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
+            true, false, false, false, false, false, false, false, false, false,
+        );
+        arch::process_control_block::configure(
+            target.pcb,
+            config,
+            target.address_space,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+
+    fn drop_process_runtime_mappings(
+        &mut self,
+        pid: usize,
+        target: crate::nanami_core::process::ProcessEntry,
+    ) -> Result<(), CapabilityError> {
+        let allocations =
+            self.processes
+                .reset_runtime_memory_for_exec(pid, 0, 0, USER_HEAP_LIMIT)?;
+        for (allocation, is_last_reference) in allocations {
+            let mut i = 0usize;
+            while i < allocation.page_count {
+                let slot = allocation.start_slot + i;
+                let frame = process_frame_descriptor(target.root_node, slot);
+                let va = allocation.base_va + i * PAGE_SIZE;
+                if let Err(e) = arch::address_space::unmap(target.address_space, frame, va) {
+                    info!(
+                        "[proc.exec.warn] unmap failed pid={:>3} va={:#018x} frame={:#018x} err={:?}",
+                        pid, va, frame, e
+                    );
+                }
+                if let Err(e) = arch::node::remove(
+                    process_frame_chunk_descriptor(
+                        target.root_node,
+                        slot / PROCESS_FRAME_CHUNK_PAGES,
+                    ),
+                    (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                ) {
+                    info!(
+                        "[proc.exec.warn] frame cap remove failed pid={:>3} frame={:#018x} slot={} err={:?}",
+                        pid, frame, slot, e
+                    );
+                }
+                i += 1;
+            }
+            if is_last_reference {
+                self.memory.free_physical(
+                    allocation.base_page * PAGE_SIZE,
+                    allocation.page_count * PAGE_SIZE,
+                )?;
+            }
+        }
+        self.free_deferred_process_allocations(pid, Some(target.root_node));
+        Ok(())
+    }
+
+    fn handle_process_spawn_fault_handler_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        self.handle_process_spawn_fault_handler_request_with_resume(request, true)
+    }
+
+    fn handle_process_spawn_fault_handler_suspended_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<usize, CapabilityError> {
+        self.handle_process_spawn_fault_handler_request_with_resume(request, false)
+    }
+
+    fn handle_process_spawn_fault_handler_request_with_resume(
+        &mut self,
+        request: OsRequestEvent,
+        auto_resume: bool,
+    ) -> Result<usize, CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let caller = self
+            .processes
+            .find_entry_by_pid(request.identifier)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if caller.root_node == 0 {
+            return Err(CapabilityError::InvalidDescriptor);
+        }
+        let destination_slot = request.arg3;
+        if destination_slot == 0 || destination_slot >= (1 << PROCESS_ROOT_RADIX) {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let resolver_port = make_child_slot_descriptor(
+            caller.root_node,
+            PROCESS_ROOT_RADIX,
+            PROCESS_SLOT_SERVICE_PORT,
+        );
+        let (raw_name, raw_len) = decode_service_name_24(request.arg0, request.arg1, request.arg2)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let image_name = core::str::from_utf8(&raw_name[..raw_len])
+            .map_err(|_| CapabilityError::InvalidArgument)?;
+
+        let pid = self.spawn_initramfs_image(
+            image_name,
+            request.identifier,
+            Some(resolver_port),
+            auto_resume,
+            None,
+        )?;
+        let child = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::Fatal)?;
+        let _ = arch::node::remove(caller.root_node, destination_slot as Word);
+        if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
+        {
+            error!(
+                "[proc.err] spawned child pcb copy failed caller={:>3} image={} pid={:>3} dst_slot={:>3} pcb={:#018x} err={:?}",
+                request.identifier, image_name, pid, destination_slot, child.pcb, error
+            );
+            self.cleanup_failed_spawn(pid, child.root_slot);
+            return Err(error);
+        }
+        info!(
+            "[proc] spawned with fault-handler caller={:>3} image={} pid={:>3} pcb_slot={:>3} suspended={}",
+            request.identifier, image_name, pid, destination_slot, !auto_resume
         );
         Ok(pid)
     }
@@ -1357,6 +2246,20 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?;
         validate_process_observer(request.identifier, entry.pid, entry.reaper_pid)?;
         Ok((entry.exited as usize, entry.exit_code))
+    }
+
+    fn handle_process_alive_request(
+        &self,
+        request: OsRequestEvent,
+    ) -> Result<bool, CapabilityError> {
+        if request.identifier == 0 || request.arg0 == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        Ok(self
+            .processes
+            .find_entry_by_pid(request.arg0)
+            .map(|entry| !entry.exited)
+            .unwrap_or(false))
     }
 
     fn handle_process_reap_request(
@@ -1387,11 +2290,41 @@ impl Alpha {
                 allocation.page_count * PAGE_SIZE,
             )?;
         }
+        self.free_deferred_process_allocations(pid, None);
         self.processes.drop_physical_allocations_for_pid(pid);
+        self.memory.reset_process_arena(entry.root_slot)?;
         self.processes.reap_process(pid, true)?;
         info!(
             "[proc] reaped pid={:>3} root_slot={:>3}",
             pid, entry.root_slot
+        );
+        Ok(())
+    }
+
+    fn handle_process_kill_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        if request.identifier == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let pid = request.arg0;
+        if pid == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let entry = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        validate_process_observer(request.identifier, entry.pid, entry.reaper_pid)?;
+        if entry.exited {
+            return Ok(());
+        }
+        arch::process_control_block::suspend(entry.pcb)?;
+        self.processes.mark_exited(pid, 0, request.arg1)?;
+        info!(
+            "[proc] killed pid={:>3} pcb={:#018x} signal={:#018x}",
+            pid, entry.pcb, request.arg1
         );
         Ok(())
     }
@@ -1473,6 +2406,7 @@ impl Alpha {
             self.processes
                 .register_physical_allocation(pid, va, slot, page, 1)?;
         }
+        self.zero_process_frames(root_node, start_slot, page_count)?;
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
@@ -1488,6 +2422,102 @@ impl Alpha {
         }
 
         Ok(heap_base)
+    }
+
+    fn map_process_heap_pages_at(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+    ) -> Result<usize, CapabilityError> {
+        if pid == 0 || base_va == 0 || page_count == 0 || (base_va & (PAGE_SIZE - 1)) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let (root_node, address_space, start_slot) = self.processes.reserve_process_heap_at(
+            pid,
+            base_va,
+            page_count,
+            PAGE_SIZE,
+            PROCESS_FRAME_TOTAL_PAGES,
+        )?;
+        let reuse_allocation = self
+            .processes
+            .take_deferred_physical_allocation(pid, base_va, page_count);
+        let allocated_frames = if let Some(allocation) = reuse_allocation {
+            self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
+            let mut frames = Vec::new();
+            let mut i = 0usize;
+            while i < page_count {
+                let frame_index = allocation.base_page + i;
+                self.memory
+                    .ensure_alpha_frame_at_physical_index(frame_index)?;
+                let source_frame = self
+                    .memory
+                    .physical_frame_descriptor_from_index(frame_index)
+                    .ok_or(CapabilityError::InvalidArgument)?;
+                arch::node::copy(
+                    process_frame_chunk_descriptor(
+                        root_node,
+                        (start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
+                    ),
+                    ((start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                    source_frame,
+                )?;
+                frames.push((start_slot + i, frame_index));
+                i += 1;
+            }
+            frames
+        } else {
+            self.allocate_process_frames(pid, root_node, start_slot, page_count)?
+        };
+        for (slot, page) in allocated_frames {
+            let va = base_va + (slot - start_slot) * PAGE_SIZE;
+            self.processes
+                .register_physical_allocation(pid, va, slot, page, 1)?;
+        }
+        self.zero_process_frames(root_node, start_slot, page_count)?;
+
+        let memory = &mut self.memory;
+        let processes = &mut self.processes;
+        let mut i = 0usize;
+        while i < page_count {
+            let frame = process_frame_descriptor(root_node, start_slot + i);
+            let va = base_va + i * PAGE_SIZE;
+            let vm = processes
+                .vm_space_mut(pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            memory.map_frame_strict(address_space, frame, va, vm)?;
+            i += 1;
+        }
+
+        Ok(base_va)
+    }
+
+    fn zero_process_frames(
+        &mut self,
+        process_root: CapabilityDescriptor,
+        start_slot: usize,
+        page_count: usize,
+    ) -> Result<(), CapabilityError> {
+        let mut i = 0usize;
+        while i < page_count {
+            let frame = process_frame_descriptor(process_root, start_slot + i);
+            let temp_va = PROCESS_ZERO_TEMP_BASE + i * PAGE_SIZE;
+            self.map_alpha_temporary_frame(frame, temp_va)?;
+            unsafe {
+                ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
+            }
+            if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
+                error!(
+                    "[proc.err] unmap zero temp frame={:#018x} temp={:#018x} err={:?}",
+                    frame, temp_va, e
+                );
+                return Err(e);
+            }
+            i += 1;
+        }
+        Ok(())
     }
 
     fn handle_dma_request(
@@ -1513,13 +2543,8 @@ impl Alpha {
         )?;
         let base_page = self.memory.allocate_physical_any(mapped_size)?;
         let base_paddr = base_page * PAGE_SIZE;
-        self.processes.register_physical_allocation(
-            pid,
-            base_va,
-            start_slot,
-            base_page,
-            page_count,
-        )?;
+        self.processes
+            .register_physical_allocation(pid, base_va, start_slot, base_page, page_count)?;
 
         self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
         let mut i = 0usize;
@@ -1713,16 +2738,21 @@ impl Alpha {
         &mut self,
         request: OsRequestEvent,
     ) -> Result<(), CapabilityError> {
-        let pid = request.identifier;
-        if pid == 0 {
+        let caller_pid = request.identifier;
+        if caller_pid == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
+        let target_pid = if request.arg2 == 0 {
+            caller_pid
+        } else {
+            request.arg2
+        };
         let base_va = request.arg0;
         let size_bytes = request.arg1;
         if size_bytes == 0 || (base_va & (PAGE_SIZE - 1)) != 0 {
             info!(
-                "[map.err] release invalid args pid={:>3} va={:#018x} bytes={:#x}",
-                pid, base_va, size_bytes
+                "[map.err] release invalid args caller={:>3} target={:>3} va={:#018x} bytes={:#x}",
+                caller_pid, target_pid, base_va, size_bytes
             );
             return Err(CapabilityError::InvalidArgument);
         }
@@ -1731,68 +2761,446 @@ impl Alpha {
         let page_count = mapped_size / PAGE_SIZE;
         let entry = self
             .processes
-            .find_entry_by_pid(pid)
+            .find_entry_by_pid(target_pid)
             .ok_or_else(|| {
-                info!("[map.err] release unknown pid={:>3}", pid);
+                info!("[map.err] release unknown target={:>3}", target_pid);
                 CapabilityError::InvalidArgument
             })?;
-        let allocation = match self
+        if caller_pid != target_pid && entry.reaper_pid != caller_pid {
+            info!(
+                "[map.err] release denied caller={:>3} target={:>3} reaper={:>3}",
+                caller_pid, target_pid, entry.reaper_pid
+            );
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let exact_allocation = self
             .processes
-            .find_active_physical_allocation_reference(pid, base_va, page_count)
-        {
-            Some(allocation) => allocation,
-            None => {
-                info!(
-                    "[map.err] release lookup failed pid={:>3} va={:#018x} bytes={:#x} pages={}",
-                    pid, base_va, mapped_size, page_count
-                );
-                return Err(CapabilityError::InvalidArgument);
-            }
-        };
+            .find_active_physical_allocation_reference(target_pid, base_va, page_count);
 
         let mut i = 0usize;
         while i < page_count {
-            let slot = allocation.start_slot + i;
-            let frame = process_frame_descriptor(entry.root_node, slot);
             let va = base_va + i * PAGE_SIZE;
+            let allocation = if let Some(allocation) = exact_allocation {
+                allocation
+            } else {
+                self.processes
+                    .find_active_physical_allocation_reference(target_pid, va, 1)
+                    .ok_or_else(|| {
+                        info!(
+                            "[map.err] release lookup failed caller={:>3} target={:>3} va={:#018x} bytes={:#x} page={}/{}",
+                            caller_pid, target_pid, va, mapped_size, i, page_count
+                        );
+                        CapabilityError::InvalidArgument
+                    })?
+            };
+            let slot = allocation.start_slot + if allocation.page_count == 1 { 0 } else { i };
+            let frame = process_frame_descriptor(entry.root_node, slot);
             if let Err(e) = arch::address_space::unmap(entry.address_space, frame, va) {
                 info!(
-                    "[map.err] unmap pid={:>3} va={:#018x} frame={:#018x} slot={} err={:?}",
-                    pid, va, frame, slot, e
+                    "[map.err] unmap target={:>3} va={:#018x} frame={:#018x} slot={} err={:?}",
+                    target_pid, va, frame, slot, e
                 );
                 return Err(e);
             }
-            if let Err(e) = arch::node::remove(
-                process_frame_chunk_descriptor(entry.root_node, slot / PROCESS_FRAME_CHUNK_PAGES),
-                (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-            ) {
-                info!(
-                    "[map.warn] frame cap remove deferred pid={:>3} frame={:#018x} slot={} err={:?}",
-                    pid, frame, slot, e
-                );
+            if let Some(vm) = self.processes.vm_space_mut(target_pid) {
+                vm.forget_frame(va);
             }
             i += 1;
         }
 
-        let (allocation, is_last_reference) = self
-            .processes
-            .release_physical_allocation_reference(pid, base_va, page_count)?;
-        if is_last_reference {
-            self.memory.free_physical(
-                allocation.base_page * PAGE_SIZE,
-                allocation.page_count * PAGE_SIZE,
-            )?;
+        if exact_allocation.is_some() {
+            let (allocation, _) = self
+                .processes
+                .release_physical_allocation_reference(target_pid, base_va, page_count)?;
+            self.processes
+                .defer_physical_allocation_for_pid(target_pid, allocation);
+        } else {
+            let mut page = 0usize;
+            while page < page_count {
+                let va = base_va + page * PAGE_SIZE;
+                let (allocation, _) = self
+                    .processes
+                    .release_physical_allocation_reference(target_pid, va, 1)?;
+                self.processes
+                    .defer_physical_allocation_for_pid(target_pid, allocation);
+                page += 1;
+            }
         }
         info!(
-            "[map] released pid={:>3} va=[{:#018x}..{:#018x}) pages={} frame_slot={} last_ref={}",
-            pid,
+            "[map] released caller={:>3} target={:>3} va=[{:#018x}..{:#018x}) pages={}",
+            caller_pid,
+            target_pid,
             base_va,
             base_va + mapped_size,
-            page_count,
-            allocation.start_slot,
-            is_last_reference as usize
+            page_count
         );
         Ok(())
+    }
+
+    fn handle_process_memory_copy_request(
+        &mut self,
+        request: OsRequestEvent,
+        write_to_target: bool,
+    ) -> Result<(), CapabilityError> {
+        let caller_pid = request.identifier;
+        let target_pid = request.arg0;
+        let target_va = request.arg1;
+        let caller_va = request.arg2;
+        let size_bytes = request.arg3;
+        if caller_pid == 0 || target_pid == 0 || target_va == 0 || caller_va == 0 || size_bytes == 0
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let target = self
+            .processes
+            .find_entry_by_pid(target_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if target.reaper_pid != caller_pid && target_pid != caller_pid {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        if self.processes.find_entry_by_pid(caller_pid).is_none() {
+            return Err(CapabilityError::InvalidArgument);
+        }
+
+        let (source_pid, source_va, destination_pid, destination_va) = if write_to_target {
+            (caller_pid, caller_va, target_pid, target_va)
+        } else {
+            (target_pid, target_va, caller_pid, caller_va)
+        };
+        self.copy_process_memory(
+            source_pid,
+            source_va,
+            destination_pid,
+            destination_va,
+            size_bytes,
+        )
+    }
+
+    fn validate_process_memory_access(
+        &self,
+        caller_pid: usize,
+        target_pid: usize,
+    ) -> Result<(), CapabilityError> {
+        let target = self
+            .processes
+            .find_entry_by_pid(target_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if caller_pid != target_pid && target.reaper_pid != caller_pid {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        Ok(())
+    }
+
+    fn handle_process_memory_clone_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        let caller_pid = request.identifier;
+        let source_pid = request.arg0;
+        let destination_pid = request.arg1;
+        let base_va = request.arg2;
+        let size_bytes = request.arg3;
+        if caller_pid == 0
+            || source_pid == 0
+            || destination_pid == 0
+            || base_va == 0
+            || size_bytes == 0
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.validate_process_memory_access(caller_pid, source_pid)?;
+        self.validate_process_memory_access(caller_pid, destination_pid)?;
+        self.copy_process_memory(source_pid, base_va, destination_pid, base_va, size_bytes)
+    }
+
+    fn handle_process_memory_copy_within_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        let caller_pid = request.identifier;
+        let target_pid = request.arg0;
+        let source_va = request.arg1;
+        let destination_va = request.arg2;
+        let size_bytes = request.arg3;
+        if caller_pid == 0
+            || target_pid == 0
+            || source_va == 0
+            || destination_va == 0
+            || size_bytes == 0
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.validate_process_memory_access(caller_pid, target_pid)?;
+        self.copy_process_memory(
+            target_pid,
+            source_va,
+            target_pid,
+            destination_va,
+            size_bytes,
+        )
+    }
+
+    fn handle_process_map_anonymous_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(usize, usize), CapabilityError> {
+        let caller_pid = request.identifier;
+        let target_pid = request.arg0;
+        let size_bytes = request.arg1;
+        let requested_base = request.arg2;
+        if caller_pid == 0 || target_pid == 0 || size_bytes == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let target = self
+            .processes
+            .find_entry_by_pid(target_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if target.reaper_pid != caller_pid && target_pid != caller_pid {
+            return Err(CapabilityError::PermissionDenied);
+        }
+
+        let mapped_size = align_up(size_bytes, PAGE_SIZE);
+        let page_count = mapped_size / PAGE_SIZE;
+        let base = if requested_base == 0 {
+            self.map_process_heap_pages(target_pid, page_count)
+                .map_err(|e| {
+                    info!(
+                        "[proc.map.err] caller={:>3} target={:>3} bytes={:#x} pages={} err={:?}",
+                        caller_pid, target_pid, size_bytes, page_count, e
+                    );
+                    e
+                })?
+        } else {
+            self.map_process_heap_pages_at(target_pid, requested_base, page_count)
+                .map_err(|e| {
+                    info!(
+                        "[proc.map.err] caller={:>3} target={:>3} fixed={:#018x} bytes={:#x} pages={} err={:?}",
+                        caller_pid, target_pid, requested_base, size_bytes, page_count, e
+                    );
+                    e
+                })?
+        };
+        info!(
+            "[proc.map] granted caller={:>3} target={:>3} bytes={:#x} mapped={:#x} va=[{:#018x}..{:#018x})",
+            caller_pid,
+            target_pid,
+            size_bytes,
+            mapped_size,
+            base,
+            base + mapped_size
+        );
+        Ok((base, mapped_size))
+    }
+
+    fn copy_process_memory(
+        &mut self,
+        source_pid: usize,
+        source_va: usize,
+        destination_pid: usize,
+        destination_va: usize,
+        size_bytes: usize,
+    ) -> Result<(), CapabilityError> {
+        if source_pid == destination_pid && source_va == destination_va {
+            return Ok(());
+        }
+        let source_end = source_va
+            .checked_add(size_bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let _ = destination_va
+            .checked_add(size_bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let copy_backward = source_pid == destination_pid
+            && destination_va > source_va
+            && destination_va < source_end;
+        let src_temp_va = PROCESS_COPY_TEMP_BASE;
+        let dst_temp_va = PROCESS_COPY_TEMP_BASE + PAGE_SIZE;
+        let mut copied = 0usize;
+        while copied < size_bytes {
+            let (src, dst, chunk) = if copy_backward {
+                let remaining = size_bytes - copied;
+                let src_end = source_va + remaining;
+                let dst_end = destination_va + remaining;
+                let src_page_tail = ((src_end - 1) & (PAGE_SIZE - 1)) + 1;
+                let dst_page_tail = ((dst_end - 1) & (PAGE_SIZE - 1)) + 1;
+                let chunk = min_usize(remaining, min_usize(src_page_tail, dst_page_tail));
+                (src_end - chunk, dst_end - chunk, chunk)
+            } else {
+                let src = source_va + copied;
+                let dst = destination_va + copied;
+                let src_offset = src & (PAGE_SIZE - 1);
+                let dst_offset = dst & (PAGE_SIZE - 1);
+                let chunk = min_usize(
+                    size_bytes - copied,
+                    min_usize(PAGE_SIZE - src_offset, PAGE_SIZE - dst_offset),
+                );
+                (src, dst, chunk)
+            };
+            let src_page = align_down(src, PAGE_SIZE);
+            let dst_page = align_down(dst, PAGE_SIZE);
+            let src_offset = src - src_page;
+            let dst_offset = dst - dst_page;
+            let src_frame = self.process_frame_for_page(source_pid, src_page)?;
+            let dst_frame = self.process_frame_for_page(destination_pid, dst_page)?;
+            self.map_alpha_temporary_frame(src_frame, src_temp_va)?;
+
+            if src_frame == dst_frame {
+                let bounce = core::ptr::addr_of_mut!(PROCESS_COPY_BOUNCE_BUFFER) as *mut u8;
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        (src_temp_va + src_offset) as *const u8,
+                        bounce,
+                        chunk,
+                    );
+                    ptr::copy_nonoverlapping(bounce, (src_temp_va + dst_offset) as *mut u8, chunk);
+                }
+                self.unmap_alpha_temporary_frame(src_frame, src_temp_va)?;
+            } else {
+                if let Err(error) = self.map_alpha_temporary_frame(dst_frame, dst_temp_va) {
+                    let _ = self.unmap_alpha_temporary_frame(src_frame, src_temp_va);
+                    return Err(error);
+                }
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        (src_temp_va + src_offset) as *const u8,
+                        (dst_temp_va + dst_offset) as *mut u8,
+                        chunk,
+                    );
+                }
+                let src_unmap = self.unmap_alpha_temporary_frame(src_frame, src_temp_va);
+                let dst_unmap = self.unmap_alpha_temporary_frame(dst_frame, dst_temp_va);
+                src_unmap?;
+                dst_unmap?;
+            }
+            copied += chunk;
+        }
+
+        Ok(())
+    }
+
+    fn read_process_memory_into_static_buffer(
+        &mut self,
+        source_pid: usize,
+        source_va: usize,
+        size_bytes: usize,
+    ) -> Result<&'static [u8], CapabilityError> {
+        if size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let out = core::ptr::addr_of_mut!(PROCESS_MEMORY_IMAGE_BUFFER) as *mut u8;
+        let mut copied = 0usize;
+        while copied < size_bytes {
+            let src = source_va
+                .checked_add(copied)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let src_page = align_down(src, PAGE_SIZE);
+            let src_offset = src - src_page;
+            let chunk = min_usize(size_bytes - copied, PAGE_SIZE - src_offset);
+            let temp_offset = (copied / PAGE_SIZE)
+                .checked_mul(PAGE_SIZE)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if temp_offset + PAGE_SIZE > PROCESS_COPY_TEMP_WINDOW_SIZE {
+                return Err(CapabilityError::InvalidArgument);
+            }
+            let temp_va = PROCESS_COPY_TEMP_BASE + temp_offset;
+            let (src_frame, src_temp) =
+                self.map_process_page_into_alpha(source_pid, src_page, temp_va)?;
+
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    (src_temp + src_offset) as *const u8,
+                    out.add(copied),
+                    chunk,
+                );
+            }
+
+            if let Err(e) = self.unmap_alpha_temporary_frame(src_frame, src_temp) {
+                info!(
+                    "[proc.copy.err] unmap spawn-memory temp={:#018x} frame={:#018x} err={:?}",
+                    src_temp, src_frame, e
+                );
+                return Err(e);
+            }
+            copied += chunk;
+        }
+        Ok(unsafe { core::slice::from_raw_parts(out as *const u8, size_bytes) })
+    }
+
+    fn map_process_page_into_alpha(
+        &mut self,
+        pid: usize,
+        page_va: usize,
+        temp_va: usize,
+    ) -> Result<(CapabilityDescriptor, usize), CapabilityError> {
+        if page_va & (PAGE_SIZE - 1) != 0 || temp_va & (PAGE_SIZE - 1) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let frame = self.process_frame_for_page(pid, page_va)?;
+        self.map_alpha_temporary_frame(frame, temp_va)?;
+        Ok((frame, temp_va))
+    }
+
+    fn process_frame_for_page(
+        &mut self,
+        pid: usize,
+        page_va: usize,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
+        if page_va & (PAGE_SIZE - 1) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let entry = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+
+        let frame = match self
+            .processes
+            .vm_space_mut(pid)
+            .and_then(|vm| vm.find_frame(page_va))
+        {
+            Some(frame) => frame,
+            None => {
+                self.materialize_lazy_page(pid, entry.root_node, entry.address_space, page_va)?;
+                self.processes
+                    .vm_space_mut(pid)
+                    .and_then(|vm| vm.find_frame(page_va))
+                    .ok_or(CapabilityError::InvalidArgument)?
+            }
+        };
+        Ok(frame)
+    }
+
+    fn map_alpha_temporary_frame(
+        &mut self,
+        frame: CapabilityDescriptor,
+        temp_va: usize,
+    ) -> Result<(), CapabilityError> {
+        let alpha_as = self.processes.alpha_entry().address_space;
+        if let Some(old_frame) = self.processes.alpha_vm_space_mut().find_frame(temp_va) {
+            match arch::address_space::unmap(alpha_as, old_frame, temp_va) {
+                Ok(()) | Err(CapabilityError::IllegalOperation) => {
+                    self.processes.alpha_vm_space_mut().forget_frame(temp_va);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let vm = self.processes.alpha_vm_space_mut();
+        self.memory.map_frame_strict(alpha_as, frame, temp_va, vm)
+    }
+
+    fn unmap_alpha_temporary_frame(
+        &mut self,
+        frame: CapabilityDescriptor,
+        temp_va: usize,
+    ) -> Result<(), CapabilityError> {
+        let alpha_as = self.processes.alpha_entry().address_space;
+        match arch::address_space::unmap(alpha_as, frame, temp_va) {
+            Ok(()) | Err(CapabilityError::IllegalOperation) => {
+                self.processes.alpha_vm_space_mut().forget_frame(temp_va);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn handle_shared_framebuffer_request(
@@ -2074,17 +3482,34 @@ impl Alpha {
             return Err(CapabilityError::PermissionDenied);
         }
 
-        let process_entry = self
-            .processes
-            .find_entry_by_pid(pid)
-            .ok_or(CapabilityError::InvalidArgument)?;
+        let process_entry = self.processes.find_entry_by_pid(pid).ok_or_else(|| {
+            error!("[svc.err] register unknown pid={:>3}", pid);
+            CapabilityError::InvalidArgument
+        })?;
 
         let (raw_name, raw_len) = decode_service_name_24(request.arg0, request.arg1, request.arg2)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let service_name = core::str::from_utf8(&raw_name[..raw_len])
-            .map_err(|_| CapabilityError::InvalidArgument)?;
+            .ok_or_else(|| {
+                error!(
+                    "[svc.err] register decode failed pid={:>3} args=[{:#018x},{:#018x},{:#018x}] slot={:#x}",
+                    pid, request.arg0, request.arg1, request.arg2, request.arg3
+                );
+                CapabilityError::InvalidArgument
+            })?;
+        let service_name = core::str::from_utf8(&raw_name[..raw_len]).map_err(|_| {
+            error!(
+                "[svc.err] register non-utf8 pid={:>3} len={} args=[{:#018x},{:#018x},{:#018x}]",
+                pid, raw_len, request.arg0, request.arg1, request.arg2
+            );
+            CapabilityError::InvalidArgument
+        })?;
         let service_slot = request.arg3;
-        validate_process_device_slot(service_slot)?;
+        validate_process_device_slot(service_slot).map_err(|e| {
+            error!(
+                "[svc.err] register invalid slot pid={:>3} name={} slot={:#x}",
+                pid, service_name, service_slot
+            );
+            e
+        })?;
         let service_port =
             make_child_slot_descriptor(process_entry.root_node, PROCESS_ROOT_RADIX, service_slot);
 
@@ -2290,6 +3715,92 @@ fn process_frame_descriptor(
     )
 }
 
+fn fill_lazy_page(
+    kind: ProcessLazyMappingKind,
+    page_va: usize,
+    temp_va: usize,
+) -> Result<(), CapabilityError> {
+    unsafe {
+        ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
+    }
+
+    let ProcessLazyMappingKind::Image { image, elf } = kind else {
+        return Ok(());
+    };
+
+    let page_end = page_va
+        .checked_add(PAGE_SIZE)
+        .ok_or(CapabilityError::InvalidArgument)?;
+    let mut i = 0usize;
+    while i < elf.segment_count {
+        let seg = elf.segments[i];
+        let seg_start = seg.virtual_address;
+        let seg_mem_end = seg
+            .virtual_address
+            .checked_add(seg.memory_size)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if seg.memory_size == 0 || page_va >= seg_mem_end || page_end <= seg_start {
+            i += 1;
+            continue;
+        }
+
+        let file_end = seg
+            .virtual_address
+            .checked_add(seg.file_size)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let copy_start = max_usize(page_va, seg_start);
+        let copy_end = min_usize(page_end, file_end);
+        if copy_start < copy_end {
+            let src_offset = seg
+                .offset
+                .checked_add(copy_start - seg.virtual_address)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let len = copy_end - copy_start;
+            if src_offset
+                .checked_add(len)
+                .filter(|end| *end <= image.len())
+                .is_none()
+            {
+                return Err(CapabilityError::InvalidArgument);
+            }
+            let dst = temp_va + (copy_start - page_va);
+            unsafe {
+                ptr::copy_nonoverlapping(image.as_ptr().add(src_offset), dst as *mut u8, len);
+            }
+        }
+
+        i += 1;
+    }
+
+    if let Some(ipc_buffer_va) = elf.ipc_buffer_start {
+        let tls_slot_va = ipc_buffer_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS;
+        if tls_slot_va >= page_va && tls_slot_va + core::mem::size_of::<Word>() <= page_end {
+            let dst = temp_va + (tls_slot_va - page_va);
+            unsafe {
+                ptr::write(dst as *mut Word, ipc_buffer_va as Word);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn max_usize(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn min_usize(a: usize, b: usize) -> usize {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
 fn select_irq_notification_alias_slot(
     irq_number: usize,
     notification_slot: usize,
@@ -2490,27 +4001,25 @@ fn pack_framebuffer_color_information(
 }
 
 fn process_priority_for_image(image_name: &str) -> Word {
-    match basename(image_name) {
+    match strip_elf_suffix(basename(image_name)) {
         // Timer must preempt clients promptly; animation and network timeouts depend on it.
-        "timer-server.elf" => PROCESS_PRIORITY_TIMER_SERVER,
+        "timer-server" => PROCESS_PRIORITY_TIMER_SERVER,
         // Input pipeline must stay above the compositor and every input consumer.
-        "input-server.elf" | "ps2-server.elf" => PROCESS_PRIORITY_INPUT_SERVER,
+        "input-server" | "ps2-server" => PROCESS_PRIORITY_INPUT_SERVER,
         // GUI servers are above GUI clients, but below timer/input IRQ-facing services.
-        "fb-server.elf" | "honoka.elf" => PROCESS_PRIORITY_GUI_SERVER,
+        "fb-server" | "honoka" => PROCESS_PRIORITY_GUI_SERVER,
         // Background servers stay above clients, but below the GUI critical path.
-        "block-device-server.elf" | "virtio-blk-server.elf" => {
-            PROCESS_PRIORITY_BACKGROUND_SERVER + 2
-        }
-        "virtio-net.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
-        "ext2-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "net-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "rtc-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "http-server.elf" => PROCESS_PRIORITY_BACKGROUND_SERVER,
-        "honoka-client.elf" | "eg-test.elf" | "image-viewer.elf" => {
+        "block-device-server" | "virtio-blk-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
+        "virtio-net" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
+        "ext2-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
+        "net-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
+        "rtc-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
+        "http-server" => PROCESS_PRIORITY_BACKGROUND_SERVER,
+        "honoka-client" | "eg-test" | "image-viewer" | "performance-monitor" => {
             PROCESS_PRIORITY_INTERACTIVE_CLIENT
         }
-        "shell.elf" => PROCESS_PRIORITY_CLIENT,
-        "cpp-hello.elf" | "rust-hello.elf" => PROCESS_PRIORITY_BACKGROUND_CLIENT,
+        "shell" => PROCESS_PRIORITY_CLIENT,
+        "cpp-hello" | "rust-hello" => PROCESS_PRIORITY_BACKGROUND_CLIENT,
         _ => PROCESS_PRIORITY_LOW,
     }
 }
@@ -2538,13 +4047,101 @@ fn decode_service_name_24(arg1: Word, arg2: Word, arg3: Word) -> Option<([u8; 24
     Some((raw, len))
 }
 
+struct ControlText {
+    raw: [u8; 16],
+    len: usize,
+}
+
+fn decode_control_text(arg0: Word, arg1: Word) -> ControlText {
+    let mut raw = [0u8; 16];
+    raw[0..8].copy_from_slice(&arg0.to_le_bytes());
+    raw[8..16].copy_from_slice(&arg1.to_le_bytes());
+    let mut len = 0usize;
+    while len < raw.len() && raw[len] != 0 {
+        len += 1;
+    }
+    ControlText { raw, len }
+}
+
+fn bytes_equal(text: &ControlText, expected: &[u8]) -> bool {
+    text.len == expected.len() && &text.raw[..text.len] == expected
+}
+
+fn initramfs_entry_data(requested_name: &str) -> Option<&'static [u8]> {
+    let mut found = None;
+    let _ = cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
+        if found.is_none() && initramfs_path_matches(entry.name, requested_name) {
+            found = Some(entry.data);
+        }
+        Ok(())
+    });
+    found
+}
+
+fn parse_boot_list_line(line: &str) -> Option<BootListEntry<'_>> {
+    let line = line.split('#').next().unwrap_or("");
+    let mut tokens = line.split_whitespace();
+    let name = tokens.next()?;
+    let priority = parse_decimal_word(tokens.next()?)?;
+    let image_path = tokens.next()?;
+    Some(BootListEntry {
+        _name: name,
+        priority,
+        image_path,
+    })
+}
+
+fn parse_decimal_word(text: &str) -> Option<Word> {
+    if text.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?;
+        value = value.checked_add((byte - b'0') as usize)?;
+    }
+    Some(value as Word)
+}
+
 fn initramfs_image_name_matches(entry_name: &str, requested_name: &str) -> bool {
-    if entry_name == requested_name {
+    if initramfs_path_matches(entry_name, requested_name) {
         return true;
     }
     let entry_base = path_basename(entry_name);
     let requested_base = path_basename(requested_name);
-    entry_base == requested_name || entry_name == requested_base || entry_base == requested_base
+    if initramfs_path_matches(entry_base, requested_name)
+        || initramfs_path_matches(entry_name, requested_base)
+        || entry_base == requested_base
+    {
+        return true;
+    }
+
+    let entry_stem = strip_elf_suffix(entry_base);
+    let requested_stem = strip_elf_suffix(requested_base);
+    entry_stem == strip_elf_suffix(requested_name)
+        || strip_elf_suffix(entry_name) == requested_stem
+        || entry_stem == requested_stem
+}
+
+fn initramfs_path_matches(entry_name: &str, requested_name: &str) -> bool {
+    entry_name == requested_name
+        || entry_name.strip_prefix("./") == Some(requested_name)
+        || requested_name.strip_prefix("./") == Some(entry_name)
+}
+
+fn initramfs_image_is_explicit_only(name: &str) -> bool {
+    path_basename(name).starts_with('_')
+}
+
+fn initramfs_image_is_auto_spawn_candidate(name: &str) -> bool {
+    name.starts_with("./bin/") || name.starts_with("bin/")
+}
+
+fn strip_elf_suffix(name: &str) -> &str {
+    name.strip_suffix(".elf").unwrap_or(name)
 }
 
 fn path_basename(path: &str) -> &str {

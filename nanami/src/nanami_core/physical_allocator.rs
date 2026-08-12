@@ -1,4 +1,4 @@
-use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
@@ -11,6 +11,12 @@ pub struct PhysicalAllocation {
 }
 
 #[derive(Clone, Copy)]
+pub struct PhysicalMemoryInfo {
+    pub total_pages: usize,
+    pub free_pages: usize,
+}
+
+#[derive(Clone, Copy)]
 pub enum PhysicalAllocError {
     InvalidArgument,
     PermissionDenied,
@@ -18,258 +24,233 @@ pub enum PhysicalAllocError {
 }
 
 #[derive(Clone, Copy)]
-struct Region {
+struct AllocationRecord {
     base_page: usize,
     page_count: usize,
     is_device: bool,
-    used: bool,
+    reserved: bool,
 }
 
-struct Node {
-    region: Region,
-    left: Option<Box<Node>>,
-    right: Option<Box<Node>>,
-    height: i16,
+struct BuddyPool {
+    free_lists: Vec<Vec<usize>>,
 }
 
-impl Node {
-    fn new(region: Region) -> Box<Self> {
-        Box::new(Self {
-            region,
-            left: None,
-            right: None,
-            height: 1,
-        })
-    }
-}
-
-struct RegionTree {
-    root: Option<Box<Node>>,
-}
-
-impl RegionTree {
+impl BuddyPool {
     const fn new() -> Self {
-        Self { root: None }
+        Self {
+            free_lists: Vec::new(),
+        }
     }
 
-    fn height(node: &Option<Box<Node>>) -> i16 {
-        node.as_ref().map(|n| n.height).unwrap_or(0)
+    fn add_range(
+        &mut self,
+        mut base_page: usize,
+        mut page_count: usize,
+    ) -> Result<(), PhysicalAllocError> {
+        if page_count == 0 {
+            return Ok(());
+        }
+
+        while page_count != 0 {
+            let order = largest_aligned_order(base_page, page_count)?;
+            self.add_block(base_page, order)?;
+            let count = block_pages(order)?;
+            base_page = base_page
+                .checked_add(count)
+                .ok_or(PhysicalAllocError::InvalidArgument)?;
+            page_count -= count;
+        }
+        Ok(())
     }
 
-    fn recompute_height(node: &mut Box<Node>) {
-        let lh = Self::height(&node.left);
-        let rh = Self::height(&node.right);
-        node.height = if lh > rh { lh + 1 } else { rh + 1 };
-    }
-
-    fn balance_factor(node: &Box<Node>) -> i16 {
-        Self::height(&node.left) - Self::height(&node.right)
-    }
-
-    fn rotate_left(mut x: Box<Node>) -> Box<Node> {
-        let mut y = x.right.take().expect("rotate_left requires right child");
-        x.right = y.left.take();
-        Self::recompute_height(&mut x);
-        y.left = Some(x);
-        Self::recompute_height(&mut y);
-        y
-    }
-
-    fn rotate_right(mut y: Box<Node>) -> Box<Node> {
-        let mut x = y.left.take().expect("rotate_right requires left child");
-        y.left = x.right.take();
-        Self::recompute_height(&mut y);
-        x.right = Some(y);
-        Self::recompute_height(&mut x);
-        x
-    }
-
-    fn rebalance(mut node: Box<Node>) -> Box<Node> {
-        Self::recompute_height(&mut node);
-        let bf = Self::balance_factor(&node);
-
-        if bf > 1 {
-            if Self::balance_factor(node.left.as_ref().unwrap()) < 0 {
-                let left = node.left.take().unwrap();
-                node.left = Some(Self::rotate_left(left));
+    fn add_block(
+        &mut self,
+        mut base_page: usize,
+        mut order: usize,
+    ) -> Result<(), PhysicalAllocError> {
+        loop {
+            self.ensure_order(order);
+            let count = block_pages(order)?;
+            if base_page % count != 0 {
+                return Err(PhysicalAllocError::InvalidArgument);
             }
-            return Self::rotate_right(node);
-        }
 
-        if bf < -1 {
-            if Self::balance_factor(node.right.as_ref().unwrap()) > 0 {
-                let right = node.right.take().unwrap();
-                node.right = Some(Self::rotate_right(right));
-            }
-            return Self::rotate_left(node);
-        }
-
-        node
-    }
-
-    fn insert(&mut self, region: Region) {
-        self.root = Some(Self::insert_node(self.root.take(), region));
-    }
-
-    fn insert_node(node: Option<Box<Node>>, region: Region) -> Box<Node> {
-        let Some(mut n) = node else {
-            return Node::new(region);
-        };
-
-        if region.base_page < n.region.base_page {
-            n.left = Some(Self::insert_node(n.left.take(), region));
-        } else if region.base_page > n.region.base_page {
-            n.right = Some(Self::insert_node(n.right.take(), region));
-        } else {
-            n.region = region;
-            return n;
-        }
-
-        Self::rebalance(n)
-    }
-
-    fn remove(&mut self, base_page: usize) -> Option<Region> {
-        let (new_root, removed) = Self::remove_node(self.root.take(), base_page);
-        self.root = new_root;
-        removed
-    }
-
-    fn remove_node(
-        node: Option<Box<Node>>,
-        base_page: usize,
-    ) -> (Option<Box<Node>>, Option<Region>) {
-        let Some(mut n) = node else {
-            return (None, None);
-        };
-
-        if base_page < n.region.base_page {
-            let (left, removed) = Self::remove_node(n.left.take(), base_page);
-            n.left = left;
-            return (Some(Self::rebalance(n)), removed);
-        }
-        if base_page > n.region.base_page {
-            let (right, removed) = Self::remove_node(n.right.take(), base_page);
-            n.right = right;
-            return (Some(Self::rebalance(n)), removed);
-        }
-
-        let removed = Some(n.region);
-        match (n.left.take(), n.right.take()) {
-            (None, None) => (None, removed),
-            (Some(left), None) => (Some(left), removed),
-            (None, Some(right)) => (Some(right), removed),
-            (Some(left), Some(right)) => {
-                let (new_right, successor) = Self::extract_min(right);
-                let mut new_node = successor;
-                new_node.left = Some(left);
-                new_node.right = new_right;
-                (Some(Self::rebalance(new_node)), removed)
-            }
-        }
-    }
-
-    fn extract_min(mut node: Box<Node>) -> (Option<Box<Node>>, Box<Node>) {
-        match node.left.take() {
-            None => (node.right.take(), node),
-            Some(left) => {
-                let (new_left, min_node) = Self::extract_min(left);
-                node.left = new_left;
-                (Some(Self::rebalance(node)), min_node)
-            }
-        }
-    }
-
-    fn get(&self, base_page: usize) -> Option<Region> {
-        let mut cursor = self.root.as_ref();
-        while let Some(n) = cursor {
-            if base_page < n.region.base_page {
-                cursor = n.left.as_ref();
-            } else if base_page > n.region.base_page {
-                cursor = n.right.as_ref();
-            } else {
-                return Some(n.region);
-            }
-        }
-        None
-    }
-
-    fn find_containing(&self, base_page: usize, page_count: usize) -> Option<Region> {
-        let mut cursor = self.root.as_ref();
-        while let Some(n) = cursor {
-            let start = n.region.base_page;
-            let end = start + n.region.page_count;
-            if base_page < start {
-                cursor = n.left.as_ref();
-            } else if base_page >= end {
-                cursor = n.right.as_ref();
-            } else {
-                let req_end = base_page + page_count;
-                if req_end <= end {
-                    return Some(n.region);
+            let buddy = base_page ^ count;
+            if let Some(index) = self.find_block_index(order, buddy) {
+                self.free_lists[order].swap_remove(index);
+                if buddy < base_page {
+                    base_page = buddy;
                 }
-                return None;
+                order = order
+                    .checked_add(1)
+                    .ok_or(PhysicalAllocError::InvalidArgument)?;
+                continue;
             }
+
+            if self.find_block_index(order, base_page).is_none() {
+                self.free_lists[order].push(base_page);
+            }
+            return Ok(());
+        }
+    }
+
+    fn allocate_range(
+        &mut self,
+        base_page: usize,
+        page_count: usize,
+    ) -> Result<(), PhysicalAllocError> {
+        if page_count == 0 {
+            return Err(PhysicalAllocError::InvalidArgument);
+        }
+        let _ = base_page
+            .checked_add(page_count)
+            .ok_or(PhysicalAllocError::InvalidArgument)?;
+
+        if !self.contains_range(base_page, page_count) {
+            return Err(PhysicalAllocError::OutOfMemory);
+        }
+        self.carve_range(base_page, page_count)
+    }
+
+    fn contains_range(&self, base_page: usize, page_count: usize) -> bool {
+        let Some(end_page) = base_page.checked_add(page_count) else {
+            return false;
+        };
+        if page_count == 0 {
+            return false;
+        }
+
+        let mut current = base_page;
+        while current < end_page {
+            let Some((order, _, block_base)) = self.find_containing_block(current) else {
+                return false;
+            };
+            let Ok(block_count) = block_pages(order) else {
+                return false;
+            };
+            let Some(block_end) = block_base.checked_add(block_count) else {
+                return false;
+            };
+            current = core::cmp::min(block_end, end_page);
+        }
+        true
+    }
+
+    fn carve_range(
+        &mut self,
+        base_page: usize,
+        page_count: usize,
+    ) -> Result<(), PhysicalAllocError> {
+        let end_page = base_page
+            .checked_add(page_count)
+            .ok_or(PhysicalAllocError::InvalidArgument)?;
+        let mut current = base_page;
+
+        while current < end_page {
+            let Some((order, index, block_base)) = self.find_containing_block(current) else {
+                return Err(PhysicalAllocError::OutOfMemory);
+            };
+
+            let block_count = block_pages(order)?;
+            let block_end = block_base
+                .checked_add(block_count)
+                .ok_or(PhysicalAllocError::InvalidArgument)?;
+            self.free_lists[order].swap_remove(index);
+
+            if block_base < current {
+                self.add_range(block_base, current - block_base)?;
+            }
+
+            let allocated_end = if block_end < end_page {
+                block_end
+            } else {
+                end_page
+            };
+            if allocated_end < block_end {
+                self.add_range(allocated_end, block_end - allocated_end)?;
+            }
+            current = allocated_end;
+        }
+
+        Ok(())
+    }
+
+    fn find_first_fit(&self, page_count: usize) -> Option<usize> {
+        if page_count == 0 {
+            return None;
+        }
+        let mut order = ceil_log2(page_count)?;
+        while order < self.free_lists.len() {
+            if let Some(base_page) = self.free_lists[order].first() {
+                return Some(*base_page);
+            }
+            order += 1;
         }
         None
     }
 
-    fn first_fit_non_device(&self, page_count: usize) -> Option<Region> {
-        Self::first_fit_in_node(&self.root, page_count)
+    fn find_containing_block(&self, page: usize) -> Option<(usize, usize, usize)> {
+        let mut order = 0usize;
+        while order < self.free_lists.len() {
+            let count = block_pages(order).ok()?;
+            let mut index = 0usize;
+            while index < self.free_lists[order].len() {
+                let base = self.free_lists[order][index];
+                let end = base.checked_add(count)?;
+                if page >= base && page < end {
+                    return Some((order, index, base));
+                }
+                index += 1;
+            }
+            order += 1;
+        }
+        None
     }
 
-    fn first_fit_in_node(node: &Option<Box<Node>>, page_count: usize) -> Option<Region> {
-        let Some(n) = node.as_ref() else {
+    fn find_block_index(&self, order: usize, base_page: usize) -> Option<usize> {
+        if order >= self.free_lists.len() {
             return None;
-        };
-
-        if let Some(r) = Self::first_fit_in_node(&n.left, page_count) {
-            return Some(r);
         }
-
-        if !n.region.used && !n.region.is_device && n.region.page_count >= page_count {
-            return Some(n.region);
+        let mut index = 0usize;
+        while index < self.free_lists[order].len() {
+            if self.free_lists[order][index] == base_page {
+                return Some(index);
+            }
+            index += 1;
         }
-
-        Self::first_fit_in_node(&n.right, page_count)
+        None
     }
 
-    fn predecessor_key(&self, base_page: usize) -> Option<usize> {
-        let mut cursor = self.root.as_ref();
-        let mut best = None;
-        while let Some(n) = cursor {
-            if base_page <= n.region.base_page {
-                cursor = n.left.as_ref();
-            } else {
-                best = Some(n.region.base_page);
-                cursor = n.right.as_ref();
-            }
+    fn ensure_order(&mut self, order: usize) {
+        while self.free_lists.len() <= order {
+            self.free_lists.push(Vec::new());
         }
-        best
     }
 
-    fn successor_key(&self, base_page: usize) -> Option<usize> {
-        let mut cursor = self.root.as_ref();
-        let mut best = None;
-        while let Some(n) = cursor {
-            if base_page < n.region.base_page {
-                best = Some(n.region.base_page);
-                cursor = n.left.as_ref();
-            } else {
-                cursor = n.right.as_ref();
-            }
+    fn free_page_count(&self) -> usize {
+        let mut pages = 0usize;
+        let mut order = 0usize;
+        while order < self.free_lists.len() {
+            let block_count = 1usize.checked_shl(order as u32).unwrap_or(0);
+            pages = pages.saturating_add(self.free_lists[order].len().saturating_mul(block_count));
+            order += 1;
         }
-        best
+        pages
     }
 }
 
 pub struct PhysicalAllocator {
-    tree: RegionTree,
+    normal: BuddyPool,
+    device: BuddyPool,
+    allocations: Vec<AllocationRecord>,
 }
 
 impl PhysicalAllocator {
     pub fn new() -> Self {
         Self {
-            tree: RegionTree::new(),
+            normal: BuddyPool::new(),
+            device: BuddyPool::new(),
+            allocations: Vec::new(),
         }
     }
 
@@ -287,13 +268,19 @@ impl PhysicalAllocator {
         if page_count == 0 {
             return Err(PhysicalAllocError::InvalidArgument);
         }
-        self.tree.insert(Region {
-            base_page: base_address >> PAGE_BITS,
-            page_count,
-            is_device,
-            used,
-        });
-        Ok(())
+        let base_page = base_address >> PAGE_BITS;
+
+        if used {
+            self.allocations.push(AllocationRecord {
+                base_page,
+                page_count,
+                is_device,
+                reserved: true,
+            });
+            return Ok(());
+        }
+
+        self.pool_mut(is_device).add_range(base_page, page_count)
     }
 
     pub fn allocate_at(
@@ -308,52 +295,28 @@ impl PhysicalAllocator {
         let req_base = base_address >> PAGE_BITS;
         let req_count = bytes_to_pages(size_bytes);
 
-        let container = self
-            .tree
-            .find_containing(req_base, req_count)
-            .ok_or(PhysicalAllocError::OutOfMemory)?;
-
-        if container.used {
-            return Err(PhysicalAllocError::OutOfMemory);
+        if self.normal.allocate_range(req_base, req_count).is_ok() {
+            self.record_allocation(req_base, req_count, false);
+            return Ok(PhysicalAllocation {
+                base_page: req_base,
+                page_count: req_count,
+                is_device: false,
+            });
         }
-        if container.is_device && !allow_device {
+
+        if self.device.contains_range(req_base, req_count) && !allow_device {
             return Err(PhysicalAllocError::PermissionDenied);
         }
-
-        self.tree.remove(container.base_page);
-
-        if req_base > container.base_page {
-            self.tree.insert(Region {
-                base_page: container.base_page,
-                page_count: req_base - container.base_page,
-                is_device: container.is_device,
-                used: false,
+        if allow_device && self.device.allocate_range(req_base, req_count).is_ok() {
+            self.record_allocation(req_base, req_count, true);
+            return Ok(PhysicalAllocation {
+                base_page: req_base,
+                page_count: req_count,
+                is_device: true,
             });
         }
 
-        self.tree.insert(Region {
-            base_page: req_base,
-            page_count: req_count,
-            is_device: container.is_device,
-            used: true,
-        });
-
-        let container_end = container.base_page + container.page_count;
-        let req_end = req_base + req_count;
-        if req_end < container_end {
-            self.tree.insert(Region {
-                base_page: req_end,
-                page_count: container_end - req_end,
-                is_device: container.is_device,
-                used: false,
-            });
-        }
-
-        Ok(PhysicalAllocation {
-            base_page: req_base,
-            page_count: req_count,
-            is_device: container.is_device,
-        })
+        Err(PhysicalAllocError::OutOfMemory)
     }
 
     pub fn allocate_any(
@@ -364,12 +327,12 @@ impl PhysicalAllocator {
             return Err(PhysicalAllocError::InvalidArgument);
         }
         let req_count = bytes_to_pages(size_bytes);
-        let region = self
-            .tree
-            .first_fit_non_device(req_count)
+        let base_page = self
+            .normal
+            .find_first_fit(req_count)
             .ok_or(PhysicalAllocError::OutOfMemory)?;
 
-        self.allocate_at(region.base_page << PAGE_BITS, req_count << PAGE_BITS, false)
+        self.allocate_at(base_page << PAGE_BITS, req_count << PAGE_BITS, false)
     }
 
     pub fn free(
@@ -383,106 +346,115 @@ impl PhysicalAllocator {
 
         let req_base = base_address >> PAGE_BITS;
         let req_count = bytes_to_pages(size_bytes);
-
-        let container = self
-            .tree
-            .find_containing(req_base, req_count)
+        let req_end = req_base
+            .checked_add(req_count)
             .ok_or(PhysicalAllocError::InvalidArgument)?;
 
-        if !container.used {
-            return Err(PhysicalAllocError::InvalidArgument);
+        let index = self
+            .allocations
+            .iter()
+            .position(|allocation| {
+                if allocation.reserved {
+                    return false;
+                }
+                let allocation_end = allocation.base_page + allocation.page_count;
+                req_base >= allocation.base_page && req_end <= allocation_end
+            })
+            .ok_or(PhysicalAllocError::InvalidArgument)?;
+
+        let allocation = self.allocations.swap_remove(index);
+        let allocation_end = allocation
+            .base_page
+            .checked_add(allocation.page_count)
+            .ok_or(PhysicalAllocError::InvalidArgument)?;
+
+        if allocation.base_page < req_base {
+            self.record_allocation(
+                allocation.base_page,
+                req_base - allocation.base_page,
+                allocation.is_device,
+            );
+        }
+        if req_end < allocation_end {
+            self.record_allocation(req_end, allocation_end - req_end, allocation.is_device);
         }
 
-        self.tree.remove(container.base_page);
+        self.pool_mut(allocation.is_device)
+            .add_range(req_base, req_count)
+    }
 
-        if req_base > container.base_page {
-            self.tree.insert(Region {
-                base_page: container.base_page,
-                page_count: req_base - container.base_page,
-                is_device: container.is_device,
-                used: true,
-            });
+    pub fn memory_info(&self) -> PhysicalMemoryInfo {
+        let free_pages = self.normal.free_page_count();
+        let mut allocated_pages = 0usize;
+        for allocation in self.allocations.iter() {
+            if !allocation.is_device {
+                allocated_pages = allocated_pages.saturating_add(allocation.page_count);
+            }
         }
+        PhysicalMemoryInfo {
+            total_pages: free_pages.saturating_add(allocated_pages),
+            free_pages,
+        }
+    }
 
-        self.tree.insert(Region {
-            base_page: req_base,
-            page_count: req_count,
-            is_device: container.is_device,
-            used: false,
+    fn record_allocation(&mut self, base_page: usize, page_count: usize, is_device: bool) {
+        self.allocations.push(AllocationRecord {
+            base_page,
+            page_count,
+            is_device,
+            reserved: false,
         });
-
-        let container_end = container.base_page + container.page_count;
-        let req_end = req_base + req_count;
-        if req_end < container_end {
-            self.tree.insert(Region {
-                base_page: req_end,
-                page_count: container_end - req_end,
-                is_device: container.is_device,
-                used: true,
-            });
-        }
-
-        self.merge_neighbors(req_base)?;
-        Ok(())
     }
 
-    fn merge_neighbors(&mut self, base_page: usize) -> Result<(), PhysicalAllocError> {
-        let mut center = self
-            .tree
-            .get(base_page)
-            .ok_or(PhysicalAllocError::InvalidArgument)?;
-        if center.used {
-            return Ok(());
+    fn pool_mut(&mut self, is_device: bool) -> &mut BuddyPool {
+        if is_device {
+            &mut self.device
+        } else {
+            &mut self.normal
         }
-
-        if let Some(prev_key) = self.tree.predecessor_key(center.base_page) {
-            if let Some(prev) = self.tree.get(prev_key) {
-                if !prev.used
-                    && prev.is_device == center.is_device
-                    && prev.base_page + prev.page_count == center.base_page
-                {
-                    self.tree.remove(prev.base_page);
-                    self.tree.remove(center.base_page);
-                    center = Region {
-                        base_page: prev.base_page,
-                        page_count: prev.page_count + center.page_count,
-                        is_device: center.is_device,
-                        used: false,
-                    };
-                    self.tree.insert(center);
-                }
-            }
-        }
-
-        if let Some(next_key) = self.tree.successor_key(center.base_page) {
-            if let Some(next) = self.tree.get(next_key) {
-                if !next.used
-                    && next.is_device == center.is_device
-                    && center.base_page + center.page_count == next.base_page
-                {
-                    self.tree.remove(center.base_page);
-                    self.tree.remove(next.base_page);
-                    center = Region {
-                        base_page: center.base_page,
-                        page_count: center.page_count + next.page_count,
-                        is_device: center.is_device,
-                        used: false,
-                    };
-                    self.tree.insert(center);
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
-#[inline(always)]
-fn is_page_aligned(addr: usize) -> bool {
-    (addr & (PAGE_SIZE - 1)) == 0
-}
-
-#[inline(always)]
 fn bytes_to_pages(size_bytes: usize) -> usize {
-    (size_bytes + PAGE_SIZE - 1) >> PAGE_BITS
+    (size_bytes + PAGE_SIZE - 1) / PAGE_SIZE
+}
+
+fn is_page_aligned(address: usize) -> bool {
+    address & (PAGE_SIZE - 1) == 0
+}
+
+fn block_pages(order: usize) -> Result<usize, PhysicalAllocError> {
+    1usize
+        .checked_shl(order as u32)
+        .ok_or(PhysicalAllocError::InvalidArgument)
+}
+
+fn floor_log2(value: usize) -> Option<usize> {
+    if value == 0 {
+        return None;
+    }
+    Some(usize::BITS as usize - 1 - value.leading_zeros() as usize)
+}
+
+fn ceil_log2(value: usize) -> Option<usize> {
+    let floor = floor_log2(value)?;
+    if value.is_power_of_two() {
+        Some(floor)
+    } else {
+        floor.checked_add(1)
+    }
+}
+
+fn largest_aligned_order(base_page: usize, page_count: usize) -> Result<usize, PhysicalAllocError> {
+    let mut order = floor_log2(page_count).ok_or(PhysicalAllocError::InvalidArgument)?;
+    loop {
+        let count = block_pages(order)?;
+        if base_page % count == 0 {
+            return Ok(order);
+        }
+        if order == 0 {
+            return Ok(0);
+        }
+        order -= 1;
+    }
 }

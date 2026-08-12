@@ -54,6 +54,12 @@ impl<const N: usize> StaticAvlTree<N> {
         None
     }
 
+    pub fn remove(&mut self, key: usize) -> Option<usize> {
+        let (root, removed) = self.remove_at(self.root, key);
+        self.root = root;
+        removed
+    }
+
     fn insert_at(&mut self, current: Option<usize>, key: usize, value: usize) -> Result<usize, ()> {
         let Some(index) = current else {
             return self.allocate_node(key, value);
@@ -73,6 +79,65 @@ impl<const N: usize> StaticAvlTree<N> {
 
         self.recompute_height(index);
         Ok(self.rebalance(index))
+    }
+
+    fn remove_at(&mut self, current: Option<usize>, key: usize) -> (Option<usize>, Option<usize>) {
+        let Some(index) = current else {
+            return (None, None);
+        };
+
+        let node_key = self.nodes[index].key;
+        if key < node_key {
+            let (left, removed) = self.remove_at(self.nodes[index].left, key);
+            if removed.is_none() {
+                return (Some(index), None);
+            }
+            self.nodes[index].left = left;
+            self.recompute_height(index);
+            return (Some(self.rebalance(index)), removed);
+        }
+
+        if key > node_key {
+            let (right, removed) = self.remove_at(self.nodes[index].right, key);
+            if removed.is_none() {
+                return (Some(index), None);
+            }
+            self.nodes[index].right = right;
+            self.recompute_height(index);
+            return (Some(self.rebalance(index)), removed);
+        }
+
+        let removed = self.nodes[index].value;
+        let left = self.nodes[index].left;
+        let right = self.nodes[index].right;
+        if left.is_none() {
+            self.nodes[index] = AvlNode::EMPTY;
+            return (right, Some(removed));
+        }
+        if right.is_none() {
+            self.nodes[index] = AvlNode::EMPTY;
+            return (left, Some(removed));
+        }
+
+        let right = right.expect("checked above");
+        let (new_right, successor) = self.take_min(right);
+        self.nodes[index].key = self.nodes[successor].key;
+        self.nodes[index].value = self.nodes[successor].value;
+        self.nodes[index].right = new_right;
+        self.nodes[successor] = AvlNode::EMPTY;
+        self.recompute_height(index);
+        (Some(self.rebalance(index)), Some(removed))
+    }
+
+    fn take_min(&mut self, index: usize) -> (Option<usize>, usize) {
+        let Some(left) = self.nodes[index].left else {
+            return (self.nodes[index].right, index);
+        };
+
+        let (new_left, min_index) = self.take_min(left);
+        self.nodes[index].left = new_left;
+        self.recompute_height(index);
+        (Some(self.rebalance(index)), min_index)
     }
 
     fn allocate_node(&mut self, key: usize, value: usize) -> Result<usize, ()> {

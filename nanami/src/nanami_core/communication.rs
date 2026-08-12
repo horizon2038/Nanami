@@ -1,5 +1,5 @@
 use crate::*;
-use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource, Word};
+use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource};
 
 const MAX_SERVICES: usize = 64;
 const MAX_SERVICE_NAME_LEN: usize = 32;
@@ -236,12 +236,12 @@ impl CommunicationManager {
         let mut identifier = 0usize;
         debug!(
             "[ipc.dbg] before reply_receive info={:#018x}",
-            Word::from(info)
+            usize::from(info)
         );
         arch::ipc_port::reply_receive(self.os_port, &mut info, &mut identifier)?;
         debug!(
         "[ipc.dbg] after reply_receive info={:#018x} source={:?} len={} transfer={} id={:#018x}",
-        Word::from(info),
+        usize::from(info),
         info.source(),
         info.message_length(),
         info.transfer_count(),

@@ -499,9 +499,13 @@ impl Alpha {
     }
 
     fn handle_notification_event(&mut self, notification: NotificationEvent) {
+        let NotificationEvent {
+            identifier: _identifier,
+            value: _value,
+        } = notification;
         debug!(
             "[ipc] notification received: id={:>3} value={:#018x}",
-            notification.identifier, notification.value
+            _identifier, _value
         );
     }
 

@@ -520,7 +520,7 @@ impl Alpha {
             .find_entry_by_pid(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
 
-        arch::io_port::mint(
+        a9n_abi::arch::io_port::mint(
             self.root_io_port,
             range_min,
             range_max,

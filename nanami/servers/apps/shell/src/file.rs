@@ -1,13 +1,14 @@
 use libnanami::{RequestError, Word};
 
-use crate::{append_bytes, append_decimal, bytes_eq, copy_bytes, starts_with, COLS, SLOT_VFS_SERVICE};
+use crate::{
+    append_bytes, append_decimal, bytes_eq, copy_bytes, starts_with, COLS, SLOT_VFS_SERVICE,
+};
 
 const PATH_MAX: usize = 128;
 const MAX_COMPONENTS: usize = 16;
-const MAX_OUTPUT_LINES: usize = 18;
+const MAX_OUTPUT_LINES: usize = 64;
 const VFS_SHM_BYTES: Word = 0x4000;
 const PATH_OFFSET: usize = 0;
-const PATH2_OFFSET: usize = 256;
 const IO_OFFSET: usize = 512;
 const DIR_ENTRIES_PER_READ: Word = 8;
 const CAT_CHUNK_BYTES: Word = 384;
@@ -115,11 +116,16 @@ impl FileShell {
         if self.connected {
             return true;
         }
-        let _ = nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE);
+        if let Err(error) = nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
+            out.push_line(format_error_line(b"vfs: service unavailable ", error));
+            return false;
+        }
         self.vfs_port = libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
         match nanami_services::vfs::vfs_attach_shared_memory(self.vfs_port, VFS_SHM_BYTES) {
             Ok((shm, shm_size)) => {
-                if shm_size < 0x1000 {
+                let required = IO_OFFSET
+                    + DIR_ENTRIES_PER_READ * nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+                if shm == 0 || shm_size < required {
                     out.push_bytes(b"vfs: shared memory too small");
                     return false;
                 }
@@ -144,7 +150,11 @@ impl FileShell {
             return out;
         };
         write_shm_bytes(self.shm, PATH_OFFSET, &path[..path_len]);
-        let handle = match nanami_services::vfs::vfs_open(self.vfs_port, PATH_OFFSET as Word, path_len as Word) {
+        let handle = match nanami_services::vfs::vfs_open(
+            self.vfs_port,
+            PATH_OFFSET as Word,
+            path_len as Word,
+        ) {
             Ok(handle) => handle,
             Err(_) => {
                 out.push_bytes(b"ls: open failed");
@@ -153,6 +163,7 @@ impl FileShell {
         };
 
         let mut index = 0 as Word;
+        let mut truncated = false;
         loop {
             let result = nanami_services::vfs::vfs_read_dir(
                 self.vfs_port,
@@ -161,7 +172,7 @@ impl FileShell {
                 DIR_ENTRIES_PER_READ,
                 IO_OFFSET as Word,
             );
-            let (entries, _) = match result {
+            let (entries, next_index) = match result {
                 Ok(v) => v,
                 Err(_) => {
                     out.push_bytes(b"ls: readdir failed");
@@ -171,18 +182,37 @@ impl FileShell {
             if entries == 0 {
                 break;
             }
+            let expected_bytes = entries * nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+            if entries > DIR_ENTRIES_PER_READ
+                || IO_OFFSET + expected_bytes > self.shm_size
+                || next_index < index.saturating_add(entries)
+            {
+                out.push_bytes(b"ls: invalid directory response");
+                break;
+            }
             let mut i = 0usize;
-            while i < entries as usize {
+            while i < entries && out.len() < MAX_OUTPUT_LINES.saturating_sub(1) {
                 out.push_line(format_dirent_name(
                     self.shm,
                     IO_OFFSET + i * nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES,
                 ));
                 i += 1;
             }
-            index += entries;
-            if out.len() >= MAX_OUTPUT_LINES || entries < DIR_ENTRIES_PER_READ {
+            if i < entries {
+                truncated = true;
                 break;
             }
+            index = next_index;
+            if entries < DIR_ENTRIES_PER_READ {
+                break;
+            }
+            if out.len() >= MAX_OUTPUT_LINES.saturating_sub(1) {
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
+            out.push_bytes(b"[output truncated]");
         }
         let _ = nanami_services::vfs::vfs_close(self.vfs_port, handle);
         out
@@ -201,7 +231,11 @@ impl FileShell {
             return out;
         };
         write_shm_bytes(self.shm, PATH_OFFSET, &path[..path_len]);
-        let handle = match nanami_services::vfs::vfs_open(self.vfs_port, PATH_OFFSET as Word, path_len as Word) {
+        let handle = match nanami_services::vfs::vfs_open(
+            self.vfs_port,
+            PATH_OFFSET as Word,
+            path_len as Word,
+        ) {
             Ok(handle) => handle,
             Err(e) => {
                 out.push_line(format_error_line(b"cat: open failed ", e));
@@ -224,6 +258,9 @@ impl FileShell {
 
         let mut file_offset = 0 as Word;
         let read_limit = size.min(CAT_MAX_BYTES);
+        let mut line = [0u8; COLS];
+        let mut line_len = 0usize;
+        let mut truncated = size > read_limit;
         while file_offset < read_limit && out.len() < MAX_OUTPUT_LINES {
             let limit = (read_limit - file_offset).min(CAT_CHUNK_BYTES);
             let bytes = match nanami_services::vfs::vfs_read(
@@ -242,11 +279,40 @@ impl FileShell {
             if bytes == 0 {
                 break;
             }
-            push_text_lines(&mut out, self.shm, IO_OFFSET, bytes as usize);
+            if bytes > limit || IO_OFFSET + bytes > self.shm_size {
+                out.push_bytes(b"cat: invalid read response");
+                truncated = true;
+                break;
+            }
+            let consumed = push_text_chunk(
+                &mut out,
+                self.shm,
+                IO_OFFSET,
+                bytes as usize,
+                &mut line,
+                &mut line_len,
+            );
+            if consumed != bytes as usize {
+                truncated = true;
+                break;
+            }
             file_offset += bytes;
             if bytes < limit {
                 break;
             }
+        }
+        if line_len != 0 {
+            if out.len() < MAX_OUTPUT_LINES.saturating_sub(usize::from(truncated)) {
+                out.push_line(line);
+            } else {
+                truncated = true;
+            }
+        }
+        if file_offset < read_limit {
+            truncated = true;
+        }
+        if truncated && out.len() < MAX_OUTPUT_LINES {
+            out.push_bytes(b"[output truncated]");
         }
         let _ = nanami_services::vfs::vfs_close(self.vfs_port, handle);
         out
@@ -265,7 +331,8 @@ impl FileShell {
             return out;
         };
         write_shm_bytes(self.shm, PATH_OFFSET, &path[..path_len]);
-        match nanami_services::vfs::vfs_remove(self.vfs_port, PATH_OFFSET as Word, path_len as Word) {
+        match nanami_services::vfs::vfs_remove(self.vfs_port, PATH_OFFSET as Word, path_len as Word)
+        {
             Ok(()) => out.push_bytes(b"rm: ok"),
             Err(e) => out.push_line(format_error_line(b"rm: failed ", e)),
         }
@@ -285,9 +352,10 @@ impl FileShell {
             return out;
         };
         write_shm_bytes(self.shm, PATH_OFFSET, &path[..path_len]);
-        match nanami_services::vfs::vfs_mkdir(self.vfs_port, PATH_OFFSET as Word, path_len as Word) {
+        match nanami_services::vfs::vfs_mkdir(self.vfs_port, PATH_OFFSET as Word, path_len as Word)
+        {
             Ok(_) => out.push_bytes(b"mkdir: ok"),
-            Err(_) => out.push_bytes(b"mkdir: failed"),
+            Err(e) => out.push_line(format_error_line(b"mkdir: failed ", e)),
         }
         out
     }
@@ -313,7 +381,11 @@ impl FileShell {
         out
     }
 
-    fn resolve_or_report(&self, arg: &[u8], out: &mut CommandOutput) -> Option<([u8; PATH_MAX], usize)> {
+    fn resolve_or_report(
+        &self,
+        arg: &[u8],
+        out: &mut CommandOutput,
+    ) -> Option<([u8; PATH_MAX], usize)> {
         match resolve_path(&self.cwd[..self.cwd_len], arg) {
             Some(v) => Some(v),
             None => {
@@ -416,35 +488,50 @@ fn normalize_path(raw: &[u8]) -> Option<([u8; PATH_MAX], usize)> {
     Some((out, out_len))
 }
 
-fn push_text_lines(out: &mut CommandOutput, base: Word, offset: usize, len: usize) {
-    let mut line = [0u8; COLS];
-    let mut pos = 0usize;
+fn push_text_chunk(
+    out: &mut CommandOutput,
+    base: Word,
+    offset: usize,
+    len: usize,
+    line: &mut [u8; COLS],
+    line_len: &mut usize,
+) -> usize {
     let mut i = 0usize;
-    while i < len && out.len() < MAX_OUTPUT_LINES {
+    while i < len {
         let byte = read_shm_byte(base, offset + i);
         if byte == b'\n' {
-            out.push_line(line);
-            line = [0u8; COLS];
-            pos = 0;
-        } else {
-            if pos >= COLS {
-                out.push_line(line);
-                line = [0u8; COLS];
-                pos = 0;
+            if out.len() + 1 >= MAX_OUTPUT_LINES {
+                break;
             }
-            line[pos] = printable(byte);
-            pos += 1;
+            out.push_line(*line);
+            *line = [0u8; COLS];
+            *line_len = 0;
+        } else {
+            if *line_len >= COLS {
+                if out.len() + 1 >= MAX_OUTPUT_LINES {
+                    break;
+                }
+                out.push_line(*line);
+                *line = [0u8; COLS];
+                *line_len = 0;
+            }
+            line[*line_len] = printable(byte);
+            *line_len += 1;
         }
         i += 1;
     }
-    if pos != 0 && out.len() < MAX_OUTPUT_LINES {
-        out.push_line(line);
-    }
+    i
 }
 
 fn format_dirent_name(base: Word, offset: usize) -> [u8; COLS] {
-    let inode = read_shm_word(base, offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET);
-    let kind = read_shm_word(base, offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET);
+    let inode = read_shm_word(
+        base,
+        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET,
+    );
+    let kind = read_shm_word(
+        base,
+        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET,
+    );
     let name_len = read_shm_word(
         base,
         offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET,
@@ -494,20 +581,16 @@ fn format_error_line(prefix: &[u8], error: RequestError) -> [u8; COLS] {
 }
 
 fn read_shm_word(base: Word, offset: usize) -> Word {
-    unsafe { core::ptr::read_unaligned((base as usize + offset) as *const Word) }
+    unsafe { core::ptr::read_unaligned((base + offset) as *const Word) }
 }
 
 fn read_shm_byte(base: Word, offset: usize) -> u8 {
-    unsafe { core::ptr::read_volatile((base as usize + offset) as *const u8) }
+    unsafe { core::ptr::read_volatile((base + offset) as *const u8) }
 }
 
 fn write_shm_bytes(base: Word, offset: usize, bytes: &[u8]) {
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            (base as usize + offset) as *mut u8,
-            bytes.len(),
-        );
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), (base + offset) as *mut u8, bytes.len());
     }
 }
 

@@ -53,8 +53,22 @@ pub(crate) fn release_session_fds(runtime: &mut Runtime, session_index: usize) {
     }
 }
 
+pub(crate) fn release_cloexec_session_fds(runtime: &mut Runtime, session_index: usize) {
+    let mut fd = 0usize;
+    while fd < MAX_FDS {
+        if runtime.sessions[session_index].fds[fd].active
+            && (runtime.sessions[session_index].fds[fd].flags & POSIX_FD_CLOEXEC) != 0
+        {
+            let open_index = runtime.sessions[session_index].fds[fd].open_file;
+            runtime.sessions[session_index].fds[fd] = FileDescriptor::EMPTY;
+            release_open_file(runtime, open_index);
+        }
+        fd += 1;
+    }
+}
+
 pub(crate) fn handle_close(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
@@ -68,14 +82,14 @@ pub(crate) fn handle_close(runtime: &mut Runtime, request: ServiceRequest) -> (W
 }
 
 pub(crate) fn handle_dup(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(runtime, index, request.arg0 as usize, None)
 }
 
 pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(
@@ -87,7 +101,7 @@ pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
 }
 
 pub(crate) fn handle_fcntl(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
@@ -95,7 +109,11 @@ pub(crate) fn handle_fcntl(runtime: &mut Runtime, request: ServiceRequest) -> (W
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     match request.arg1 {
-        POSIX_F_GETFD => (libnanami::OS_RESPONSE_OK, runtime.sessions[index].fds[fd].flags, 0),
+        POSIX_F_GETFD => (
+            libnanami::OS_RESPONSE_OK,
+            runtime.sessions[index].fds[fd].flags,
+            0,
+        ),
         POSIX_F_SETFD => {
             if (request.arg2 & !POSIX_FD_CLOEXEC) != 0 {
                 return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);

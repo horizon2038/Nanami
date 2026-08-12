@@ -1,8 +1,10 @@
 .PHONY: all apps cpp rust initramfs initramfs-rust-only initramfs-cpp-only clean
 
-APP_DIRS := $(sort $(wildcard apps/*))
-RUST_APP_DIRS := $(foreach d,$(APP_DIRS),$(if $(wildcard $(d)/Cargo.toml),$(d),))
-CPP_APP_DIRS := $(foreach d,$(APP_DIRS),$(if $(wildcard $(d)/Makefile),$(d),))
+CORE_SERVICE_DIRS := $(sort $(wildcard core-services/*) $(wildcard core-services/*/*))
+APP_DIRS := $(sort $(wildcard apps/*) $(wildcard apps/*/*))
+BUILD_DIRS := $(CORE_SERVICE_DIRS) $(APP_DIRS)
+RUST_APP_DIRS := $(foreach d,$(BUILD_DIRS),$(if $(wildcard $(d)/Cargo.toml),$(d),))
+CPP_APP_DIRS := $(foreach d,$(BUILD_DIRS),$(if $(wildcard $(d)/Makefile),$(d),))
 
 all: initramfs
 

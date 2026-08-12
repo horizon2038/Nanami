@@ -1,3 +1,4 @@
+use core::sync::atomic::{fence, Ordering};
 use libnanami::Word;
 
 use crate::constants::CURSOR_SIZE;
@@ -56,6 +57,7 @@ impl Rect {
 }
 
 pub struct Framebuffer {
+    display_port: Word,
     vaddr: Word,
     bytes: Word,
     screen: ScreenInfo,
@@ -63,14 +65,21 @@ pub struct Framebuffer {
 
 impl Framebuffer {
     pub fn new(
+        display_port: Word,
         vaddr: Word,
         bytes: Word,
         screen: ScreenInfo,
     ) -> Result<Self, libnanami::NanamiError> {
-        if vaddr == 0 || bytes == 0 || screen.bits_per_pixel != 32 || screen.stride_bytes == 0 {
+        if display_port == 0
+            || vaddr == 0
+            || bytes == 0
+            || screen.bits_per_pixel != 32
+            || screen.stride_bytes == 0
+        {
             return Err(libnanami::NanamiError::INVALID_ARGUMENT);
         }
         Ok(Self {
+            display_port,
             vaddr,
             bytes,
             screen,
@@ -87,6 +96,29 @@ impl Framebuffer {
 
     pub fn bytes(&self) -> Word {
         self.bytes
+    }
+
+    pub fn present(&self, rect: Rect) -> Result<(), libnanami::RequestError> {
+        if rect.is_empty() {
+            return Ok(());
+        }
+        let x = clamp_i32(rect.x, 0, self.screen.width as i32) as Word;
+        let y = clamp_i32(rect.y, 0, self.screen.height as i32) as Word;
+        let x1 = clamp_i32(
+            rect.x.saturating_add(rect.width),
+            0,
+            self.screen.width as i32,
+        ) as Word;
+        let y1 = clamp_i32(
+            rect.y.saturating_add(rect.height),
+            0,
+            self.screen.height as i32,
+        ) as Word;
+        if x1 <= x || y1 <= y {
+            return Ok(());
+        }
+        fence(Ordering::Release);
+        nanami_services::gfx::display_service_present(self.display_port, x, y, x1 - x, y1 - y)
     }
 
     pub fn color(&self, r8: u8, g8: u8, b8: u8) -> u32 {
@@ -137,7 +169,32 @@ impl Framebuffer {
         self.fill_rect(rect.x, rect.y, rect.width, rect.height, color);
     }
 
-    pub fn blit_bgra32_from(
+    pub fn fill_rect_alpha(&self, x: i32, y: i32, width: i32, height: i32, color: u32, alpha: u8) {
+        if alpha == u8::MAX {
+            self.fill_rect(x, y, width, height, color);
+            return;
+        }
+        if alpha == 0 || width <= 0 || height <= 0 {
+            return;
+        }
+
+        let x0 = clamp_i32(x, 0, self.screen.width as i32);
+        let y0 = clamp_i32(y, 0, self.screen.height as i32);
+        let x1 = clamp_i32(x.saturating_add(width), 0, self.screen.width as i32);
+        let y1 = clamp_i32(y.saturating_add(height), 0, self.screen.height as i32);
+        let mut py = y0;
+        while py < y1 {
+            let mut px = x0;
+            while px < x1 {
+                self.blend_pixel(px, py, color, alpha);
+                px += 1;
+            }
+            py += 1;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_bgra32_from_alpha(
         &self,
         dst_x: i32,
         dst_y: i32,
@@ -148,8 +205,12 @@ impl Framebuffer {
         src_stride_pixels: usize,
         src_x: usize,
         src_y: usize,
+        alpha: u8,
     ) {
         if width <= 0 || height <= 0 || src_vaddr == 0 || src_bytes == 0 || src_stride_pixels == 0 {
+            return;
+        }
+        if alpha == 0 {
             return;
         }
 
@@ -196,10 +257,16 @@ impl Framebuffer {
                     let pixel = core::ptr::read_volatile(
                         src_base.saturating_add(x.saturating_mul(4)) as *const u32,
                     );
-                    core::ptr::write_volatile(
-                        dst_base.saturating_add(x.saturating_mul(4)) as *mut u32,
-                        pixel,
-                    );
+                    let dst_ptr = dst_base.saturating_add(x.saturating_mul(4)) as *mut u32;
+                    if alpha == u8::MAX {
+                        core::ptr::write_volatile(dst_ptr, pixel);
+                    } else {
+                        let background = core::ptr::read_volatile(dst_ptr);
+                        core::ptr::write_volatile(
+                            dst_ptr,
+                            self.blend_color(background, pixel, alpha),
+                        );
+                    }
                 }
                 x += 1;
             }
@@ -250,6 +317,94 @@ impl Framebuffer {
             core::ptr::write_volatile(ptr, color);
         }
     }
+
+    pub fn blend_pixel(&self, x: i32, y: i32, color: u32, alpha: u8) {
+        if alpha == u8::MAX {
+            self.put_pixel(x, y, color);
+            return;
+        }
+        if alpha == 0 {
+            return;
+        }
+        let Some(ptr) = self.pixel_ptr(x, y) else {
+            return;
+        };
+        unsafe {
+            let background = core::ptr::read_volatile(ptr);
+            core::ptr::write_volatile(ptr, self.blend_color(background, color, alpha));
+        }
+    }
+
+    fn pixel_ptr(&self, x: i32, y: i32) -> Option<*mut u32> {
+        if x < 0 || y < 0 {
+            return None;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        if x >= self.screen.width || y >= self.screen.height {
+            return None;
+        }
+        let offset = y
+            .saturating_mul(self.screen.stride_bytes)
+            .saturating_add(x.saturating_mul(4));
+        if offset.saturating_add(4) > self.bytes as usize {
+            return None;
+        }
+        Some((self.vaddr as usize).saturating_add(offset) as *mut u32)
+    }
+
+    fn blend_color(&self, background: u32, foreground: u32, alpha: u8) -> u32 {
+        let red_mask = channel_mask(self.screen.red_size, self.screen.red_position);
+        let green_mask = channel_mask(self.screen.green_size, self.screen.green_position);
+        let blue_mask = channel_mask(self.screen.blue_size, self.screen.blue_position);
+        let rgb_mask = red_mask | green_mask | blue_mask;
+        (background & !rgb_mask)
+            | blend_channel(
+                background,
+                foreground,
+                red_mask,
+                self.screen.red_position,
+                alpha,
+            )
+            | blend_channel(
+                background,
+                foreground,
+                green_mask,
+                self.screen.green_position,
+                alpha,
+            )
+            | blend_channel(
+                background,
+                foreground,
+                blue_mask,
+                self.screen.blue_position,
+                alpha,
+            )
+    }
+}
+
+fn channel_mask(size: usize, position: usize) -> u32 {
+    if size == 0 || position >= u32::BITS as usize {
+        return 0;
+    }
+    let size = size.min(u32::BITS as usize - position);
+    let bits = if size == u32::BITS as usize {
+        u32::MAX
+    } else {
+        (1u32 << size) - 1
+    };
+    bits << position
+}
+
+fn blend_channel(background: u32, foreground: u32, mask: u32, position: usize, alpha: u8) -> u32 {
+    if mask == 0 {
+        return 0;
+    }
+    let background = ((background & mask) >> position) as u64;
+    let foreground = ((foreground & mask) >> position) as u64;
+    let alpha = alpha as u64;
+    let value = (foreground * alpha + background * (255 - alpha) + 127) / 255;
+    ((value as u32) << position) & mask
 }
 
 pub fn parse_screen_info(detail0: Word, detail1: Word) -> ScreenInfo {

@@ -14,7 +14,7 @@ pub(crate) fn init_default_environment(session: &mut Session) {
 }
 
 pub(crate) fn handle_getenv(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
@@ -29,14 +29,19 @@ pub(crate) fn handle_getenv(runtime: &mut Runtime, request: ServiceRequest) -> (
     if env.value_len > request.arg3 as usize {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    if !write_client_bytes(runtime, index, request.arg2 as usize, &env.value[..env.value_len]) {
+    if !write_client_bytes(
+        runtime,
+        index,
+        request.arg2 as usize,
+        &env.value[..env.value_len],
+    ) {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     (libnanami::OS_RESPONSE_OK, env.value_len as Word, 0)
 }
 
 pub(crate) fn handle_setenv(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
@@ -59,8 +64,11 @@ pub(crate) fn handle_setenv(runtime: &mut Runtime, request: ServiceRequest) -> (
     }
 }
 
-pub(crate) fn handle_unsetenv(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+pub(crate) fn handle_unsetenv(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+) -> (Word, Word, Word) {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
@@ -74,8 +82,11 @@ pub(crate) fn handle_unsetenv(runtime: &mut Runtime, request: ServiceRequest) ->
     (libnanami::OS_RESPONSE_OK, 0, 0)
 }
 
-pub(crate) fn handle_env_count(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+pub(crate) fn handle_env_count(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+) -> (Word, Word, Word) {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let mut count = 0usize;
@@ -88,7 +99,7 @@ pub(crate) fn handle_env_count(runtime: &mut Runtime, request: ServiceRequest) -
 }
 
 pub(crate) fn handle_env_at(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::find_session(runtime, request.identifier) else {
+    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let target = request.arg0 as usize;

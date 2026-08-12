@@ -32,6 +32,7 @@ use arp::emit_arp_request;
 use dhcp::dhcp_bootstrap;
 use dns::handle_dns_query_request;
 use ethernet::process_ethernet_frame;
+use icmp::{emit_icmp_echo_from_session, handle_icmp_recv_request};
 use tcp::emit_tcp_segment;
 use udp::{emit_udp_from_session, handle_udp_recv_request};
 use util::{log_request_error, map_request_error_to_status};
@@ -46,8 +47,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_NET_DEVICE_PORT: Word = 23;
 const SLOT_TIMER_SERVICE_PORT: Word = 22;
+const SLOT_CLIENT_RX_NOTIFICATION_BASE: Word = 32;
 const BACKOFF_MS: Word = 100;
 const TIMER_CONNECT_RETRIES: usize = 128;
+const RX_MAINTENANCE_INTERVAL_MS: Word = 10;
 
 const BACKEND_SHM_BYTES: Word = 0x20000;
 const BACKEND_RX_OFFSET: Word = 0x0000;
@@ -65,9 +68,13 @@ const TCP_RX_META_LEN: usize = 12;
 const TCP_MAX_CONNECTIONS: usize = 128;
 const TCP_RX_QUEUE_CAP: usize = 32;
 const UDP_RX_QUEUE_CAP: usize = 8;
+const ICMP_PAYLOAD_MAX: usize = 1480;
+const ICMP_RX_META_LEN: usize = 8;
+const ICMP_RX_QUEUE_CAP: usize = 8;
+const CLIENT_SESSION_MAX: usize = 4;
+const CLIENT_BIND_MAX: usize = 16;
 const RAW_RX_MAX_BYTES: usize = 1536;
 const RAW_RX_QUEUE_CAP: usize = 4;
-const TCP_LISTEN_PORT: u16 = 80;
 const TCP_STATE_CLOSED: u8 = 0;
 const TCP_STATE_SYN_RECEIVED: u8 = 1;
 const TCP_STATE_ESTABLISHED: u8 = 2;
@@ -75,6 +82,7 @@ const TCP_STATE_FIN_WAIT1: u8 = 3;
 const TCP_STATE_FIN_WAIT2: u8 = 4;
 const TCP_STATE_CLOSE_WAIT: u8 = 5;
 const TCP_STATE_LAST_ACK: u8 = 6;
+const TCP_STATE_SYN_SENT: u8 = 7;
 const TCP_FLAG_FIN: u8 = 0x01;
 const TCP_FLAG_SYN: u8 = 0x02;
 const TCP_FLAG_RST: u8 = 0x04;
@@ -115,7 +123,10 @@ impl NetStats {
 #[derive(Clone, Copy)]
 struct TcpConnection {
     active: bool,
+    owner_id: Word,
     connection_id: Word,
+    accepted: bool,
+    eof_pending: bool,
     state: u8,
     peer_ip: [u8; 4],
     peer_port: u16,
@@ -129,7 +140,10 @@ struct TcpConnection {
 impl TcpConnection {
     const EMPTY: Self = Self {
         active: false,
+        owner_id: 0,
         connection_id: 0,
+        accepted: false,
+        eof_pending: false,
         state: TCP_STATE_CLOSED,
         peer_ip: [0; 4],
         peer_port: 0,
@@ -147,8 +161,11 @@ struct ClientSession {
     caller_id: Word,
     shm_local: Word,
     shm_size: Word,
-    udp_port: u16,
-    tcp_port: u16,
+    udp_ports: [u16; CLIENT_BIND_MAX],
+    tcp_ports: [u16; CLIENT_BIND_MAX],
+    icmp_identifiers: [u16; CLIENT_BIND_MAX],
+    raw_rx_enabled: bool,
+    rx_notification: Word,
 }
 
 impl ClientSession {
@@ -157,9 +174,103 @@ impl ClientSession {
         caller_id: 0,
         shm_local: 0,
         shm_size: 0,
-        udp_port: 0,
-        tcp_port: 0,
+        udp_ports: [0; CLIENT_BIND_MAX],
+        tcp_ports: [0; CLIENT_BIND_MAX],
+        icmp_identifiers: [0; CLIENT_BIND_MAX],
+        raw_rx_enabled: false,
+        rx_notification: 0,
     };
+}
+
+#[derive(Clone, Copy)]
+struct IcmpRxEntry {
+    used: bool,
+    owner_id: Word,
+    identifier: u16,
+    src_ip: [u8; 4],
+    ttl: u8,
+    len: usize,
+    payload: [u8; ICMP_PAYLOAD_MAX],
+}
+
+impl IcmpRxEntry {
+    const EMPTY: Self = Self {
+        used: false,
+        owner_id: 0,
+        identifier: 0,
+        src_ip: [0; 4],
+        ttl: 0,
+        len: 0,
+        payload: [0; ICMP_PAYLOAD_MAX],
+    };
+}
+
+#[derive(Clone, Copy)]
+struct IcmpRxQueue {
+    entries: [IcmpRxEntry; ICMP_RX_QUEUE_CAP],
+    head: usize,
+    tail: usize,
+    count: usize,
+}
+
+impl IcmpRxQueue {
+    const fn new() -> Self {
+        Self {
+            entries: [IcmpRxEntry::EMPTY; ICMP_RX_QUEUE_CAP],
+            head: 0,
+            tail: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, mut entry: IcmpRxEntry) {
+        if self.count == self.entries.len() {
+            self.entries[self.head] = IcmpRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+        }
+        entry.used = true;
+        self.entries[self.tail] = entry;
+        self.tail = (self.tail + 1) % self.entries.len();
+        self.count += 1;
+    }
+
+    fn pop_for(&mut self, owner_id: Word, identifier: u16) -> Option<IcmpRxEntry> {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = IcmpRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+            if entry.used
+                && entry.owner_id == owner_id
+                && (identifier == 0 || entry.identifier == identifier)
+            {
+                return Some(entry);
+            }
+            if entry.used {
+                self.push(entry);
+            }
+            checked += 1;
+        }
+        None
+    }
+
+    fn remove_owner(&mut self, owner_id: Word) {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = IcmpRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+            if entry.used && entry.owner_id != owner_id {
+                self.push(entry);
+            }
+            checked += 1;
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -218,24 +329,44 @@ impl UdpRxQueue {
     }
 
     fn pop_for(&mut self, pid: Word, port: u16) -> Option<UdpRxEntry> {
-        while self.count > 0 {
-            let idx = self.head;
-            let e = self.entries[idx];
-            self.entries[idx] = UdpRxEntry::EMPTY;
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = UdpRxEntry::EMPTY;
             self.head = (self.head + 1) % self.entries.len();
             self.count -= 1;
-            if e.used && e.pid == pid && e.dst_port == port {
-                return Some(e);
+            if entry.used && entry.pid == pid && entry.dst_port == port {
+                return Some(entry);
             }
+            if entry.used {
+                self.push(entry);
+            }
+            checked += 1;
         }
-        self.tail = self.head;
         None
+    }
+
+    fn remove_owner(&mut self, pid: Word) {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = UdpRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+            if entry.used && entry.pid != pid {
+                self.push(entry);
+            }
+            checked += 1;
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct TcpRxEntry {
     used: bool,
+    owner_id: Word,
     connection_id: Word,
     src_ip: [u8; 4],
     src_port: u16,
@@ -246,6 +377,7 @@ struct TcpRxEntry {
 impl TcpRxEntry {
     const EMPTY: Self = Self {
         used: false,
+        owner_id: 0,
         connection_id: 0,
         src_ip: [0; 4],
         src_port: 0,
@@ -283,24 +415,53 @@ impl TcpRxQueue {
         true
     }
 
-    fn pop(&mut self) -> Option<TcpRxEntry> {
+    fn pop_for(&mut self, owner_id: Word, connection_id: Word) -> Option<TcpRxEntry> {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let e = self.pop_front()?;
+            if e.owner_id == owner_id && (connection_id == 0 || e.connection_id == connection_id) {
+                return Some(e);
+            }
+            let _ = self.push(e);
+            checked += 1;
+        }
+        None
+    }
+
+    fn pop_front(&mut self) -> Option<TcpRxEntry> {
         if self.count == 0 {
             return None;
         }
-        let e = self.entries[self.head];
-        if !e.used {
-            return None;
-        }
+        let entry = self.entries[self.head];
         self.entries[self.head] = TcpRxEntry::EMPTY;
         self.head = (self.head + 1) % self.entries.len();
         self.count -= 1;
-        Some(e)
+        if entry.used {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    fn remove_owner(&mut self, owner_id: Word) {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            if let Some(entry) = self.pop_front() {
+                if entry.owner_id != owner_id {
+                    let _ = self.push(entry);
+                }
+            }
+            checked += 1;
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 struct RawRxEntry {
     used: bool,
+    owner_id: Word,
     len: usize,
     payload: [u8; RAW_RX_MAX_BYTES],
 }
@@ -308,6 +469,7 @@ struct RawRxEntry {
 impl RawRxEntry {
     const EMPTY: Self = Self {
         used: false,
+        owner_id: 0,
         len: 0,
         payload: [0; RAW_RX_MAX_BYTES],
     };
@@ -331,7 +493,7 @@ impl RawRxQueue {
         }
     }
 
-    fn push(&mut self, frame: &[u8]) {
+    fn push(&mut self, owner_id: Word, frame: &[u8]) {
         if self.count == self.entries.len() {
             self.entries[self.head] = RawRxEntry::EMPTY;
             self.head = (self.head + 1) % self.entries.len();
@@ -340,6 +502,7 @@ impl RawRxQueue {
 
         let mut entry = RawRxEntry::EMPTY;
         entry.used = true;
+        entry.owner_id = owner_id;
         entry.len = min(frame.len(), RAW_RX_MAX_BYTES);
         if entry.len > 0 {
             unsafe {
@@ -351,18 +514,38 @@ impl RawRxQueue {
         self.count += 1;
     }
 
-    fn pop(&mut self) -> Option<RawRxEntry> {
-        if self.count == 0 {
-            return None;
+    fn pop_for(&mut self, owner_id: Word) -> Option<RawRxEntry> {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = RawRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+            if entry.used && entry.owner_id == owner_id {
+                return Some(entry);
+            }
+            if entry.used {
+                self.push(entry.owner_id, &entry.payload[..entry.len]);
+            }
+            checked += 1;
         }
-        let e = self.entries[self.head];
-        if !e.used {
-            return None;
+        None
+    }
+
+    fn remove_owner(&mut self, owner_id: Word) {
+        let pending = self.count;
+        let mut checked = 0usize;
+        while checked < pending {
+            let entry = self.entries[self.head];
+            self.entries[self.head] = RawRxEntry::EMPTY;
+            self.head = (self.head + 1) % self.entries.len();
+            self.count -= 1;
+            if entry.used && entry.owner_id != owner_id {
+                self.push(entry.owner_id, &entry.payload[..entry.len]);
+            }
+            checked += 1;
         }
-        self.entries[self.head] = RawRxEntry::EMPTY;
-        self.head = (self.head + 1) % self.entries.len();
-        self.count -= 1;
-        Some(e)
     }
 }
 
@@ -392,11 +575,11 @@ struct NetRuntime {
     arp: ArpCache,
     tcp_connections: [TcpConnection; TCP_MAX_CONNECTIONS],
     next_tcp_connection_id: Word,
-    session: ClientSession,
+    sessions: [ClientSession; CLIENT_SESSION_MAX],
     udp_rx: UdpRxQueue,
+    icmp_rx: IcmpRxQueue,
     tcp_rx: TcpRxQueue,
     raw_rx: RawRxQueue,
-    raw_rx_enabled: bool,
     dhcp_waiting: bool,
     dhcp_xid: u32,
     dhcp_offer_valid: bool,
@@ -410,6 +593,89 @@ struct NetRuntime {
     dns_src_port: u16,
     dns_answer_valid: bool,
     dns_answer_ip: [u8; 4],
+}
+
+fn session_index(runtime: &NetRuntime, caller_id: Word) -> Option<usize> {
+    runtime
+        .sessions
+        .iter()
+        .position(|session| session.active && session.caller_id == caller_id)
+}
+
+fn session_for(runtime: &NetRuntime, caller_id: Word) -> Option<ClientSession> {
+    session_index(runtime, caller_id).map(|index| runtime.sessions[index])
+}
+
+fn session_for_udp_port(runtime: &NetRuntime, port: u16) -> Option<ClientSession> {
+    runtime
+        .sessions
+        .iter()
+        .copied()
+        .find(|session| session.active && session.udp_ports.contains(&port))
+}
+
+fn session_for_tcp_port(runtime: &NetRuntime, port: u16) -> Option<ClientSession> {
+    runtime
+        .sessions
+        .iter()
+        .copied()
+        .find(|session| session.active && session.tcp_ports.contains(&port))
+}
+
+fn cleanup_client_session(runtime: &mut NetRuntime, index: usize) {
+    let session = runtime.sessions[index];
+    if !session.active {
+        return;
+    }
+
+    runtime.udp_rx.remove_owner(session.caller_id);
+    runtime.icmp_rx.remove_owner(session.caller_id);
+    runtime.tcp_rx.remove_owner(session.caller_id);
+    runtime.raw_rx.remove_owner(session.caller_id);
+    for connection in runtime.tcp_connections.iter_mut() {
+        if connection.active && connection.owner_id == session.caller_id {
+            *connection = TcpConnection::EMPTY;
+        }
+    }
+    if session.shm_local != 0 && session.shm_size != 0 {
+        let _ = libnanami::request_mapping_release(session.shm_local, session.shm_size);
+    }
+    runtime.sessions[index] = ClientSession::EMPTY;
+}
+
+fn cleanup_stale_client_sessions(runtime: &mut NetRuntime) {
+    let mut index = 0usize;
+    while index < runtime.sessions.len() {
+        let session = runtime.sessions[index];
+        if session.active
+            && matches!(
+                libnanami::request_process_alive(session.caller_id),
+                Ok(false)
+            )
+        {
+            cleanup_client_session(runtime, index);
+        }
+        index += 1;
+    }
+}
+
+fn bind_port(ports: &mut [u16; CLIENT_BIND_MAX], port: u16) -> bool {
+    if ports.contains(&port) {
+        return true;
+    }
+    let Some(slot) = ports.iter_mut().find(|bound| **bound == 0) else {
+        return false;
+    };
+    *slot = port;
+    true
+}
+
+fn unbind_port(ports: &mut [u16; CLIENT_BIND_MAX], port: u16) -> bool {
+    let Some(slot) = ports.iter_mut().find(|bound| **bound == port) else {
+        return false;
+    };
+    *slot = 0;
+    true
 }
 
 fn unpack_mac(detail0: Word) -> [u8; 6] {
@@ -448,6 +714,14 @@ fn emit_frame(runtime: &NetRuntime, frame_len: usize) -> Result<Word, RequestErr
     )
 }
 
+fn next_hop_ip(runtime: &NetRuntime, destination: [u8; 4]) -> [u8; 4] {
+    if destination[0..3] == runtime.ip[0..3] {
+        destination
+    } else {
+        runtime.gateway_ip
+    }
+}
+
 fn pump_backend(runtime: &mut NetRuntime, stats: &mut NetStats) -> Word {
     pump_backend_with_budget(runtime, stats, BACKEND_PUMP_DEFAULT_BURST)
 }
@@ -476,8 +750,11 @@ fn pump_backend_with_budget(
                 get_backend_shm_ptr(runtime, BACKEND_RX_OFFSET) as *const u8,
                 received,
             );
-            if runtime.raw_rx_enabled {
-                runtime.raw_rx.push(frame);
+            let sessions = runtime.sessions;
+            for session in sessions {
+                if session.active && session.raw_rx_enabled {
+                    runtime.raw_rx.push(session.caller_id, frame);
+                }
             }
             process_ethernet_frame(runtime, stats, frame);
         }
@@ -487,18 +764,43 @@ fn pump_backend_with_budget(
         processed += 1;
     }
 
+    if processed != 0 {
+        notify_client_sessions(runtime);
+    }
     processed as Word
+}
+
+fn notify_client_sessions(runtime: &NetRuntime) {
+    for session in runtime.sessions {
+        if session.active && session.rx_notification != 0 {
+            let _ = libnanami::ipc::notification_notify(session.rx_notification);
+        }
+    }
 }
 
 fn handle_tcp_recv_request(
     runtime: &mut NetRuntime,
     request: libnanami::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
-    if !runtime.session.active || runtime.session.caller_id != request.identifier {
+    let Some(session) = session_for(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    }
+    };
 
-    let Some(entry) = runtime.tcp_rx.pop() else {
+    let entry = runtime.tcp_rx.pop_for(request.identifier, request.arg3);
+    let Some(entry) = entry else {
+        let mut index = 0usize;
+        while index < runtime.tcp_connections.len() {
+            let conn = runtime.tcp_connections[index];
+            if conn.active
+                && conn.owner_id == request.identifier
+                && conn.eof_pending
+                && (request.arg3 == 0 || conn.connection_id == request.arg3)
+            {
+                runtime.tcp_connections[index].eof_pending = false;
+                return (libnanami::OS_RESPONSE_OK, 0, conn.connection_id);
+            }
+            index += 1;
+        }
         return (libnanami::OS_RESPONSE_OK, 0, 0);
     };
 
@@ -506,15 +808,15 @@ fn handle_tcp_recv_request(
     let payload_offset = request.arg1;
     let max_len = request.arg2 as usize;
     let copy_len = min(entry.len, max_len);
-    if meta_offset + TCP_RX_META_LEN as Word > runtime.session.shm_size
-        || payload_offset + copy_len as Word > runtime.session.shm_size
+    if meta_offset + TCP_RX_META_LEN as Word > session.shm_size
+        || payload_offset + copy_len as Word > session.shm_size
     {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
-        let meta = (runtime.session.shm_local + meta_offset) as *mut u8;
-        let payload = (runtime.session.shm_local + payload_offset) as *mut u8;
+        let meta = (session.shm_local + meta_offset) as *mut u8;
+        let payload = (session.shm_local + payload_offset) as *mut u8;
 
         write_u32_be(
             core::slice::from_raw_parts_mut(meta, 4),
@@ -545,11 +847,17 @@ fn handle_tcp_recv_request(
     )
 }
 
-fn active_tcp_connection_index(runtime: &NetRuntime, connection_id: Word) -> Option<usize> {
+fn active_tcp_connection_index(
+    runtime: &NetRuntime,
+    owner_id: Word,
+    connection_id: Word,
+) -> Option<usize> {
     if connection_id == 0 {
         let mut index = 0usize;
         while index < runtime.tcp_connections.len() {
-            if runtime.tcp_connections[index].active {
+            if runtime.tcp_connections[index].active
+                && runtime.tcp_connections[index].owner_id == owner_id
+            {
                 return Some(index);
             }
             index += 1;
@@ -559,6 +867,7 @@ fn active_tcp_connection_index(runtime: &NetRuntime, connection_id: Word) -> Opt
     let index = (connection_id - 1) as usize;
     if index < runtime.tcp_connections.len()
         && runtime.tcp_connections[index].active
+        && runtime.tcp_connections[index].owner_id == owner_id
         && runtime.tcp_connections[index].connection_id == connection_id
     {
         return Some(index);
@@ -566,7 +875,7 @@ fn active_tcp_connection_index(runtime: &NetRuntime, connection_id: Word) -> Opt
     let mut index = 0usize;
     while index < runtime.tcp_connections.len() {
         let conn = runtime.tcp_connections[index];
-        if conn.active && conn.connection_id == connection_id {
+        if conn.active && conn.owner_id == owner_id && conn.connection_id == connection_id {
             return Some(index);
         }
         index += 1;
@@ -579,25 +888,28 @@ fn handle_tcp_send_request(
     request: libnanami::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
-    if !runtime.session.active || runtime.session.caller_id != request.identifier {
+    let Some(session) = session_for(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    }
-    let Some(connection_index) = active_tcp_connection_index(runtime, request.arg3) else {
+    };
+    let Some(connection_index) =
+        active_tcp_connection_index(runtime, request.identifier, request.arg3)
+    else {
         return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
 
     let payload_offset = request.arg0;
     let payload_len = request.arg1 as usize;
     let flags = (request.arg2 & 0xff) as u8;
-    if payload_offset + payload_len as Word > runtime.session.shm_size {
+    if payload_offset + payload_len as Word > session.shm_size {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let peer_ip = runtime.tcp_connections[connection_index].peer_ip;
-    let dst_mac = if let Some(mac) = arp_lookup(runtime, peer_ip) {
+    let next_hop = next_hop_ip(runtime, peer_ip);
+    let dst_mac = if let Some(mac) = arp_lookup(runtime, next_hop) {
         mac
     } else {
-        let _ = emit_arp_request(runtime, peer_ip);
+        let _ = emit_arp_request(runtime, next_hop);
         return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
 
@@ -644,7 +956,7 @@ fn handle_tcp_send_request(
         let conn = runtime.tcp_connections[connection_index];
 
         let send_result = unsafe {
-            let src = (runtime.session.shm_local + current_offset) as *const u8;
+            let src = (session.shm_local + current_offset) as *const u8;
             let payload = core::slice::from_raw_parts(src, chunk);
             emit_tcp_segment(
                 runtime,
@@ -688,6 +1000,141 @@ fn handle_tcp_send_request(
     (libnanami::OS_RESPONSE_OK, total_payload_sent as Word, 0)
 }
 
+fn handle_tcp_accept_request(
+    runtime: &mut NetRuntime,
+    request: libnanami::ipc::ServiceRequest,
+) -> (Word, Word, Word) {
+    let Some(session) = session_for(runtime, request.identifier) else {
+        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+    };
+    if request.arg0 + TCP_RX_META_LEN as Word > session.shm_size {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+
+    let mut index = 0usize;
+    while index < runtime.tcp_connections.len() {
+        let conn = runtime.tcp_connections[index];
+        if conn.active
+            && conn.owner_id == request.identifier
+            && !conn.accepted
+            && (request.arg1 == 0 || conn.local_port == request.arg1 as u16)
+            && (conn.state == TCP_STATE_ESTABLISHED || conn.state == TCP_STATE_CLOSE_WAIT)
+        {
+            runtime.tcp_connections[index].accepted = true;
+            unsafe {
+                let meta = (session.shm_local + request.arg0) as *mut u8;
+                write_u32_be(
+                    core::slice::from_raw_parts_mut(meta, 4),
+                    pack_ipv4(conn.peer_ip),
+                );
+                write_u16_be(
+                    core::slice::from_raw_parts_mut(meta.add(4), 2),
+                    conn.peer_port,
+                );
+                write_u16_be(
+                    core::slice::from_raw_parts_mut(meta.add(6), 2),
+                    conn.local_port,
+                );
+                write_u32_be(
+                    core::slice::from_raw_parts_mut(meta.add(8), 4),
+                    conn.connection_id as u32,
+                );
+            }
+            return (
+                libnanami::OS_RESPONSE_OK,
+                conn.connection_id,
+                pack_ipv4(conn.peer_ip) as Word,
+            );
+        }
+        index += 1;
+    }
+    (libnanami::OS_RESPONSE_OK, 0, 0)
+}
+
+fn handle_tcp_connect_request(
+    runtime: &mut NetRuntime,
+    request: libnanami::ipc::ServiceRequest,
+    stats: &mut NetStats,
+) -> (Word, Word, Word) {
+    if session_for(runtime, request.identifier).is_none() {
+        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+    }
+    let peer_ip = [
+        ((request.arg0 >> 24) & 0xff) as u8,
+        ((request.arg0 >> 16) & 0xff) as u8,
+        ((request.arg0 >> 8) & 0xff) as u8,
+        (request.arg0 & 0xff) as u8,
+    ];
+    let local_port = ((request.arg1 >> 16) & 0xffff) as u16;
+    let peer_port = (request.arg1 & 0xffff) as u16;
+    if local_port == 0 || peer_port == 0 || peer_ip == [0; 4] {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+
+    for conn in runtime.tcp_connections {
+        if conn.active
+            && conn.owner_id == request.identifier
+            && conn.local_port == local_port
+            && conn.peer_port == peer_port
+            && conn.peer_ip == peer_ip
+        {
+            let id = if conn.state == TCP_STATE_ESTABLISHED {
+                conn.connection_id
+            } else {
+                0
+            };
+            return (libnanami::OS_RESPONSE_OK, id, 0);
+        }
+    }
+
+    let next_hop = next_hop_ip(runtime, peer_ip);
+    let Some(dst_mac) = arp_lookup(runtime, next_hop) else {
+        let _ = emit_arp_request(runtime, next_hop);
+        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    };
+    let Some(index) = tcp::allocate_tcp_connection(runtime) else {
+        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    };
+    let connection_id = runtime.next_tcp_connection_id;
+    runtime.next_tcp_connection_id = runtime.next_tcp_connection_id.wrapping_add(1).max(1);
+    let iss = 0x414c_5445u32.wrapping_add((index as u32) << 12);
+    runtime.tcp_connections[index] = TcpConnection {
+        active: true,
+        owner_id: request.identifier,
+        connection_id,
+        accepted: true,
+        eof_pending: false,
+        state: TCP_STATE_SYN_SENT,
+        peer_ip,
+        peer_port,
+        local_port,
+        snd_iss: iss,
+        snd_nxt: iss.wrapping_add(1),
+        snd_una: iss,
+        rcv_nxt: 0,
+    };
+    match emit_tcp_segment(
+        runtime,
+        dst_mac,
+        peer_ip,
+        local_port,
+        peer_port,
+        iss,
+        0,
+        TCP_FLAG_SYN,
+        &[],
+    ) {
+        Ok(_) => {
+            stats.tcp_tx = stats.tcp_tx.wrapping_add(1);
+            (libnanami::OS_RESPONSE_OK, 0, 0)
+        }
+        Err(error) => {
+            runtime.tcp_connections[index] = TcpConnection::EMPTY;
+            (map_request_error_to_status(error), 0, 0)
+        }
+    }
+}
+
 fn handle_network_request(
     runtime: &mut NetRuntime,
     request: libnanami::ipc::ServiceRequest,
@@ -696,15 +1143,15 @@ fn handle_network_request(
     match request.code {
         nanami_services::net::NET_SERVICE_REQUEST_SEND => {
             // Raw L2 frame send: arg0=client shm offset, arg1=len
-            if !runtime.session.active || runtime.session.caller_id != request.identifier {
+            let Some(session) = session_for(runtime, request.identifier) else {
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-            }
+            };
             let n = request.arg1 as usize;
-            if n == 0 || request.arg0 + request.arg1 > runtime.session.shm_size {
+            if n == 0 || request.arg0 + request.arg1 > session.shm_size {
                 return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             unsafe {
-                let src = (runtime.session.shm_local + request.arg0) as *const u8;
+                let src = (session.shm_local + request.arg0) as *const u8;
                 let dst = get_backend_shm_ptr(runtime, BACKEND_TX_OFFSET);
                 ptr::copy_nonoverlapping(src, dst, n);
             }
@@ -719,21 +1166,22 @@ fn handle_network_request(
         }
         nanami_services::net::NET_SERVICE_REQUEST_RECV => {
             // Raw L2 recv: arg0=client shm offset, arg1=max len
-            if !runtime.session.active || runtime.session.caller_id != request.identifier {
+            let Some(index) = session_index(runtime, request.identifier) else {
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-            }
-            runtime.raw_rx_enabled = true;
+            };
+            runtime.sessions[index].raw_rx_enabled = true;
+            let session = runtime.sessions[index];
             let _ = pump_backend(runtime, stats);
-            let Some(entry) = runtime.raw_rx.pop() else {
+            let Some(entry) = runtime.raw_rx.pop_for(request.identifier) else {
                 return (libnanami::OS_RESPONSE_OK, 0, 0);
             };
             let n = min(entry.len, request.arg1 as usize);
-            if request.arg0 + n as Word > runtime.session.shm_size {
+            if request.arg0 + n as Word > session.shm_size {
                 return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             if n > 0 {
                 unsafe {
-                    let dst = (runtime.session.shm_local + request.arg0) as *mut u8;
+                    let dst = (session.shm_local + request.arg0) as *mut u8;
                     ptr::copy_nonoverlapping(entry.payload.as_ptr(), dst, n);
                 }
             }
@@ -784,6 +1232,7 @@ fn handle_network_request(
                 (libnanami::OS_RESPONSE_OK, pack_mac(runtime.mac), 0)
             }
             nanami_services::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY => {
+                cleanup_stale_client_sessions(runtime);
                 let peer_pid = request.arg1;
                 if peer_pid == 0 {
                     return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
@@ -795,17 +1244,23 @@ fn handle_network_request(
                 };
                 match libnanami::request_shared_memory(peer_pid, size) {
                     Ok((local, peer)) => {
-                        runtime.session = ClientSession {
+                        let index = session_index(runtime, request.identifier).or_else(|| {
+                            runtime.sessions.iter().position(|session| !session.active)
+                        });
+                        let Some(index) = index else {
+                            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                        };
+                        runtime.sessions[index] = ClientSession {
                             active: true,
                             caller_id: request.identifier,
                             shm_local: local,
                             shm_size: size,
-                            udp_port: 0,
-                            tcp_port: 0,
+                            udp_ports: [0; CLIENT_BIND_MAX],
+                            tcp_ports: [0; CLIENT_BIND_MAX],
+                            icmp_identifiers: [0; CLIENT_BIND_MAX],
+                            raw_rx_enabled: false,
+                            rx_notification: 0,
                         };
-                        runtime.udp_rx = UdpRxQueue::new();
-                        runtime.tcp_rx = TcpRxQueue::new();
-                        runtime.raw_rx = RawRxQueue::new();
                         libnanami::print!("[net-server] client shm attached pid=");
                         libnanami::print!("{}", peer_pid as usize);
                         libnanami::print!(" local=");
@@ -818,33 +1273,87 @@ fn handle_network_request(
                     Err(e) => (map_request_error_to_status(e), 0, 0),
                 }
             }
-            nanami_services::net::NET_SERVICE_CONTROL_UDP_BIND => {
-                if !runtime.session.active || runtime.session.caller_id != request.identifier {
+            nanami_services::net::NET_SERVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
+                let Some(index) = session_index(runtime, request.identifier) else {
                     return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                };
+                let source_slot = if request.arg1 == 0 {
+                    libnanami::PROCESS_SLOT_NOTIFICATION
+                } else {
+                    request.arg1
+                };
+                let destination_slot = SLOT_CLIENT_RX_NOTIFICATION_BASE + index as Word;
+                match libnanami::request_notification_port_copy(
+                    request.identifier,
+                    source_slot,
+                    destination_slot,
+                    nanami_services::net::NET_NOTIFICATION_RX,
+                ) {
+                    Ok(()) => {
+                        runtime.sessions[index].rx_notification =
+                            libnanami::ipc::process_slot_descriptor(destination_slot);
+                        (libnanami::OS_RESPONSE_OK, 0, 0)
+                    }
+                    Err(error) => (map_request_error_to_status(error), 0, 0),
                 }
+            }
+            nanami_services::net::NET_SERVICE_CONTROL_UDP_BIND => {
+                let Some(index) = session_index(runtime, request.identifier) else {
+                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                };
                 let port = request.arg1 as u16;
                 if port == 0 {
                     return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
-                runtime.session.udp_port = port;
+                if runtime.sessions.iter().enumerate().any(|(other, session)| {
+                    other != index && session.active && session.udp_ports.contains(&port)
+                }) {
+                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                }
+                if !bind_port(&mut runtime.sessions[index].udp_ports, port) {
+                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                }
                 libnanami::print!("[net-server] udp bind port=");
                 libnanami::print!("{}", port as usize);
                 libnanami::print!("\n");
                 (libnanami::OS_RESPONSE_OK, port as Word, 0)
             }
             nanami_services::net::NET_SERVICE_CONTROL_TCP_BIND => {
-                if !runtime.session.active || runtime.session.caller_id != request.identifier {
+                let Some(index) = session_index(runtime, request.identifier) else {
                     return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-                }
+                };
                 let port = request.arg1 as u16;
                 if port == 0 {
                     return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
-                runtime.session.tcp_port = port;
+                if runtime.sessions.iter().enumerate().any(|(other, session)| {
+                    other != index && session.active && session.tcp_ports.contains(&port)
+                }) {
+                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                }
+                if !bind_port(&mut runtime.sessions[index].tcp_ports, port) {
+                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                }
                 libnanami::print!("[net-server] tcp bind port=");
                 libnanami::print!("{}", port as usize);
                 libnanami::print!("\n");
                 (libnanami::OS_RESPONSE_OK, port as Word, 0)
+            }
+            nanami_services::net::NET_SERVICE_CONTROL_UDP_UNBIND => {
+                let Some(index) = session_index(runtime, request.identifier) else {
+                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                };
+                let removed =
+                    unbind_port(&mut runtime.sessions[index].udp_ports, request.arg1 as u16);
+                (libnanami::OS_RESPONSE_OK, removed as Word, 0)
+            }
+            nanami_services::net::NET_SERVICE_CONTROL_TCP_UNBIND => {
+                let Some(index) = session_index(runtime, request.identifier) else {
+                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                };
+                let removed =
+                    unbind_port(&mut runtime.sessions[index].tcp_ports, request.arg1 as u16);
+                (libnanami::OS_RESPONSE_OK, removed as Word, 0)
             }
             _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
         },
@@ -854,11 +1363,12 @@ fn handle_network_request(
             stats.tx_packets,
         ),
         nanami_services::net::NET_SERVICE_REQUEST_UDP_SEND => {
-            if !runtime.session.active || runtime.session.caller_id != request.identifier {
+            if session_for(runtime, request.identifier).is_none() {
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
             match emit_udp_from_session(
                 runtime,
+                request.identifier,
                 request.arg0,
                 request.arg1,
                 request.arg2,
@@ -883,6 +1393,29 @@ fn handle_network_request(
             }
             rsp
         }
+        nanami_services::net::NET_SERVICE_REQUEST_ICMP_SEND => {
+            match emit_icmp_echo_from_session(
+                runtime,
+                request.identifier,
+                request.arg0,
+                request.arg1,
+                request.arg2 as u16,
+                request.arg3 as u32,
+            ) {
+                Ok(sent) => {
+                    stats.tx_packets = stats.tx_packets.wrapping_add(1);
+                    stats.tx_bytes = stats.tx_bytes.wrapping_add(sent);
+                    (libnanami::OS_RESPONSE_OK, request.arg1, 0)
+                }
+                Err(error) => (map_request_error_to_status(error), 0, 0),
+            }
+        }
+        nanami_services::net::NET_SERVICE_REQUEST_ICMP_RECV => {
+            if runtime.icmp_rx.count == 0 {
+                let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
+            }
+            handle_icmp_recv_request(runtime, request)
+        }
         nanami_services::net::NET_SERVICE_REQUEST_TCP_RECV => {
             if runtime.tcp_rx.count == 0 {
                 let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
@@ -891,6 +1424,14 @@ fn handle_network_request(
         }
         nanami_services::net::NET_SERVICE_REQUEST_TCP_SEND => {
             handle_tcp_send_request(runtime, request, stats)
+        }
+        nanami_services::net::NET_SERVICE_REQUEST_TCP_ACCEPT => {
+            let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
+            handle_tcp_accept_request(runtime, request)
+        }
+        nanami_services::net::NET_SERVICE_REQUEST_TCP_CONNECT => {
+            let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
+            handle_tcp_connect_request(runtime, request, stats)
         }
         nanami_services::net::NET_SERVICE_REQUEST_DNS_QUERY => {
             handle_dns_query_request(runtime, request, stats, DNS_QUERY_TIMEOUT_MS)
@@ -944,6 +1485,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[net-server] bootstrap start\n");
 
     let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let notification =
+        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
+    libnanami::ipc::bind_current_thread_notification(notification)?;
 
     match nanami_services::registry::register_network_service() {
         Ok(()) => libnanami::print!("[net-server] service registered: network-service\n"),
@@ -999,6 +1543,20 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
+    let irq_driven = match nanami_services::net::net_device_attach_rx_notification(
+        net_device_port,
+        libnanami::PROCESS_SLOT_NOTIFICATION,
+    ) {
+        Ok(irq_driven) => irq_driven,
+        Err(error) => {
+            log_request_error(
+                "[net-server] backend rx notification attach failed: ",
+                error,
+            );
+            return Err(error.into());
+        }
+    };
+
     let mac = match nanami_services::net::net_device_control_ex(
         net_device_port,
         nanami_services::net::NET_DEVICE_CONTROL_GET_MAC,
@@ -1038,11 +1596,11 @@ fn nanami_main() -> libnanami::NanamiResult {
         arp: ArpCache::EMPTY,
         tcp_connections: [TcpConnection::EMPTY; TCP_MAX_CONNECTIONS],
         next_tcp_connection_id: 1,
-        session: ClientSession::EMPTY,
+        sessions: [ClientSession::EMPTY; CLIENT_SESSION_MAX],
         udp_rx: UdpRxQueue::new(),
+        icmp_rx: IcmpRxQueue::new(),
         tcp_rx: TcpRxQueue::new(),
         raw_rx: RawRxQueue::new(),
-        raw_rx_enabled: false,
         dhcp_waiting: false,
         dhcp_xid: 0,
         dhcp_offer_valid: false,
@@ -1061,6 +1619,19 @@ fn nanami_main() -> libnanami::NanamiResult {
     let mut has_pending_reply = false;
     let mut stats = NetStats::new();
     dhcp_bootstrap(&mut runtime, &mut stats);
+
+    if !irq_driven {
+        if let Some(timer_port) = runtime.timer_port {
+            nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+                timer_port,
+                RX_MAINTENANCE_INTERVAL_MS,
+                libnanami::PROCESS_SLOT_NOTIFICATION,
+            )?;
+            libnanami::print!("[net-server] rx fallback polling enabled\n");
+        } else {
+            libnanami::print!("[net-server] rx polling unavailable\n");
+        }
+    }
 
     libnanami::print!("[net-server] enter service loop\n");
     loop {
@@ -1097,7 +1668,9 @@ fn nanami_main() -> libnanami::NanamiResult {
                 pending_status = handle_network_request(&mut runtime, req, &mut stats);
                 has_pending_reply = true;
             }
-            ServiceEvent::Notification { .. } => {}
+            ServiceEvent::Notification { .. } => {
+                let _ = pump_backend(&mut runtime, &mut stats);
+            }
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {

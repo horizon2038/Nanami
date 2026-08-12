@@ -31,7 +31,9 @@ use crate::font::TextRenderer;
 use crate::input::{decode_input_event, InputEvent};
 use crate::logging::log_error;
 use crate::server::handle_request;
-use crate::services::{connect_services, prepare_framebuffer, subscribe_input};
+use crate::services::{connect_services, load_honoka_theme, prepare_framebuffer, subscribe_input};
+
+const THEME_DATA_MAX: usize = 0x800;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -92,7 +94,21 @@ fn nanami_main() -> libnanami::NanamiResult {
         input_queue_bytes
     );
 
-    let mut compositor = Compositor::new(framebuffer, text);
+    let mut theme_data = [0u8; THEME_DATA_MAX];
+    let theme_len = load_honoka_theme(&ports, &mut theme_data)?;
+    libnanami::println!("[honoka] theme loaded bytes={:#x}", theme_len);
+    let mut compositor = Compositor::new(
+        framebuffer,
+        text,
+        ports.exec,
+        ports.exec_shm,
+        ports.exec_shm_size,
+        &theme_data[..theme_len],
+    )
+    .ok_or_else(|| {
+        libnanami::print!("[honoka] invalid theme file\n");
+        libnanami::NanamiError::INVALID_ARGUMENT
+    })?;
     refresh_clock(ports.rtc, &mut compositor);
     start_clock_timer(ports.timer);
     libnanami::print!("[honoka] initial render start\n");
@@ -167,6 +183,7 @@ fn handle_notification(
         compositor.invalidate_presented_logical_framebuffer(present_window_id(identifier));
     }
     if is_timer_notification(identifier) {
+        compositor.reap_dead_windows();
         compositor.drain_presented_logical_framebuffers();
         refresh_clock(rtc_port, compositor);
     }

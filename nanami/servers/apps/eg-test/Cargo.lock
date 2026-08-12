@@ -10,11 +10,12 @@ checksum = "f13feb37ee5cfc4b43d8bd78a4c1fcd2d8e9a4c653d971b54b2c6c886a34b4ff"
 
 [[package]]
 name = "a9n_abi"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bf3d2647d6a896ff4562f56102567e9687ca61a48eb507dc62c1eac32d669dd"
+checksum = "6e7e68321c985251d2f3c7b2fea2d1cb119907099084a5572dbbea7bdc3afa6d"
 dependencies = [
  "a9n-types",
+ "bitflags",
 ]
 
 [[package]]
@@ -28,6 +29,12 @@ name = "az"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b7e4c2464d97fe331d41de9d5db0def0a96f4d823b8b32a2efd503578988973"
+
+[[package]]
+name = "bitflags"
+version = "2.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "byteorder"

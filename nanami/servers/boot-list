@@ -1,0 +1,10 @@
+# Alpha embedded boot list.
+# Format: <name> <priority> <initramfs-path> [argv...]
+#
+# Keep this list minimal. It must not depend on vfs/rootfs because Alpha reads
+# it from embedded initramfs before any filesystem service exists.
+timer-service 30 ./bin/timer-server
+rtc-service 22 ./bin/rtc-server
+block-device 23 ./bin/virtio-blk-server
+vfs-service 22 ./bin/ext2-server
+system-manager 20 ./bin/system-manager

@@ -35,6 +35,12 @@ pub fn handle_request(request: ServiceRequest, compositor: &mut Compositor) -> (
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
+        nanami_services::gfx::honoka::HONOKA_REQUEST_DESTROY_WINDOW => {
+            match compositor.destroy_window(request.identifier, request.arg0) {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
         nanami_services::gfx::honoka::HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER => {
             match compositor.attach_logical_framebuffer(request.identifier, request.arg0) {
                 Ok((peer_vaddr, size_bytes)) => (libnanami::OS_RESPONSE_OK, peer_vaddr, size_bytes),
@@ -65,6 +71,12 @@ pub fn handle_request(request: ServiceRequest, compositor: &mut Compositor) -> (
         nanami_services::gfx::honoka::HONOKA_REQUEST_SET_WINDOW_VISIBLE => {
             match compositor.set_window_visible(request.identifier, request.arg0, request.arg1 != 0)
             {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
+        nanami_services::gfx::honoka::HONOKA_REQUEST_SET_WINDOW_OPACITY => {
+            match compositor.set_window_opacity(request.identifier, request.arg0, request.arg1) {
                 Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }

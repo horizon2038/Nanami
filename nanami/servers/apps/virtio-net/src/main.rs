@@ -26,6 +26,7 @@ const SLOT_IO_VIRTIO: Word = 17;
 const SLOT_NOTIFICATION: Word = 18;
 const SLOT_INTERRUPT: Word = 19;
 const SLOT_SERVICE_PORT: Word = 20;
+const SLOT_CLIENT_RX_NOTIFICATION: Word = 24;
 
 const VIRTIO_VENDOR_ID: u16 = 0x1af4;
 const VIRTIO_NET_DEVICE_ID_LEGACY: u16 = 0x1000;
@@ -83,6 +84,7 @@ struct NetRuntime {
     tx_buf_vaddr: usize,
     shared_vaddr: usize,
     shared_size: usize,
+    client_rx_notification: Word,
     mac_addr: [u8; 6],
 }
 
@@ -422,7 +424,7 @@ fn rx_buffer_vaddr(runtime: &NetRuntime, chain: usize) -> usize {
     runtime.rx_buf_vaddr_base + chain * NET_MAX_PACKET_BYTES
 }
 
-fn consume_rx_chain(runtime: &mut NetRuntime) -> Option<(usize, usize)> {
+fn take_rx_chain(runtime: &mut NetRuntime) -> Option<(usize, usize)> {
     unsafe {
         let base = runtime.rx_queue_vaddr as *mut u8;
         let used_idx = ptr::read_volatile(used_idx_ptr(base, runtime.rx_queue_size));
@@ -454,20 +456,25 @@ fn consume_rx_chain(runtime: &mut NetRuntime) -> Option<(usize, usize)> {
             }
             RX_SNAPSHOT_LEN = snap_len;
         }
+        Some((chain, runtime.rx_packet_len))
+    }
+}
 
+fn recycle_rx_chain(runtime: &mut NetRuntime, chain: usize) {
+    unsafe {
+        let base = runtime.rx_queue_vaddr as *mut u8;
+        let head = (chain * 2) as u16;
         let avail_idx = ptr::read_volatile(avail_idx_ptr(base, runtime.rx_queue_size));
         ptr::write_volatile(
             avail_ring_ptr(base, runtime.rx_queue_size)
                 .add((avail_idx as usize) % runtime.rx_queue_size as usize),
-            head as u16,
+            head,
         );
+        fence(Ordering::SeqCst);
         ptr::write_volatile(
             avail_idx_ptr(base, runtime.rx_queue_size),
             avail_idx.wrapping_add(1),
         );
-        fence(Ordering::SeqCst);
-        let _ = notify_queue(runtime.io_desc, runtime.io_base, QUEUE_RX_INDEX);
-        Some((chain, runtime.rx_packet_len))
     }
 }
 
@@ -494,15 +501,39 @@ fn softq_push_from_rx_buffer(runtime: &NetRuntime, chain: usize, packet_len: usi
     }
 }
 
-fn drain_rx_to_softq(runtime: &mut NetRuntime, burst: usize) {
+fn drain_rx_to_softq(runtime: &mut NetRuntime, burst: usize) -> usize {
     let mut drained = 0usize;
     while drained < burst {
-        let Some((chain, packet_len)) = consume_rx_chain(runtime) else {
+        let Some((chain, packet_len)) = take_rx_chain(runtime) else {
             break;
         };
         softq_push_from_rx_buffer(runtime, chain, packet_len);
+        recycle_rx_chain(runtime, chain);
         drained += 1;
+
+        if ENABLE_IRQ_RX_PACKET_DEBUG && runtime.rx_pending_len > 0 {
+            libnanami::print!("[virtio-net][irq.dbg] rx#");
+            libnanami::print!("{}", drained);
+            libnanami::print!(" bytes=");
+            libnanami::print!("{}", runtime.rx_pending_len);
+            libnanami::print!(" head=");
+            let mut i = 0usize;
+            let snap_len = unsafe { RX_SNAPSHOT_LEN };
+            while i < min(snap_len, 16) {
+                if i != 0 {
+                    libnanami::debug::print_char(' ');
+                }
+                let b = unsafe { ptr::read((ptr::addr_of!(RX_SNAPSHOT) as *const u8).add(i)) };
+                libnanami::print!("{:#x}", b);
+                i += 1;
+            }
+            libnanami::print!("\n");
+        }
     }
+    if drained != 0 {
+        let _ = notify_queue(runtime.io_desc, runtime.io_base, QUEUE_RX_INDEX);
+    }
+    drained
 }
 
 fn softq_pop_len(requested_len: usize) -> usize {
@@ -554,21 +585,29 @@ fn recv_direct_to_shared(
     if runtime.shared_vaddr == 0 || runtime.shared_size == 0 {
         return Err(RequestError::InvalidArgument);
     }
-    let Some((chain, packet_len)) = consume_rx_chain(runtime) else {
+    let Some((chain, packet_len)) = take_rx_chain(runtime) else {
         return Ok(None);
     };
     let n = min(packet_len, requested_len);
-    if shared_offset >= runtime.shared_size || shared_offset + n > runtime.shared_size {
-        return Err(RequestError::InvalidArgument);
-    }
-    if n > 0 {
+    let result = if shared_offset >= runtime.shared_size
+        || shared_offset
+            .checked_add(n)
+            .is_none_or(|end| end > runtime.shared_size)
+    {
+        Err(RequestError::InvalidArgument)
+    } else if n > 0 {
         unsafe {
             let src = rx_buffer_vaddr(runtime, chain) as *const u8;
             let dst = (runtime.shared_vaddr + shared_offset) as *mut u8;
             ptr::copy_nonoverlapping(src, dst, n);
         }
-    }
-    Ok(Some(n))
+        Ok(n)
+    } else {
+        Ok(0)
+    };
+    recycle_rx_chain(runtime, chain);
+    let _ = notify_queue(runtime.io_desc, runtime.io_base, QUEUE_RX_INDEX);
+    result.map(Some)
 }
 
 fn submit_tx_prepared(runtime: &mut NetRuntime, payload_len: usize) -> Result<usize, RequestError> {
@@ -764,6 +803,36 @@ fn handle_net_request(
                     | ((runtime.mac_addr[5] as Word) << 40);
                 (libnanami::OS_RESPONSE_OK, packed, 0)
             }
+            nanami_services::net::NET_DEVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
+                let source_slot = if request.arg1 == 0 {
+                    libnanami::PROCESS_SLOT_NOTIFICATION
+                } else {
+                    request.arg1
+                };
+                match libnanami::request_notification_port_copy(
+                    request.identifier,
+                    source_slot,
+                    SLOT_CLIENT_RX_NOTIFICATION,
+                    nanami_services::net::NET_NOTIFICATION_RX,
+                ) {
+                    Ok(()) => {
+                        runtime.client_rx_notification =
+                            libnanami::ipc::process_slot_descriptor(SLOT_CLIENT_RX_NOTIFICATION);
+                        (libnanami::OS_RESPONSE_OK, runtime.irq_enabled as Word, 0)
+                    }
+                    Err(error) => (
+                        match error {
+                            RequestError::InvalidArgument => {
+                                libnanami::OS_RESPONSE_INVALID_ARGUMENT
+                            }
+                            RequestError::Status(status) => status,
+                            _ => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+                        },
+                        0,
+                        0,
+                    ),
+                }
+            }
             _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
         },
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
@@ -795,33 +864,17 @@ fn handle_notification(runtime: &mut NetRuntime, irq_desc: Word, identifier: Wor
             }
         }
 
-        let mut rx_count = 0usize;
-        while let Some((chain, packet_len)) = consume_rx_chain(runtime) {
-            rx_count += 1;
-            if packet_len > 0 {
-                softq_push_from_rx_buffer(runtime, chain, packet_len);
-            }
-
-            if ENABLE_IRQ_RX_PACKET_DEBUG && runtime.rx_pending_len > 0 {
-                libnanami::print!("[virtio-net][irq.dbg] rx#");
-                libnanami::print!("{}", rx_count);
-                libnanami::print!(" bytes=");
-                libnanami::print!("{}", runtime.rx_pending_len);
-                libnanami::print!(" head=");
-                let mut i = 0usize;
-                let snap_len = unsafe { RX_SNAPSHOT_LEN };
-                while i < min(snap_len, 16) {
-                    if i != 0 {
-                        libnanami::debug::print_char(' ');
-                    }
-                    let b = unsafe { ptr::read((ptr::addr_of!(RX_SNAPSHOT) as *const u8).add(i)) };
-                    libnanami::print!("{:#x}", b);
-                    i += 1;
-                }
-                libnanami::print!("\n");
-            }
+        let mut rx_count = drain_rx_to_softq(runtime, RX_SOFTQ_CAP);
+        if let Err(e) = libnanami::ipc::interrupt_ack(irq_desc) {
+            log_request_error("[virtio-net] irq re-arm failed: ", e);
         }
-        let _ = libnanami::ipc::interrupt_ack(irq_desc);
+
+        // A packet can arrive after the ring was drained but before INTx is re-armed.
+        // Rechecking after the ack closes that masked-interrupt window.
+        rx_count += drain_rx_to_softq(runtime, RX_SOFTQ_CAP);
+        if rx_count != 0 && runtime.client_rx_notification != 0 {
+            let _ = libnanami::ipc::notification_notify(runtime.client_rx_notification);
+        }
     }
 }
 
@@ -1034,6 +1087,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         tx_buf_vaddr: queue_init.tx_buf_vaddr,
         shared_vaddr: 0,
         shared_size: 0,
+        client_rx_notification: 0,
         mac_addr,
     };
 

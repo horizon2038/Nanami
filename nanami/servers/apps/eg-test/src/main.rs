@@ -126,6 +126,12 @@ fn nanami_main() -> libnanami::NanamiResult {
         framebuffer,
         pixel_bytes
     );
+    let (input_base, _input_bytes) =
+        nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
+            .map_err(|e| log_error("[eg-test] attach input queue failed: ", e))?;
+    nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
+        .map_err(|e| log_error("[eg-test] attach input notification failed: ", e))?;
+    let mut input_queue = nanami_services::input::InputEventQueue::new(input_base);
 
     let mut display = HonokaFrameBuffer::new(framebuffer, CONTENT_WIDTH, CONTENT_HEIGHT);
     draw_static_scene(&mut display);
@@ -148,6 +154,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         shared_base,
         present_notification,
         timer_port,
+        &mut input_queue,
     )
 }
 
@@ -227,10 +234,12 @@ fn animate(
     damage_queue: Word,
     present_notification: Word,
     timer_port: Word,
+    input_queue: &mut nanami_services::input::InputEventQueue,
 ) -> ! {
     let mut frame = 0usize;
     start_frame_timer(timer_port);
     loop {
+        drain_input(input_queue, honoka_port, window_id);
         draw_animation_region(display, frame);
         present_rect(
             honoka_port,
@@ -243,7 +252,7 @@ fn animate(
             ANIMATION_H,
         );
         frame = frame.wrapping_add(1);
-        wait_frame_timer();
+        wait_frame_timer(input_queue, honoka_port, window_id);
     }
 }
 
@@ -409,11 +418,18 @@ fn start_frame_timer(timer_port: Word) {
     }
 }
 
-fn wait_frame_timer() {
+fn wait_frame_timer(
+    input_queue: &mut nanami_services::input::InputEventQueue,
+    honoka_port: Word,
+    window_id: Word,
+) {
     let notification = libnanami::ipc::process_slot_descriptor(SLOT_TIMER_NOTIFICATION);
     loop {
         match libnanami::ipc::notification_wait(notification) {
             Ok(identifier) => {
+                if (identifier & nanami_services::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
+                    drain_input(input_queue, honoka_port, window_id);
+                }
                 if (identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0 {
                     return;
                 }
@@ -424,6 +440,28 @@ fn wait_frame_timer() {
                 return;
             }
         }
+    }
+}
+
+fn drain_input(
+    input_queue: &mut nanami_services::input::InputEventQueue,
+    honoka_port: Word,
+    window_id: Word,
+) {
+    let mut drained = 0usize;
+    while drained < 256 {
+        let Some(packed) = input_queue.pop() else {
+            break;
+        };
+        let (kind, _, _, _, _) = nanami_services::input::unpack_input_event(packed);
+        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
+            let _ = nanami_services::gfx::honoka::honoka_destroy_window(honoka_port, window_id);
+            let _ = libnanami::request_exit();
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+        drained += 1;
     }
 }
 

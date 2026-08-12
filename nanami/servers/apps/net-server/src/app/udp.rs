@@ -3,21 +3,22 @@ use super::*;
 
 pub(crate) fn emit_udp_from_session(
     runtime: &mut NetRuntime,
+    owner_id: Word,
     payload_offset: Word,
     payload_len: Word,
     ports: Word,
     dst_ip_be: Word,
 ) -> Result<Word, RequestError> {
-    if !runtime.session.active || runtime.session.shm_local == 0 {
+    let Some(session) = session_for(runtime, owner_id) else {
         return Err(RequestError::Status(
             libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
-    }
+    };
     let payload_len = min(payload_len as usize, UDP_PAYLOAD_MAX);
     if payload_len == 0 {
         return Err(RequestError::InvalidArgument);
     }
-    if payload_offset + payload_len as Word > runtime.session.shm_size {
+    if payload_offset + payload_len as Word > session.shm_size {
         return Err(RequestError::InvalidArgument);
     }
 
@@ -30,10 +31,11 @@ pub(crate) fn emit_udp_from_session(
         (dst_ip_be & 0xff) as u8,
     ];
 
-    let dst_mac = if let Some(mac) = arp_lookup(runtime, dst_ip) {
+    let next_hop = next_hop_ip(runtime, dst_ip);
+    let dst_mac = if let Some(mac) = arp_lookup(runtime, next_hop) {
         mac
     } else {
-        let _ = emit_arp_request(runtime, dst_ip);
+        let _ = emit_arp_request(runtime, next_hop);
         return Err(RequestError::Status(
             libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
@@ -72,7 +74,7 @@ pub(crate) fn emit_udp_from_session(
         write_u16_be(&mut udp[4..6], (UDP_HDR_LEN + payload_len) as u16);
         write_u16_be(&mut udp[6..8], 0);
 
-        let src = (runtime.session.shm_local + payload_offset) as *const u8;
+        let src = (session.shm_local + payload_offset) as *const u8;
         let dst = frame
             .as_mut_ptr()
             .add(ETH_HDR_LEN + IPV4_HDR_LEN + UDP_HDR_LEN);
@@ -91,15 +93,12 @@ pub(crate) fn try_queue_udp(
     dst_port: u16,
     payload: &[u8],
 ) {
-    if !runtime.session.active || runtime.session.udp_port == 0 {
+    let Some(session) = session_for_udp_port(runtime, dst_port) else {
         return;
-    }
-    if runtime.session.udp_port != dst_port {
-        return;
-    }
+    };
 
     let mut entry = UdpRxEntry::EMPTY;
-    entry.pid = runtime.session.caller_id;
+    entry.pid = session.caller_id;
     entry.src_ip = src_ip;
     entry.dst_ip = dst_ip;
     entry.src_port = src_port;
@@ -117,31 +116,39 @@ pub(crate) fn handle_udp_recv_request(
     runtime: &mut NetRuntime,
     request: libnanami::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
-    if !runtime.session.active || runtime.session.caller_id != request.identifier {
+    let Some(session) = session_for(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    }
+    };
 
     let meta_offset = request.arg0;
     let payload_offset = request.arg1;
     let max_len = request.arg2 as usize;
 
-    let Some(entry) = runtime
-        .udp_rx
-        .pop_for(runtime.session.caller_id, runtime.session.udp_port)
-    else {
+    let requested_port = request.arg3 as u16;
+    let local_port = if requested_port == 0 {
+        session
+            .udp_ports
+            .iter()
+            .copied()
+            .find(|port| *port != 0)
+            .unwrap_or(0)
+    } else {
+        requested_port
+    };
+    let Some(entry) = runtime.udp_rx.pop_for(session.caller_id, local_port) else {
         return (libnanami::OS_RESPONSE_OK, 0, 0);
     };
 
     let copy_len = min(entry.len, max_len);
-    if meta_offset + UDP_RX_META_LEN as Word > runtime.session.shm_size
-        || payload_offset + copy_len as Word > runtime.session.shm_size
+    if meta_offset + UDP_RX_META_LEN as Word > session.shm_size
+        || payload_offset + copy_len as Word > session.shm_size
     {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
-        let meta = (runtime.session.shm_local + meta_offset) as *mut u8;
-        let payload = (runtime.session.shm_local + payload_offset) as *mut u8;
+        let meta = (session.shm_local + meta_offset) as *mut u8;
+        let payload = (session.shm_local + payload_offset) as *mut u8;
 
         write_u32_be(
             core::slice::from_raw_parts_mut(meta, 4),

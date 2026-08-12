@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
 
+use core::sync::atomic::{fence, Ordering};
 use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const PAGE_SIZE: Word = 4096;
 
+#[derive(Clone, Copy)]
 struct ScreenInfo {
     display_id: Word,
-    framebuffer_phys: Word,
     width: Word,
     height: Word,
     stride: Word,
@@ -21,6 +22,29 @@ struct ScreenInfo {
     blue_position: Word,
     blue_size: Word,
     framebuffer_bytes: Word,
+}
+
+#[derive(Clone, Copy)]
+struct SharedFramebuffer {
+    owner_pid: Word,
+    local_vaddr: Word,
+    peer_vaddr: Word,
+    bytes: Word,
+}
+
+impl SharedFramebuffer {
+    const EMPTY: Self = Self {
+        owner_pid: 0,
+        local_vaddr: 0,
+        peer_vaddr: 0,
+        bytes: 0,
+    };
+}
+
+struct DisplayState {
+    screen: ScreenInfo,
+    hardware_vaddr: Word,
+    shared: SharedFramebuffer,
 }
 
 #[panic_handler]
@@ -109,13 +133,20 @@ fn nanami_main() -> libnanami::NanamiResult {
 
     let mapped_fb = mapped_base.saturating_add(fb_offset);
     let framebuffer_bytes = fb_size;
+    let stride_bytes = normalize_stride_bytes(fb_stride, fb_width, fb_bpp)
+        .ok_or(libnanami::NanamiError::INVALID_ARGUMENT)?;
+    if stride_bytes.saturating_mul(fb_height) > framebuffer_bytes {
+        return Err(log_error(
+            "[fb-server] framebuffer stride exceeds mapped region: ",
+            RequestError::InvalidArgument,
+        ));
+    }
 
     let screen_info = ScreenInfo {
         display_id,
-        framebuffer_phys: fb_phys,
         width: fb_width,
         height: fb_height,
-        stride: fb_stride,
+        stride: stride_bytes,
         bits_per_pixel: fb_bpp,
         red_position: color.0,
         red_size: color.1,
@@ -151,6 +182,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     let mut has_pending_reply = false;
 
     fill_screen(&screen_info, mapped_fb);
+    let mut display = DisplayState {
+        screen: screen_info,
+        hardware_vaddr: mapped_fb,
+        shared: SharedFramebuffer::EMPTY,
+    };
 
     loop {
         let used_reply_receive = has_pending_reply;
@@ -176,7 +212,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 
         match event {
             ServiceEvent::Request(request) => {
-                pending_status = handle_request(request, &screen_info);
+                pending_status = handle_request(request, &mut display);
                 has_pending_reply = true;
             }
             ServiceEvent::Notification { .. } => {}
@@ -209,41 +245,158 @@ fn fill_screen(screen_info: &ScreenInfo, mapped_address: usize) {
     }
 }
 
-fn handle_request(request: ServiceRequest, screen_info: &ScreenInfo) -> (Word, Word, Word) {
+fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word, Word, Word) {
     match request.code {
         nanami_services::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {
-            let detail0 = pack_screen_info_detail0(screen_info);
-            let detail1 = pack_screen_info_detail1(screen_info);
+            let detail0 = pack_screen_info_detail0(&display.screen);
+            let detail1 = pack_screen_info_detail1(&display.screen);
             (libnanami::OS_RESPONSE_OK, detail0, detail1)
         }
         nanami_services::gfx::DISPLAY_SERVICE_REQUEST_PREPARE_SHARED_FRAMEBUFFER => {
             if request.identifier == 0 {
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
+            if display.shared.owner_pid == request.identifier {
+                return (
+                    libnanami::OS_RESPONSE_OK,
+                    display.shared.peer_vaddr,
+                    display.shared.bytes,
+                );
+            }
+            if display.shared.owner_pid != 0 {
+                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+            }
 
-            match libnanami::request_shared_framebuffer_memory(
+            match libnanami::request_shared_memory(
                 request.identifier,
-                screen_info.framebuffer_phys,
-                screen_info.framebuffer_bytes,
+                display.screen.framebuffer_bytes,
             ) {
-                Ok((_local_vaddr, peer_vaddr)) => {
-                    libnanami::print!("[fb-server] shared framebuffer ready pid=");
-                    libnanami::print!("{}", request.identifier);
-                    libnanami::print!(" vaddr=");
-                    libnanami::print!("{:#x}", peer_vaddr);
-                    libnanami::print!(" bytes=");
-                    libnanami::print!("{:#x}", screen_info.framebuffer_bytes);
-                    libnanami::print!("\n");
+                Ok((local_vaddr, peer_vaddr)) => {
+                    clear_memory(local_vaddr, display.screen.framebuffer_bytes);
+                    display.shared = SharedFramebuffer {
+                        owner_pid: request.identifier,
+                        local_vaddr,
+                        peer_vaddr,
+                        bytes: display.screen.framebuffer_bytes,
+                    };
+                    libnanami::println!(
+                        "[fb-server] shared backbuffer ready pid={} vaddr={:#x} bytes={:#x}",
+                        request.identifier,
+                        peer_vaddr,
+                        display.screen.framebuffer_bytes
+                    );
                     (
                         libnanami::OS_RESPONSE_OK,
                         peer_vaddr,
-                        screen_info.framebuffer_bytes,
+                        display.screen.framebuffer_bytes,
                     )
                 }
-                Err(e) => (map_request_error_to_status(e), 0, 0),
+                Err(error) => (map_request_error_to_status(error), 0, 0),
+            }
+        }
+        nanami_services::gfx::DISPLAY_SERVICE_REQUEST_PRESENT => {
+            match present_shared_framebuffer(
+                display,
+                request.identifier,
+                request.arg0,
+                request.arg1,
+            ) {
+                Ok(pixels) => (libnanami::OS_RESPONSE_OK, pixels, 0),
+                Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+    }
+}
+
+fn clear_memory(vaddr: Word, bytes: Word) {
+    let mut offset = 0usize;
+    while offset + core::mem::size_of::<u64>() <= bytes as usize {
+        unsafe {
+            core::ptr::write_volatile((vaddr + offset) as *mut u64, 0);
+        }
+        offset += core::mem::size_of::<u64>();
+    }
+    while offset < bytes as usize {
+        unsafe {
+            core::ptr::write_volatile((vaddr + offset) as *mut u8, 0);
+        }
+        offset += 1;
+    }
+}
+
+fn present_shared_framebuffer(
+    display: &DisplayState,
+    owner_pid: Word,
+    position: Word,
+    size: Word,
+) -> Result<Word, RequestError> {
+    let shared = display.shared;
+    if owner_pid == 0 || shared.owner_pid != owner_pid || shared.local_vaddr == 0 {
+        return Err(RequestError::Status(
+            libnanami::OS_RESPONSE_PERMISSION_DENIED,
+        ));
+    }
+
+    let x = (position & 0xffff_ffff) as usize;
+    let y = ((position >> 32) & 0xffff_ffff) as usize;
+    let width = (size & 0xffff_ffff) as usize;
+    let height = ((size >> 32) & 0xffff_ffff) as usize;
+    if width == 0
+        || height == 0
+        || x >= display.screen.width as usize
+        || y >= display.screen.height as usize
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+
+    let width = width.min(display.screen.width as usize - x);
+    let height = height.min(display.screen.height as usize - y);
+    let row_bytes = width.saturating_mul(4);
+    fence(Ordering::Acquire);
+    let mut row = 0usize;
+    while row < height {
+        let offset = y
+            .saturating_add(row)
+            .saturating_mul(display.screen.stride as usize)
+            .saturating_add(x.saturating_mul(4));
+        if offset.saturating_add(row_bytes) > shared.bytes as usize {
+            return Err(RequestError::InvalidArgument);
+        }
+        copy_row_to_hardware(
+            shared.local_vaddr.saturating_add(offset),
+            display.hardware_vaddr.saturating_add(offset),
+            width,
+        );
+        row += 1;
+    }
+    fence(Ordering::Release);
+    Ok(width.saturating_mul(height) as Word)
+}
+
+fn copy_row_to_hardware(source: Word, destination: Word, pixels: usize) {
+    let mut pixel = 0usize;
+    if pixels != 0 && (destination & 7) != 0 {
+        unsafe {
+            let value = core::ptr::read(source as *const u32);
+            core::ptr::write_volatile(destination as *mut u32, value);
+        }
+        pixel = 1;
+    }
+    while pixel + 2 <= pixels {
+        let offset = pixel * 4;
+        unsafe {
+            let value = core::ptr::read((source + offset) as *const u64);
+            core::ptr::write_volatile((destination + offset) as *mut u64, value);
+        }
+        pixel += 2;
+    }
+    if pixel < pixels {
+        let offset = pixel * 4;
+        unsafe {
+            let value = core::ptr::read((source + offset) as *const u32);
+            core::ptr::write_volatile((destination + offset) as *mut u32, value);
+        }
     }
 }
 
@@ -284,6 +437,19 @@ fn align_up(value: Word, align: Word) -> Word {
         value
     } else {
         (value + mask) & !mask
+    }
+}
+
+fn normalize_stride_bytes(stride: Word, width: Word, bits_per_pixel: Word) -> Option<Word> {
+    let bytes_per_pixel = bits_per_pixel.checked_add(7)?.checked_div(8)?;
+    if stride == 0 || width == 0 || bytes_per_pixel == 0 {
+        return None;
+    }
+    let minimum_row_bytes = width.checked_mul(bytes_per_pixel)?;
+    if stride >= minimum_row_bytes {
+        Some(stride)
+    } else {
+        stride.checked_mul(bytes_per_pixel)
     }
 }
 

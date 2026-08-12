@@ -78,14 +78,6 @@ pub(crate) fn tcp_reset(runtime: &mut NetRuntime, connection_index: usize) {
     }
 }
 
-fn listen_port(runtime: &NetRuntime) -> u16 {
-    if runtime.session.tcp_port != 0 {
-        runtime.session.tcp_port
-    } else {
-        TCP_LISTEN_PORT
-    }
-}
-
 fn find_tcp_connection(
     runtime: &NetRuntime,
     src_ip: [u8; 4],
@@ -107,7 +99,7 @@ fn find_tcp_connection(
     None
 }
 
-fn allocate_tcp_connection(runtime: &NetRuntime) -> Option<usize> {
+pub(crate) fn allocate_tcp_connection(runtime: &NetRuntime) -> Option<usize> {
     let mut i = 0usize;
     while i < runtime.tcp_connections.len() {
         if !runtime.tcp_connections[i].active {
@@ -152,7 +144,7 @@ fn ack_and_maybe_queue_payload(
     src_mac: [u8; 6],
     src_ip: [u8; 4],
     src_port: u16,
-    dst_port: u16,
+    _dst_port: u16,
     seq: u32,
     payload: &[u8],
     payload_len: u32,
@@ -160,11 +152,12 @@ fn ack_and_maybe_queue_payload(
     let expected_seq = runtime.tcp_connections[connection_index].rcv_nxt;
     if payload_len > 0 && seq == expected_seq {
         // Only ACK payload we can enqueue, so we never ACK-and-drop.
-        let can_queue_for_session = runtime.session.active && runtime.session.tcp_port == dst_port;
         let payload_fits_entry = (payload_len as usize) <= TCP_PAYLOAD_MAX;
-        if can_queue_for_session && payload_fits_entry {
+        if payload_fits_entry {
             let mut entry = TcpRxEntry::EMPTY;
-            entry.connection_id = runtime.tcp_connections[connection_index].connection_id;
+            let conn = runtime.tcp_connections[connection_index];
+            entry.owner_id = conn.owner_id;
+            entry.connection_id = conn.connection_id;
             entry.src_ip = src_ip;
             entry.src_port = src_port;
             entry.len = payload_len as usize;
@@ -208,10 +201,10 @@ pub(crate) fn process_tcp(
     let payload = &frame[tcp_base + data_offset..ip_end];
     let payload_len = payload.len() as u32;
 
-    if (flags & TCP_FLAG_SYN) != 0
-        && (flags & TCP_FLAG_ACK) == 0
-        && dst_port == listen_port(runtime)
-    {
+    if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
+        let Some(session) = session_for_tcp_port(runtime, dst_port) else {
+            return;
+        };
         let connection_index = match find_tcp_connection(runtime, src_ip, src_port, dst_port) {
             Some(index) => index,
             None => match allocate_tcp_connection(runtime) {
@@ -227,7 +220,10 @@ pub(crate) fn process_tcp(
         let iss = 0x4e41_4e41u32.wrapping_add((connection_index as u32) << 12);
         runtime.tcp_connections[connection_index] = TcpConnection {
             active: true,
+            owner_id: session.caller_id,
             connection_id,
+            accepted: false,
+            eof_pending: false,
             state: TCP_STATE_SYN_RECEIVED,
             peer_ip: src_ip,
             peer_port: src_port,
@@ -263,6 +259,18 @@ pub(crate) fn process_tcp(
     }
 
     match runtime.tcp_connections[connection_index].state {
+        TCP_STATE_SYN_SENT => {
+            let conn = runtime.tcp_connections[connection_index];
+            if (flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK)
+                && ack_num == conn.snd_nxt
+            {
+                let conn = &mut runtime.tcp_connections[connection_index];
+                conn.snd_una = ack_num;
+                conn.rcv_nxt = seq.wrapping_add(1);
+                conn.state = TCP_STATE_ESTABLISHED;
+                emit_ack(runtime, stats, connection_index, src_mac);
+            }
+        }
         TCP_STATE_SYN_RECEIVED => {
             let conn = runtime.tcp_connections[connection_index];
             if (flags & TCP_FLAG_SYN) != 0
@@ -332,7 +340,9 @@ pub(crate) fn process_tcp(
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                 }
                 emit_ack(runtime, stats, connection_index, src_mac);
-                runtime.tcp_connections[connection_index].state = TCP_STATE_CLOSE_WAIT;
+                let conn = &mut runtime.tcp_connections[connection_index];
+                conn.state = TCP_STATE_CLOSE_WAIT;
+                conn.eof_pending = true;
             }
         }
         TCP_STATE_CLOSE_WAIT => {

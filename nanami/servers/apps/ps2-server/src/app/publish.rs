@@ -68,6 +68,19 @@ fn publish_mouse_batch(server: &mut Ps2Server) -> usize {
         published = published.wrapping_add(1);
     }
 
+    let wheel = server.mouse_batch.wheel;
+    if wheel != 0 {
+        let packed = nanami_services::input::pack_input_event(
+            nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL,
+            0,
+            clamp_i32_to_i16(wheel),
+            0,
+            next_sequence(server),
+        );
+        queue.push_with_event_kind(nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL, packed);
+        published = published.wrapping_add(1);
+    }
+
     let mut i = 0usize;
     let button_count = server.mouse_batch.button_count;
     while i < button_count {

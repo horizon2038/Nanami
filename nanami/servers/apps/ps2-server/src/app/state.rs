@@ -4,6 +4,8 @@ use crate::constants::{
     MAX_KEY_EVENTS_PER_BATCH, MAX_MOUSE_BUTTON_EVENTS_PER_BATCH, PS2_MOUSE_ACK, PS2_MOUSE_RESEND,
 };
 
+const PS2_MOUSE_PACKET_MAX_BYTES: usize = 4;
+
 #[derive(Clone, Copy)]
 pub struct ButtonEvent {
     pub code: Word,
@@ -20,6 +22,7 @@ impl ButtonEvent {
 pub struct MouseBatch {
     pub dx: i32,
     pub dy: i32,
+    pub wheel: i32,
     pub buttons: [ButtonEvent; MAX_MOUSE_BUTTON_EVENTS_PER_BATCH],
     pub button_count: usize,
 }
@@ -29,18 +32,20 @@ impl MouseBatch {
         Self {
             dx: 0,
             dy: 0,
+            wheel: 0,
             buttons: [ButtonEvent::EMPTY; MAX_MOUSE_BUTTON_EVENTS_PER_BATCH],
             button_count: 0,
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dx == 0 && self.dy == 0 && self.button_count == 0
+        self.dx == 0 && self.dy == 0 && self.wheel == 0 && self.button_count == 0
     }
 
     pub fn clear(&mut self) {
         self.dx = 0;
         self.dy = 0;
+        self.wheel = 0;
         self.button_count = 0;
     }
 
@@ -132,18 +137,29 @@ impl KeyboardDecoder {
 }
 
 pub struct MouseDecoder {
-    packet: [u8; 3],
+    packet: [u8; PS2_MOUSE_PACKET_MAX_BYTES],
     packet_index: usize,
+    packet_len: usize,
     last_buttons: u8,
 }
 
 impl MouseDecoder {
     pub const fn new() -> Self {
         Self {
-            packet: [0; 3],
+            packet: [0; PS2_MOUSE_PACKET_MAX_BYTES],
             packet_index: 0,
+            packet_len: 3,
             last_buttons: 0,
         }
+    }
+
+    pub fn set_packet_len(&mut self, packet_len: usize) {
+        if packet_len < 3 || packet_len > PS2_MOUSE_PACKET_MAX_BYTES {
+            return;
+        }
+        self.packet = [0; PS2_MOUSE_PACKET_MAX_BYTES];
+        self.packet_index = 0;
+        self.packet_len = packet_len;
     }
 
     pub fn push_byte(&mut self, data: u8, batch: &mut MouseBatch, packet_counter: &mut usize) {
@@ -158,7 +174,7 @@ impl MouseDecoder {
         self.packet[self.packet_index] = data;
         self.packet_index += 1;
 
-        if self.packet_index < 3 {
+        if self.packet_index < self.packet_len {
             return;
         }
 
@@ -173,6 +189,12 @@ impl MouseDecoder {
         batch.dx = batch.dx.saturating_add(dx);
         batch.dy = batch.dy.saturating_add(-dy_raw);
 
+        if self.packet_len >= 4 {
+            batch.wheel = batch
+                .wheel
+                .saturating_add(sign_extend_mouse_wheel(self.packet[3]) as i32);
+        }
+
         let buttons = b0 & 0x07;
         let changed = buttons ^ self.last_buttons;
         if changed != 0 {
@@ -183,6 +205,15 @@ impl MouseDecoder {
         }
 
         *packet_counter = packet_counter.wrapping_add(1);
+    }
+}
+
+fn sign_extend_mouse_wheel(byte: u8) -> i8 {
+    let value = byte & 0x0f;
+    if (value & 0x08) != 0 {
+        (value | 0xf0) as i8
+    } else {
+        value as i8
     }
 }
 

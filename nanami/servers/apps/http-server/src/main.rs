@@ -109,6 +109,13 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[http-server] bootstrap\n");
 
+    let notification =
+        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
+    libnanami::ipc::bind_current_thread_notification(notification).map_err(|e| {
+        log_request_error("[http-server] bind notification failed: ", e);
+        e
+    })?;
+
     let net_desc = libnanami::ipc::process_slot_descriptor(NET_SLOT);
     let timer_desc = connect_timer_service();
     wait_network_service(timer_desc);
@@ -140,26 +147,42 @@ fn nanami_main() -> libnanami::NanamiResult {
         return Err(libnanami::NanamiError(status));
     }
 
+    let rx_notification = match nanami_services::net::net_service_attach_rx_notification(
+        net_desc,
+        libnanami::PROCESS_SLOT_NOTIFICATION,
+    ) {
+        Ok(()) => Some(notification),
+        Err(e) => {
+            log_request_error("[http-server] attach rx notification failed: ", e);
+            None
+        }
+    };
+
     let _ = nanami_services::net::net_service_control(
         net_desc,
         nanami_services::net::NET_SERVICE_CONTROL_LINK_UP,
         0,
         0,
     );
-    let _ = nanami_services::net::net_service_control(
+    nanami_services::net::net_service_control(
         net_desc,
         nanami_services::net::NET_SERVICE_CONTROL_TCP_BIND,
         80,
         0,
-    );
+    )
+    .map_err(|e| {
+        log_request_error("[http-server] tcp bind failed: ", e);
+        e
+    })?;
     libnanami::print!("[http-server] tcp listen port=80\n");
 
-    run_http_reactor(net_desc, timer_desc, shm_vaddr, shm_size)
+    run_http_reactor(net_desc, timer_desc, rx_notification, shm_vaddr, shm_size)
 }
 
 fn run_http_reactor(
     net_desc: Word,
     timer_desc: Option<Word>,
+    rx_notification: Option<Word>,
     shm_vaddr: Word,
     shm_size: Word,
 ) -> libnanami::NanamiResult {
@@ -173,6 +196,7 @@ fn run_http_reactor(
     }
 
     let mut idle_streak = 0usize;
+    let mut rx_notification = rx_notification;
     let response_cache = build_response_cache();
     loop {
         let received_any = drain_tcp_rx(net_desc, shm_vaddr, &response_cache, &mut connections);
@@ -185,7 +209,7 @@ fn run_http_reactor(
         );
 
         if !received_any && !sent_any {
-            idle_recv_backoff(timer_desc, &mut idle_streak);
+            idle_recv_backoff(timer_desc, &mut rx_notification, &mut idle_streak);
         } else {
             idle_streak = 0;
         }
@@ -213,10 +237,16 @@ fn drain_tcp_rx(
                 break;
             }
         };
-        if received == 0 {
-            break;
-        }
         if connection_id == 0 {
+            if received == 0 {
+                break;
+            }
+            budget += 1;
+            continue;
+        }
+        if received == 0 {
+            finish_peer_close(net_desc, connections, connection_id);
+            did_work = true;
             budget += 1;
             continue;
         }
@@ -235,6 +265,24 @@ fn drain_tcp_rx(
         budget += 1;
     }
     did_work
+}
+
+fn finish_peer_close(net_desc: Word, connections: &mut [HttpConnection], connection_id: Word) {
+    let mut index = 0usize;
+    while index < connections.len() {
+        if connections[index].connection_id == connection_id && connections[index].active {
+            connections[index].keep_alive = false;
+            return;
+        }
+        index += 1;
+    }
+    let _ = nanami_services::net::net_service_tcp_send_on_connection(
+        net_desc,
+        connection_id,
+        0,
+        0,
+        TCP_FLAG_ACK | TCP_FLAG_FIN,
+    );
 }
 
 fn flush_http_tx(
@@ -740,7 +788,24 @@ fn idle_backoff_spin() {
     }
 }
 
-fn idle_recv_backoff(timer_desc: Option<Word>, idle_streak: &mut usize) {
+fn idle_recv_backoff(
+    timer_desc: Option<Word>,
+    rx_notification: &mut Option<Word>,
+    idle_streak: &mut usize,
+) {
+    if let Some(notification) = *rx_notification {
+        match libnanami::ipc::notification_wait(notification) {
+            Ok(_) => {
+                *idle_streak = 0;
+                return;
+            }
+            Err(e) => {
+                log_request_error("[http-server] rx notification wait failed: ", e);
+                *rx_notification = None;
+            }
+        }
+    }
+
     *idle_streak = idle_streak.saturating_add(1);
     if timer_desc.is_some() && *idle_streak > IDLE_SPIN_BEFORE_SLEEP {
         sleep_ms(timer_desc, IDLE_RECV_SLEEP_MS);

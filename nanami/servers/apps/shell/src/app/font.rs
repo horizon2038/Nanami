@@ -1,7 +1,4 @@
-use alloc::{
-    alloc::{alloc, handle_alloc_error, Layout},
-    boxed::Box,
-};
+use alloc::boxed::Box;
 
 use fontdue::{Font, FontSettings};
 use libnanami::Word;
@@ -18,7 +15,7 @@ const FIRST: usize = 32;
 const COUNT: usize = 96;
 const MAX_GLYPH_W: usize = 20;
 const MAX_GLYPH_H: usize = 20;
-const TEXT_COLOR: u32 = 0x00e8_e0cf;
+pub const DEFAULT_TEXT_COLOR: u32 = 0x00e8_e0cf;
 
 #[derive(Clone, Copy)]
 struct CachedGlyph {
@@ -44,14 +41,14 @@ impl CachedGlyph {
 }
 
 pub struct TextRenderer {
-    glyphs: *mut CachedGlyph,
+    glyphs: Box<[CachedGlyph; COUNT]>,
     use_fontdue: bool,
 }
 
 impl TextRenderer {
     pub fn new() -> Self {
         log_heap_stats("[shell] font init begin");
-        let glyphs = allocate_glyph_cache();
+        let mut glyphs = allocate_glyph_cache();
         let use_fontdue = if !ENABLE_FONTDUE {
             libnanami::println!("[shell] fontdue disabled; using bitmap fallback");
             false
@@ -61,7 +58,7 @@ impl TextRenderer {
         } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
             libnanami::println!("[shell] fontdue ready bytes={:#x}", FONT_BYTES.len());
             let font = Box::leak(Box::new(font));
-            prerasterize_glyph_cache(glyphs, font);
+            prerasterize_glyph_cache(&mut glyphs, font);
             true
         } else {
             libnanami::println!("[shell] fontdue parse failed; using bitmap fallback");
@@ -74,16 +71,23 @@ impl TextRenderer {
         }
     }
 
-    pub fn draw_text(&mut self, vaddr: Word, fb_width: usize, y: usize, text: &[u8; COLS]) {
+    pub fn draw_text_colored(
+        &mut self,
+        vaddr: Word,
+        fb_width: usize,
+        y: usize,
+        text: &[u8; COLS],
+        colors: &[u32; COLS],
+    ) {
         let mut x = 0usize;
         let mut i = 0usize;
         while i < COLS {
             let ch = text[i];
             if ch != 0 {
                 if self.use_fontdue {
-                    self.draw_cached_glyph(vaddr, fb_width, x, y, ch);
+                    self.draw_cached_glyph(vaddr, fb_width, x, y, ch, colors[i]);
                 } else {
-                    draw_bitmap_char(vaddr, fb_width, x, y, ch, TEXT_COLOR);
+                    draw_bitmap_char(vaddr, fb_width, x, y, ch, colors[i]);
                 }
             }
             x += FONT_W;
@@ -91,12 +95,20 @@ impl TextRenderer {
         }
     }
 
-    fn draw_cached_glyph(&mut self, vaddr: Word, fb_width: usize, x: usize, y: usize, ch: u8) {
+    fn draw_cached_glyph(
+        &mut self,
+        vaddr: Word,
+        fb_width: usize,
+        x: usize,
+        y: usize,
+        ch: u8,
+        text_color: u32,
+    ) {
         if !(FIRST as u8..(FIRST + COUNT) as u8).contains(&ch) {
             return;
         }
         let index = (ch as usize) - FIRST;
-        let glyph = unsafe { *self.glyphs.add(index) };
+        let glyph = self.glyphs[index];
         if !glyph.cached {
             return;
         }
@@ -116,7 +128,7 @@ impl TextRenderer {
                         && (py as usize) < CONTENT_HEIGHT
                     {
                         let background = get_pixel(vaddr, fb_width, px as usize, py as usize);
-                        let color = blend_over(background, TEXT_COLOR, alpha);
+                        let color = blend_over(background, text_color, alpha);
                         put_pixel(vaddr, fb_width, px as usize, py as usize, color);
                     }
                 }
@@ -146,30 +158,16 @@ fn log_heap_stats(prefix: &str) {
     );
 }
 
-fn allocate_glyph_cache() -> *mut CachedGlyph {
-    let layout = Layout::array::<CachedGlyph>(COUNT).unwrap();
-    let ptr = unsafe { alloc(layout) as *mut CachedGlyph };
-    if ptr.is_null() {
-        handle_alloc_error(layout);
-    }
-    let mut i = 0usize;
-    while i < COUNT {
-        unsafe {
-            ptr.add(i).write(CachedGlyph::EMPTY);
-        }
-        i += 1;
-    }
-    ptr
+fn allocate_glyph_cache() -> Box<[CachedGlyph; COUNT]> {
+    Box::new([CachedGlyph::EMPTY; COUNT])
 }
 
-fn prerasterize_glyph_cache(glyphs: *mut CachedGlyph, font: &Font) {
+fn prerasterize_glyph_cache(glyphs: &mut [CachedGlyph; COUNT], font: &Font) {
     let mut i = 0usize;
     while i < COUNT {
         let ch = (FIRST + i) as u8;
         let glyph = rasterize_glyph(font, ch);
-        unsafe {
-            glyphs.add(i).write(glyph);
-        }
+        glyphs[i] = glyph;
         i += 1;
     }
 }

@@ -1,0 +1,6 @@
+# Rootfs user session list.
+# Intended location in rootfs: /nanami/session-list
+# Format: <name> <priority> <path> [argv...]
+#
+# System Manager starts these after all system-list entries have been spawned.
+shell 16 /bin/shell

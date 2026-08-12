@@ -138,6 +138,12 @@ fn nanami_main() -> libnanami::NanamiResult {
         content_width,
         content_height
     );
+    let (input_base, _input_bytes) =
+        nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
+            .map_err(|e| log_error("[image-viewer] attach input queue failed: ", e))?;
+    nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
+        .map_err(|e| log_error("[image-viewer] attach input notification failed: ", e))?;
+    let mut input_queue = nanami_services::input::InputEventQueue::new(input_base);
 
     let capacity_pixels = (pixel_bytes / 4) as usize;
     let expected_pixels = content_width.saturating_mul(content_height);
@@ -170,6 +176,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[image-viewer] rendered\n");
 
     loop {
+        drain_input(&mut input_queue, honoka_port, window_id);
         let _ = nanami_services::timer::timer_service_sleep_milliseconds(timer_port, 1000);
     }
 }
@@ -487,6 +494,28 @@ fn push_damage_rect(base: Word, x: usize, y: usize, width: usize, height: usize)
     write_word(base, entry + 2, width as Word);
     write_word(base, entry + 3, height as Word);
     write_word(base, 4, read_word(base, 4).wrapping_add(1).max(1));
+}
+
+fn drain_input(
+    input_queue: &mut nanami_services::input::InputEventQueue,
+    honoka_port: Word,
+    window_id: Word,
+) {
+    let mut drained = 0usize;
+    while drained < 256 {
+        let Some(packed) = input_queue.pop() else {
+            break;
+        };
+        let (kind, _, _, _, _) = nanami_services::input::unpack_input_event(packed);
+        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
+            let _ = nanami_services::gfx::honoka::honoka_destroy_window(honoka_port, window_id);
+            let _ = libnanami::request_exit();
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+        drained += 1;
+    }
 }
 
 fn read_word(base: Word, index: usize) -> Word {

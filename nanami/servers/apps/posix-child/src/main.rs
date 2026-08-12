@@ -19,7 +19,6 @@ fn nanami_main() -> libnanami::NanamiResult {
     if shm == 0 || shm_size < 0x1000 {
         nanami_services::posix::posix_exit(2);
     }
-
     let bytes = match nanami_services::posix::posix_read(posix_port, 3, 0, EXPECTED.len() as Word) {
         Ok(bytes) => bytes,
         Err(_) => nanami_services::posix::posix_exit(3),

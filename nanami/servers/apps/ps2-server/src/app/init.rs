@@ -4,9 +4,10 @@ use crate::constants::{
     PS2_ACK_TIMEOUT, PS2_COMMAND_PORT, PS2_CONTROLLER_ENABLE_AUX, PS2_CONTROLLER_READ_CONFIG,
     PS2_CONTROLLER_WRITE_CONFIG, PS2_CONTROLLER_WRITE_TO_MOUSE, PS2_DATA_PORT, PS2_MOUSE_ACK,
     PS2_MOUSE_CMD_DISABLE_DATA_REPORTING, PS2_MOUSE_CMD_ENABLE_DATA_REPORTING,
-    PS2_MOUSE_CMD_SET_DEFAULTS, PS2_MOUSE_CMD_SET_RESOLUTION, PS2_MOUSE_CMD_SET_SAMPLE_RATE,
-    PS2_MOUSE_CMD_SET_SCALING_1_TO_1, PS2_MOUSE_RESEND, PS2_MOUSE_RESOLUTION,
-    PS2_MOUSE_SAMPLE_RATE, PS2_STATUS_PORT,
+    PS2_MOUSE_CMD_GET_DEVICE_ID, PS2_MOUSE_CMD_SET_DEFAULTS, PS2_MOUSE_CMD_SET_RESOLUTION,
+    PS2_MOUSE_CMD_SET_SAMPLE_RATE, PS2_MOUSE_CMD_SET_SCALING_1_TO_1, PS2_MOUSE_ID_INTELLIMOUSE,
+    PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER, PS2_MOUSE_ID_STANDARD, PS2_MOUSE_RESEND,
+    PS2_MOUSE_RESOLUTION, PS2_MOUSE_SAMPLE_RATE, PS2_STATUS_PORT,
 };
 use crate::controller::drain_controller;
 use crate::state::Ps2Server;
@@ -57,16 +58,34 @@ pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     write_mouse_command(server, PS2_MOUSE_CMD_SET_DEFAULTS)?;
     write_mouse_command(server, PS2_MOUSE_CMD_SET_SCALING_1_TO_1)?;
     write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_RESOLUTION, PS2_MOUSE_RESOLUTION)?;
+    let mouse_id = enable_mouse_wheel(server).unwrap_or(PS2_MOUSE_ID_STANDARD);
+    if mouse_id == PS2_MOUSE_ID_INTELLIMOUSE || mouse_id == PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER {
+        server.mouse.set_packet_len(4);
+    }
     write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_SAMPLE_RATE, PS2_MOUSE_SAMPLE_RATE)?;
     write_mouse_command(server, PS2_MOUSE_CMD_ENABLE_DATA_REPORTING)?;
 
     libnanami::println!(
-        "[ps2-server] mouse rate={}Hz resolution={} scaling=1:1",
+        "[ps2-server] mouse rate={}Hz resolution={} id={:#x} packet={} scaling=1:1",
         PS2_MOUSE_SAMPLE_RATE,
-        PS2_MOUSE_RESOLUTION
+        PS2_MOUSE_RESOLUTION,
+        mouse_id,
+        if mouse_id == PS2_MOUSE_ID_INTELLIMOUSE || mouse_id == PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER {
+            4
+        } else {
+            3
+        }
     );
 
     Ok(())
+}
+
+fn enable_mouse_wheel(server: &mut Ps2Server) -> Result<u8, RequestError> {
+    write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_SAMPLE_RATE, 200)?;
+    write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_SAMPLE_RATE, 100)?;
+    write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_SAMPLE_RATE, 80)?;
+    write_mouse_command(server, PS2_MOUSE_CMD_GET_DEVICE_ID)?;
+    read_mouse_data_byte(server)
 }
 
 fn read_controller_config(server: &mut Ps2Server) -> Result<Word, RequestError> {
@@ -155,6 +174,28 @@ fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
     }
 
     libnanami::print!("[ps2-server] mouse ack timeout\n");
+    Err(RequestError::Transport)
+}
+
+fn read_mouse_data_byte(server: &mut Ps2Server) -> Result<u8, RequestError> {
+    let mut i = 0usize;
+    while i < PS2_ACK_TIMEOUT {
+        let status = libnanami::io::io_read(server.io_desc, PS2_STATUS_PORT, 1)?;
+        if (status & 0x01) == 0 {
+            i += 1;
+            continue;
+        }
+
+        let data = libnanami::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
+        if (status & 0x20) != 0 {
+            return Ok(data);
+        }
+
+        server
+            .keyboard
+            .push_byte(data, &mut server.key_events, &mut server.key_event_count);
+        i += 1;
+    }
     Err(RequestError::Transport)
 }
 

@@ -9,9 +9,17 @@ use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
 use crate::input::InputEvent;
 
 const MAX_DIRTY_RECTS: usize = 256;
+const MAX_INDIVIDUAL_DIRTY_RECTS: usize = 64;
 const CLIENT_PADDING: i32 = 4;
+const WINDOW_CORNER_RADIUS: i32 = 8;
 const DRAG_OUTLINE_THICKNESS: i32 = 2;
+const CLOSE_BUTTON_SIZE: i32 = 14;
+const CLOSE_BUTTON_RIGHT_MARGIN: i32 = 10;
+const TITLE_TEXT_Y_OFFSET: i32 = 10;
 const CLOCK_TEXT_BYTES: usize = 8;
+const SHELL_ICON_RECT: Rect = Rect::new(12, 4, 28, MENU_BAR_HEIGHT - 8);
+const SHELL_PATH: &[u8] = b"/bin/shell";
+const SHELL_PRIORITY: Word = 16;
 const TITLE_TEXT_MAX: usize = nanami_services::gfx::honoka::HONOKA_WINDOW_TITLE_BYTES;
 const DEFAULT_WALLPAPER_PNM: &[u8] = include_bytes!("../../assets/wallpapers/default.pnm");
 
@@ -47,6 +55,7 @@ struct Window {
     width: i32,
     height: i32,
     visible: bool,
+    opacity: u8,
     damage_queue: Word,
     local_fb: Word,
     fb_size: Word,
@@ -67,6 +76,7 @@ impl Window {
         width: 0,
         height: 0,
         visible: false,
+        opacity: nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
         damage_queue: 0,
         local_fb: 0,
         fb_size: 0,
@@ -103,7 +113,7 @@ pub struct Compositor {
     drag_preview_x: i32,
     drag_preview_y: i32,
     drag_outline_visible: bool,
-    active_theme: usize,
+    theme: Theme,
     dirty_rects: [Rect; MAX_DIRTY_RECTS],
     dirty_count: usize,
     focused_window_id: Word,
@@ -111,11 +121,22 @@ pub struct Compositor {
     clock_text: [u8; CLOCK_TEXT_BYTES],
     clock_len: usize,
     text: TextRenderer,
+    exec_port: Word,
+    exec_shm: Word,
+    exec_shm_size: Word,
 }
 
 impl Compositor {
-    pub fn new(framebuffer: Framebuffer, text: TextRenderer) -> Self {
+    pub fn new(
+        framebuffer: Framebuffer,
+        text: TextRenderer,
+        exec_port: Word,
+        exec_shm: Word,
+        exec_shm_size: Word,
+        theme_data: &[u8],
+    ) -> Option<Self> {
         let screen = framebuffer.screen();
+        let theme = parse_theme(&framebuffer, theme_data)?;
         let mut this = Self {
             framebuffer,
             windows: [Window::EMPTY; MAX_WINDOWS],
@@ -128,7 +149,7 @@ impl Compositor {
             drag_preview_x: 0,
             drag_preview_y: 0,
             drag_outline_visible: false,
-            active_theme: 0,
+            theme,
             dirty_rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
             dirty_count: 0,
             focused_window_id: 0,
@@ -136,10 +157,13 @@ impl Compositor {
             clock_text: *b"--:--:--",
             clock_len: CLOCK_TEXT_BYTES,
             text,
+            exec_port,
+            exec_shm,
+            exec_shm_size,
         };
         this.dirty_count = 0;
         this.mark_dirty(this.screen_rect());
-        this
+        Some(this)
     }
 
     pub fn render_if_needed(&mut self) -> bool {
@@ -147,22 +171,26 @@ impl Compositor {
             return false;
         }
 
-        if self.drag_outline_visible {
-            while self.dirty_count != 0 {
-                self.dirty_count -= 1;
-                self.render_rect(self.dirty_rects[self.dirty_count]);
+        let count = self.dirty_count;
+        self.dirty_count = 0;
+
+        if count > MAX_INDIVIDUAL_DIRTY_RECTS {
+            let mut rect = self.dirty_rects[0];
+            let mut i = 1usize;
+            while i < count {
+                rect = union_rect(rect, self.dirty_rects[i]);
+                i += 1;
             }
+            self.render_and_present(rect);
             return false;
         }
 
-        let mut rect = self.dirty_rects[0];
-        let mut i = 1usize;
-        while i < self.dirty_count {
-            rect = union_rect(rect, self.dirty_rects[i]);
+        let mut i = 0usize;
+        while i < count {
+            self.render_and_present(self.dirty_rects[i]);
             i += 1;
         }
-        self.dirty_count = 0;
-        self.render_rect(rect);
+
         false
     }
 
@@ -265,6 +293,7 @@ impl Compositor {
             width,
             height,
             visible: true,
+            opacity: nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
             damage_queue: 0,
             local_fb: 0,
             fb_size: 0,
@@ -297,6 +326,49 @@ impl Compositor {
         self.windows[index].title_len = len;
         self.mark_dirty(self.windows[index].rect());
         Ok(id)
+    }
+
+    pub fn destroy_window(
+        &mut self,
+        owner_pid: Word,
+        window_id: Word,
+    ) -> Result<(), libnanami::RequestError> {
+        let index = self.find_owned_window(owner_pid, window_id)?;
+        self.remove_window(index);
+        Ok(())
+    }
+
+    pub fn reap_dead_windows(&mut self) {
+        let mut checked_pids = [0; MAX_WINDOWS];
+        let mut checked_alive = [true; MAX_WINDOWS];
+        let mut checked_count = 0usize;
+        let mut index = 0usize;
+
+        while index < MAX_WINDOWS {
+            let window = self.windows[index];
+            if !window.used {
+                index += 1;
+                continue;
+            }
+
+            let cached = checked_pids[..checked_count]
+                .iter()
+                .position(|pid| *pid == window.owner_pid);
+            let alive = if let Some(cached_index) = cached {
+                checked_alive[cached_index]
+            } else {
+                let alive = libnanami::request_process_alive(window.owner_pid).unwrap_or(true);
+                checked_pids[checked_count] = window.owner_pid;
+                checked_alive[checked_count] = alive;
+                checked_count += 1;
+                alive
+            };
+
+            if !alive {
+                self.remove_window(index);
+            }
+            index += 1;
+        }
     }
 
     pub fn attach_logical_framebuffer(
@@ -416,6 +488,24 @@ impl Compositor {
         Ok(())
     }
 
+    pub fn set_window_opacity(
+        &mut self,
+        owner_pid: Word,
+        window_id: Word,
+        opacity: Word,
+    ) -> Result<(), libnanami::RequestError> {
+        if opacity > u8::MAX as Word {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
+        let index = self.find_owned_window(owner_pid, window_id)?;
+        let opacity = opacity as u8;
+        if self.windows[index].opacity != opacity {
+            self.windows[index].opacity = opacity;
+            self.mark_dirty(self.windows[index].rect());
+        }
+        Ok(())
+    }
+
     pub fn invalidate_logical_framebuffer(
         &mut self,
         owner_pid: Word,
@@ -478,6 +568,19 @@ impl Compositor {
         if pressed {
             let Some(index) = self.find_window_at(self.cursor_x, self.cursor_y) else {
                 if code == 1 {
+                    if self.point_in_shell_icon(self.cursor_x, self.cursor_y) {
+                        match self.spawn_shell() {
+                            Ok(pid) => {
+                                libnanami::println!("[honoka] shell spawned pid={}", pid);
+                            }
+                            Err(e) => {
+                                libnanami::println!("[honoka] shell spawn failed: {:?}", e);
+                            }
+                        }
+                        self.mark_dirty(SHELL_ICON_RECT);
+                        self.mark_dirty(self.cursor_rect());
+                        return true;
+                    }
                     if let Some(old_focus) = self.find_focused_window() {
                         let old_rect = self.windows[old_focus].rect();
                         self.focused_window_id = 0;
@@ -513,6 +616,13 @@ impl Compositor {
                 return false;
             }
 
+            if self.point_in_close_button(index, self.cursor_x, self.cursor_y) {
+                self.deliver_client_close(index);
+                self.mark_dirty(self.windows[index].rect());
+                self.mark_dirty(self.cursor_rect());
+                return true;
+            }
+
             {
                 let old_focus = self.find_focused_window().map(|i| self.windows[i].rect());
                 let window_id = self.windows[index].id;
@@ -540,7 +650,6 @@ impl Compositor {
                     DRAG_OUTLINE_THICKNESS + 1,
                 );
                 redraw_cursor = false;
-                libnanami::print!("[honoka] drag begin\n");
             }
         } else {
             if let Some(index) = self.dragging_window {
@@ -558,9 +667,7 @@ impl Compositor {
                 self.deliver_client_mouse_position(index);
                 self.deliver_client_button(index, code, false);
             }
-            if code == 1 {
-                libnanami::print!("[honoka] drag end\n");
-            }
+            if code == 1 {}
         }
         if redraw_cursor {
             self.mark_dirty(self.cursor_rect());
@@ -586,14 +693,6 @@ impl Compositor {
             return false;
         }
 
-        if code == 0x01 {
-            if pressed {
-                self.active_theme ^= 1;
-                self.mark_dirty(self.screen_rect());
-                libnanami::print!("[honoka] esc pressed: theme toggled\n");
-            }
-            return true;
-        }
         if let Some(index) = self.find_focused_window() {
             self.deliver_client_key(index, code, pressed);
             return true;
@@ -605,7 +704,7 @@ impl Compositor {
         if dirty.is_empty() {
             return;
         }
-        let theme = make_theme(&self.framebuffer, self.active_theme);
+        let theme = self.theme;
         draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
         draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
         draw_clock(
@@ -651,6 +750,13 @@ impl Compositor {
                 theme.cursor,
                 theme.cursor_shadow,
             );
+        }
+    }
+
+    fn render_and_present(&self, dirty: Rect) {
+        self.render_rect(dirty);
+        if let Err(error) = self.framebuffer.present(dirty) {
+            libnanami::println!("[honoka] display present failed: {}", error);
         }
     }
 
@@ -760,7 +866,7 @@ impl Compositor {
         while i > 0 {
             i -= 1;
             let w = self.windows[i];
-            if w.used && w.visible && contains_rect(w.rect(), x, y) {
+            if w.used && w.visible && contains_rounded_rect(w.rect(), x, y) {
                 return Some(i);
             }
         }
@@ -771,10 +877,39 @@ impl Compositor {
         let w = self.windows[index];
         w.used
             && w.visible
+            && contains_rounded_rect(w.rect(), x, y)
             && x >= w.x
             && x < w.x + w.width
             && y >= w.y
             && y < w.y + TITLE_BAR_HEIGHT
+    }
+
+    fn point_in_close_button(&self, index: usize, x: i32, y: i32) -> bool {
+        let w = self.windows[index];
+        w.used && w.visible && contains_rect(close_button_rect(w).inflate(2), x, y)
+    }
+
+    fn point_in_shell_icon(&self, x: i32, y: i32) -> bool {
+        contains_rect(SHELL_ICON_RECT, x, y)
+    }
+
+    fn spawn_shell(&self) -> Result<Word, libnanami::RequestError> {
+        if self.exec_shm == 0 || SHELL_PATH.len() > self.exec_shm_size as usize {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                SHELL_PATH.as_ptr(),
+                self.exec_shm as *mut u8,
+                SHELL_PATH.len(),
+            );
+        }
+        nanami_services::exec::exec_spawn_path(
+            self.exec_port,
+            0,
+            SHELL_PATH.len() as Word,
+            SHELL_PRIORITY,
+        )
     }
 
     fn find_window_content_at(&self, x: i32, y: i32) -> Option<usize> {
@@ -782,7 +917,11 @@ impl Compositor {
         while i > 0 {
             i -= 1;
             let w = self.windows[i];
-            if w.used && w.visible && contains_rect(w.content_rect(), x, y) {
+            if w.used
+                && w.visible
+                && contains_rect(w.content_rect(), x, y)
+                && contains_rounded_rect(w.rect(), x, y)
+            {
                 return Some(i);
             }
         }
@@ -877,6 +1016,17 @@ impl Compositor {
         self.deliver_client_event(index, packed);
     }
 
+    fn deliver_client_close(&self, index: usize) {
+        let packed = nanami_services::input::pack_input_event(
+            nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE,
+            0,
+            0,
+            0,
+            0,
+        );
+        self.deliver_client_event(index, packed);
+    }
+
     fn deliver_client_event(&self, index: usize, packed: Word) {
         let window = self.windows[index];
         if window.input_queue == 0 {
@@ -889,7 +1039,7 @@ impl Compositor {
     }
 
     fn clear_logical_framebuffer(&self, local_vaddr: Word, size: Word) {
-        let theme = make_theme(&self.framebuffer, self.active_theme);
+        let theme = self.theme;
         let mut offset = 0usize;
         while offset + 4 <= size {
             unsafe {
@@ -897,6 +1047,36 @@ impl Compositor {
             }
             offset += 4;
         }
+    }
+
+    fn remove_window(&mut self, index: usize) {
+        let window = self.windows[index];
+        if !window.used {
+            return;
+        }
+
+        if self.focused_window_id == window.id {
+            self.focused_window_id = 0;
+        }
+        if self.dragging_window == Some(index) {
+            self.dragging_window = None;
+            self.drag_outline_visible = false;
+        }
+
+        self.windows[index] = Window::EMPTY;
+        if window.damage_queue != 0 {
+            let size = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES
+                .saturating_add(window.fb_size);
+            let _ = libnanami::request_mapping_release(window.damage_queue, size);
+        }
+        if window.input_queue != 0 {
+            let _ = libnanami::request_mapping_release(
+                window.input_queue,
+                nanami_services::input::INPUT_EVENT_QUEUE_BYTES,
+            );
+        }
+        self.mark_dirty(window.rect());
+        self.mark_dirty(self.cursor_rect());
     }
 
     fn init_damage_queue(&self, base: Word) {
@@ -1019,6 +1199,41 @@ fn push_raw_input_event(base: Word, packed: Word) {
 
 fn contains_rect(rect: Rect, x: i32, y: i32) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+fn contains_rounded_rect(rect: Rect, x: i32, y: i32) -> bool {
+    rounded_row_span(rect, WINDOW_CORNER_RADIUS, y).is_some_and(|(x0, x1)| x >= x0 && x < x1)
+}
+
+fn rounded_row_span(rect: Rect, radius: i32, y: i32) -> Option<(i32, i32)> {
+    if rect.is_empty() || y < rect.y || y >= rect.y.saturating_add(rect.height) {
+        return None;
+    }
+    let radius = radius.max(0).min(rect.width / 2).min(rect.height / 2);
+    if radius <= 1 {
+        return Some((rect.x, rect.x.saturating_add(rect.width)));
+    }
+
+    let row = y - rect.y;
+    let edge_distance = row.min(rect.height - 1 - row);
+    if edge_distance >= radius {
+        return Some((rect.x, rect.x.saturating_add(rect.width)));
+    }
+
+    let circle_radius = radius - 1;
+    let dy = circle_radius - edge_distance;
+    let mut inset = 0;
+    while inset < radius {
+        let dx = circle_radius - inset;
+        if dx * dx + dy * dy <= circle_radius * circle_radius {
+            break;
+        }
+        inset += 1;
+    }
+    Some((
+        rect.x.saturating_add(inset),
+        rect.x.saturating_add(rect.width).saturating_sub(inset),
+    ))
 }
 
 fn clamp_i16(value: i32) -> i16 {
@@ -1257,9 +1472,49 @@ fn draw_menu_bar(framebuffer: &Framebuffer, screen: ScreenInfo, theme: Theme, di
         1,
         theme.menu_edge,
     );
-    fill_clipped(framebuffer, dirty, 14, 8, 12, 12, theme.accent);
-    fill_clipped(framebuffer, dirty, 36, 9, 86, 3, theme.title_text);
-    fill_clipped(framebuffer, dirty, 36, 17, 56, 3, theme.title_text);
+    draw_shell_icon(framebuffer, dirty, theme);
+}
+
+fn draw_shell_icon(framebuffer: &Framebuffer, dirty: Rect, theme: Theme) {
+    let Some(_) = intersect_rect(SHELL_ICON_RECT, dirty) else {
+        return;
+    };
+    fill_clipped(
+        framebuffer,
+        dirty,
+        SHELL_ICON_RECT.x,
+        SHELL_ICON_RECT.y,
+        SHELL_ICON_RECT.width,
+        SHELL_ICON_RECT.height,
+        theme.window_frame,
+    );
+    fill_clipped(
+        framebuffer,
+        dirty,
+        SHELL_ICON_RECT.x + 5,
+        SHELL_ICON_RECT.y + 6,
+        7,
+        2,
+        theme.title_text,
+    );
+    fill_clipped(
+        framebuffer,
+        dirty,
+        SHELL_ICON_RECT.x + 10,
+        SHELL_ICON_RECT.y + 9,
+        7,
+        2,
+        theme.title_text,
+    );
+    fill_clipped(
+        framebuffer,
+        dirty,
+        SHELL_ICON_RECT.x + 5,
+        SHELL_ICON_RECT.y + 14,
+        16,
+        2,
+        theme.accent,
+    );
 }
 
 fn draw_clock(
@@ -1283,6 +1538,7 @@ fn draw_clock(
         clock_text,
         theme.title_text,
         theme.menu_bar,
+        u8::MAX,
     );
 }
 
@@ -1300,116 +1556,35 @@ fn draw_window(
     active: bool,
     dirty: Rect,
 ) {
-    let Some(_) = intersect_rect(window.rect(), dirty) else {
+    let Some(area) = intersect_rect(window.rect(), dirty) else {
         return;
     };
-
-    fill_clipped(
-        framebuffer,
-        dirty,
-        window.x,
-        window.y,
-        window.width,
-        window.height,
-        theme.window_frame,
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        window.x + 2,
-        window.y + 2,
-        window.width - 4,
-        window.height - 4,
-        theme.window_body,
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        window.x + 2,
-        window.y + 2,
-        window.width - 4,
-        TITLE_BAR_HEIGHT,
-        theme.title_bar,
-    );
-    draw_rect_clipped(
-        framebuffer,
-        dirty,
-        window.x,
-        window.y,
-        window.width,
-        window.height,
-        if active {
-            theme.accent
-        } else {
-            theme.window_frame
-        },
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        window.x + 12,
-        window.y + 10,
-        8,
-        8,
-        theme.accent,
-    );
+    draw_window_surface(framebuffer, window, theme, active, area);
     let title_clip = Rect::new(
-        window.x + 26,
-        window.y + 4,
-        window.width - 48,
-        TITLE_BAR_HEIGHT - 6,
+        window.x + 10,
+        window.y + 6,
+        window.width - 44,
+        TITLE_BAR_HEIGHT - 8,
     );
     if let Some(title_dirty) = intersect_rect(title_clip, dirty) {
         text.draw_title(
             framebuffer,
             title_dirty,
-            window.x + 28,
-            window.y + 8,
+            window.x + 12,
+            window.y + TITLE_TEXT_Y_OFFSET,
             &window.title[..window.title_len],
             theme.title_text,
             theme.title_bar,
+            window.opacity,
         );
     }
-    fill_clipped(
-        framebuffer,
-        dirty,
-        window.x + window.width - 24,
-        window.y + 11,
-        8,
-        8,
-        if active {
-            theme.title_text
-        } else {
-            theme.window_frame
-        },
-    );
+    draw_close_button(framebuffer, dirty, window, theme.title_text);
 
     let content = window.content_rect();
     if window.local_fb != 0 {
-        if let Some(r) = intersect_rect(content, dirty) {
-            framebuffer.blit_bgra32_from(
-                r.x,
-                r.y,
-                r.width,
-                r.height,
-                window.local_fb,
-                window.fb_size,
-                content.width.max(0) as usize,
-                (r.x - content.x) as usize,
-                (r.y - content.y) as usize,
-            );
-        }
+        draw_window_content(framebuffer, window, dirty);
     } else {
-        fill_clipped(
-            framebuffer,
-            dirty,
-            content.x,
-            content.y,
-            content.width,
-            content.height,
-            darken(theme.window_body),
-        );
-        fill_clipped(
+        fill_clipped_alpha(
             framebuffer,
             dirty,
             content.x + 18,
@@ -1417,8 +1592,9 @@ fn draw_window(
             content.width - 36,
             3,
             theme.title_text,
+            window.opacity,
         );
-        fill_clipped(
+        fill_clipped_alpha(
             framebuffer,
             dirty,
             content.x + 18,
@@ -1426,8 +1602,9 @@ fn draw_window(
             content.width - 84,
             3,
             theme.title_text,
+            window.opacity,
         );
-        fill_clipped(
+        fill_clipped_alpha(
             framebuffer,
             dirty,
             content.x + 18,
@@ -1435,7 +1612,214 @@ fn draw_window(
             content.width - 140,
             3,
             theme.title_text,
+            window.opacity,
         );
+    }
+}
+
+fn close_button_rect(window: Window) -> Rect {
+    Rect::new(
+        window.x + window.width - CLOSE_BUTTON_RIGHT_MARGIN - CLOSE_BUTTON_SIZE,
+        window.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2,
+        CLOSE_BUTTON_SIZE,
+        CLOSE_BUTTON_SIZE,
+    )
+}
+
+fn draw_close_button(framebuffer: &Framebuffer, dirty: Rect, window: Window, color: u32) {
+    let rect = close_button_rect(window);
+    let arm = rect.width.saturating_sub(6);
+    let mut offset = 0i32;
+    while offset < arm {
+        fill_clipped_alpha(
+            framebuffer,
+            dirty,
+            rect.x + 3 + offset,
+            rect.y + 3 + offset,
+            2,
+            2,
+            color,
+            window.opacity,
+        );
+        fill_clipped_alpha(
+            framebuffer,
+            dirty,
+            rect.x + rect.width - 5 - offset,
+            rect.y + 3 + offset,
+            2,
+            2,
+            color,
+            window.opacity,
+        );
+        offset += 1;
+    }
+}
+
+fn draw_window_surface(
+    framebuffer: &Framebuffer,
+    window: Window,
+    theme: Theme,
+    active: bool,
+    dirty: Rect,
+) {
+    let outer = window.rect();
+    let inner = Rect::new(outer.x + 2, outer.y + 2, outer.width - 4, outer.height - 4);
+    let content = window.content_rect();
+    let border = if active {
+        theme.accent
+    } else {
+        theme.window_frame
+    };
+    let mut y = dirty.y;
+    while y < dirty.y.saturating_add(dirty.height) {
+        let Some((outer_x0, outer_x1)) = rounded_row_span(outer, WINDOW_CORNER_RADIUS, y) else {
+            y += 1;
+            continue;
+        };
+        let Some((inner_x0, inner_x1)) =
+            rounded_row_span(inner, WINDOW_CORNER_RADIUS.saturating_sub(2), y)
+        else {
+            fill_window_span(
+                framebuffer,
+                dirty,
+                y,
+                outer_x0,
+                outer_x1,
+                border,
+                window.opacity,
+            );
+            y += 1;
+            continue;
+        };
+
+        fill_window_span(
+            framebuffer,
+            dirty,
+            y,
+            outer_x0,
+            inner_x0,
+            border,
+            window.opacity,
+        );
+        fill_window_span(
+            framebuffer,
+            dirty,
+            y,
+            inner_x1,
+            outer_x1,
+            border,
+            window.opacity,
+        );
+        if y >= content.y && y < content.y.saturating_add(content.height) {
+            fill_window_span(
+                framebuffer,
+                dirty,
+                y,
+                inner_x0,
+                content.x,
+                theme.window_body,
+                window.opacity,
+            );
+            if window.local_fb == 0 {
+                fill_window_span(
+                    framebuffer,
+                    dirty,
+                    y,
+                    content.x,
+                    content.x.saturating_add(content.width),
+                    darken(theme.window_body),
+                    window.opacity,
+                );
+            }
+            fill_window_span(
+                framebuffer,
+                dirty,
+                y,
+                content.x.saturating_add(content.width),
+                inner_x1,
+                theme.window_body,
+                window.opacity,
+            );
+        } else {
+            let color = if y < content.y {
+                theme.title_bar
+            } else {
+                theme.window_body
+            };
+            fill_window_span(
+                framebuffer,
+                dirty,
+                y,
+                inner_x0,
+                inner_x1,
+                color,
+                window.opacity,
+            );
+        }
+        y += 1;
+    }
+}
+
+fn draw_window_content(framebuffer: &Framebuffer, window: Window, dirty: Rect) {
+    let content = window.content_rect();
+    let Some(area) = intersect_rect(content, dirty) else {
+        return;
+    };
+    let mut y = area.y;
+    while y < area.y.saturating_add(area.height) {
+        if let Some((rounded_x0, rounded_x1)) =
+            rounded_row_span(window.rect(), WINDOW_CORNER_RADIUS, y)
+        {
+            let x0 = area.x.max(rounded_x0);
+            let x1 = area.x.saturating_add(area.width).min(rounded_x1);
+            if x0 < x1 {
+                framebuffer.blit_bgra32_from_alpha(
+                    x0,
+                    y,
+                    x1 - x0,
+                    1,
+                    window.local_fb,
+                    window.fb_size,
+                    content.width.max(0) as usize,
+                    (x0 - content.x) as usize,
+                    (y - content.y) as usize,
+                    window.opacity,
+                );
+            }
+        }
+        y += 1;
+    }
+}
+
+fn fill_window_span(
+    framebuffer: &Framebuffer,
+    dirty: Rect,
+    y: i32,
+    x0: i32,
+    x1: i32,
+    color: u32,
+    opacity: u8,
+) {
+    let x0 = x0.max(dirty.x);
+    let x1 = x1.min(dirty.x.saturating_add(dirty.width));
+    if y >= dirty.y && y < dirty.y.saturating_add(dirty.height) && x0 < x1 {
+        framebuffer.fill_rect_alpha(x0, y, x1 - x0, 1, color, opacity);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_clipped_alpha(
+    framebuffer: &Framebuffer,
+    dirty: Rect,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+    opacity: u8,
+) {
+    if let Some(r) = intersect_rect(Rect::new(x, y, width, height), dirty) {
+        framebuffer.fill_rect_alpha(r.x, r.y, r.width, r.height, color, opacity);
     }
 }
 
@@ -1528,36 +1912,96 @@ fn sanitize_title_byte(byte: u8) -> u8 {
     }
 }
 
-fn make_theme(framebuffer: &Framebuffer, index: usize) -> Theme {
-    if index == 0 {
-        return Theme {
-            background_top: framebuffer.color(101, 101, 101),
-            background_bottom: framebuffer.color(32, 32, 32),
-            menu_bar: framebuffer.color(64, 64, 64),
-            menu_edge: framebuffer.color(32, 32, 32),
-            window_body: framebuffer.color(136, 136, 136),
-            window_frame: framebuffer.color(48, 48, 48),
-            title_bar: framebuffer.color(112, 113, 111),
-            title_text: framebuffer.color(224, 224, 224),
-            accent: framebuffer.color(170, 132, 82),
-            cursor: framebuffer.color(250, 248, 238),
-            cursor_shadow: framebuffer.color(23, 25, 24),
-        };
+fn parse_theme(framebuffer: &Framebuffer, data: &[u8]) -> Option<Theme> {
+    const FIELD_COUNT: usize = 11;
+    let mut values = [None; FIELD_COUNT];
+    let mut start = 0usize;
+    while start < data.len() {
+        let mut end = start;
+        while end < data.len() && data[end] != b'\n' {
+            end += 1;
+        }
+        let line = trim_ascii(&data[start..end]);
+        if !line.is_empty() && line[0] != b';' {
+            let separator = line.iter().position(|byte| *byte == b'=')?;
+            let key = trim_ascii(&line[..separator]);
+            let value = trim_ascii(&line[separator + 1..]);
+            let index = theme_field_index(key)?;
+            values[index] = Some(parse_hex_color(value)?);
+        }
+        start = end.saturating_add(1);
     }
 
-    Theme {
-        background_top: framebuffer.color(28, 23, 20),
-        background_bottom: framebuffer.color(63, 43, 32),
-        menu_bar: framebuffer.color(30, 24, 22),
-        menu_edge: framebuffer.color(130, 88, 66),
-        window_body: framebuffer.color(166, 148, 126),
-        window_frame: framebuffer.color(54, 36, 32),
-        title_bar: framebuffer.color(104, 62, 52),
-        title_text: framebuffer.color(236, 222, 202),
-        accent: framebuffer.color(108, 150, 122),
-        cursor: framebuffer.color(255, 244, 220),
-        cursor_shadow: framebuffer.color(29, 20, 18),
+    Some(Theme {
+        background_top: framebuffer_theme_color(framebuffer, values[0]?),
+        background_bottom: framebuffer_theme_color(framebuffer, values[1]?),
+        menu_bar: framebuffer_theme_color(framebuffer, values[2]?),
+        menu_edge: framebuffer_theme_color(framebuffer, values[3]?),
+        window_body: framebuffer_theme_color(framebuffer, values[4]?),
+        window_frame: framebuffer_theme_color(framebuffer, values[5]?),
+        title_bar: framebuffer_theme_color(framebuffer, values[6]?),
+        title_text: framebuffer_theme_color(framebuffer, values[7]?),
+        accent: framebuffer_theme_color(framebuffer, values[8]?),
+        cursor: framebuffer_theme_color(framebuffer, values[9]?),
+        cursor_shadow: framebuffer_theme_color(framebuffer, values[10]?),
+    })
+}
+
+fn theme_field_index(key: &[u8]) -> Option<usize> {
+    match key {
+        b"background_top" => Some(0),
+        b"background_bottom" => Some(1),
+        b"menu_bar" => Some(2),
+        b"menu_edge" => Some(3),
+        b"window_body" => Some(4),
+        b"window_frame" => Some(5),
+        b"title_bar" => Some(6),
+        b"title_text" => Some(7),
+        b"accent" => Some(8),
+        b"cursor" => Some(9),
+        b"cursor_shadow" => Some(10),
+        _ => None,
     }
+}
+
+fn trim_ascii(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn parse_hex_color(value: &[u8]) -> Option<u32> {
+    if value.len() != 7 || value[0] != b'#' {
+        return None;
+    }
+    let mut color = 0u32;
+    let mut i = 1usize;
+    while i < value.len() {
+        color = (color << 4) | hex_digit(value[i])? as u32;
+        i += 1;
+    }
+    Some(color)
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn framebuffer_theme_color(framebuffer: &Framebuffer, color: u32) -> u32 {
+    framebuffer.color(
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+    )
 }
 
 fn clip_to_screen(rect: Rect, screen: ScreenInfo) -> Rect {

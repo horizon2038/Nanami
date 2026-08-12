@@ -1,0 +1,15 @@
+# Rootfs system service list.
+# Intended location in rootfs: /nanami/system-list
+# Format: <name> <priority> <path> [argv...]
+#
+# System Manager reads this after vfs-service is online.
+terminal-service 21 /bin/terminal-service
+posix-service 21 /bin/posix-server
+alter-linux 21 /bin/alter-linux
+alter-freebsd 21 /bin/alter-freebsd
+input-service 28 /bin/input-server
+ps2-service 28 /bin/ps2-server
+display-service 24 /bin/fb-server
+honoka-service 24 /bin/honoka
+net-device 23 /bin/virtio-net
+network-service 22 /bin/net-server

@@ -204,9 +204,8 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
 
             retry = retry.saturating_add(1);
             if retry >= DHCP_MAX_RETRIES {
-                libnanami::print!("[net-server][dhcp] offer timeout, restart discover cycle\n");
-                runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(0x0101_0101);
-                continue 'discover_phase;
+                use_configured_fallback(runtime, "offer timeout");
+                return;
             }
             libnanami::print!("[net-server][dhcp] offer timeout, retry=");
             libnanami::print!("{}", retry);
@@ -243,9 +242,8 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
 
             retry = retry.saturating_add(1);
             if retry >= DHCP_MAX_RETRIES {
-                libnanami::print!("[net-server][dhcp] ack timeout, restart discover cycle\n");
-                runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(0x0011_0011);
-                continue 'discover_phase;
+                use_configured_fallback(runtime, "ack timeout");
+                return;
             }
             libnanami::print!("[net-server][dhcp] ack timeout, retry=");
             libnanami::print!("{}", retry);
@@ -254,6 +252,21 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
             libnanami::print!("\n");
         }
     }
+}
+
+fn use_configured_fallback(runtime: &mut NetRuntime, reason: &str) {
+    runtime.dhcp_waiting = false;
+    runtime.dhcp_offer_valid = false;
+    runtime.dhcp_ack_valid = false;
+    libnanami::print!("[net-server][dhcp] ");
+    libnanami::print!("{}", reason);
+    libnanami::print!("; using configured ip=");
+    log_ip(runtime.ip);
+    libnanami::print!(" gw=");
+    log_ip(runtime.gateway_ip);
+    libnanami::print!(" dns=");
+    log_ip(runtime.dns_ip);
+    libnanami::print!("\n");
 }
 
 fn wait_dhcp_offer(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {

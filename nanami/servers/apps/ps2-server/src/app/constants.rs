@@ -21,12 +21,16 @@ pub const PS2_MOUSE_CMD_SET_DEFAULTS: Word = 0xF6;
 pub const PS2_MOUSE_CMD_SET_SAMPLE_RATE: Word = 0xF3;
 pub const PS2_MOUSE_CMD_SET_RESOLUTION: Word = 0xE8;
 pub const PS2_MOUSE_CMD_SET_SCALING_1_TO_1: Word = 0xE6;
+pub const PS2_MOUSE_CMD_GET_DEVICE_ID: Word = 0xF2;
 pub const PS2_MOUSE_CMD_ENABLE_DATA_REPORTING: Word = 0xF4;
 pub const PS2_MOUSE_ACK: u8 = 0xFA;
 pub const PS2_MOUSE_RESEND: u8 = 0xFE;
 
 pub const PS2_MOUSE_SAMPLE_RATE: Word = 200;
 pub const PS2_MOUSE_RESOLUTION: Word = 3;
+pub const PS2_MOUSE_ID_STANDARD: u8 = 0x00;
+pub const PS2_MOUSE_ID_INTELLIMOUSE: u8 = 0x03;
+pub const PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER: u8 = 0x04;
 
 pub const MAX_PS2_BYTES_PER_DRAIN: usize = 128;
 pub const MAX_KEY_EVENTS_PER_BATCH: usize = 32;

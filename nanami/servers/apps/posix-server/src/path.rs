@@ -19,7 +19,10 @@ pub(crate) fn resolve_client_path(
         return None;
     }
     let input = unsafe {
-        core::slice::from_raw_parts((session.shm_local as usize + path_offset) as *const u8, path_len)
+        core::slice::from_raw_parts(
+            (session.shm_local as usize + path_offset) as *const u8,
+            path_len,
+        )
     };
     resolve_path(&session.cwd[..session.cwd_len], input)
 }

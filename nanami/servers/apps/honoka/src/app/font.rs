@@ -69,6 +69,7 @@ impl TextRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_title(
         &self,
         framebuffer: &Framebuffer,
@@ -78,9 +79,10 @@ impl TextRenderer {
         text: &[u8],
         color: u32,
         background: u32,
+        opacity: u8,
     ) {
         if !self.use_fontdue {
-            draw_fallback_text(framebuffer, dirty, x, y + 1, text, color);
+            draw_fallback_text(framebuffer, dirty, x, y + 1, text, color, opacity);
             return;
         }
 
@@ -89,7 +91,16 @@ impl TextRenderer {
         while i < text.len() {
             let ch = text[i];
             if let Some(glyph) = self.cached_glyph(ch) {
-                draw_cached_glyph(framebuffer, dirty, pen_x, y, glyph, color, background);
+                draw_cached_glyph(
+                    framebuffer,
+                    dirty,
+                    pen_x,
+                    y,
+                    glyph,
+                    color,
+                    background,
+                    opacity,
+                );
                 pen_x = pen_x.saturating_add(glyph.advance as i32);
             }
             i += 1;
@@ -179,6 +190,7 @@ fn rasterize_glyph(font: &Font, ch: u8) -> CachedGlyph {
     glyph
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_cached_glyph(
     framebuffer: &Framebuffer,
     dirty: Rect,
@@ -187,6 +199,7 @@ fn draw_cached_glyph(
     glyph: CachedGlyph,
     color: u32,
     background: u32,
+    opacity: u8,
 ) {
     let base_x = x.saturating_add(glyph.x_offset);
     let base_y = y.saturating_add(glyph.y_offset);
@@ -199,7 +212,7 @@ fn draw_cached_glyph(
                 let px = base_x.saturating_add(gx as i32);
                 let py = base_y.saturating_add(gy as i32);
                 if contains(dirty, px, py) {
-                    framebuffer.fill_rect(px, py, 1, 1, blend_over(background, color, alpha));
+                    framebuffer.blend_pixel(px, py, blend_over(background, color, alpha), opacity);
                 }
             }
             gx += 1;
@@ -239,6 +252,7 @@ fn draw_fallback_text(
     y: i32,
     text: &[u8],
     color: u32,
+    opacity: u8,
 ) {
     let mut i = 0usize;
     while i < text.len() {
@@ -249,12 +263,21 @@ fn draw_fallback_text(
             y,
             text[i],
             color,
+            opacity,
         );
         i += 1;
     }
 }
 
-fn draw_glyph5x7(framebuffer: &Framebuffer, dirty: Rect, x: i32, y: i32, ch: u8, color: u32) {
+fn draw_glyph5x7(
+    framebuffer: &Framebuffer,
+    dirty: Rect,
+    x: i32,
+    y: i32,
+    ch: u8,
+    color: u32,
+    opacity: u8,
+) {
     let glyph = glyph5x7(ch);
     let mut gy = 0usize;
     while gy < 7 {
@@ -265,7 +288,7 @@ fn draw_glyph5x7(framebuffer: &Framebuffer, dirty: Rect, x: i32, y: i32, ch: u8,
                 let px = x + gx as i32;
                 let py = y + gy as i32;
                 if contains(dirty, px, py) {
-                    framebuffer.fill_rect(px, py, 1, 1, color);
+                    framebuffer.blend_pixel(px, py, color, opacity);
                 }
             }
             gx += 1;

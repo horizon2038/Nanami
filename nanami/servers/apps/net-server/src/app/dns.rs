@@ -9,9 +9,9 @@ pub(crate) fn handle_dns_query_request(
     stats: &mut NetStats,
     default_timeout_ms: Word,
 ) -> (Word, Word, Word) {
-    if !runtime.session.active || runtime.session.caller_id != request.identifier {
+    let Some(session) = session_for(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    }
+    };
 
     let name_offset = request.arg0;
     let name_len = request.arg1 as usize;
@@ -25,16 +25,16 @@ pub(crate) fn handle_dns_query_request(
     if name_len == 0 || name_len > 253 {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    if name_offset + name_len as Word > runtime.session.shm_size {
+    if name_offset + name_len as Word > session.shm_size {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    if out_offset + 4 > runtime.session.shm_size {
+    if out_offset + 4 > session.shm_size {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let mut host = [0u8; 253];
     unsafe {
-        let src = (runtime.session.shm_local + name_offset) as *const u8;
+        let src = (session.shm_local + name_offset) as *const u8;
         ptr::copy_nonoverlapping(src, host.as_mut_ptr(), name_len);
     }
 
@@ -49,7 +49,7 @@ pub(crate) fn handle_dns_query_request(
         | (resolved[3] as Word);
 
     unsafe {
-        let out = (runtime.session.shm_local + out_offset) as *mut u8;
+        let out = (session.shm_local + out_offset) as *mut u8;
         let dst = core::slice::from_raw_parts_mut(out, 4);
         write_u32_be(dst, be as u32);
     }

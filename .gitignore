@@ -10,3 +10,6 @@
 *.elf
 *.obj
 *.bin
+*.cpio
+**/bin/*
+/untracked-files/

@@ -22,10 +22,45 @@ NET_MODE="${NET_MODE:-}"
 NET_DEVICE="${NET_DEVICE:-virtio}"
 BLOCK_IMAGE="${BLOCK_IMAGE:-}"
 BLOCK_IMAGE_FORMAT="${BLOCK_IMAGE_FORMAT:-raw}"
-BRIDGE_IF="${BRIDGE_IF:-en0}"
+EXTRA_LINUX_BINS="${EXTRA_LINUX_BINS:-}"
+EXTRA_FREEBSD_BINS="${EXTRA_FREEBSD_BINS:-}"
+ROOTFS_APPS="${ROOTFS_APPS:-}"
+BRIDGE_IF_EXPLICIT=0
+if [ -n "${BRIDGE_IF:-}" ]; then
+  BRIDGE_IF_EXPLICIT=1
+fi
+BRIDGE_IF="${BRIDGE_IF:-}"
 HOSTFWD_HTTP="${HOSTFWD_HTTP:-tcp:127.0.0.1:1234-:80}"
 PCAP="${PCAP:-$ROOT_DIR/out/net0.pcap}"
 QEMU_USE_SUDO="${QEMU_USE_SUDO:-auto}"
+BLOCK_IMAGE_IS_DEFAULT=0
+
+default_block_image_stale() {
+  if [ ! -f "$BLOCK_IMAGE" ]; then
+    return 0
+  fi
+  if [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
+    return 0
+  fi
+  if find "$ROOT_DIR/nanami/servers/apps" \
+      \( -path '*/target/x86_64-unknown-a9n/release/*' -o -path '*/build/*.elf' \) \
+      -type f -newer "$BLOCK_IMAGE" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if find "$ROOT_DIR/nanami/servers" \
+      \( -name system-list -o -name session-list \) \
+      -type f -newer "$BLOCK_IMAGE" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if find "$ROOT_DIR/nanami/servers/apps/honoka/assets/themes" \
+      -type f -newer "$BLOCK_IMAGE" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if [ "$ROOT_DIR/scripts/create-ext2-image.sh" -nt "$BLOCK_IMAGE" ]; then
+    return 0
+  fi
+  return 1
+}
 
 if [ "$ARCH" != "x86-64" ] && [ "$ARCH" != "x86_64" ]; then
   echo "[nanami-run] only x86-64 QEMU is currently supported" >&2
@@ -40,10 +75,35 @@ if [ -z "$NET_MODE" ]; then
   fi
 fi
 
-if [ -z "$BLOCK_IMAGE" ]; then
-  if [ -f "out/ext2.img" ]; then
-    BLOCK_IMAGE="$(pwd)/out/ext2.img"
+default_ipv4_interface() {
+  case "$(uname -s)" in
+    Darwin)
+      route -n get default 2>/dev/null | awk '/^[[:space:]]*interface:/{print $2; exit}'
+      ;;
+    Linux)
+      ip -4 route show default 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "dev" && i < NF) {print $(i + 1); exit}}'
+      ;;
+  esac
+}
+
+if [ "$NET_MODE" = "bridged" ]; then
+  DEFAULT_ROUTE_IF="$(default_ipv4_interface)"
+  if [ -z "$BRIDGE_IF" ]; then
+    BRIDGE_IF="$DEFAULT_ROUTE_IF"
   fi
+  if [ -z "$BRIDGE_IF" ]; then
+    echo "[nanami-run] could not detect the default IPv4 interface; set BRIDGE_IF" >&2
+    exit 1
+  fi
+  if [ "$BRIDGE_IF_EXPLICIT" -eq 1 ] && [ -n "$DEFAULT_ROUTE_IF" ] && [ "$BRIDGE_IF" != "$DEFAULT_ROUTE_IF" ]; then
+    echo "[nanami-run] warning: BRIDGE_IF=$BRIDGE_IF differs from the default IPv4 interface $DEFAULT_ROUTE_IF" >&2
+    echo "[nanami-run] local host access to the guest may route through $DEFAULT_ROUTE_IF instead" >&2
+  fi
+fi
+
+if [ -z "$BLOCK_IMAGE" ]; then
+  BLOCK_IMAGE="$ROOT_DIR/out/ext2.img"
+  BLOCK_IMAGE_IS_DEFAULT=1
 fi
 
 "$ROOT_DIR/scripts/build-image.sh"
@@ -51,6 +111,28 @@ fi
 if [ ! -f "$IMG" ]; then
   echo "[nanami-run] image not found: $IMG" >&2
   exit 1
+fi
+
+if [ "$BLOCK_IMAGE_IS_DEFAULT" -eq 1 ]; then
+  REBUILD_BLOCK_IMAGE=0
+  if default_block_image_stale; then
+    REBUILD_BLOCK_IMAGE=1
+  fi
+else
+  REBUILD_BLOCK_IMAGE=0
+  if [ ! -f "$BLOCK_IMAGE" ] || [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
+    REBUILD_BLOCK_IMAGE=1
+  fi
+fi
+
+if [ "$REBUILD_BLOCK_IMAGE" -eq 1 ]; then
+  if [ ! -f "$BLOCK_IMAGE" ]; then
+    echo "[nanami-run] creating BLOCK_IMAGE: $BLOCK_IMAGE"
+  else
+    echo "[nanami-run] rebuilding BLOCK_IMAGE: $BLOCK_IMAGE"
+  fi
+  EXTRA_LINUX_BINS="$EXTRA_LINUX_BINS" EXTRA_FREEBSD_BINS="$EXTRA_FREEBSD_BINS" ROOTFS_APPS="$ROOTFS_APPS" \
+    "$ROOT_DIR/scripts/create-ext2-image.sh" "${SIZE_MB:-64}" "$BLOCK_IMAGE"
 fi
 
 cp "$OVMF_VARS_SRC" "$OVMF_VARS_RUNTIME"
@@ -67,12 +149,6 @@ args=(
   --no-shutdown
 )
 
-if [ -z "$BLOCK_IMAGE" ]; then
-  echo "[nanami-run] BLOCK_IMAGE is required because ramdisk block-device-server is disabled." >&2
-  echo "[nanami-run] Set BLOCK_IMAGE=/path/to/ext2.img, or place ext2.img under out/, nanami/servers/, or repository root." >&2
-  exit 1
-fi
-
 if [ ! -f "$BLOCK_IMAGE" ]; then
   echo "[nanami-run] BLOCK_IMAGE not found: $BLOCK_IMAGE" >&2
   exit 1
@@ -80,7 +156,7 @@ fi
 
 args+=(
   -drive "if=none,id=blk0,format=$BLOCK_IMAGE_FORMAT,file=$BLOCK_IMAGE"
-  -device "virtio-blk-pci,drive=blk0,disable-legacy=off,disable-modern=on"
+  -device "virtio-blk-pci,drive=blk0,addr=3,disable-legacy=off,disable-modern=on"
 )
 
 if [ "$QEMU_ACCEL" = "auto" ]; then
@@ -103,7 +179,7 @@ fi
 
 case "$NET_DEVICE" in
   virtio)
-    netdev_device=( -device virtio-net,netdev=net0,disable-legacy=off,disable-modern=on )
+    netdev_device=( -device virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on )
     ;;
   e1000)
     netdev_device=( -device e1000,netdev=net0 )

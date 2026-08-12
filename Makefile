@@ -21,7 +21,7 @@ image:
 	./scripts/build-image.sh
 
 fs-image:
-	./scripts/create-ext2-image.sh $${SIZE_MB:-8} $${OUT:-out/ext2.img}
+	./scripts/create-ext2-image.sh $${SIZE_MB:-64} $${OUT:-$(CURDIR)/out/ext2.img}
 
 run:
 	./scripts/run-qemu.sh

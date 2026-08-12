@@ -757,18 +757,21 @@ impl Compositor {
             return;
         }
         let theme = self.theme;
-        draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
-        draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
-        draw_clock(
-            &self.framebuffer,
-            &self.text,
-            self.framebuffer.screen(),
-            theme,
-            dirty,
-            &self.clock_text[..self.clock_len],
-        );
+        let first_window = self.first_visible_window_for_dirty(dirty);
+        if first_window == 0 {
+            draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+            draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+            draw_clock(
+                &self.framebuffer,
+                &self.text,
+                self.framebuffer.screen(),
+                theme,
+                dirty,
+                &self.clock_text[..self.clock_len],
+            );
+        }
 
-        let mut i = 0usize;
+        let mut i = first_window;
         while i < MAX_WINDOWS {
             let window = self.windows[i];
             if window.used && window.visible && intersects(window.rect(), dirty) {
@@ -803,6 +806,22 @@ impl Compositor {
                 theme.cursor_shadow,
             );
         }
+    }
+
+    fn first_visible_window_for_dirty(&self, dirty: Rect) -> usize {
+        let mut i = MAX_WINDOWS;
+        while i != 0 {
+            i -= 1;
+            let window = self.windows[i];
+            if window.used
+                && window.visible
+                && window.opacity == nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE
+                && contains_rect_fully(window.content_rect(), dirty)
+            {
+                return i;
+            }
+        }
+        0
     }
 
     fn render_and_present(&self, dirty: Rect) {
@@ -1273,6 +1292,15 @@ fn push_raw_input_event(base: Word, packed: Word) {
 
 fn contains_rect(rect: Rect, x: i32, y: i32) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+fn contains_rect_fully(outer: Rect, inner: Rect) -> bool {
+    !outer.is_empty()
+        && !inner.is_empty()
+        && inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
+        && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height)
 }
 
 fn contains_rounded_rect(rect: Rect, x: i32, y: i32) -> bool {

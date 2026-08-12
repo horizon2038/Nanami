@@ -251,22 +251,25 @@ impl Framebuffer {
 
             let src_base = (src_vaddr as usize).saturating_add(row_offset);
             let dst_base = (self.vaddr as usize).saturating_add(dst_offset);
+            if alpha == u8::MAX {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_base as *const u8,
+                        dst_base as *mut u8,
+                        row_bytes,
+                    );
+                }
+                y += 1;
+                continue;
+            }
             let mut x = 0usize;
             while x < width {
                 unsafe {
-                    let pixel = core::ptr::read_volatile(
-                        src_base.saturating_add(x.saturating_mul(4)) as *const u32,
-                    );
+                    let pixel =
+                        core::ptr::read(src_base.saturating_add(x.saturating_mul(4)) as *const u32);
                     let dst_ptr = dst_base.saturating_add(x.saturating_mul(4)) as *mut u32;
-                    if alpha == u8::MAX {
-                        core::ptr::write_volatile(dst_ptr, pixel);
-                    } else {
-                        let background = core::ptr::read_volatile(dst_ptr);
-                        core::ptr::write_volatile(
-                            dst_ptr,
-                            self.blend_color(background, pixel, alpha),
-                        );
-                    }
+                    let background = core::ptr::read(dst_ptr);
+                    core::ptr::write(dst_ptr, self.blend_color(background, pixel, alpha));
                 }
                 x += 1;
             }

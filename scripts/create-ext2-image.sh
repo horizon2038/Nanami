@@ -73,6 +73,7 @@ extra_freebsd_bins = sys.argv[5]
 rootfs_apps_filter = os.environ.get('ROOTFS_APPS', '').strip()
 servers_dir = os.path.join(root_dir, 'nanami', 'servers')
 apps_dir = os.path.join(servers_dir, 'apps')
+rust_target_dir = os.environ.get('CARGO_TARGET_DIR', os.path.join(servers_dir, 'target'))
 block_size = 1024
 blocks_count = size_mb * 1024 * 1024 // block_size
 if blocks_count < 256:
@@ -170,7 +171,7 @@ def collect_rootfs_binaries():
             crate_name = parse_crate_name(cargo_toml)
             if crate_name:
                 binary_path = os.path.join(
-                    current, 'target', 'x86_64-unknown-a9n', 'release', crate_name
+                    rust_target_dir, 'x86_64-unknown-a9n', 'release', crate_name
                 )
                 if os.path.isfile(binary_path):
                     binaries.append((app_name, binary_path))

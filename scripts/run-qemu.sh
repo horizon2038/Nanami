@@ -43,7 +43,11 @@ default_block_image_stale() {
     return 0
   fi
   if find "$ROOT_DIR/nanami/servers/apps" \
-      \( -path '*/target/x86_64-unknown-a9n/release/*' -o -path '*/build/*.elf' \) \
+      -path '*/build/*.elf' \
+      -type f -newer "$BLOCK_IMAGE" -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if find "$ROOT_DIR/nanami/servers/target/x86_64-unknown-a9n/release" \
       -type f -newer "$BLOCK_IMAGE" -print -quit 2>/dev/null | grep -q .; then
     return 0
   fi

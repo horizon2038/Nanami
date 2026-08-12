@@ -43,6 +43,7 @@ impl SharedFramebuffer {
 
 struct DisplayState {
     screen: ScreenInfo,
+    hardware_paddr: Word,
     hardware_vaddr: Word,
     shared: SharedFramebuffer,
 }
@@ -184,6 +185,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     fill_screen(&screen_info, mapped_fb);
     let mut display = DisplayState {
         screen: screen_info,
+        hardware_paddr: fb_phys,
         hardware_vaddr: mapped_fb,
         shared: SharedFramebuffer::EMPTY,
     };
@@ -267,20 +269,20 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
 
-            match libnanami::request_shared_memory(
+            match libnanami::request_shared_framebuffer_memory(
                 request.identifier,
+                display.hardware_paddr,
                 display.screen.framebuffer_bytes,
             ) {
-                Ok((local_vaddr, peer_vaddr)) => {
-                    clear_memory(local_vaddr, display.screen.framebuffer_bytes);
+                Ok((_, peer_vaddr)) => {
                     display.shared = SharedFramebuffer {
                         owner_pid: request.identifier,
-                        local_vaddr,
+                        local_vaddr: display.hardware_vaddr,
                         peer_vaddr,
                         bytes: display.screen.framebuffer_bytes,
                     };
                     libnanami::println!(
-                        "[fb-server] shared backbuffer ready pid={} vaddr={:#x} bytes={:#x}",
+                        "[fb-server] hardware framebuffer shared pid={} vaddr={:#x} bytes={:#x}",
                         request.identifier,
                         peer_vaddr,
                         display.screen.framebuffer_bytes
@@ -306,22 +308,6 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
             }
         }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    }
-}
-
-fn clear_memory(vaddr: Word, bytes: Word) {
-    let mut offset = 0usize;
-    while offset + core::mem::size_of::<u64>() <= bytes as usize {
-        unsafe {
-            core::ptr::write_volatile((vaddr + offset) as *mut u64, 0);
-        }
-        offset += core::mem::size_of::<u64>();
-    }
-    while offset < bytes as usize {
-        unsafe {
-            core::ptr::write_volatile((vaddr + offset) as *mut u8, 0);
-        }
-        offset += 1;
     }
 }
 
@@ -352,6 +338,10 @@ fn present_shared_framebuffer(
 
     let width = width.min(display.screen.width as usize - x);
     let height = height.min(display.screen.height as usize - y);
+    if shared.local_vaddr == display.hardware_vaddr {
+        fence(Ordering::Release);
+        return Ok(width.saturating_mul(height) as Word);
+    }
     let row_bytes = width.saturating_mul(4);
     fence(Ordering::Acquire);
     let mut row = 0usize;

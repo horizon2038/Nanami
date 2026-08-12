@@ -1867,30 +1867,18 @@ fn draw_window_content(framebuffer: &Framebuffer, window: Window, dirty: Rect) {
     let Some(area) = intersect_rect(content, dirty) else {
         return;
     };
-    let mut y = area.y;
-    while y < area.y.saturating_add(area.height) {
-        if let Some((rounded_x0, rounded_x1)) =
-            rounded_row_span(window.rect(), WINDOW_CORNER_RADIUS, y)
-        {
-            let x0 = area.x.max(rounded_x0);
-            let x1 = area.x.saturating_add(area.width).min(rounded_x1);
-            if x0 < x1 {
-                framebuffer.blit_bgra32_from_alpha(
-                    x0,
-                    y,
-                    x1 - x0,
-                    1,
-                    window.local_fb,
-                    window.fb_size,
-                    content.width.max(0) as usize,
-                    (x0 - content.x) as usize,
-                    (y - content.y) as usize,
-                    window.opacity,
-                );
-            }
-        }
-        y += 1;
-    }
+    framebuffer.blit_bgra32_from_alpha(
+        area.x,
+        area.y,
+        area.width,
+        area.height,
+        window.local_fb,
+        window.fb_size,
+        content.width.max(0) as usize,
+        (area.x - content.x) as usize,
+        (area.y - content.y) as usize,
+        window.opacity,
+    );
 }
 
 fn fill_window_span(

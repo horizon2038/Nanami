@@ -247,3 +247,7 @@ each ABI, so compatibility depends on the syscalls used by the program.
 ## Author
 
 horizon2k38 (Rekka "horizon" IGUMI)
+
+## License
+
+[MIT License](https://choosealicense.com/licenses/mit/)

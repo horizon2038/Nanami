@@ -41,14 +41,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "net_wire"
-version = "0.1.0"
-
-[[package]]
 name = "virtio_net"
 version = "0.1.0"
 dependencies = [
  "libnanami",
  "nanami-services",
- "net_wire",
 ]

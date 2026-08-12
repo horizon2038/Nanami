@@ -1,17 +1,18 @@
 use libnanami::{RequestError, Word};
-use nanami_services::{net, posix, vfs};
+use nanami_services::{gfx::honoka, input, net, posix, vfs};
 
 use crate::abi::{
     ALTER_DEFAULT_SHM_BYTES, ALTER_IO_OFFSET, ALTER_LAUNCH_MAX_ARGS, ALTER_LAUNCH_MAX_ENVS,
+    SLOT_HONOKA_PRESENT_NOTIFICATION_BASE, SLOT_HONOKA_SERVICE, SLOT_INPUT_SERVICE,
     SLOT_NETWORK_SERVICE,
 };
+use crate::common::virtual_fs::{self, VirtualNode};
 use crate::elf::ElfMetadata;
 use crate::loader::{load_cached_fork_linux_elf_image, load_linux_elf_image, LoadError};
 use crate::personality;
 use crate::process::{
     clone_registers_for_fork, read_register_value, write_exec_registers, write_register_value,
-    write_syscall_return, LinuxSyscallContext, REG_FS_BASE, REG_R10, REG_R8, REG_R9, REG_RAX,
-    REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+    write_syscall_return, LinuxSyscallContext, REG_FS_BASE,
 };
 use crate::state::{
     LinuxFile, LinuxFileKind, OsPersonality, Runtime, LINUX_CWD_MAX, LINUX_FD_MAX,
@@ -54,6 +55,13 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[2],
         ),
+        SYS_READV => sys_readv(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
         SYS_WRITEV => sys_writev(
             runtime,
             native_pid,
@@ -61,6 +69,13 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[2],
         ),
+        SYS_NANOSLEEP => {
+            let action = sys_nanosleep_action(runtime, native_pid, context);
+            record_action_result(runtime, native_pid, context.number, action);
+            trace_critical_action(runtime, native_pid, context, action);
+            trace_syscall_action(runtime, native_pid, context, action);
+            return action;
+        }
         SYS_GETDENTS64 => sys_getdents64(
             runtime,
             native_pid,
@@ -241,6 +256,7 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_MUNMAP => sys_munmap(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_MSYNC => sys_msync(runtime, native_pid, context.args[0], context.args[1]),
         SYS_MADVISE => sys_madvise(
             runtime,
             native_pid,
@@ -455,7 +471,9 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_SET_TID_ADDRESS => Ok(0),
-        SYS_CLOCK_GETTIME => sys_clock_gettime(runtime, native_pid, context.args[1]),
+        SYS_CLOCK_GETTIME => {
+            sys_clock_gettime(runtime, native_pid, context.args[0], context.args[1])
+        }
         SYS_UTIMES => sys_utime_path(runtime, native_pid, context.args[0]),
         SYS_FUTIMESAT => sys_utime_path(runtime, native_pid, context.args[1]),
         SYS_UTIMENSAT => sys_utime_path(runtime, native_pid, context.args[1]),
@@ -494,14 +512,22 @@ fn sys_read(
     match file.kind {
         LinuxFileKind::Terminal => return sys_terminal_read(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeRead => {
-            return sys_pipe_read(runtime, pid, file.posix_fd, user_buffer, len)
+            return sys_pipe_read(runtime, pid, file.posix_fd, user_buffer, len);
         }
         LinuxFileKind::PipeWrite => return Err(EBADF),
         LinuxFileKind::SocketUdp | LinuxFileKind::SocketTcp | LinuxFileKind::SocketIcmp => {
-            return sys_socket_recv(runtime, pid, fd, user_buffer, len, 0, 0)
+            return sys_socket_recv(runtime, pid, fd, user_buffer, len, 0, 0);
         }
         LinuxFileKind::SocketNetlink => return Err(EOPNOTSUPP),
         LinuxFileKind::SocketTcpListener => return Err(ENOTCONN),
+        LinuxFileKind::VirtualDirectory => return Err(EISDIR),
+        LinuxFileKind::VirtualFile => return sys_virtual_read(runtime, pid, fd, user_buffer, len),
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            return sys_evdev_read(runtime, pid, fd, user_buffer, len);
+        }
+        LinuxFileKind::Framebuffer => {
+            return sys_framebuffer_read(runtime, pid, fd, user_buffer, len);
+        }
         LinuxFileKind::Posix => {}
         LinuxFileKind::Empty => return Err(EBADF),
     }
@@ -547,6 +573,20 @@ fn sys_read_action(
         return network_result_action(runtime, pid, context, result, nonblocking);
     }
     if file.kind != LinuxFileKind::Terminal {
+        if matches!(
+            file.kind,
+            LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse
+        ) {
+            pump_input_events(runtime);
+            let result = sys_evdev_read(runtime, pid, fd, user_buffer, len);
+            if result != Err(EAGAIN) || (file.flags & LINUX_O_NONBLOCK) != 0 {
+                return EmulationAction::Return(result_to_linux_return(result));
+            }
+            if runtime.park_device_reader(pid, fd, user_buffer, len, context) {
+                return EmulationAction::Park;
+            }
+            return EmulationAction::Return(-(ESRCH as isize));
+        }
         return EmulationAction::Return(result_to_linux_return(sys_read(
             runtime,
             pid,
@@ -566,6 +606,470 @@ fn sys_read_action(
             }
         }
         Err(errno) => EmulationAction::Return(-(errno as isize)),
+    }
+}
+
+fn pump_input_events(runtime: &mut Runtime) {
+    let source = runtime.input_queue;
+    let mut graphics_index = 0usize;
+    while graphics_index < runtime.graphics.len() {
+        let session = runtime.graphics[graphics_index];
+        if session.active && session.input_queue != 0 {
+            drain_input_queue(runtime, session.input_queue, graphics_index as Word + 1);
+        }
+        graphics_index += 1;
+    }
+    if source != 0 {
+        drain_input_queue(runtime, source, 0);
+    }
+}
+
+fn drain_input_queue(runtime: &mut Runtime, source: Word, session_id: Word) {
+    let mut queue = input::InputEventQueue::new(source);
+    while let Some(packed) = queue.pop() {
+        let (kind, code, value0, value1, flags) = input::unpack_input_event(packed);
+        match kind {
+            input::INPUT_EVENT_KIND_KEY => {
+                push_keyboard_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_KEY, linux_key_code(code), value0 as i32),
+                );
+                push_keyboard_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_SYN, LINUX_SYN_REPORT, 0),
+                );
+            }
+            input::INPUT_EVENT_KIND_MOUSE_MOVE => {
+                let (dx, dy) = normalize_mouse_movement(
+                    runtime,
+                    session_id,
+                    value0 as i32,
+                    value1 as i32,
+                    flags,
+                );
+                if dx != 0 {
+                    push_mouse_event(
+                        runtime,
+                        session_id,
+                        pack_linux_input_event(LINUX_EV_REL, LINUX_REL_X, dx),
+                    );
+                }
+                if dy != 0 {
+                    push_mouse_event(
+                        runtime,
+                        session_id,
+                        pack_linux_input_event(LINUX_EV_REL, LINUX_REL_Y, dy),
+                    );
+                }
+                if dx != 0 || dy != 0 {
+                    push_mouse_event(
+                        runtime,
+                        session_id,
+                        pack_linux_input_event(LINUX_EV_SYN, LINUX_SYN_REPORT, 0),
+                    );
+                }
+            }
+            input::INPUT_EVENT_KIND_MOUSE_BUTTON => {
+                push_mouse_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_KEY, linux_mouse_button(code), value0 as i32),
+                );
+                push_mouse_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_SYN, LINUX_SYN_REPORT, 0),
+                );
+            }
+            input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
+                push_mouse_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_REL, LINUX_REL_WHEEL, value0 as i32),
+                );
+                push_mouse_event(
+                    runtime,
+                    session_id,
+                    pack_linux_input_event(LINUX_EV_SYN, LINUX_SYN_REPORT, 0),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn normalize_mouse_movement(
+    runtime: &mut Runtime,
+    session_id: Word,
+    x: i32,
+    y: i32,
+    flags: Word,
+) -> (i32, i32) {
+    if session_id == 0 || (flags & honoka::HONOKA_INPUT_FLAG_ABSOLUTE) == 0 {
+        return (x, y);
+    }
+    let Some(session) = runtime.graphics.get_mut(session_id as usize - 1) else {
+        return (0, 0);
+    };
+    let movement = if session.mouse_position_valid {
+        (
+            x.saturating_sub(session.mouse_x),
+            y.saturating_sub(session.mouse_y),
+        )
+    } else {
+        (0, 0)
+    };
+    session.mouse_x = x;
+    session.mouse_y = y;
+    session.mouse_position_valid = true;
+    movement
+}
+
+fn push_keyboard_event(runtime: &mut Runtime, session_id: Word, event: Word) {
+    if session_id == 0 {
+        runtime.push_keyboard_event(event);
+        return;
+    }
+    let Some(session) = runtime.graphics.get_mut(session_id as usize - 1) else {
+        return;
+    };
+    push_event_ring(
+        &mut session.keyboard_events,
+        &mut session.keyboard_head,
+        &mut session.keyboard_tail,
+        event,
+    );
+}
+
+fn push_mouse_event(runtime: &mut Runtime, session_id: Word, event: Word) {
+    if session_id == 0 {
+        runtime.push_mouse_event(event);
+        return;
+    }
+    let Some(session) = runtime.graphics.get_mut(session_id as usize - 1) else {
+        return;
+    };
+    push_event_ring(
+        &mut session.mouse_events,
+        &mut session.mouse_head,
+        &mut session.mouse_tail,
+        event,
+    );
+}
+
+fn pop_keyboard_event(runtime: &mut Runtime, session_id: Word) -> Option<Word> {
+    if session_id == 0 {
+        return runtime.pop_keyboard_event();
+    }
+    let session = runtime.graphics.get_mut(session_id as usize - 1)?;
+    pop_event_ring(
+        &session.keyboard_events,
+        &mut session.keyboard_head,
+        session.keyboard_tail,
+    )
+}
+
+fn pop_mouse_event(runtime: &mut Runtime, session_id: Word) -> Option<Word> {
+    if session_id == 0 {
+        return runtime.pop_mouse_event();
+    }
+    let session = runtime.graphics.get_mut(session_id as usize - 1)?;
+    pop_event_ring(
+        &session.mouse_events,
+        &mut session.mouse_head,
+        session.mouse_tail,
+    )
+}
+
+fn keyboard_event_ready(runtime: &Runtime, session_id: Word) -> bool {
+    if session_id == 0 {
+        return runtime.keyboard_event_ready();
+    }
+    runtime
+        .graphics
+        .get(session_id as usize - 1)
+        .map(|session| session.keyboard_head != session.keyboard_tail)
+        .unwrap_or(false)
+}
+
+fn mouse_event_ready(runtime: &Runtime, session_id: Word) -> bool {
+    if session_id == 0 {
+        return runtime.mouse_event_ready();
+    }
+    runtime
+        .graphics
+        .get(session_id as usize - 1)
+        .map(|session| session.mouse_head != session.mouse_tail)
+        .unwrap_or(false)
+}
+
+fn push_event_ring(
+    events: &mut [Word; crate::state::ALTER_EVDEV_QUEUE_CAPACITY],
+    head: &mut usize,
+    tail: &mut usize,
+    event: Word,
+) {
+    let next = (*tail + 1) % events.len();
+    if next == *head {
+        *head = (*head + 1) % events.len();
+    }
+    events[*tail] = event;
+    *tail = next;
+}
+
+fn pop_event_ring(
+    events: &[Word; crate::state::ALTER_EVDEV_QUEUE_CAPACITY],
+    head: &mut usize,
+    tail: usize,
+) -> Option<Word> {
+    if *head == tail {
+        return None;
+    }
+    let event = events[*head];
+    *head = (*head + 1) % events.len();
+    Some(event)
+}
+
+fn sys_evdev_read(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    user_buffer: Word,
+    len: Word,
+) -> Result<Word, i32> {
+    if len < LINUX_INPUT_EVENT_BYTES {
+        return Err(EINVAL);
+    }
+    pump_input_events(runtime);
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let session_id = file.resource >> 32;
+    let mut written = 0usize;
+    while written + LINUX_INPUT_EVENT_BYTES as usize <= len as usize {
+        let packed = match file.kind {
+            LinuxFileKind::EvdevKeyboard => pop_keyboard_event(runtime, session_id),
+            LinuxFileKind::EvdevMouse => pop_mouse_event(runtime, session_id),
+            _ => return Err(ENODEV),
+        };
+        let Some(packed) = packed else { break };
+        let (event_type, code, value) = unpack_linux_input_event(packed);
+        write_input_event(runtime.posix_shm + written as Word, event_type, code, value);
+        written += LINUX_INPUT_EVENT_BYTES as usize;
+    }
+    if written == 0 {
+        return Err(EAGAIN);
+    }
+    write_target_memory(runtime, pid, user_buffer, written as Word)?;
+    Ok(written as Word)
+}
+
+fn pack_linux_input_event(event_type: u16, code: u16, value: i32) -> Word {
+    event_type as Word | ((code as Word) << 16) | (((value as u32) as Word) << 32)
+}
+
+fn unpack_linux_input_event(event: Word) -> (u16, u16, i32) {
+    (
+        event as u16,
+        (event >> 16) as u16,
+        (event >> 32) as u32 as i32,
+    )
+}
+
+fn write_input_event(base: Word, event_type: u16, code: u16, value: i32) {
+    unsafe {
+        write_u64(base, 0);
+        write_u64(base + 8, 0);
+        write_u16(base + 16, event_type);
+        write_u16(base + 18, code);
+        write_u32(base + 20, value as u32);
+    }
+}
+
+fn linux_key_code(code: Word) -> u16 {
+    match code {
+        0x11c => 96,
+        0x11d => 97,
+        0x135 => 98,
+        0x138 => 100,
+        0x147 => 102,
+        0x148 => 103,
+        0x149 => 104,
+        0x14b => 105,
+        0x14d => 106,
+        0x14f => 107,
+        0x150 => 108,
+        0x151 => 109,
+        0x152 => 110,
+        0x153 => 111,
+        _ => (code & 0x7f) as u16,
+    }
+}
+
+fn linux_mouse_button(code: Word) -> u16 {
+    match code {
+        1 => 0x110,
+        2 => 0x111,
+        3 => 0x112,
+        _ => 0x110,
+    }
+}
+
+fn sys_framebuffer_read(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    user_buffer: Word,
+    len: Word,
+) -> Result<Word, i32> {
+    let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let base = ensure_framebuffer_mapping(
+        runtime,
+        pid,
+        file.resource,
+        LINUX_PROT_READ | LINUX_PROT_WRITE,
+    )?;
+    let session = graphics_session(runtime, file.resource)?;
+    let available = session.framebuffer_bytes.saturating_sub(file.offset);
+    let bytes = len.min(available);
+    let mut copied = 0;
+    while copied < bytes {
+        let chunk = (bytes - copied).min(LINUX_DIRECT_COPY_CHUNK);
+        libnanami::request_process_memory_copy_within(
+            pid,
+            base + file.offset + copied,
+            user_buffer + copied,
+            chunk,
+        )
+        .map_err(map_request_error)?;
+        copied += chunk;
+    }
+    file.offset += copied;
+    if !runtime.set_linux_file(pid, fd, file) {
+        return Err(EBADF);
+    }
+    Ok(copied)
+}
+
+fn sys_framebuffer_write(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    user_buffer: Word,
+    len: Word,
+) -> Result<Word, i32> {
+    let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let base = ensure_framebuffer_mapping(
+        runtime,
+        pid,
+        file.resource,
+        LINUX_PROT_READ | LINUX_PROT_WRITE,
+    )?;
+    let session = graphics_session(runtime, file.resource)?;
+    let available = session.framebuffer_bytes.saturating_sub(file.offset);
+    let bytes = len.min(available);
+    let mut copied = 0;
+    while copied < bytes {
+        let chunk = (bytes - copied).min(LINUX_DIRECT_COPY_CHUNK);
+        libnanami::request_process_memory_copy_within(
+            pid,
+            user_buffer + copied,
+            base + file.offset + copied,
+            chunk,
+        )
+        .map_err(map_request_error)?;
+        copied += chunk;
+    }
+    file.offset += copied;
+    if !runtime.set_linux_file(pid, fd, file) {
+        return Err(EBADF);
+    }
+    notify_graphics_session(session)?;
+    Ok(copied)
+}
+
+fn sys_framebuffer_mmap(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    len: Word,
+    prot: Word,
+    offset: Word,
+) -> Result<Word, i32> {
+    let session = graphics_session(runtime, file.resource)?;
+    if offset != 0 || len > align_up_word(session.framebuffer_bytes, LINUX_PAGE_SIZE) {
+        return Err(EINVAL);
+    }
+    let base = ensure_framebuffer_mapping(runtime, pid, file.resource, prot)?;
+    Ok(base)
+}
+
+fn ensure_framebuffer_mapping(
+    runtime: &mut Runtime,
+    pid: Word,
+    id: Word,
+    prot: Word,
+) -> Result<Word, i32> {
+    let session = graphics_session(runtime, id)?;
+    if session.guest_framebuffer != 0 {
+        return if session.guest_pid == pid {
+            Ok(session.guest_framebuffer)
+        } else {
+            Err(EACCES)
+        };
+    }
+    ensure_clock_timer(runtime)?;
+    let (shared, bytes) = honoka::honoka_attach_logical_framebuffer_to_process(
+        session.honoka_port,
+        session.window_id,
+        pid,
+    )
+    .map_err(map_request_error)?;
+    if bytes == 0 {
+        return Err(EIO);
+    }
+    let framebuffer = shared;
+    let framebuffer_bytes = bytes;
+    let mapped = align_up_word(framebuffer_bytes, LINUX_PAGE_SIZE);
+    if !runtime.add_mapping(pid, framebuffer, mapped, prot) {
+        return Err(ENOMEM);
+    }
+    let index = id.checked_sub(1).ok_or(ENODEV)? as usize;
+    runtime.graphics[index].damage_queue = 0;
+    runtime.graphics[index].framebuffer = framebuffer;
+    runtime.graphics[index].framebuffer_bytes = framebuffer_bytes;
+    runtime.graphics[index].guest_pid = pid;
+    runtime.graphics[index].guest_framebuffer = framebuffer;
+    runtime.graphics[index].guest_framebuffer_bytes = framebuffer_bytes;
+    Ok(framebuffer)
+}
+
+fn graphics_session(runtime: &Runtime, id: Word) -> Result<crate::state::GraphicsSession, i32> {
+    let index = id.checked_sub(1).ok_or(ENODEV)? as usize;
+    let session = *runtime.graphics.get(index).ok_or(ENODEV)?;
+    if !session.active {
+        return Err(ENODEV);
+    }
+    Ok(session)
+}
+
+fn present_graphics_session(runtime: &mut Runtime, id: Word, pid: Word) -> Result<(), i32> {
+    let session = graphics_session(runtime, id)?;
+    if session.guest_pid != 0 && session.guest_pid != pid {
+        return Err(EACCES);
+    }
+    notify_graphics_session(session)
+}
+
+fn notify_graphics_session(session: crate::state::GraphicsSession) -> Result<(), i32> {
+    libnanami::ipc::notification_notify(session.present_notification).map_err(map_request_error)
+}
+
+fn present_mapped_framebuffers(runtime: &Runtime) {
+    for session in runtime.graphics {
+        if session.active && session.guest_pid != 0 && session.guest_framebuffer != 0 {
+            let _ = notify_graphics_session(session);
+        }
     }
 }
 
@@ -687,16 +1191,22 @@ fn sys_write(
     match file.kind {
         LinuxFileKind::Terminal => return sys_terminal_write(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeWrite => {
-            return sys_pipe_write(runtime, pid, file.posix_fd, user_buffer, len)
+            return sys_pipe_write(runtime, pid, file.posix_fd, user_buffer, len);
         }
         LinuxFileKind::PipeRead => return Err(EBADF),
         LinuxFileKind::SocketUdp | LinuxFileKind::SocketTcp | LinuxFileKind::SocketIcmp => {
-            return sys_socket_send(runtime, pid, fd, user_buffer, len, 0, 0)
+            return sys_socket_send(runtime, pid, fd, user_buffer, len, 0, 0);
         }
         LinuxFileKind::SocketNetlink => {
-            return sys_netlink_send(runtime, pid, fd, user_buffer, len)
+            return sys_netlink_send(runtime, pid, fd, user_buffer, len);
         }
         LinuxFileKind::SocketTcpListener => return Err(ENOTCONN),
+        LinuxFileKind::VirtualDirectory => return Err(EISDIR),
+        LinuxFileKind::VirtualFile => return sys_virtual_write(runtime, pid, fd, len),
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => return Err(EBADF),
+        LinuxFileKind::Framebuffer => {
+            return sys_framebuffer_write(runtime, pid, fd, user_buffer, len);
+        }
         LinuxFileKind::Posix => {}
         LinuxFileKind::Empty => return Err(EBADF),
     }
@@ -765,7 +1275,7 @@ fn sys_socket(
                 }
                 LINUX_SOCK_RAW if protocol == LINUX_IPPROTO_ICMP => LinuxFile::socket_icmp(flags),
                 LINUX_SOCK_DGRAM | LINUX_SOCK_STREAM | LINUX_SOCK_RAW => {
-                    return Err(EPROTONOSUPPORT)
+                    return Err(EPROTONOSUPPORT);
                 }
                 _ => return Err(ESOCKTNOSUPPORT),
             }
@@ -828,7 +1338,7 @@ fn sys_connect(
                 return Ok(0);
             }
             Ok(_) | Err(RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)) => {
-                return Err(EINPROGRESS)
+                return Err(EINPROGRESS);
             }
             Err(error) => return Err(map_network_error(error)),
         }
@@ -1401,6 +1911,12 @@ fn read_linux_iovecs(
     bases: &mut [Word; LINUX_IOV_MAX as usize],
     lens: &mut [Word; LINUX_IOV_MAX as usize],
 ) -> Result<(), i32> {
+    if iov_count > LINUX_IOV_MAX {
+        return Err(EINVAL);
+    }
+    if iov_count != 0 && iov == 0 {
+        return Err(EFAULT);
+    }
     let bytes = iov_count.checked_mul(LINUX_IOVEC_LEN).ok_or(EINVAL)?;
     read_target_memory(runtime, pid, iov, bytes)?;
     let mut index = 0usize;
@@ -2294,32 +2810,58 @@ fn sys_writev(
     iov_ptr: Word,
     iov_count: Word,
 ) -> Result<Word, i32> {
-    if iov_ptr == 0 {
-        return Err(EFAULT);
-    }
-    if iov_count > LINUX_IOV_MAX {
-        return Err(EINVAL);
-    }
-    let table_bytes = iov_count.checked_mul(16).ok_or(EINVAL)?;
-    read_target_memory(runtime, pid, iov_ptr, table_bytes)?;
-
     let mut bases = [0 as Word; LINUX_IOV_MAX as usize];
     let mut lens = [0 as Word; LINUX_IOV_MAX as usize];
-    let mut i = 0usize;
-    while i < iov_count as usize {
-        let entry = runtime.posix_shm + (i * 16) as Word;
-        bases[i] = unsafe { ::core::ptr::read_unaligned(entry as *const Word) };
-        lens[i] = unsafe { ::core::ptr::read_unaligned((entry + 8) as *const Word) };
-        i += 1;
-    }
+    read_linux_iovecs(runtime, pid, iov_ptr, iov_count, &mut bases, &mut lens)?;
 
     let mut total = 0 as Word;
-    i = 0;
+    let mut i = 0usize;
     while i < iov_count as usize {
         let base = bases[i];
         let len = lens[i];
         if len != 0 {
-            total = total.saturating_add(sys_write(runtime, pid, fd, base, len)?);
+            match sys_write(runtime, pid, fd, base, len) {
+                Ok(written) => {
+                    total = total.checked_add(written).ok_or(EINVAL)?;
+                    if written < len {
+                        break;
+                    }
+                }
+                Err(_) if total != 0 => break,
+                Err(errno) => return Err(errno),
+            }
+        }
+        i += 1;
+    }
+    Ok(total)
+}
+
+fn sys_readv(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    iov_ptr: Word,
+    iov_count: Word,
+) -> Result<Word, i32> {
+    let mut bases = [0 as Word; LINUX_IOV_MAX as usize];
+    let mut lens = [0 as Word; LINUX_IOV_MAX as usize];
+    read_linux_iovecs(runtime, pid, iov_ptr, iov_count, &mut bases, &mut lens)?;
+
+    let mut total = 0 as Word;
+    let mut i = 0usize;
+    while i < iov_count as usize {
+        let len = lens[i];
+        if len != 0 {
+            match sys_read(runtime, pid, fd, bases[i], len) {
+                Ok(read) => {
+                    total = total.checked_add(read).ok_or(EINVAL)?;
+                    if read < len {
+                        break;
+                    }
+                }
+                Err(_) if total != 0 => break,
+                Err(errno) => return Err(errno),
+            }
         }
         i += 1;
     }
@@ -2337,6 +2879,9 @@ fn sys_getdents64(
         return Err(EFAULT);
     }
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::VirtualDirectory {
+        return sys_virtual_getdents(runtime, pid, fd, user_buffer, count);
+    }
     if file.kind != LinuxFileKind::Posix {
         return Err(ENOTDIR);
     }
@@ -2410,6 +2955,166 @@ fn sys_getdents64(
     Ok(out_offset)
 }
 
+fn sys_virtual_getdents(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    user_buffer: Word,
+    count: Word,
+) -> Result<Word, i32> {
+    let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let directory = VirtualNode::from_id(file.resource).ok_or(ENOTDIR)?;
+    if !directory.is_directory() {
+        return Err(ENOTDIR);
+    }
+    let graphics = graphics_enabled(runtime, pid);
+    let mut out = 0usize;
+    let mut index = file.offset as usize;
+    while let Some(entry) = virtual_fs::directory_entry(directory, index, graphics) {
+        let reclen = align_up_word(
+            (LINUX_DIRENT64_NAME_OFFSET + entry.name.len() + 1) as Word,
+            8,
+        ) as usize;
+        if out + reclen > count as usize || out + reclen > runtime.posix_shm_size as usize {
+            break;
+        }
+        unsafe {
+            let base = runtime.posix_shm + out as Word;
+            ::core::ptr::write_bytes(base as *mut u8, 0, reclen);
+            write_u64(base, entry.node.id());
+            write_u64(base + 8, (index + 1) as Word);
+            write_u16(base + 16, reclen as u16);
+            let dtype = if entry.node.is_directory() {
+                LINUX_DT_DIR
+            } else if entry.node.is_regular_file() {
+                LINUX_DT_REG
+            } else {
+                LINUX_DT_CHR
+            };
+            ::core::ptr::write((base + 18) as *mut u8, dtype as u8);
+            ::core::ptr::copy_nonoverlapping(
+                entry.name.as_ptr(),
+                (base + LINUX_DIRENT64_NAME_OFFSET as Word) as *mut u8,
+                entry.name.len(),
+            );
+        }
+        out += reclen;
+        index += 1;
+    }
+    file.offset = index as Word;
+    if !runtime.set_linux_file(pid, fd, file) {
+        return Err(EBADF);
+    }
+    if out != 0 {
+        write_target_memory(runtime, pid, user_buffer, out as Word)?;
+    }
+    Ok(out as Word)
+}
+
+fn sys_virtual_read(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    user_buffer: Word,
+    len: Word,
+) -> Result<Word, i32> {
+    let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let node = VirtualNode::from_id(file.resource).ok_or(EBADF)?;
+    if node == VirtualNode::DevNull {
+        return Ok(0);
+    }
+    if node == VirtualNode::DevZero {
+        let bytes = len.min(runtime.posix_shm_size);
+        unsafe { ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, bytes as usize) };
+        write_target_memory(runtime, pid, user_buffer, bytes)?;
+        return Ok(bytes);
+    }
+    let memory_text;
+    let memory_text_len;
+    let image_name;
+    let bytes = if node == VirtualNode::ProcMemInfo {
+        let info = libnanami::request_nanami_info_memory().map_err(map_request_error)?;
+        (memory_text, memory_text_len) = format_proc_meminfo(info.total_bytes, info.free_bytes);
+        &memory_text[..memory_text_len]
+    } else if node == VirtualNode::ProcSelfExe {
+        let process = runtime.managed_process(pid).ok_or(ESRCH)?;
+        image_name = process.image_name;
+        &image_name[..process.image_name_len]
+    } else {
+        virtual_fs::static_file(node).ok_or(EINVAL)?
+    };
+    let offset = file.offset as usize;
+    if offset >= bytes.len() {
+        return Ok(0);
+    }
+    let amount = (bytes.len() - offset)
+        .min(len as usize)
+        .min(runtime.posix_shm_size as usize);
+    unsafe {
+        ::core::ptr::copy_nonoverlapping(
+            bytes[offset..offset + amount].as_ptr(),
+            runtime.posix_shm as *mut u8,
+            amount,
+        );
+    }
+    write_target_memory(runtime, pid, user_buffer, amount as Word)?;
+    file.offset += amount as Word;
+    if !runtime.set_linux_file(pid, fd, file) {
+        return Err(EBADF);
+    }
+    Ok(amount as Word)
+}
+
+fn sys_virtual_write(runtime: &Runtime, pid: Word, fd: Word, len: Word) -> Result<Word, i32> {
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let node = VirtualNode::from_id(file.resource).ok_or(EBADF)?;
+    match node {
+        VirtualNode::DevNull | VirtualNode::DevZero => Ok(len),
+        _ => Err(EBADF),
+    }
+}
+
+fn format_proc_meminfo(total: Word, free: Word) -> ([u8; 96], usize) {
+    let mut out = [0u8; 96];
+    let mut pos = 0usize;
+    pos = append_bytes_to_array(&mut out, pos, b"MemTotal:       ");
+    pos = append_decimal_to_array(&mut out, pos, total / 1024);
+    pos = append_bytes_to_array(&mut out, pos, b" kB\nMemFree:        ");
+    pos = append_decimal_to_array(&mut out, pos, free / 1024);
+    pos = append_bytes_to_array(&mut out, pos, b" kB\n");
+    (out, pos)
+}
+
+fn append_bytes_to_array(out: &mut [u8], mut pos: usize, value: &[u8]) -> usize {
+    for byte in value {
+        if pos >= out.len() {
+            break;
+        }
+        out[pos] = *byte;
+        pos += 1;
+    }
+    pos
+}
+
+fn append_decimal_to_array(out: &mut [u8], pos: usize, mut value: Word) -> usize {
+    if value == 0 {
+        return append_bytes_to_array(out, pos, b"0");
+    }
+    let mut digits = [0u8; 20];
+    let mut count = 0usize;
+    while value != 0 {
+        digits[count] = b'0' + (value % 10) as u8;
+        value /= 10;
+        count += 1;
+    }
+    let mut out_pos = pos;
+    while count != 0 {
+        count -= 1;
+        out_pos = append_bytes_to_array(out, out_pos, &digits[count..count + 1]);
+    }
+    out_pos
+}
+
 fn sys_open(
     runtime: &mut Runtime,
     pid: Word,
@@ -2417,10 +3122,8 @@ fn sys_open(
     linux_flags: Word,
 ) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    if is_terminal_path(runtime.posix_shm, len) {
-        return runtime
-            .allocate_linux_file(pid, LinuxFile::terminal(), 0)
-            .ok_or(EMFILE);
+    if let Some(fd) = open_virtual_path(runtime, pid, len, linux_flags)? {
+        return Ok(fd);
     }
     let flags = translate_open_flags(linux_flags);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
@@ -2451,10 +3154,8 @@ fn sys_openat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    if is_terminal_path(runtime.posix_shm, len) {
-        return runtime
-            .allocate_linux_file(pid, LinuxFile::terminal(), 0)
-            .ok_or(EMFILE);
+    if let Some(fd) = open_virtual_path(runtime, pid, len, linux_flags)? {
+        return Ok(fd);
     }
     let flags = translate_open_flags(linux_flags);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
@@ -2471,6 +3172,225 @@ fn sys_openat(
     runtime
         .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags), 0)
         .ok_or(EMFILE)
+}
+
+fn open_virtual_path(
+    runtime: &mut Runtime,
+    pid: Word,
+    len: Word,
+    linux_flags: Word,
+) -> Result<Option<Word>, i32> {
+    let graphics_enabled = runtime
+        .managed_process(pid)
+        .map(|process| process.graphics_enabled)
+        .ok_or(ESRCH)?;
+    let path =
+        unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
+    let Some(node) = virtual_fs::lookup(path, graphics_enabled) else {
+        return if is_linux_virtual_path(runtime.posix_shm, len) {
+            Err(ENOENT)
+        } else {
+            Ok(None)
+        };
+    };
+    if (linux_flags & LINUX_O_DIRECTORY) != 0 && !node.is_directory() {
+        return Err(ENOTDIR);
+    }
+    let access_mode = linux_flags & LINUX_O_ACCMODE;
+    if node.is_directory() && access_mode != LINUX_O_RDONLY {
+        return Err(EISDIR);
+    }
+    if node.is_regular_file()
+        && (access_mode != LINUX_O_RDONLY || (linux_flags & (LINUX_O_CREAT | LINUX_O_TRUNC)) != 0)
+    {
+        return Err(EROFS);
+    }
+    let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
+        LINUX_FD_CLOEXEC
+    } else {
+        0
+    } | (linux_flags & LINUX_O_NONBLOCK);
+    let file = match node {
+        VirtualNode::DevTty => LinuxFile::terminal(),
+        VirtualNode::DevNull | VirtualNode::DevZero => {
+            LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)
+        }
+        VirtualNode::DevKeyboard => {
+            ensure_input(runtime, pid)?;
+            LinuxFile::virtual_node(
+                LinuxFileKind::EvdevKeyboard,
+                input_resource(runtime, pid, node.id())?,
+                fd_flags,
+            )
+        }
+        VirtualNode::DevMouse => {
+            ensure_input(runtime, pid)?;
+            LinuxFile::virtual_node(
+                LinuxFileKind::EvdevMouse,
+                input_resource(runtime, pid, node.id())?,
+                fd_flags,
+            )
+        }
+        VirtualNode::DevFramebuffer => {
+            let session = ensure_graphics_session(runtime, pid)?;
+            let mut file = LinuxFile::virtual_node(LinuxFileKind::Framebuffer, node.id(), fd_flags);
+            file.resource = session;
+            file
+        }
+        node if node.is_directory() => {
+            LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, node.id(), fd_flags)
+        }
+        _ => LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags),
+    };
+    runtime
+        .allocate_linux_file(pid, file, 0)
+        .map(Some)
+        .ok_or(EMFILE)
+}
+
+fn graphics_enabled(runtime: &Runtime, pid: Word) -> bool {
+    runtime
+        .managed_process(pid)
+        .map(|process| process.graphics_enabled)
+        .unwrap_or(false)
+}
+
+fn input_resource(runtime: &Runtime, pid: Word, node: Word) -> Result<Word, i32> {
+    let session = runtime
+        .managed_process(pid)
+        .map(|process| process.graphics_session)
+        .ok_or(ESRCH)?;
+    Ok((session << 32) | node)
+}
+
+fn ensure_input(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    if graphics_enabled(runtime, pid) {
+        ensure_graphics_session(runtime, pid)?;
+        return Ok(());
+    }
+    if runtime.input_port != 0 && runtime.input_queue != 0 {
+        return Ok(());
+    }
+    nanami_services::registry::connect_input_service(SLOT_INPUT_SERVICE).map_err(|_| ENODEV)?;
+    let port = libnanami::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE);
+    let (queue, bytes) = input::input_service_subscribe_shared(
+        port,
+        input::INPUT_SUBSCRIBE_KEYBOARD | input::INPUT_SUBSCRIBE_MOUSE,
+    )
+    .map_err(map_request_error)?;
+    if queue == 0 || bytes == 0 {
+        return Err(ENODEV);
+    }
+    runtime.input_port = port;
+    runtime.input_queue = queue;
+    runtime.input_queue_size = bytes;
+    Ok(())
+}
+
+fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Result<Word, i32> {
+    if !graphics_enabled(runtime, pid) {
+        return Err(ENOENT);
+    }
+    if let Some(process) = runtime.managed_process(pid) {
+        if process.graphics_session != 0 {
+            return Ok(process.graphics_session);
+        }
+    }
+    let root_pid = process_tree_root(runtime, pid)?;
+    let mut index = 0usize;
+    while index < runtime.graphics.len() {
+        if runtime.graphics[index].active && runtime.graphics[index].root_pid == root_pid {
+            let id = index as Word + 1;
+            let _ = runtime.set_graphics_session(pid, id);
+            return Ok(id);
+        }
+        index += 1;
+    }
+    let Some(index) = runtime.graphics.iter().position(|entry| !entry.active) else {
+        return Err(ENOMEM);
+    };
+    if runtime.honoka_port == 0 {
+        runtime.honoka_pid =
+            nanami_services::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE)
+                .map_err(|_| ENODEV)?;
+        runtime.honoka_port = libnanami::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE);
+    }
+    let honoka_pid = runtime.honoka_pid;
+    let port = runtime.honoka_port;
+    let window = honoka::honoka_create_window_with_title(
+        port,
+        80 + (index as Word * 32),
+        80 + (index as Word * 32),
+        ALTER_FB_WIDTH,
+        ALTER_FB_HEIGHT,
+        b"Alter/Linux fb0",
+    )
+    .map_err(map_request_error)?;
+    let present_slot = SLOT_HONOKA_PRESENT_NOTIFICATION_BASE + index as Word;
+    if let Err(error) = libnanami::request_notification_port_copy(
+        honoka_pid,
+        libnanami::PROCESS_SLOT_NOTIFICATION,
+        present_slot,
+        honoka::HONOKA_NOTIFICATION_PRESENT | (window & 0xffff_ffff),
+    ) {
+        let _ = honoka::honoka_destroy_window(port, window);
+        return Err(map_request_error(error));
+    }
+    let present_notification = libnanami::ipc::process_slot_descriptor(present_slot);
+    let (input_queue, _) = match honoka::honoka_attach_input_queue(port, window) {
+        Ok(attached) => attached,
+        Err(error) => {
+            let _ = honoka::honoka_destroy_window(port, window);
+            return Err(map_request_error(error));
+        }
+    };
+    if let Err(error) = honoka::honoka_attach_input_notification(port, window) {
+        let _ = libnanami::request_mapping_release(input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+        let _ = honoka::honoka_destroy_window(port, window);
+        return Err(map_request_error(error));
+    }
+    runtime.graphics[index] = crate::state::GraphicsSession {
+        active: true,
+        root_pid,
+        honoka_port: port,
+        present_notification,
+        window_id: window,
+        width: ALTER_FB_WIDTH,
+        height: ALTER_FB_HEIGHT,
+        damage_queue: 0,
+        framebuffer: 0,
+        framebuffer_bytes: ALTER_FB_BYTES,
+        input_queue,
+        keyboard_events: [0; crate::state::ALTER_EVDEV_QUEUE_CAPACITY],
+        keyboard_head: 0,
+        keyboard_tail: 0,
+        mouse_events: [0; crate::state::ALTER_EVDEV_QUEUE_CAPACITY],
+        mouse_head: 0,
+        mouse_tail: 0,
+        mouse_x: 0,
+        mouse_y: 0,
+        mouse_position_valid: false,
+        guest_pid: 0,
+        guest_framebuffer: 0,
+        guest_framebuffer_bytes: 0,
+    };
+    let id = index as Word + 1;
+    let _ = runtime.set_graphics_session(pid, id);
+    Ok(id)
+}
+
+fn process_tree_root(runtime: &Runtime, pid: Word) -> Result<Word, i32> {
+    let mut current = pid;
+    let mut depth = 0usize;
+    while depth < runtime.managed.len() {
+        let process = runtime.managed_process(current).ok_or(ESRCH)?;
+        if process.parent_pid == 0 {
+            return Ok(process.pid);
+        }
+        current = process.parent_pid;
+        depth += 1;
+    }
+    Err(EINVAL)
 }
 
 fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
@@ -2493,14 +3413,21 @@ fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
         | LinuxFileKind::SocketTcpListener
         | LinuxFileKind::SocketIcmp
         | LinuxFileKind::SocketNetlink => close_socket_file(runtime, file),
-        LinuxFileKind::Terminal | LinuxFileKind::Empty => {}
+        LinuxFileKind::Terminal
+        | LinuxFileKind::VirtualDirectory
+        | LinuxFileKind::VirtualFile
+        | LinuxFileKind::EvdevKeyboard
+        | LinuxFileKind::EvdevMouse
+        | LinuxFileKind::Framebuffer
+        | LinuxFileKind::Empty => {}
     }
     Ok(0)
 }
 
 fn sys_dup(runtime: &mut Runtime, pid: Word, old_fd: Word) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, old_fd).ok_or(EBADF)?;
-    let new_file = duplicate_linux_file(runtime, file)?;
+    let mut new_file = duplicate_linux_file(runtime, file)?;
+    new_file.flags &= !LINUX_FD_CLOEXEC;
     runtime.allocate_linux_file(pid, new_file, 0).ok_or(EMFILE)
 }
 
@@ -2513,7 +3440,8 @@ fn sys_dup2(runtime: &mut Runtime, pid: Word, old_fd: Word, new_fd: Word) -> Res
         return Ok(new_fd);
     }
     close_linux_fd(runtime, pid, new_fd)?;
-    let new_file = duplicate_linux_file(runtime, file)?;
+    let mut new_file = duplicate_linux_file(runtime, file)?;
+    new_file.flags &= !LINUX_FD_CLOEXEC;
     if runtime.set_linux_file(pid, new_fd, new_file) {
         if new_fd <= 2 {
             libnanami::println!(
@@ -2749,6 +3677,8 @@ fn sys_fork(
         child.fs_base = child_fs_base;
         child.trace_enabled = parent.trace_enabled;
         child.diagnostics_enabled = parent.diagnostics_enabled;
+        child.graphics_enabled = parent.graphics_enabled;
+        child.graphics_session = parent.graphics_session;
         child.personality = parent.personality;
         child.terminal_canonical = parent.terminal_canonical;
         child.terminal_echo = parent.terminal_echo;
@@ -3128,8 +4058,11 @@ fn log_execve_stage_error(runtime: &Runtime, pid: Word, stage: &str, path_len: W
 
 fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    if is_terminal_path(runtime.posix_shm, len) {
+    if current_virtual_node(runtime, pid, len).is_some() {
         return Ok(0);
+    }
+    if is_linux_virtual_path(runtime.posix_shm, len) {
+        return Err(ENOENT);
     }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_stat(runtime.posix_port, 0, vfs_len)
@@ -3150,8 +4083,11 @@ fn sys_faccessat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    if is_terminal_path(runtime.posix_shm, len) || is_linux_device_path(runtime.posix_shm, len) {
+    if current_virtual_node(runtime, pid, len).is_some() {
         return Ok(0);
+    }
+    if is_linux_virtual_path(runtime.posix_shm, len) {
+        return Err(ENOENT);
     }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_stat(runtime.posix_port, 0, vfs_len)
@@ -3172,6 +4108,19 @@ fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i
             len as usize,
         );
     }
+    if let Some(node) = current_virtual_node(runtime, pid, len) {
+        if !node.is_directory() {
+            return Err(ENOTDIR);
+        }
+        return if runtime.set_cwd(pid, &guest_path[..len as usize]) {
+            Ok(0)
+        } else {
+            Err(EINVAL)
+        };
+    }
+    if is_linux_virtual_path(runtime.posix_shm, len) {
+        return Err(ENOENT);
+    }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     let stat = posix::posix_stat(runtime.posix_port, 0, vfs_len).map_err(map_path_request_error)?;
     if stat.2 != posix::POSIX_FILE_TYPE_DIRECTORY {
@@ -3187,6 +4136,7 @@ fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i
 
 fn sys_mkdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
         .map(|_| 0)
@@ -3199,6 +4149,7 @@ fn sys_mkdirat(runtime: &mut Runtime, pid: Word, dirfd: Word, path_ptr: Word) ->
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
         .map(|_| 0)
@@ -3239,9 +4190,7 @@ fn mknod_current_path(
     mode: Word,
     _dev: Word,
 ) -> Result<Word, i32> {
-    if is_terminal_path(runtime.posix_shm, len) || is_linux_device_path(runtime.posix_shm, len) {
-        return Ok(0);
-    }
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let file_type = mode & LINUX_S_IFMT;
     if file_type == LINUX_S_IFCHR || file_type == LINUX_S_IFBLK {
         return Err(ENOSYS);
@@ -3260,6 +4209,7 @@ fn mknod_current_path(
 
 fn sys_unlink(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_unlink(runtime.posix_port, 0, vfs_len), 0)
 }
@@ -3276,6 +4226,7 @@ fn sys_unlinkat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     if (flags & LINUX_AT_REMOVEDIR) != 0 {
         return map_unit(posix::posix_rmdir(runtime.posix_port, 0, vfs_len), 0);
@@ -3285,6 +4236,7 @@ fn sys_unlinkat(
 
 fn sys_rmdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_rmdir(runtime.posix_port, 0, vfs_len), 0)
 }
@@ -3296,9 +4248,11 @@ fn sys_rename(
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
     let old_len = resolve_path(runtime, pid, old_path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, ALTER_IO_OFFSET as Word, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, ALTER_IO_OFFSET as Word, old_len)?;
     let new_len = resolve_path(runtime, pid, new_path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
@@ -3324,6 +4278,7 @@ fn sys_renameat(
         return Err(ENOSYS);
     }
     let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, ALTER_IO_OFFSET as Word, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, ALTER_IO_OFFSET as Word, old_len)?;
     let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
@@ -3331,6 +4286,7 @@ fn sys_renameat(
         return Err(ENOSYS);
     }
     let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
@@ -3403,8 +4359,11 @@ fn sys_utime_path(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Wo
         return Ok(0);
     }
     let len = resolve_path(runtime, pid, path_ptr)?;
-    if is_terminal_path(runtime.posix_shm, len) || is_linux_device_path(runtime.posix_shm, len) {
+    if current_virtual_node(runtime, pid, len).is_some() {
         return Ok(0);
+    }
+    if is_linux_virtual_path(runtime.posix_shm, len) {
+        return Err(ENOENT);
     }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_stat(runtime.posix_port, 0, vfs_len)
@@ -3501,6 +4460,11 @@ fn sys_statx(
             | LinuxFileKind::SocketTcpListener
             | LinuxFileKind::SocketIcmp
             | LinuxFileKind::SocketNetlink => (0, 0, POSIX_FILE_TYPE_SOCKET, 0, 0),
+            LinuxFileKind::VirtualDirectory
+            | LinuxFileKind::VirtualFile
+            | LinuxFileKind::EvdevKeyboard
+            | LinuxFileKind::EvdevMouse
+            | LinuxFileKind::Framebuffer => virtual_node_stat(runtime, pid, file)?,
             LinuxFileKind::Empty => return Err(EBADF),
         };
         write_linux_statx(runtime, pid, statx_ptr, stat)?;
@@ -3520,26 +4484,13 @@ fn stat_current_path(
     pid: Word,
     len: Word,
 ) -> Result<(Word, Word, Word, Word, Word), i32> {
-    if is_terminal_path(runtime.posix_shm, len) {
-        return Ok((0, 0, posix::POSIX_FILE_TYPE_CHAR_DEVICE, 5, 0));
+    let path =
+        unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
+    if let Some(node) = virtual_fs::lookup(path, graphics_enabled(runtime, pid)) {
+        return virtual_node_stat_from_node(runtime, pid, node);
     }
-    if path_equals(runtime.posix_shm, len, b"/dev/null") {
-        return Ok((
-            0,
-            0,
-            posix::POSIX_FILE_TYPE_CHAR_DEVICE,
-            posix::POSIX_DEV_NULL_MAJOR,
-            posix::POSIX_DEV_NULL_MINOR,
-        ));
-    }
-    if path_equals(runtime.posix_shm, len, b"/dev/zero") {
-        return Ok((
-            0,
-            0,
-            posix::POSIX_FILE_TYPE_CHAR_DEVICE,
-            posix::POSIX_DEV_ZERO_MAJOR,
-            posix::POSIX_DEV_ZERO_MINOR,
-        ));
+    if is_linux_virtual_path(runtime.posix_shm, len) {
+        return Err(ENOENT);
     }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_stat(runtime.posix_port, 0, vfs_len).map_err(map_path_request_error)
@@ -3560,12 +4511,81 @@ fn sys_fstat(runtime: &mut Runtime, pid: Word, fd: Word, stat_ptr: Word) -> Resu
         write_linux_pipe_stat(runtime, pid, stat_ptr)?;
         return Ok(0);
     }
+    if matches!(
+        file.kind,
+        LinuxFileKind::VirtualDirectory
+            | LinuxFileKind::VirtualFile
+            | LinuxFileKind::EvdevKeyboard
+            | LinuxFileKind::EvdevMouse
+            | LinuxFileKind::Framebuffer
+    ) {
+        let stat = virtual_node_stat(runtime, pid, file)?;
+        write_linux_stat(runtime, pid, stat_ptr, stat)?;
+        return Ok(0);
+    }
     if file.kind != LinuxFileKind::Posix {
         return Err(EBADF);
     }
     let stat = posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
+}
+
+fn virtual_node_stat(
+    runtime: &Runtime,
+    pid: Word,
+    file: LinuxFile,
+) -> Result<(Word, Word, Word, Word, Word), i32> {
+    let node = if file.kind == LinuxFileKind::Framebuffer {
+        VirtualNode::DevFramebuffer
+    } else {
+        VirtualNode::from_id(file.resource & 0xffff_ffff).ok_or(EBADF)?
+    };
+    virtual_node_stat_from_node(runtime, pid, node)
+}
+
+fn virtual_node_stat_from_node(
+    runtime: &Runtime,
+    pid: Word,
+    node: VirtualNode,
+) -> Result<(Word, Word, Word, Word, Word), i32> {
+    let (size, major, minor) = match node {
+        VirtualNode::DevNull => (0, 1, 3),
+        VirtualNode::DevZero => (0, 1, 5),
+        VirtualNode::DevTty => (0, 5, 0),
+        VirtualNode::DevKeyboard => (0, 13, 64),
+        VirtualNode::DevMouse => (0, 13, 65),
+        VirtualNode::DevFramebuffer => {
+            if !graphics_enabled(runtime, pid) {
+                return Err(ENOENT);
+            }
+            (ALTER_FB_BYTES, 29, 0)
+        }
+        VirtualNode::ProcSelfExe => runtime
+            .managed_process(pid)
+            .map(|process| (process.image_name_len as Word, 0, 0))
+            .ok_or(ESRCH)?,
+        _ => (
+            virtual_fs::static_file(node)
+                .map(|bytes| bytes.len() as Word)
+                .unwrap_or(0),
+            0,
+            0,
+        ),
+    };
+    Ok((
+        node.id(),
+        size,
+        if node.is_directory() {
+            posix::POSIX_FILE_TYPE_DIRECTORY
+        } else if node.is_regular_file() {
+            posix::POSIX_FILE_TYPE_REGULAR
+        } else {
+            posix::POSIX_FILE_TYPE_CHAR_DEVICE
+        },
+        major,
+        minor,
+    ))
 }
 
 fn sys_lseek(
@@ -3575,11 +4595,34 @@ fn sys_lseek(
     offset: Word,
     whence: Word,
 ) -> Result<Word, i32> {
-    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     if file.kind == LinuxFileKind::PipeRead
         || file.kind == LinuxFileKind::PipeWrite
         || file.kind == LinuxFileKind::Terminal
     {
+        return Err(ESPIPE);
+    }
+    if matches!(
+        file.kind,
+        LinuxFileKind::VirtualFile | LinuxFileKind::Framebuffer
+    ) {
+        let end = virtual_node_stat(runtime, pid, file)?.1;
+        let next = match whence {
+            0 => offset,
+            1 => file.offset.checked_add(offset).ok_or(EINVAL)?,
+            2 => end.checked_add(offset).ok_or(EINVAL)?,
+            _ => return Err(EINVAL),
+        };
+        file.offset = next;
+        if !runtime.set_linux_file(pid, fd, file) {
+            return Err(EBADF);
+        }
+        return Ok(next);
+    }
+    if matches!(
+        file.kind,
+        LinuxFileKind::VirtualDirectory | LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse
+    ) {
         return Err(ESPIPE);
     }
     if file.kind != LinuxFileKind::Posix {
@@ -3675,8 +4718,8 @@ fn sys_mmap(
     len: Word,
     _prot: Word,
     flags: Word,
-    _fd: Word,
-    _offset: Word,
+    fd: Word,
+    offset: Word,
 ) -> Result<Word, i32> {
     if len == 0 {
         return Err(EINVAL);
@@ -3684,8 +4727,17 @@ fn sys_mmap(
     if (_prot & !LINUX_PROT_ALL) != 0 {
         return Err(EINVAL);
     }
-    if (_fd as isize) >= 0 && (flags & LINUX_MAP_ANONYMOUS) == 0 {
-        return Err(ENOSYS);
+    if (fd as isize) >= 0 && (flags & LINUX_MAP_ANONYMOUS) == 0 {
+        let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+        return match file.kind {
+            LinuxFileKind::Framebuffer => {
+                if requested_addr != 0 && (flags & LINUX_MAP_FIXED) != 0 {
+                    return Err(EINVAL);
+                }
+                sys_framebuffer_mmap(runtime, pid, file, len, _prot, offset)
+            }
+            _ => Err(ENOSYS),
+        };
     }
     if requested_addr != 0 && (flags & LINUX_MAP_FIXED) != 0 {
         let fixed_base = requested_addr & !(LINUX_PAGE_SIZE - 1);
@@ -3715,8 +4767,8 @@ fn sys_mmap(
                     mapped,
                     _prot,
                     flags,
-                    _fd,
-                    _offset,
+                    fd,
+                    offset,
                     errno
                 );
                 errno
@@ -3740,8 +4792,8 @@ fn sys_mmap(
             len,
             _prot,
             flags,
-            _fd,
-            _offset,
+            fd,
+            offset,
             errno
         );
         errno
@@ -3754,6 +4806,15 @@ fn sys_munmap(runtime: &mut Runtime, pid: Word, addr: Word, len: Word) -> Result
         return Err(EINVAL);
     }
     let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
+    let framebuffer_index = runtime.graphics.iter().position(|session| {
+        session.active
+            && session.guest_pid == pid
+            && session.guest_framebuffer == addr
+            && align_up_word(session.guest_framebuffer_bytes, LINUX_PAGE_SIZE) == mapped
+    });
+    if let Some(index) = framebuffer_index {
+        let _ = present_graphics_session(runtime, index as Word + 1, pid);
+    }
     if !runtime.has_mapping(pid, addr, mapped) {
         return Err(EINVAL);
     }
@@ -3762,6 +4823,44 @@ fn sys_munmap(runtime: &mut Runtime, pid: Word, addr: Word, len: Word) -> Result
     }
     if !runtime.remove_mapping(pid, addr, mapped) {
         return Err(EINVAL);
+    }
+    if let Some(index) = framebuffer_index {
+        let session = runtime.graphics[index];
+        honoka::honoka_detach_logical_framebuffer(session.honoka_port, session.window_id)
+            .map_err(map_request_error)?;
+        runtime.graphics[index].guest_pid = 0;
+        runtime.graphics[index].guest_framebuffer = 0;
+        runtime.graphics[index].guest_framebuffer_bytes = 0;
+        runtime.graphics[index].framebuffer = 0;
+        runtime.graphics[index].framebuffer_bytes = ALTER_FB_BYTES;
+    }
+    Ok(0)
+}
+
+fn sys_msync(runtime: &mut Runtime, pid: Word, addr: Word, len: Word) -> Result<Word, i32> {
+    if addr == 0 || len == 0 {
+        return Err(EINVAL);
+    }
+    let mut index = 0usize;
+    while index < runtime.graphics.len() {
+        let session = runtime.graphics[index];
+        if session.active
+            && session.guest_pid == pid
+            && session.guest_framebuffer != 0
+            && runtime
+                .managed_process(pid)
+                .map(|process| process.graphics_session == index as Word + 1)
+                .unwrap_or(false)
+            && addr >= session.guest_framebuffer
+            && addr.saturating_add(len)
+                <= session
+                    .guest_framebuffer
+                    .saturating_add(session.guest_framebuffer_bytes)
+        {
+            present_graphics_session(runtime, index as Word + 1, pid)?;
+            return Ok(0);
+        }
+        index += 1;
     }
     Ok(0)
 }
@@ -4170,6 +5269,31 @@ fn linux_poll_revents(runtime: &mut Runtime, pid: Word, fd: i32, events: i16) ->
             }
             revents
         }
+        LinuxFileKind::VirtualDirectory | LinuxFileKind::VirtualFile => {
+            let mut revents = 0;
+            if (events & LINUX_POLLIN) != 0 {
+                revents |= LINUX_POLLIN;
+            }
+            if (events & LINUX_POLLOUT) != 0 && file.kind == LinuxFileKind::VirtualFile {
+                revents |= LINUX_POLLOUT;
+            }
+            revents
+        }
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            pump_input_events(runtime);
+            let session_id = file.resource >> 32;
+            let ready = match file.kind {
+                LinuxFileKind::EvdevKeyboard => keyboard_event_ready(runtime, session_id),
+                LinuxFileKind::EvdevMouse => mouse_event_ready(runtime, session_id),
+                _ => false,
+            };
+            if ready && (events & LINUX_POLLIN) != 0 {
+                LINUX_POLLIN
+            } else {
+                0
+            }
+        }
+        LinuxFileKind::Framebuffer => events & (LINUX_POLLIN | LINUX_POLLOUT),
         LinuxFileKind::Empty => LINUX_POLLNVAL,
     }
 }
@@ -4257,6 +5381,23 @@ fn readable_fdset_mask(runtime: &mut Runtime, pid: Word, requested: Word) -> Wor
                     LinuxFileKind::Posix => {
                         out |= bit;
                     }
+                    LinuxFileKind::VirtualDirectory
+                    | LinuxFileKind::VirtualFile
+                    | LinuxFileKind::Framebuffer => {
+                        out |= bit;
+                    }
+                    LinuxFileKind::EvdevKeyboard => {
+                        pump_input_events(runtime);
+                        if keyboard_event_ready(runtime, file.resource >> 32) {
+                            out |= bit;
+                        }
+                    }
+                    LinuxFileKind::EvdevMouse => {
+                        pump_input_events(runtime);
+                        if mouse_event_ready(runtime, file.resource >> 32) {
+                            out |= bit;
+                        }
+                    }
                     LinuxFileKind::SocketUdp
                     | LinuxFileKind::SocketTcp
                     | LinuxFileKind::SocketTcpListener
@@ -4295,6 +5436,12 @@ fn writable_fdset_mask(runtime: &Runtime, pid: Word, requested: Word) -> Word {
                     LinuxFileKind::Terminal | LinuxFileKind::Posix => {
                         out |= bit;
                     }
+                    LinuxFileKind::VirtualFile | LinuxFileKind::Framebuffer => {
+                        out |= bit;
+                    }
+                    LinuxFileKind::VirtualDirectory
+                    | LinuxFileKind::EvdevKeyboard
+                    | LinuxFileKind::EvdevMouse => {}
                     LinuxFileKind::SocketUdp
                     | LinuxFileKind::SocketTcp
                     | LinuxFileKind::SocketIcmp
@@ -4318,8 +5465,15 @@ fn sys_ioctl(
     argument: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    if file.kind != LinuxFileKind::Terminal {
-        return Ok(0);
+    match file.kind {
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            return sys_evdev_ioctl(runtime, pid, file, request, argument);
+        }
+        LinuxFileKind::Framebuffer => {
+            return sys_framebuffer_ioctl(runtime, pid, file, request, argument);
+        }
+        LinuxFileKind::Terminal => {}
+        _ => return Err(ENOTTY),
     }
     if request == LINUX_TCGETS {
         if argument == 0 {
@@ -4373,6 +5527,165 @@ fn sys_ioctl(
     Ok(0)
 }
 
+fn sys_evdev_ioctl(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    request: Word,
+    argument: Word,
+) -> Result<Word, i32> {
+    if argument == 0 {
+        return Err(EFAULT);
+    }
+    if request == LINUX_EVIOCGVERSION {
+        unsafe { write_u32(runtime.posix_shm, 0x0001_0001) };
+        write_target_memory(runtime, pid, argument, 4)?;
+        return Ok(0);
+    }
+    if request == LINUX_EVIOCGID {
+        unsafe {
+            write_u16(runtime.posix_shm, 0x0011);
+            write_u16(runtime.posix_shm + 2, 0);
+            write_u16(runtime.posix_shm + 4, 0);
+            write_u16(runtime.posix_shm + 6, 1);
+        }
+        write_target_memory(runtime, pid, argument, 8)?;
+        return Ok(0);
+    }
+
+    let direction = (request >> 30) & 0x3;
+    let ioctl_type = (request >> 8) & 0xff;
+    let number = request & 0xff;
+    let requested_len = ((request >> 16) & 0x3fff).min(runtime.posix_shm_size);
+    if direction == 2 && ioctl_type == 0x45 && number == 0x06 {
+        let name = if file.kind == LinuxFileKind::EvdevKeyboard {
+            b"Nanami PS/2 Keyboard\0" as &[u8]
+        } else {
+            b"Nanami PS/2 Mouse\0" as &[u8]
+        };
+        let bytes = requested_len.min(name.len() as Word);
+        unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                name.as_ptr(),
+                runtime.posix_shm as *mut u8,
+                bytes as usize,
+            );
+        }
+        write_target_memory(runtime, pid, argument, bytes)?;
+        return Ok(bytes);
+    }
+    if direction == 2 && ioctl_type == 0x45 && (0x20..=0x3f).contains(&number) {
+        let bytes = requested_len;
+        unsafe { ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, bytes as usize) };
+        let event_type = number - 0x20;
+        if event_type == 0 && bytes != 0 {
+            set_bitmap_bit(runtime.posix_shm, bytes, LINUX_EV_SYN as Word);
+            set_bitmap_bit(runtime.posix_shm, bytes, LINUX_EV_KEY as Word);
+            if file.kind == LinuxFileKind::EvdevMouse {
+                set_bitmap_bit(runtime.posix_shm, bytes, LINUX_EV_REL as Word);
+            }
+        } else if event_type == LINUX_EV_KEY as Word {
+            if file.kind == LinuxFileKind::EvdevKeyboard {
+                let mut bit = 0;
+                while bit <= 0xff {
+                    set_bitmap_bit(runtime.posix_shm, bytes, bit);
+                    bit += 1;
+                }
+            } else {
+                set_bitmap_bit(runtime.posix_shm, bytes, 0x110);
+                set_bitmap_bit(runtime.posix_shm, bytes, 0x111);
+                set_bitmap_bit(runtime.posix_shm, bytes, 0x112);
+            }
+        } else if event_type == LINUX_EV_REL as Word && file.kind == LinuxFileKind::EvdevMouse {
+            set_bitmap_bit(runtime.posix_shm, bytes, LINUX_REL_X as Word);
+            set_bitmap_bit(runtime.posix_shm, bytes, LINUX_REL_Y as Word);
+            set_bitmap_bit(runtime.posix_shm, bytes, LINUX_REL_WHEEL as Word);
+        }
+        write_target_memory(runtime, pid, argument, bytes)?;
+        return Ok(bytes);
+    }
+    Err(ENOTTY)
+}
+
+fn set_bitmap_bit(base: Word, bytes: Word, bit: Word) {
+    let byte = bit / 8;
+    if byte >= bytes {
+        return;
+    }
+    unsafe {
+        let pointer = (base + byte) as *mut u8;
+        *pointer |= 1 << (bit & 7);
+    }
+}
+
+fn sys_framebuffer_ioctl(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    request: Word,
+    argument: Word,
+) -> Result<Word, i32> {
+    match request {
+        LINUX_FBIOGET_FSCREENINFO => {
+            if argument == 0 {
+                return Err(EFAULT);
+            }
+            write_fb_fix_screeninfo(runtime.posix_shm);
+            write_target_memory(runtime, pid, argument, LINUX_FB_FIX_SCREENINFO_BYTES)?;
+            Ok(0)
+        }
+        LINUX_FBIOGET_VSCREENINFO => {
+            if argument == 0 {
+                return Err(EFAULT);
+            }
+            write_fb_var_screeninfo(runtime.posix_shm);
+            write_target_memory(runtime, pid, argument, LINUX_FB_VAR_SCREENINFO_BYTES)?;
+            Ok(0)
+        }
+        LINUX_FBIOPUT_VSCREENINFO | LINUX_FBIOPAN_DISPLAY => {
+            if argument == 0 {
+                return Err(EFAULT);
+            }
+            present_graphics_session(runtime, file.resource, pid)?;
+            Ok(0)
+        }
+        _ => Err(ENOTTY),
+    }
+}
+
+fn write_fb_fix_screeninfo(base: Word) {
+    unsafe {
+        ::core::ptr::write_bytes(base as *mut u8, 0, LINUX_FB_FIX_SCREENINFO_BYTES as usize);
+        let id = b"Nanami Honoka fb";
+        ::core::ptr::copy_nonoverlapping(id.as_ptr(), base as *mut u8, id.len());
+        write_u64(base + 16, 0);
+        write_u32(base + 24, ALTER_FB_BYTES as u32);
+        write_u32(base + 28, 0);
+        write_u32(base + 32, 0);
+        write_u32(base + 36, 2);
+        write_u32(base + 48, ALTER_FB_STRIDE as u32);
+    }
+}
+
+fn write_fb_var_screeninfo(base: Word) {
+    unsafe {
+        ::core::ptr::write_bytes(base as *mut u8, 0, LINUX_FB_VAR_SCREENINFO_BYTES as usize);
+        write_u32(base, ALTER_FB_WIDTH as u32);
+        write_u32(base + 4, ALTER_FB_HEIGHT as u32);
+        write_u32(base + 8, ALTER_FB_WIDTH as u32);
+        write_u32(base + 12, ALTER_FB_HEIGHT as u32);
+        write_u32(base + 24, 32);
+        write_u32(base + 32, 16);
+        write_u32(base + 36, 8);
+        write_u32(base + 44, 8);
+        write_u32(base + 48, 8);
+        write_u32(base + 56, 0);
+        write_u32(base + 60, 8);
+        write_u32(base + 68, 24);
+        write_u32(base + 72, 8);
+    }
+}
+
 fn sys_fcntl(
     runtime: &mut Runtime,
     pid: Word,
@@ -4381,9 +5694,14 @@ fn sys_fcntl(
     argument: Word,
 ) -> Result<Word, i32> {
     match command {
-        LINUX_F_DUPFD => {
+        LINUX_F_DUPFD | LINUX_F_DUPFD_CLOEXEC => {
             let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-            let new_file = duplicate_linux_file(runtime, file)?;
+            let mut new_file = duplicate_linux_file(runtime, file)?;
+            new_file.flags = if command == LINUX_F_DUPFD_CLOEXEC {
+                new_file.flags | LINUX_FD_CLOEXEC
+            } else {
+                new_file.flags & !LINUX_FD_CLOEXEC
+            };
             runtime
                 .allocate_linux_file(pid, new_file, argument)
                 .ok_or(EMFILE)
@@ -4506,15 +5824,95 @@ fn sys_sched_getaffinity(
     Ok(LINUX_CPU_MASK_BYTES)
 }
 
-fn sys_clock_gettime(runtime: &mut Runtime, pid: Word, timespec: Word) -> Result<Word, i32> {
-    if timespec != 0 {
-        unsafe {
-            write_u64(runtime.posix_shm, 0);
-            write_u64(runtime.posix_shm + 8, 0);
-        }
-        write_target_memory(runtime, pid, timespec, 16)?;
+fn sys_clock_gettime(
+    runtime: &mut Runtime,
+    pid: Word,
+    clock_id: Word,
+    timespec: Word,
+) -> Result<Word, i32> {
+    if timespec == 0 {
+        return Err(EFAULT);
     }
+    match clock_id {
+        0..=9 | 11 => {}
+        _ => return Err(EINVAL),
+    }
+    ensure_clock_timer(runtime)?;
+    let tick_hz = runtime.monotonic_tick_hz;
+    if tick_hz == 0 {
+        return Err(EIO);
+    }
+    let seconds = runtime.monotonic_ticks / tick_hz;
+    let nanoseconds = (runtime.monotonic_ticks % tick_hz).saturating_mul(1_000_000_000 / tick_hz);
+    unsafe {
+        write_u64(runtime.posix_shm, seconds);
+        write_u64(runtime.posix_shm + 8, nanoseconds);
+    }
+    write_target_memory(runtime, pid, timespec, LINUX_TIMESPEC_BYTES)?;
     Ok(0)
+}
+
+fn sys_nanosleep_action(
+    runtime: &mut Runtime,
+    pid: Word,
+    context: LinuxSyscallContext,
+) -> EmulationAction {
+    let request = context.args[0];
+    if request == 0 {
+        return EmulationAction::Return(-(EFAULT as isize));
+    }
+    if let Err(errno) = read_target_memory(runtime, pid, request, LINUX_TIMESPEC_BYTES) {
+        return EmulationAction::Return(-(errno as isize));
+    }
+
+    let seconds = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const i64) };
+    let nanoseconds = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 8) as *const i64) };
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return EmulationAction::Return(-(EINVAL as isize));
+    }
+
+    let ticks = (seconds as Word)
+        .saturating_mul(ALTER_SLEEP_TICK_HZ)
+        .saturating_add(
+            (nanoseconds as Word).saturating_add(ALTER_SLEEP_TICK_NANOSECONDS - 1)
+                / ALTER_SLEEP_TICK_NANOSECONDS,
+        );
+    if ticks == 0 {
+        return EmulationAction::Return(0);
+    }
+    if let Err(errno) = ensure_clock_timer(runtime) {
+        return EmulationAction::Return(-(errno as isize));
+    }
+
+    let Some(process) = runtime.managed_process_mut(pid) else {
+        return EmulationAction::Return(-(ESRCH as isize));
+    };
+    process.sleep_waiting = true;
+    process.sleep_ticks_remaining = ticks;
+    process.sleep_context = context;
+    EmulationAction::Park
+}
+
+fn ensure_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
+    if runtime.clock_timer_armed {
+        return Ok(());
+    }
+    let (ticks, tick_hz) =
+        nanami_services::timer::timer_service_monotonic_ticks(runtime.timer_port)
+            .map_err(map_request_error)?;
+    if tick_hz == 0 {
+        return Err(EIO);
+    }
+    nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+        runtime.timer_port,
+        ALTER_SLEEP_TICK_MILLISECONDS,
+        libnanami::PROCESS_SLOT_NOTIFICATION,
+    )
+    .map_err(map_request_error)?;
+    runtime.monotonic_ticks = ticks;
+    runtime.monotonic_tick_hz = tick_hz;
+    runtime.clock_timer_armed = true;
+    Ok(())
 }
 
 fn sys_getrandom(
@@ -4913,9 +6311,11 @@ fn syscall_arg_count(number: Word) -> usize {
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_UTIMES | SYS_DUP2 | SYS_RENAME
-        | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID => 2,
+        | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID | SYS_MSYNC
+        | SYS_NANOSLEEP => 2,
         SYS_READ
         | SYS_WRITE
+        | SYS_READV
         | SYS_WRITEV
         | SYS_SENDMSG
         | SYS_RECVMSG
@@ -4958,6 +6358,7 @@ fn syscall_name(number: Word) -> &'static [u8] {
     match number {
         SYS_READ => b"read",
         SYS_WRITE => b"write",
+        SYS_READV => b"readv",
         SYS_SENDMSG => b"sendmsg",
         SYS_RECVMSG => b"recvmsg",
         SYS_OPEN => b"open",
@@ -4981,6 +6382,7 @@ fn syscall_name(number: Word) -> &'static [u8] {
         SYS_MMAP => b"mmap",
         SYS_MPROTECT => b"mprotect",
         SYS_MUNMAP => b"munmap",
+        SYS_MSYNC => b"msync",
         SYS_MADVISE => b"madvise",
         SYS_MREMAP => b"mremap",
         SYS_BRK => b"brk",
@@ -4990,6 +6392,7 @@ fn syscall_name(number: Word) -> &'static [u8] {
         SYS_SIGALTSTACK => b"sigaltstack",
         SYS_IOCTL => b"ioctl",
         SYS_WRITEV => b"writev",
+        SYS_NANOSLEEP => b"nanosleep",
         SYS_ACCESS => b"access",
         SYS_SELECT => b"select",
         SYS_GETPID => b"getpid",
@@ -6150,6 +7553,28 @@ fn translate_guest_path_at(
         return Ok(len);
     }
 
+    if path_has_component_prefix(base, len, b"/temp") {
+        let suffix_len = len as usize - b"/temp".len();
+        unsafe {
+            ::core::ptr::copy(
+                (base + b"/temp".len() as Word) as *const u8,
+                (base + b"/tmp".len() as Word) as *mut u8,
+                suffix_len,
+            );
+            ::core::ptr::copy_nonoverlapping(b"/tmp".as_ptr(), base as *mut u8, b"/tmp".len());
+            ::core::ptr::write(
+                (base + b"/tmp".len() as Word + suffix_len as Word) as *mut u8,
+                0,
+            );
+        }
+        return translate_guest_path_at(
+            runtime,
+            pid,
+            offset,
+            b"/tmp".len() as Word + suffix_len as Word,
+        );
+    }
+
     let guest_root = guest_root_for_process(runtime, pid)?;
     if path_equals(base, len, guest_root) || path_has_root_prefix(base, len, guest_root) {
         return Ok(len);
@@ -6190,7 +7615,31 @@ fn translate_guest_path_at(
 }
 
 fn is_linux_virtual_path(base: Word, len: Word) -> bool {
-    is_linux_device_path(base, len) || path_equals(base, len, b"/proc/self/exe")
+    path_has_component_prefix(base, len, b"/dev")
+        || path_has_component_prefix(base, len, b"/proc")
+        || path_has_component_prefix(base, len, b"/sys")
+}
+
+fn reject_virtual_fs_mutation(base: Word, len: Word) -> Result<(), i32> {
+    if is_linux_virtual_path(base, len) {
+        Err(EROFS)
+    } else {
+        Ok(())
+    }
+}
+
+fn path_has_component_prefix(base: Word, len: Word, prefix: &[u8]) -> bool {
+    if (len as usize) < prefix.len() {
+        return false;
+    }
+    let path = unsafe { ::core::slice::from_raw_parts(base as *const u8, len as usize) };
+    path.starts_with(prefix) && (path.len() == prefix.len() || path[prefix.len()] == b'/')
+}
+
+fn current_virtual_node(runtime: &Runtime, pid: Word, len: Word) -> Option<VirtualNode> {
+    let path =
+        unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
+    virtual_fs::lookup(path, graphics_enabled(runtime, pid))
 }
 
 fn guest_root_for_process(runtime: &Runtime, pid: Word) -> Result<&'static [u8], i32> {
@@ -6534,6 +7983,108 @@ pub fn wake_terminal_readers(runtime: &mut Runtime) {
     }
 }
 
+pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
+    if (identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) == 0
+        || !runtime.clock_timer_armed
+    {
+        return;
+    }
+    let previous_ticks = runtime.monotonic_ticks;
+    let elapsed_ticks =
+        match nanami_services::timer::timer_service_monotonic_ticks(runtime.timer_port) {
+            Ok((ticks, tick_hz)) if tick_hz != 0 => {
+                runtime.monotonic_ticks = ticks;
+                runtime.monotonic_tick_hz = tick_hz;
+                ticks.saturating_sub(previous_ticks).max(1)
+            }
+            _ => {
+                runtime.monotonic_ticks = runtime.monotonic_ticks.saturating_add(1);
+                1
+            }
+        };
+
+    let tick_hz = runtime.monotonic_tick_hz;
+    if tick_hz != 0
+        && previous_ticks.saturating_mul(ALTER_FB_PRESENT_HZ) / tick_hz
+            != runtime.monotonic_ticks.saturating_mul(ALTER_FB_PRESENT_HZ) / tick_hz
+    {
+        present_mapped_framebuffers(runtime);
+    }
+
+    let mut index = 0usize;
+    while index < runtime.managed.len() {
+        let process = runtime.managed[index];
+        if process.pid == 0 || !process.sleep_waiting {
+            index += 1;
+            continue;
+        }
+        if process.sleep_ticks_remaining > elapsed_ticks {
+            runtime.managed[index].sleep_ticks_remaining -= elapsed_ticks;
+            index += 1;
+            continue;
+        }
+
+        runtime.managed[index].sleep_waiting = false;
+        runtime.managed[index].sleep_ticks_remaining = 0;
+        runtime.managed[index].sleep_context = LinuxSyscallContext::EMPTY;
+        record_syscall_result(runtime, process.pid, SYS_NANOSLEEP, 0);
+        if crate::process::write_personality_syscall_return(
+            process.pcb,
+            process.sleep_context,
+            0,
+            process.personality,
+        )
+        .is_ok()
+        {
+            let _ = a9n_abi::arch::process_control_block::resume(process.pcb);
+        }
+        index += 1;
+    }
+}
+
+pub fn wake_device_readers(runtime: &mut Runtime) {
+    pump_input_events(runtime);
+    let mut index = 0usize;
+    while index < runtime.managed.len() {
+        let process = runtime.managed[index];
+        if process.pid == 0 || !process.device_read_waiting {
+            index += 1;
+            continue;
+        }
+        let result = sys_evdev_read(
+            runtime,
+            process.pid,
+            process.device_read_fd,
+            process.device_read_buffer,
+            process.device_read_len,
+        );
+        let return_value = match result {
+            Err(EAGAIN) => {
+                index += 1;
+                continue;
+            }
+            Ok(bytes) => bytes as isize,
+            Err(errno) => -(errno as isize),
+        };
+        runtime.managed[index].device_read_waiting = false;
+        runtime.managed[index].device_read_fd = 0;
+        runtime.managed[index].device_read_buffer = 0;
+        runtime.managed[index].device_read_len = 0;
+        runtime.managed[index].device_read_context = LinuxSyscallContext::EMPTY;
+        if crate::process::write_personality_syscall_return(
+            process.pcb,
+            process.device_read_context,
+            return_value,
+            process.personality,
+        )
+        .is_ok()
+        {
+            let _ = a9n_abi::arch::process_control_block::resume(process.pcb);
+        }
+        index += 1;
+    }
+}
+
 pub fn wake_network_waiters(runtime: &mut Runtime) {
     let mut index = 0usize;
     while index < runtime.managed.len() {
@@ -6678,13 +8229,23 @@ fn linux_file_kind_name(kind: LinuxFileKind) -> &'static str {
         LinuxFileKind::SocketTcpListener => "socket-tcp-listener",
         LinuxFileKind::SocketIcmp => "socket-icmp",
         LinuxFileKind::SocketNetlink => "socket-netlink",
+        LinuxFileKind::VirtualDirectory => "virtual-directory",
+        LinuxFileKind::VirtualFile => "virtual-file",
+        LinuxFileKind::EvdevKeyboard => "evdev-keyboard",
+        LinuxFileKind::EvdevMouse => "evdev-mouse",
+        LinuxFileKind::Framebuffer => "framebuffer",
     }
 }
 
 fn duplicate_linux_file(runtime: &mut Runtime, file: LinuxFile) -> Result<LinuxFile, i32> {
     match file.kind {
         LinuxFileKind::Empty => Err(EBADF),
-        LinuxFileKind::Terminal => Ok(file),
+        LinuxFileKind::Terminal
+        | LinuxFileKind::VirtualDirectory
+        | LinuxFileKind::VirtualFile
+        | LinuxFileKind::EvdevKeyboard
+        | LinuxFileKind::EvdevMouse
+        | LinuxFileKind::Framebuffer => Ok(file),
         LinuxFileKind::PipeRead => {
             let pipe = runtime.pipe_mut(file.posix_fd).ok_or(EBADF)?;
             pipe.readers = pipe.readers.saturating_add(1);
@@ -6746,7 +8307,13 @@ fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<(), i32>
             | LinuxFileKind::SocketTcpListener
             | LinuxFileKind::SocketIcmp
             | LinuxFileKind::SocketNetlink => close_socket_file(runtime, file),
-            LinuxFileKind::Terminal | LinuxFileKind::Empty => {}
+            LinuxFileKind::Terminal
+            | LinuxFileKind::VirtualDirectory
+            | LinuxFileKind::VirtualFile
+            | LinuxFileKind::EvdevKeyboard
+            | LinuxFileKind::EvdevMouse
+            | LinuxFileKind::Framebuffer
+            | LinuxFileKind::Empty => {}
         }
     }
     Ok(())
@@ -6829,6 +8396,40 @@ pub fn close_process_files(runtime: &mut Runtime, pid: Word) {
         let _ = close_linux_fd(runtime, pid, fd as Word);
         fd += 1;
     }
+    cleanup_graphics_for_process(runtime, pid);
+}
+
+fn cleanup_graphics_for_process(runtime: &mut Runtime, pid: Word) {
+    let Some(process) = runtime.managed_process(pid) else {
+        return;
+    };
+    let session_id = process.graphics_session;
+    if session_id == 0 {
+        return;
+    }
+    let index = session_id as usize - 1;
+    if index >= runtime.graphics.len() || !runtime.graphics[index].active {
+        return;
+    }
+    if runtime.graphics[index].root_pid != pid {
+        return;
+    }
+    if let Some(successor) = runtime.managed.iter().find(|candidate| {
+        candidate.pid != 0
+            && candidate.pid != pid
+            && candidate.graphics_session == session_id
+            && !candidate.exited
+    }) {
+        runtime.graphics[index].root_pid = successor.pid;
+        return;
+    }
+    let session = runtime.graphics[index];
+    let _ = honoka::honoka_destroy_window(session.honoka_port, session.window_id);
+    if session.input_queue != 0 {
+        let _ =
+            libnanami::request_mapping_release(session.input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+    }
+    runtime.graphics[index] = crate::state::GraphicsSession::EMPTY;
 }
 
 fn close_cloexec_files(runtime: &mut Runtime, pid: Word) {
@@ -6874,18 +8475,6 @@ fn inherit_linux_files(
         fd += 1;
     }
     Ok(())
-}
-
-fn is_terminal_path(base: Word, len: Word) -> bool {
-    path_equals(base, len, b"/dev/tty")
-        || path_equals(base, len, b"/dev/console")
-        || path_equals(base, len, b"/dev/tty0")
-}
-
-fn is_linux_device_path(base: Word, len: Word) -> bool {
-    is_terminal_path(base, len)
-        || path_equals(base, len, b"/dev/null")
-        || path_equals(base, len, b"/dev/zero")
 }
 
 fn path_has_root_prefix(base: Word, len: Word, root: &[u8]) -> bool {
@@ -6936,26 +8525,6 @@ fn path_equals(base: Word, len: Word, expected: &[u8]) -> bool {
         i += 1;
     }
     true
-}
-
-fn is_terminal_fd(fd: Word) -> bool {
-    fd == 0 || fd == 1 || fd == 2 || fd == LINUX_DEV_TTY_FD
-}
-
-fn is_terminal_read_fd(fd: Word) -> bool {
-    fd == 0 || fd == LINUX_DEV_TTY_FD
-}
-
-fn is_terminal_write_fd(fd: Word) -> bool {
-    fd == 1 || fd == 2 || fd == LINUX_DEV_TTY_FD
-}
-
-fn terminal_read_fdset_mask() -> Word {
-    1 | (1usize << LINUX_DEV_TTY_FD)
-}
-
-fn terminal_write_fdset_mask() -> Word {
-    0b110 | (1usize << LINUX_DEV_TTY_FD)
 }
 
 fn map_word(result: Result<Word, RequestError>) -> Result<Word, i32> {
@@ -7084,11 +8653,14 @@ const EACCES: i32 = 13;
 const EFAULT: i32 = 14;
 const ECHILD: i32 = 10;
 const EEXIST: i32 = 17;
+const ENODEV: i32 = 19;
+const EISDIR: i32 = 21;
 const EPIPE: i32 = 32;
 const EINVAL: i32 = 22;
 const EMFILE: i32 = 24;
 const ENOTTY: i32 = 25;
 const ESPIPE: i32 = 29;
+const EROFS: i32 = 30;
 const ENOSYS: i32 = 38;
 const ENAMETOOLONG: i32 = 36;
 const ENOTDIR: i32 = 20;
@@ -7134,7 +8706,6 @@ const LINUX_EXEC_SNAPSHOT_ALLOCATION_BYTES: usize =
     LINUX_EXEC_SNAPSHOT_BYTES + LINUX_PAGE_SIZE as usize;
 const LINUX_EXEC_STRING_MAX: usize = 4096;
 const LINUX_EXEC_PATH_MAX: usize = 256;
-const LINUX_DEV_TTY_FD: Word = 63;
 const LINUX_AT_FDCWD: Word = (-100isize) as Word;
 const LINUX_AT_REMOVEDIR: Word = 0x200;
 const LINUX_AT_EMPTY_PATH: Word = 0x1000;
@@ -7214,8 +8785,11 @@ const LINUX_CLONE_PARENT_SETTID: Word = 0x0010_0000;
 const LINUX_CLONE_SETTLS: Word = 0x0008_0000;
 const LINUX_CLONE_CHILD_SETTID: Word = 0x0100_0000;
 const LINUX_O_CREAT: Word = 0o100;
+const LINUX_O_ACCMODE: Word = 0o3;
+const LINUX_O_RDONLY: Word = 0;
 const LINUX_O_TRUNC: Word = 0o1000;
 const LINUX_O_APPEND: Word = 0o2000;
+const LINUX_O_NONBLOCK: Word = 0o4000;
 const LINUX_O_LARGEFILE: Word = 0o100000;
 const LINUX_O_DIRECTORY: Word = 0o200000;
 const LINUX_O_CLOEXEC: Word = 0o2000000;
@@ -7251,7 +8825,28 @@ const LINUX_TCSETS: Word = 0x5402;
 const LINUX_TCSETSW: Word = 0x5403;
 const LINUX_TCSETSF: Word = 0x5404;
 const LINUX_TIOCGWINSZ: Word = 0x5413;
+const LINUX_INPUT_EVENT_BYTES: Word = 24;
+const LINUX_EV_SYN: u16 = 0;
+const LINUX_EV_KEY: u16 = 1;
+const LINUX_EV_REL: u16 = 2;
+const LINUX_SYN_REPORT: u16 = 0;
+const LINUX_REL_X: u16 = 0;
+const LINUX_REL_Y: u16 = 1;
+const LINUX_REL_WHEEL: u16 = 8;
+const ALTER_FB_WIDTH: Word = 800;
+const ALTER_FB_HEIGHT: Word = 600;
+const ALTER_FB_STRIDE: Word = ALTER_FB_WIDTH * 4;
+const ALTER_FB_BYTES: Word = ALTER_FB_STRIDE * ALTER_FB_HEIGHT;
+const LINUX_FBIOGET_VSCREENINFO: Word = 0x4600;
+const LINUX_FBIOPUT_VSCREENINFO: Word = 0x4601;
+const LINUX_FBIOGET_FSCREENINFO: Word = 0x4602;
+const LINUX_FBIOPAN_DISPLAY: Word = 0x4606;
+const LINUX_EVIOCGVERSION: Word = 0x8004_4501;
+const LINUX_EVIOCGID: Word = 0x8008_4502;
+const LINUX_FB_FIX_SCREENINFO_BYTES: Word = 80;
+const LINUX_FB_VAR_SCREENINFO_BYTES: Word = 160;
 const LINUX_F_DUPFD: Word = 0;
+const LINUX_F_DUPFD_CLOEXEC: Word = 1030;
 const LINUX_F_GETFD: Word = 1;
 const LINUX_F_SETFD: Word = 2;
 const LINUX_F_GETFL: Word = 3;
@@ -7297,6 +8892,11 @@ const LINUX_MINSIGSTKSZ: Word = 2048;
 const LINUX_NSIG: Word = 64;
 const LINUX_SIGSET_BYTES: Word = 8;
 const LINUX_KERNEL_SIGACTION_BYTES: usize = 32;
+const LINUX_TIMESPEC_BYTES: Word = 16;
+const ALTER_SLEEP_TICK_HZ: Word = 100;
+const ALTER_SLEEP_TICK_MILLISECONDS: Word = 10;
+const ALTER_SLEEP_TICK_NANOSECONDS: Word = 10_000_000;
+const ALTER_FB_PRESENT_HZ: Word = 60;
 
 const ARCH_SET_FS: Word = 0x1002;
 const ARCH_GET_FS: Word = 0x1003;
@@ -7334,11 +8934,13 @@ pub const SYS_RT_SIGPROCMASK: Word = 14;
 pub const SYS_RT_SIGSUSPEND: Word = 130;
 pub const SYS_SIGALTSTACK: Word = 131;
 pub const SYS_IOCTL: Word = 16;
+pub const SYS_READV: Word = 19;
 pub const SYS_WRITEV: Word = 20;
 pub const SYS_PIPE: Word = 22;
 pub const SYS_MMAP: Word = 9;
 pub const SYS_MPROTECT: Word = 10;
 pub const SYS_MUNMAP: Word = 11;
+pub const SYS_MSYNC: Word = 26;
 pub const SYS_MREMAP: Word = 25;
 pub const SYS_MADVISE: Word = 28;
 pub const SYS_BRK: Word = 12;
@@ -7346,6 +8948,7 @@ pub const SYS_ACCESS: Word = 21;
 pub const SYS_SELECT: Word = 23;
 pub const SYS_DUP: Word = 32;
 pub const SYS_DUP2: Word = 33;
+pub const SYS_NANOSLEEP: Word = 35;
 pub const SYS_SETITIMER: Word = 38;
 pub const SYS_GETPID: Word = 39;
 pub const SYS_SOCKET: Word = 41;

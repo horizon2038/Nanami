@@ -47,6 +47,22 @@ pub fn handle_request(request: ServiceRequest, compositor: &mut Compositor) -> (
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
+        nanami_services::gfx::honoka::HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER_TO_PROCESS => {
+            match compositor.attach_logical_framebuffer_to_process(
+                request.identifier,
+                request.arg0,
+                request.arg1,
+            ) {
+                Ok((peer_vaddr, size_bytes)) => (libnanami::OS_RESPONSE_OK, peer_vaddr, size_bytes),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
+        nanami_services::gfx::honoka::HONOKA_REQUEST_DETACH_LOGICAL_FRAMEBUFFER => {
+            match compositor.detach_logical_framebuffer(request.identifier, request.arg0) {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
         nanami_services::gfx::honoka::HONOKA_REQUEST_GET_WINDOW_CONTENT_SIZE => {
             match compositor.window_content_size(request.identifier, request.arg0) {
                 Ok((width, height)) => (

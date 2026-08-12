@@ -14,6 +14,7 @@ const ALTER_REQUEST_KILL: Word = 0xb106;
 const ALTER_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 const ALTER_LAUNCH_FLAG_STRACE: Word = 1 << 0;
 const ALTER_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << 1;
+const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 const ALTER_SHM_BYTES: Word = 0x4000;
 const ALTER_LAUNCH_MAX_ARGS: usize = 8;
 const ALTER_LAUNCH_MAX_ENVS: usize = 8;
@@ -43,7 +44,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     let launch = match parse_cli() {
         Ok(launch) => launch,
         Err(()) => {
-            terminal.write_line(b"usage: alter [-t] [-d] [-os linux|freebsd] <binary> [args]");
+            terminal.write_line(
+                b"usage: alter [-t] [-d] [-g|--graphics] [-os linux|freebsd] <binary> [args]",
+            );
             return Ok(());
         }
     };
@@ -70,6 +73,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
     if launch.diagnostics {
         flags |= ALTER_LAUNCH_FLAG_DIAGNOSTICS;
+    }
+    if launch.graphics {
+        flags |= ALTER_LAUNCH_FLAG_GRAPHICS;
     }
     let (status, pid, _) = match libnanami::call_service_port(
         alter.port,
@@ -98,6 +104,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 struct Launch {
     trace: bool,
     diagnostics: bool,
+    graphics: bool,
     os: AlterOs,
     first_arg: usize,
     argc: usize,
@@ -134,6 +141,7 @@ fn parse_cli() -> Result<Launch, ()> {
     let mut index = 1usize;
     let mut trace = false;
     let mut diagnostics = false;
+    let mut graphics = false;
     let mut os = AlterOs::Linux;
     while index < argc {
         let arg = libnanami::process_arg(index).ok_or(())?;
@@ -142,6 +150,9 @@ fn parse_cli() -> Result<Launch, ()> {
             index += 1;
         } else if bytes_eq(arg, b"-d") || bytes_eq(arg, b"--diagnostics") {
             diagnostics = true;
+            index += 1;
+        } else if bytes_eq(arg, b"-g") || bytes_eq(arg, b"--graphics") {
+            graphics = true;
             index += 1;
         } else if bytes_eq(arg, b"-os") {
             let os_name = libnanami::process_arg(index + 1).ok_or(())?;
@@ -176,6 +187,7 @@ fn parse_cli() -> Result<Launch, ()> {
     Ok(Launch {
         trace,
         diagnostics,
+        graphics,
         os,
         first_arg: index,
         argc: argc - index,

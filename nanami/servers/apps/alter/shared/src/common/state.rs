@@ -11,6 +11,8 @@ pub const LINUX_CWD_MAX: usize = 128;
 pub const LINUX_TERMINAL_LINE_MAX: usize = 256;
 pub const LINUX_PIPE_MAX: usize = 16;
 pub const LINUX_PIPE_BYTES: usize = 1024;
+pub const ALTER_GRAPHICS_SESSION_MAX: usize = 4;
+pub const ALTER_EVDEV_QUEUE_CAPACITY: usize = 128;
 const FORK_IMAGE_CACHE_ENTRIES: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,6 +33,11 @@ pub enum LinuxFileKind {
     SocketTcpListener,
     SocketIcmp,
     SocketNetlink,
+    VirtualDirectory,
+    VirtualFile,
+    EvdevKeyboard,
+    EvdevMouse,
+    Framebuffer,
 }
 
 #[derive(Clone, Copy)]
@@ -41,6 +48,8 @@ pub struct LinuxFile {
     pub local_port: u16,
     pub peer_port: u16,
     pub peer_ip: u32,
+    pub offset: Word,
+    pub resource: Word,
 }
 
 impl LinuxFile {
@@ -51,6 +60,8 @@ impl LinuxFile {
         local_port: 0,
         peer_port: 0,
         peer_ip: 0,
+        offset: 0,
+        resource: 0,
     };
 
     pub const fn posix(posix_fd: Word, flags: Word) -> Self {
@@ -61,6 +72,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -72,6 +85,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -83,6 +98,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -94,6 +111,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -105,6 +124,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -116,6 +137,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -127,6 +150,8 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
         }
     }
 
@@ -138,6 +163,21 @@ impl LinuxFile {
             local_port: 0,
             peer_port: 0,
             peer_ip: 0,
+            offset: 0,
+            resource: 0,
+        }
+    }
+
+    pub const fn virtual_node(kind: LinuxFileKind, node: Word, flags: Word) -> Self {
+        Self {
+            kind,
+            posix_fd: 0,
+            flags,
+            local_port: 0,
+            peer_port: 0,
+            peer_ip: 0,
+            offset: 0,
+            resource: node,
         }
     }
 
@@ -205,6 +245,8 @@ pub struct ManagedProcess {
     pub terminal_id: Word,
     pub trace_enabled: bool,
     pub diagnostics_enabled: bool,
+    pub graphics_enabled: bool,
+    pub graphics_session: Word,
     pub exited: bool,
     pub exit_status: Word,
     pub signal_waiting: bool,
@@ -230,6 +272,14 @@ pub struct ManagedProcess {
     pub terminal_read_context: LinuxSyscallContext,
     pub network_waiting: bool,
     pub network_wait_context: LinuxSyscallContext,
+    pub device_read_waiting: bool,
+    pub device_read_fd: Word,
+    pub device_read_buffer: Word,
+    pub device_read_len: Word,
+    pub device_read_context: LinuxSyscallContext,
+    pub sleep_waiting: bool,
+    pub sleep_ticks_remaining: Word,
+    pub sleep_context: LinuxSyscallContext,
     pub mappings: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
 }
 
@@ -245,6 +295,8 @@ impl ManagedProcess {
         terminal_id: 0,
         trace_enabled: false,
         diagnostics_enabled: false,
+        graphics_enabled: false,
+        graphics_session: 0,
         exited: false,
         exit_status: 0,
         signal_waiting: false,
@@ -270,7 +322,70 @@ impl ManagedProcess {
         terminal_read_context: LinuxSyscallContext::EMPTY,
         network_waiting: false,
         network_wait_context: LinuxSyscallContext::EMPTY,
+        device_read_waiting: false,
+        device_read_fd: 0,
+        device_read_buffer: 0,
+        device_read_len: 0,
+        device_read_context: LinuxSyscallContext::EMPTY,
+        sleep_waiting: false,
+        sleep_ticks_remaining: 0,
+        sleep_context: LinuxSyscallContext::EMPTY,
         mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
+    };
+}
+
+#[derive(Clone, Copy)]
+pub struct GraphicsSession {
+    pub active: bool,
+    pub root_pid: Word,
+    pub honoka_port: Word,
+    pub present_notification: Word,
+    pub window_id: Word,
+    pub width: Word,
+    pub height: Word,
+    pub damage_queue: Word,
+    pub framebuffer: Word,
+    pub framebuffer_bytes: Word,
+    pub input_queue: Word,
+    pub keyboard_events: [Word; ALTER_EVDEV_QUEUE_CAPACITY],
+    pub keyboard_head: usize,
+    pub keyboard_tail: usize,
+    pub mouse_events: [Word; ALTER_EVDEV_QUEUE_CAPACITY],
+    pub mouse_head: usize,
+    pub mouse_tail: usize,
+    pub mouse_x: i32,
+    pub mouse_y: i32,
+    pub mouse_position_valid: bool,
+    pub guest_pid: Word,
+    pub guest_framebuffer: Word,
+    pub guest_framebuffer_bytes: Word,
+}
+
+impl GraphicsSession {
+    pub const EMPTY: Self = Self {
+        active: false,
+        root_pid: 0,
+        honoka_port: 0,
+        present_notification: 0,
+        window_id: 0,
+        width: 0,
+        height: 0,
+        damage_queue: 0,
+        framebuffer: 0,
+        framebuffer_bytes: 0,
+        input_queue: 0,
+        keyboard_events: [0; ALTER_EVDEV_QUEUE_CAPACITY],
+        keyboard_head: 0,
+        keyboard_tail: 0,
+        mouse_events: [0; ALTER_EVDEV_QUEUE_CAPACITY],
+        mouse_head: 0,
+        mouse_tail: 0,
+        mouse_x: 0,
+        mouse_y: 0,
+        mouse_position_valid: false,
+        guest_pid: 0,
+        guest_framebuffer: 0,
+        guest_framebuffer_bytes: 0,
     };
 }
 
@@ -285,10 +400,26 @@ pub struct Runtime {
     pub terminal_shm: Word,
     pub terminal_shm_size: Word,
     pub terminal_input_notification_id: Word,
+    pub timer_port: Word,
+    pub clock_timer_armed: bool,
+    pub monotonic_ticks: Word,
+    pub monotonic_tick_hz: Word,
     pub network_port: Word,
     pub network_shm: Word,
     pub network_shm_size: Word,
     pub next_ephemeral_port: u16,
+    pub input_port: Word,
+    pub input_queue: Word,
+    pub input_queue_size: Word,
+    pub honoka_port: Word,
+    pub honoka_pid: Word,
+    pub keyboard_events: [Word; ALTER_EVDEV_QUEUE_CAPACITY],
+    pub keyboard_head: usize,
+    pub keyboard_tail: usize,
+    pub mouse_events: [Word; ALTER_EVDEV_QUEUE_CAPACITY],
+    pub mouse_head: usize,
+    pub mouse_tail: usize,
+    pub graphics: [GraphicsSession; ALTER_GRAPHICS_SESSION_MAX],
     pub client_shm: Word,
     pub client_shm_size: Word,
     pub loaded_entry: Word,
@@ -326,10 +457,26 @@ impl Runtime {
             terminal_shm,
             terminal_shm_size,
             terminal_input_notification_id: 0,
+            timer_port: 0,
+            clock_timer_armed: false,
+            monotonic_ticks: 0,
+            monotonic_tick_hz: 0,
             network_port: 0,
             network_shm: 0,
             network_shm_size: 0,
             next_ephemeral_port: 49152,
+            input_port: 0,
+            input_queue: 0,
+            input_queue_size: 0,
+            honoka_port: 0,
+            honoka_pid: 0,
+            keyboard_events: [0; ALTER_EVDEV_QUEUE_CAPACITY],
+            keyboard_head: 0,
+            keyboard_tail: 0,
+            mouse_events: [0; ALTER_EVDEV_QUEUE_CAPACITY],
+            mouse_head: 0,
+            mouse_tail: 0,
+            graphics: [GraphicsSession::EMPTY; ALTER_GRAPHICS_SESSION_MAX],
             client_shm: 0,
             client_shm_size: 0,
             loaded_entry: 0,
@@ -353,6 +500,50 @@ impl Runtime {
         } else {
             self.posix_shm_size
         }
+    }
+
+    pub fn push_keyboard_event(&mut self, event: Word) {
+        let next = (self.keyboard_tail + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        if next == self.keyboard_head {
+            self.keyboard_head = (self.keyboard_head + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        }
+        self.keyboard_events[self.keyboard_tail] = event;
+        self.keyboard_tail = next;
+    }
+
+    pub fn pop_keyboard_event(&mut self) -> Option<Word> {
+        if self.keyboard_head == self.keyboard_tail {
+            return None;
+        }
+        let event = self.keyboard_events[self.keyboard_head];
+        self.keyboard_head = (self.keyboard_head + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        Some(event)
+    }
+
+    pub fn keyboard_event_ready(&self) -> bool {
+        self.keyboard_head != self.keyboard_tail
+    }
+
+    pub fn push_mouse_event(&mut self, event: Word) {
+        let next = (self.mouse_tail + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        if next == self.mouse_head {
+            self.mouse_head = (self.mouse_head + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        }
+        self.mouse_events[self.mouse_tail] = event;
+        self.mouse_tail = next;
+    }
+
+    pub fn pop_mouse_event(&mut self) -> Option<Word> {
+        if self.mouse_head == self.mouse_tail {
+            return None;
+        }
+        let event = self.mouse_events[self.mouse_head];
+        self.mouse_head = (self.mouse_head + 1) % ALTER_EVDEV_QUEUE_CAPACITY;
+        Some(event)
+    }
+
+    pub fn mouse_event_ready(&self) -> bool {
+        self.mouse_head != self.mouse_tail
     }
 
     pub fn read_posix(
@@ -457,6 +648,8 @@ impl Runtime {
                     terminal_id,
                     trace_enabled: false,
                     diagnostics_enabled: false,
+                    graphics_enabled: false,
+                    graphics_session: 0,
                     exited: false,
                     exit_status: 0,
                     signal_waiting: false,
@@ -482,6 +675,14 @@ impl Runtime {
                     terminal_read_context: LinuxSyscallContext::EMPTY,
                     network_waiting: false,
                     network_wait_context: LinuxSyscallContext::EMPTY,
+                    device_read_waiting: false,
+                    device_read_fd: 0,
+                    device_read_buffer: 0,
+                    device_read_len: 0,
+                    device_read_context: LinuxSyscallContext::EMPTY,
+                    sleep_waiting: false,
+                    sleep_ticks_remaining: 0,
+                    sleep_context: LinuxSyscallContext::EMPTY,
                     mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
                 };
                 return true;
@@ -570,6 +771,14 @@ impl Runtime {
         process.terminal_read_context = LinuxSyscallContext::EMPTY;
         process.network_waiting = false;
         process.network_wait_context = LinuxSyscallContext::EMPTY;
+        process.device_read_waiting = false;
+        process.device_read_fd = 0;
+        process.device_read_buffer = 0;
+        process.device_read_len = 0;
+        process.device_read_context = LinuxSyscallContext::EMPTY;
+        process.sleep_waiting = false;
+        process.sleep_ticks_remaining = 0;
+        process.sleep_context = LinuxSyscallContext::EMPTY;
         process.mappings = [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX];
         true
     }
@@ -890,6 +1099,25 @@ impl Runtime {
         true
     }
 
+    pub fn park_device_reader(
+        &mut self,
+        pid: Word,
+        fd: Word,
+        buffer: Word,
+        len: Word,
+        context: LinuxSyscallContext,
+    ) -> bool {
+        let Some(process) = self.managed_process_mut(pid) else {
+            return false;
+        };
+        process.device_read_waiting = true;
+        process.device_read_fd = fd;
+        process.device_read_buffer = buffer;
+        process.device_read_len = len;
+        process.device_read_context = context;
+        true
+    }
+
     pub fn take_signal_waiter_for_child(
         &mut self,
         child_pid: Word,
@@ -938,6 +1166,22 @@ impl Runtime {
             return false;
         };
         process.diagnostics_enabled = enabled;
+        true
+    }
+
+    pub fn set_graphics_enabled(&mut self, pid: Word, enabled: bool) -> bool {
+        let Some(process) = self.managed_process_mut(pid) else {
+            return false;
+        };
+        process.graphics_enabled = enabled;
+        true
+    }
+
+    pub fn set_graphics_session(&mut self, pid: Word, session: Word) -> bool {
+        let Some(process) = self.managed_process_mut(pid) else {
+            return false;
+        };
+        process.graphics_session = session;
         true
     }
 

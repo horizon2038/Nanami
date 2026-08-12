@@ -16,7 +16,7 @@ const PIT_PORT_COUNTER0: Word = 0x40;
 const PIT_PORT_COMMAND: Word = 0x43;
 const PIT_COMMAND_RATE_GEN_LOHI: Word = 0x34;
 const PIT_BASE_HZ: u64 = 1_193_182;
-const PIT_TICK_HZ: u64 = 10;
+const PIT_TICK_HZ: u64 = 100;
 
 #[derive(Clone, Copy)]
 struct ClientNotificationEntry {
@@ -210,6 +210,16 @@ fn handle_request(
                 request.arg0 as u64,
             ) {
                 Ok(()) => (libnanami::OS_RESPONSE_OK, request.arg0, 0),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
+        nanami_services::timer::TIMER_SERVICE_REQUEST_MONOTONIC_TICKS => {
+            match ensure_pit_started(state, pit_desc, irq_desc) {
+                Ok(()) => (
+                    libnanami::OS_RESPONSE_OK,
+                    state.ticks as Word,
+                    PIT_TICK_HZ as Word,
+                ),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }

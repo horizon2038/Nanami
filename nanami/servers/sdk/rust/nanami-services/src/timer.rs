@@ -5,6 +5,7 @@ use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 pub const TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS: Word = 0x4001;
 pub const TIMER_SERVICE_REQUEST_SLEEP_ASYNC_MILLISECONDS: Word = 0x4002;
 pub const TIMER_SERVICE_REQUEST_INTERVAL_MILLISECONDS: Word = 0x4003;
+pub const TIMER_SERVICE_REQUEST_MONOTONIC_TICKS: Word = 0x4004;
 pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: Word =
     1usize << (core::mem::size_of::<Word>() * 8 - 1);
 
@@ -119,6 +120,24 @@ pub fn timer_service_interval_on_notification_milliseconds(
         return Err(RequestError::Status(status));
     }
     Ok(())
+}
+
+pub fn timer_service_monotonic_ticks(
+    timer_service_port: CapabilityDescriptor,
+) -> Result<(Word, Word), RequestError> {
+    let (status, ticks, tick_hz) = call_port(
+        timer_service_port,
+        TIMER_SERVICE_REQUEST_MONOTONIC_TICKS,
+        0,
+        0,
+        0,
+        0,
+        1,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((ticks, tick_hz))
 }
 
 pub fn timer_service_sleep_async_seconds(

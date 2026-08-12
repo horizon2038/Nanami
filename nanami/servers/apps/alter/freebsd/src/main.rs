@@ -62,6 +62,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         .map_err(|e| log_error("[alter] bind notification failed: ", e))?;
 
     let posix_port = connect_posix_service();
+    let timer_port = connect_timer_service();
     let (posix_shm, posix_shm_size) =
         nanami_services::posix::posix_attach_shared_memory(posix_port, ALTER_DEFAULT_SHM_BYTES)
             .map_err(|e| log_error("[alter] posix shm attach failed: ", e))?;
@@ -84,6 +85,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         0,
         0,
     );
+    runtime.timer_port = timer_port;
     let mut pending = ReplyAction::DropReply;
 
     loop {
@@ -108,8 +110,13 @@ fn nanami_main() -> libnanami::NanamiResult {
 
         pending = match event {
             ServiceEvent::Request(request) => handle_request(&mut runtime, request),
-            ServiceEvent::Notification { .. } => {
-                linux::wake_terminal_readers(&mut runtime);
+            ServiceEvent::Notification { identifier, .. } => {
+                if identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
+                    linux::handle_timer_notification(&mut runtime, identifier);
+                }
+                if identifier & nanami_services::terminal::TERMINAL_NOTIFICATION_INPUT != 0 {
+                    linux::wake_terminal_readers(&mut runtime);
+                }
                 ReplyAction::DropReply
             }
             ServiceEvent::Fault {
@@ -261,6 +268,22 @@ fn connect_posix_service() -> Word {
             Err(e) => {
                 if tries == 0 {
                     log_request_error("[alter] waiting posix-service: ", e);
+                }
+                tries += 1;
+                libnanami::yield_now();
+            }
+        }
+    }
+}
+
+fn connect_timer_service() -> Word {
+    let mut tries = 0usize;
+    loop {
+        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
+            Err(e) => {
+                if tries == 0 {
+                    log_request_error("[alter] waiting timer-service: ", e);
                 }
                 tries += 1;
                 libnanami::yield_now();

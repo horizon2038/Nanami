@@ -12,3 +12,5 @@ pub mod loader;
 pub mod process;
 #[path = "common/state.rs"]
 pub mod state;
+#[path = "common/virtual_fs.rs"]
+pub mod virtual_fs;

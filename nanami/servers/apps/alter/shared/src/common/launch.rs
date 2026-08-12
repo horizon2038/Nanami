@@ -53,6 +53,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
     };
     let personality = personality_from_flags(request.arg3);
     let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
+    let graphics = (request.arg3 & ALTER_LAUNCH_FLAG_GRAPHICS) != 0;
 
     if is_path_launch(runtime, &info) {
         return spawn_rootfs_linux_image(
@@ -107,6 +108,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
             let _ = runtime.set_diagnostics_enabled(pid, diagnostics);
+            let _ = runtime.set_graphics_enabled(pid, graphics);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
                 libnanami::println!(
@@ -153,7 +155,7 @@ fn spawn_rootfs_linux_image(
     ) {
         Ok(loaded) => loaded,
         Err(error) => {
-            return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0)
+            return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0);
         }
     };
 
@@ -166,6 +168,7 @@ fn spawn_rootfs_linux_image(
         Ok(pid) => {
             let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
             let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
+            let graphics = (request.arg3 & ALTER_LAUNCH_FLAG_GRAPHICS) != 0;
             if let Err(status) =
                 prepare_initial_stack(runtime, pid, pcb, info, personality, diagnostics)
             {
@@ -205,6 +208,7 @@ fn spawn_rootfs_linux_image(
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
             let _ = runtime.set_diagnostics_enabled(pid, diagnostics);
+            let _ = runtime.set_graphics_enabled(pid, graphics);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
                 libnanami::println!(

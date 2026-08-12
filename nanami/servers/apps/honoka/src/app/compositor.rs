@@ -117,7 +117,6 @@ pub struct Compositor {
     dirty_rects: [Rect; MAX_DIRTY_RECTS],
     dirty_count: usize,
     focused_window_id: Word,
-    next_input_notification_slot: Word,
     clock_text: [u8; CLOCK_TEXT_BYTES],
     clock_len: usize,
     text: TextRenderer,
@@ -153,7 +152,6 @@ impl Compositor {
             dirty_rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
             dirty_count: 0,
             focused_window_id: 0,
-            next_input_notification_slot: SLOT_WINDOW_INPUT_NOTIFICATION_BASE,
             clock_text: *b"--:--:--",
             clock_len: CLOCK_TEXT_BYTES,
             text,
@@ -282,8 +280,9 @@ impl Compositor {
         );
         let id = self.next_window_id;
         self.next_window_id = self.next_window_id.wrapping_add(1);
-        let input_notify_slot = self.next_input_notification_slot;
-        self.next_input_notification_slot = self.next_input_notification_slot.wrapping_add(1);
+        let input_notify_slot = self
+            .available_input_notification_slot()
+            .ok_or(libnanami::RequestError::Unsupported)?;
         self.windows[index] = Window {
             used: true,
             owner_pid,
@@ -377,15 +376,10 @@ impl Compositor {
         window_id: Word,
     ) -> Result<(Word, Word), libnanami::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
-        let content = self.windows[index].content_rect();
-        let pixel_bytes = content
-            .width
-            .max(0)
-            .saturating_mul(content.height.max(0))
-            .saturating_mul(4) as Word;
-        if pixel_bytes == 0 {
+        if self.windows[index].local_fb != 0 {
             return Err(libnanami::RequestError::InvalidArgument);
         }
+        let pixel_bytes = self.window_pixel_bytes(index)?;
         let size =
             nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES.saturating_add(pixel_bytes);
         let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(owner_pid, size)?;
@@ -397,6 +391,57 @@ impl Compositor {
         self.clear_logical_framebuffer(self.windows[index].local_fb, pixel_bytes);
         self.mark_dirty(self.windows[index].rect());
         Ok((peer_vaddr, size))
+    }
+
+    pub fn attach_logical_framebuffer_to_process(
+        &mut self,
+        owner_pid: Word,
+        window_id: Word,
+        target_pid: Word,
+    ) -> Result<(Word, Word), libnanami::RequestError> {
+        let index = self.find_owned_window(owner_pid, window_id)?;
+        if target_pid == 0 || self.windows[index].local_fb != 0 {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
+        let pixel_bytes = self.window_pixel_bytes(index)?;
+        let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(target_pid, pixel_bytes)?;
+        self.windows[index].damage_queue = 0;
+        self.windows[index].local_fb = local_vaddr;
+        self.windows[index].fb_size = pixel_bytes;
+        self.clear_logical_framebuffer(self.windows[index].local_fb, pixel_bytes);
+        self.mark_dirty(self.windows[index].rect());
+        Ok((peer_vaddr, pixel_bytes))
+    }
+
+    pub fn detach_logical_framebuffer(
+        &mut self,
+        owner_pid: Word,
+        window_id: Word,
+    ) -> Result<(), libnanami::RequestError> {
+        let index = self.find_owned_window(owner_pid, window_id)?;
+        let window = self.windows[index];
+        if window.damage_queue != 0 || window.local_fb == 0 || window.fb_size == 0 {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
+        libnanami::request_mapping_release(window.local_fb, window.fb_size)?;
+        self.windows[index].local_fb = 0;
+        self.windows[index].fb_size = 0;
+        self.mark_dirty(window.rect());
+        Ok(())
+    }
+
+    fn window_pixel_bytes(&self, index: usize) -> Result<Word, libnanami::RequestError> {
+        let content = self.windows[index].content_rect();
+        let bytes = content
+            .width
+            .max(0)
+            .saturating_mul(content.height.max(0))
+            .saturating_mul(4) as Word;
+        if bytes == 0 {
+            Err(libnanami::RequestError::InvalidArgument)
+        } else {
+            Ok(bytes)
+        }
     }
 
     pub fn window_content_size(
@@ -447,10 +492,14 @@ impl Compositor {
         window_id: Word,
     ) -> Result<(Word, Word), libnanami::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
+        if self.windows[index].input_queue != 0 {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
         let size = nanami_services::input::INPUT_EVENT_QUEUE_BYTES;
         let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(owner_pid, size)?;
         nanami_services::input::InputEventQueue::new(local_vaddr).init();
         self.windows[index].input_queue = local_vaddr;
+        self.deliver_client_mouse_position(index);
         Ok((peer_vaddr, size))
     }
 
@@ -460,6 +509,9 @@ impl Compositor {
         window_id: Word,
     ) -> Result<(), libnanami::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
+        if self.windows[index].input_notify != 0 {
+            return Err(libnanami::RequestError::InvalidArgument);
+        }
         let slot = self.windows[index].input_notify_slot;
         if slot == 0 {
             return Err(libnanami::RequestError::Unsupported);
@@ -845,6 +897,22 @@ impl Compositor {
         None
     }
 
+    fn available_input_notification_slot(&self) -> Option<Word> {
+        let mut offset = 0usize;
+        while offset < MAX_WINDOWS {
+            let slot = SLOT_WINDOW_INPUT_NOTIFICATION_BASE + offset as Word;
+            if !self
+                .windows
+                .iter()
+                .any(|window| window.used && window.input_notify_slot == slot)
+            {
+                return Some(slot);
+            }
+            offset += 1;
+        }
+        None
+    }
+
     fn find_owned_window(
         &self,
         owner_pid: Word,
@@ -1068,6 +1136,8 @@ impl Compositor {
             let size = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES
                 .saturating_add(window.fb_size);
             let _ = libnanami::request_mapping_release(window.damage_queue, size);
+        } else if window.local_fb != 0 && window.fb_size != 0 {
+            let _ = libnanami::request_mapping_release(window.local_fb, window.fb_size);
         }
         if window.input_queue != 0 {
             let _ = libnanami::request_mapping_release(
@@ -1097,10 +1167,14 @@ impl Compositor {
 
     fn drain_window_damage(&mut self, index: usize) {
         let window = self.windows[index];
-        if !window.visible || window.local_fb == 0 || window.damage_queue == 0 {
+        if !window.visible || window.local_fb == 0 {
             return;
         }
         let content = window.content_rect();
+        if window.damage_queue == 0 {
+            self.mark_dirty_coalesced(content);
+            return;
+        }
         let mut merged = Rect::EMPTY;
         if read_word(window.damage_queue, 4) != 0 {
             let entry = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS;

@@ -5,6 +5,11 @@ APP_DIRS := $(sort $(wildcard apps/*) $(wildcard apps/*/*))
 BUILD_DIRS := $(CORE_SERVICE_DIRS) $(APP_DIRS)
 RUST_APP_DIRS := $(foreach d,$(BUILD_DIRS),$(if $(wildcard $(d)/Cargo.toml),$(d),))
 CPP_APP_DIRS := $(foreach d,$(BUILD_DIRS),$(if $(wildcard $(d)/Makefile),$(d),))
+CARGO_TARGET_DIR ?= $(CURDIR)/target
+NANAMI_USER_LINKER_SCRIPT := $(abspath sdk/arch/x86_64/linker/nanami_user.ld)
+RUSTFLAGS ?= -C link-arg=-T$(NANAMI_USER_LINKER_SCRIPT)
+export CARGO_TARGET_DIR
+export RUSTFLAGS
 
 all: initramfs
 
@@ -39,9 +44,9 @@ clean:
 	for d in $(CPP_APP_DIRS); do \
 		$(MAKE) -C $$d clean || true; \
 	done; \
-	for d in $(RUST_APP_DIRS); do \
-		cd $$d && cargo clean; \
-		cd - >/dev/null; \
-	done
+	@if [ -n "$(strip $(RUST_APP_DIRS))" ]; then \
+		cargo clean --manifest-path "$(firstword $(RUST_APP_DIRS))/Cargo.toml" \
+			--target-dir "$(CARGO_TARGET_DIR)"; \
+	fi
 	rm -rf build
 	rm -f initramfs.cpio

@@ -4,6 +4,10 @@ pub const SLOT_SERVICE_PORT: Word = 20;
 pub const SLOT_POSIX_SERVICE: Word = 22;
 pub const SLOT_TERMINAL_SERVICE: Word = 23;
 pub const SLOT_NETWORK_SERVICE: Word = 24;
+pub const SLOT_INPUT_SERVICE: Word = 25;
+pub const SLOT_HONOKA_SERVICE: Word = 26;
+pub const SLOT_HONOKA_PRESENT_NOTIFICATION_BASE: Word = 27;
+pub const SLOT_TIMER_SERVICE: Word = 31;
 
 pub const ALTER_REQUEST_CONTROL: Word = 0xb101;
 pub const ALTER_REQUEST_LOAD_ELF: Word = 0xb102;
@@ -16,6 +20,7 @@ pub const ALTER_REQUEST_KILL_TERMINAL: Word = 0xb107;
 pub const ALTER_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const ALTER_LAUNCH_FLAG_STRACE: Word = 1 << 0;
 pub const ALTER_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << 1;
+pub const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 pub const ALTER_LAUNCH_FLAG_OS_FREEBSD: Word = 1 << 8;
 
 pub const ALTER_DEFAULT_SHM_BYTES: Word = 0x10000;

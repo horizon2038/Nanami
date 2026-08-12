@@ -5,6 +5,8 @@ use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 pub const HONOKA_REQUEST_CREATE_WINDOW: Word = 0x7001;
 pub const HONOKA_REQUEST_DESTROY_WINDOW: Word = 0x7000;
 pub const HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER: Word = 0x7002;
+pub const HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER_TO_PROCESS: Word = 0x700b;
+pub const HONOKA_REQUEST_DETACH_LOGICAL_FRAMEBUFFER: Word = 0x700c;
 pub const HONOKA_REQUEST_MOVE_WINDOW: Word = 0x7003;
 pub const HONOKA_REQUEST_SET_WINDOW_VISIBLE: Word = 0x7004;
 pub const HONOKA_REQUEST_ATTACH_INPUT_QUEUE: Word = 0x7005;
@@ -118,6 +120,48 @@ pub fn honoka_attach_logical_framebuffer(
         return Err(RequestError::Status(status));
     }
     Ok((client_vaddr, size_bytes))
+}
+
+pub fn honoka_attach_logical_framebuffer_to_process(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    target_pid: Word,
+) -> Result<(Word, Word), RequestError> {
+    if target_pid == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, target_vaddr, size_bytes) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER_TO_PROCESS,
+        window_id,
+        target_pid,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((target_vaddr, size_bytes))
+}
+
+pub fn honoka_detach_logical_framebuffer(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_DETACH_LOGICAL_FRAMEBUFFER,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }
 
 pub fn honoka_get_window_content_size(

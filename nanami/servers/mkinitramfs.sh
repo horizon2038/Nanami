@@ -7,6 +7,7 @@ OUT="$ROOT_DIR/initramfs.cpio"
 APPS="${APPS:-all}"
 EXTRA_LINUX_BINS="${EXTRA_LINUX_BINS:-}"
 EXTRA_FREEBSD_BINS="${EXTRA_FREEBSD_BINS:-}"
+RUST_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/bin"
@@ -83,11 +84,11 @@ for app_dir in "$ROOT_DIR"/core-services/* "$ROOT_DIR"/core-services/*/*; do
         done
     fi
 
-    # Rust app outputs: core-services/<name>/target/.../release/<crate-name>
+    # Rust app outputs share one target directory so build-std artifacts are reused.
     if [ -f "$app_dir/Cargo.toml" ] && is_selected "$app_name" rust; then
         crate_name=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' "$app_dir/Cargo.toml" | head -n 1)
         if [ -n "$crate_name" ]; then
-            bin="$app_dir/target/x86_64-unknown-a9n/release/$crate_name"
+            bin="$RUST_TARGET_DIR/x86_64-unknown-a9n/release/$crate_name"
             if [ -f "$bin" ]; then
                 dst="$STAGE_DIR/bin/$app_name"
                 cp "$bin" "$dst"

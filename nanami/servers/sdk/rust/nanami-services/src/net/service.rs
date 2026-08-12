@@ -4,8 +4,10 @@ use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
 use super::constants::{
     NET_SERVICE_REQUEST_CONTROL, NET_SERVICE_REQUEST_DNS_QUERY, NET_SERVICE_REQUEST_RECV,
-    NET_SERVICE_REQUEST_SEND, NET_SERVICE_REQUEST_STATS, NET_SERVICE_REQUEST_TCP_RECV,
-    NET_SERVICE_REQUEST_TCP_SEND, NET_SERVICE_REQUEST_UDP_RECV, NET_SERVICE_REQUEST_UDP_SEND,
+    NET_SERVICE_REQUEST_ICMP_RECV, NET_SERVICE_REQUEST_ICMP_SEND, NET_SERVICE_REQUEST_SEND,
+    NET_SERVICE_REQUEST_STATS, NET_SERVICE_REQUEST_TCP_ACCEPT,
+    NET_SERVICE_REQUEST_TCP_CONNECT, NET_SERVICE_REQUEST_TCP_RECV, NET_SERVICE_REQUEST_TCP_SEND,
+    NET_SERVICE_REQUEST_UDP_RECV, NET_SERVICE_REQUEST_UDP_SEND,
 };
 
 pub fn net_service_send(
@@ -77,6 +79,18 @@ pub fn net_service_control_ex(
         4,
     )?;
     Ok((status, detail0, detail1))
+}
+
+pub fn net_service_attach_rx_notification(
+    service_port: CapabilityDescriptor,
+    source_notification_slot: Word,
+) -> Result<(), RequestError> {
+    net_service_control(
+        service_port,
+        super::constants::NET_SERVICE_CONTROL_ATTACH_RX_NOTIFICATION,
+        source_notification_slot,
+        0,
+    )
 }
 
 pub fn net_service_stats(service_port: CapabilityDescriptor) -> Result<(Word, Word), RequestError> {
@@ -168,13 +182,23 @@ pub fn net_service_udp_recv(
     payload_offset: Word,
     max_len: Word,
 ) -> Result<Word, RequestError> {
+    net_service_udp_recv_on_port(service_port, 0, meta_offset, payload_offset, max_len)
+}
+
+pub fn net_service_udp_recv_on_port(
+    service_port: CapabilityDescriptor,
+    local_port: u16,
+    meta_offset: Word,
+    payload_offset: Word,
+    max_len: Word,
+) -> Result<Word, RequestError> {
     let (status, received, _) = call_port(
         service_port,
         NET_SERVICE_REQUEST_UDP_RECV,
         meta_offset,
         payload_offset,
         max_len,
-        0,
+        local_port as Word,
         5,
     )?;
     if status != OS_RESPONSE_OK {
@@ -231,19 +255,71 @@ pub fn net_service_tcp_recv_ex(
     payload_offset: Word,
     max_len: Word,
 ) -> Result<(Word, Word), RequestError> {
+    net_service_tcp_recv_on_connection(service_port, 0, meta_offset, payload_offset, max_len)
+}
+
+pub fn net_service_tcp_recv_on_connection(
+    service_port: CapabilityDescriptor,
+    connection_id: Word,
+    meta_offset: Word,
+    payload_offset: Word,
+    max_len: Word,
+) -> Result<(Word, Word), RequestError> {
     let (status, received, connection_id) = call_port(
         service_port,
         NET_SERVICE_REQUEST_TCP_RECV,
         meta_offset,
         payload_offset,
         max_len,
-        0,
-        4,
+        connection_id,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
     Ok((received, connection_id))
+}
+
+pub fn net_service_tcp_accept(
+    service_port: CapabilityDescriptor,
+    local_port: u16,
+    meta_offset: Word,
+) -> Result<Word, RequestError> {
+    let (status, connection_id, _) = call_port(
+        service_port,
+        NET_SERVICE_REQUEST_TCP_ACCEPT,
+        meta_offset,
+        local_port as Word,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(connection_id)
+}
+
+pub fn net_service_tcp_connect(
+    service_port: CapabilityDescriptor,
+    local_port: u16,
+    peer_ip_be: u32,
+    peer_port: u16,
+) -> Result<Word, RequestError> {
+    let ports = ((local_port as Word) << 16) | peer_port as Word;
+    let (status, connection_id, _) = call_port(
+        service_port,
+        NET_SERVICE_REQUEST_TCP_CONNECT,
+        peer_ip_be as Word,
+        ports,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(connection_id)
 }
 
 pub fn net_service_dns_query(
@@ -266,4 +342,48 @@ pub fn net_service_dns_query(
         return Err(RequestError::Status(status));
     }
     Ok(ip_be)
+}
+
+pub fn net_service_icmp_send(
+    service_port: CapabilityDescriptor,
+    payload_offset: Word,
+    payload_len: Word,
+    identifier: u16,
+    dst_ip_be: u32,
+) -> Result<Word, RequestError> {
+    let (status, sent, _) = call_port(
+        service_port,
+        NET_SERVICE_REQUEST_ICMP_SEND,
+        payload_offset,
+        payload_len,
+        identifier as Word,
+        dst_ip_be as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(sent)
+}
+
+pub fn net_service_icmp_recv(
+    service_port: CapabilityDescriptor,
+    meta_offset: Word,
+    payload_offset: Word,
+    max_len: Word,
+    identifier: u16,
+) -> Result<Word, RequestError> {
+    let (status, received, _) = call_port(
+        service_port,
+        NET_SERVICE_REQUEST_ICMP_RECV,
+        meta_offset,
+        payload_offset,
+        max_len,
+        identifier as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(received)
 }

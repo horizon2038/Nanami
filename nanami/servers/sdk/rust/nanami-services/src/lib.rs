@@ -1,12 +1,14 @@
 #![no_std]
 
 pub mod block;
+pub mod exec;
 pub mod gfx;
 pub mod input;
 pub mod net;
 pub mod posix;
 pub mod registry;
 pub mod rtc;
+pub mod terminal;
 pub mod timer;
 pub mod vfs;
 

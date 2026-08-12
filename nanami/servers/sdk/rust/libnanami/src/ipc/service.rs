@@ -4,17 +4,43 @@ use a9n_abi::CapabilityDescriptor;
 use crate::{map_capability_error, RequestError, Word};
 
 use super::tls::init_ipc_tls;
-use super::types::{ServiceEvent, ServiceRequest};
+use super::types::{ServiceEvent, ServiceRequest, HARDWARE_CONTEXT_WORDS};
+
+const INVALID_KERNEL_CALL_FAULT: Word = 5;
+const INVALID_KERNEL_CALL_CONTEXT_START: usize = 7;
 
 fn decode_service_event(info: MessageInfo, identifier: Word) -> Result<ServiceEvent, RequestError> {
     let ipc = a9n_abi::arch::ipc_buffer::get_ipc_buffer();
     if info.is_fault() {
+        let reason = ipc.get_message(4);
+        let mut hardware_context = [0; HARDWARE_CONTEXT_WORDS];
+        let hardware_context_count = if reason == INVALID_KERNEL_CALL_FAULT {
+            usize::from(info.message_length())
+                .saturating_sub(INVALID_KERNEL_CALL_CONTEXT_START)
+                .min(HARDWARE_CONTEXT_WORDS)
+        } else {
+            0
+        };
+        for (index, value) in hardware_context
+            .iter_mut()
+            .take(hardware_context_count)
+            .enumerate()
+        {
+            *value = ipc.get_message(INVALID_KERNEL_CALL_CONTEXT_START + index);
+        }
+
         return Ok(ServiceEvent::Fault {
             identifier,
-            reason: ipc.get_message(4),
+            reason,
             program_counter: ipc.get_message(5),
             fault_address: ipc.get_message(6),
-            architecture_fault_code: ipc.get_message(7),
+            architecture_fault_code: if reason == INVALID_KERNEL_CALL_FAULT {
+                0
+            } else {
+                ipc.get_message(7)
+            },
+            hardware_context,
+            hardware_context_count,
         });
     }
     if info.is_notification() {
@@ -104,6 +130,28 @@ pub fn service_reply_receive_event(
     ipc.configure_message(6, detail1);
 
     let mut info = MessageInfo::normal(true, 3, 0);
+    let mut identifier = 0;
+    a9n_abi::arch::ipc_port::reply_receive(port_descriptor, &mut info, &mut identifier)
+        .map_err(map_capability_error)?;
+    decode_service_event(info, identifier)
+}
+
+pub fn service_fault_continue_receive_event(
+    port_descriptor: CapabilityDescriptor,
+    hardware_context: &[Word],
+) -> Result<ServiceEvent, RequestError> {
+    init_ipc_tls()?;
+
+    if hardware_context.len() > HARDWARE_CONTEXT_WORDS {
+        return Err(RequestError::InvalidArgument);
+    }
+
+    let ipc = a9n_abi::arch::ipc_buffer::get_ipc_buffer();
+    for (index, value) in hardware_context.iter().copied().enumerate() {
+        ipc.configure_message(4 + index, value);
+    }
+
+    let mut info = MessageInfo::normal(true, hardware_context.len() as u8, 0);
     let mut identifier = 0;
     a9n_abi::arch::ipc_port::reply_receive(port_descriptor, &mut info, &mut identifier)
         .map_err(map_capability_error)?;

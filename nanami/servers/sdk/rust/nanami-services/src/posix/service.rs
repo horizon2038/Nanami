@@ -24,6 +24,25 @@ pub fn posix_attach_shared_memory(
     Ok((local_vaddr, mapped_size))
 }
 
+pub fn posix_attach_direct_io(
+    service_port: CapabilityDescriptor,
+    size_bytes: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, local_vaddr, mapped_size) = call_port(
+        service_port,
+        POSIX_REQUEST_CONTROL,
+        POSIX_CONTROL_ATTACH_DIRECT_IO,
+        size_bytes,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((local_vaddr, mapped_size))
+}
+
 pub fn posix_getpid(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
     let (status, pid, _) = call_port(service_port, POSIX_REQUEST_GETPID, 0, 0, 0, 0, 1)?;
     if status != OS_RESPONSE_OK {
@@ -129,7 +148,15 @@ pub fn posix_exec(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_EXEC, path_offset, path_len, 0, 0, 3)?;
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_EXEC,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -141,7 +168,8 @@ pub fn posix_waitpid(
     pid: Word,
     options: Word,
 ) -> Result<(Word, Word), RequestError> {
-    let (status, waited_pid, exit_status) = call_port(service_port, POSIX_REQUEST_WAITPID, pid, options, 0, 0, 3)?;
+    let (status, waited_pid, exit_status) =
+        call_port(service_port, POSIX_REQUEST_WAITPID, pid, options, 0, 0, 3)?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -165,7 +193,15 @@ pub fn posix_spawn(
     path_offset: Word,
     path_len: Word,
 ) -> Result<Word, RequestError> {
-    let (status, child_pid, _) = call_port(service_port, POSIX_REQUEST_SPAWN, path_offset, path_len, 0, 0, 3)?;
+    let (status, child_pid, _) = call_port(
+        service_port,
+        POSIX_REQUEST_SPAWN,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -225,7 +261,15 @@ pub fn posix_getcwd(
     out_offset: Word,
     max_len: Word,
 ) -> Result<Word, RequestError> {
-    let (status, len, _) = call_port(service_port, POSIX_REQUEST_GETCWD, out_offset, max_len, 0, 0, 3)?;
+    let (status, len, _) = call_port(
+        service_port,
+        POSIX_REQUEST_GETCWD,
+        out_offset,
+        max_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -237,7 +281,15 @@ pub fn posix_chdir(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_CHDIR, path_offset, path_len, 0, 0, 3)?;
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_CHDIR,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -250,7 +302,15 @@ pub fn posix_open(
     path_len: Word,
     flags: Word,
 ) -> Result<Word, RequestError> {
-    let (status, fd, _) = call_port(service_port, POSIX_REQUEST_OPEN, path_offset, path_len, flags, 0, 4)?;
+    let (status, fd, _) = call_port(
+        service_port,
+        POSIX_REQUEST_OPEN,
+        path_offset,
+        path_len,
+        flags,
+        0,
+        4,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -289,7 +349,15 @@ pub fn posix_fcntl_getfd(
     service_port: CapabilityDescriptor,
     fd: Word,
 ) -> Result<Word, RequestError> {
-    let (status, flags, _) = call_port(service_port, POSIX_REQUEST_FCNTL, fd, POSIX_F_GETFD, 0, 0, 3)?;
+    let (status, flags, _) = call_port(
+        service_port,
+        POSIX_REQUEST_FCNTL,
+        fd,
+        POSIX_F_GETFD,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -301,7 +369,15 @@ pub fn posix_fcntl_setfd(
     fd: Word,
     flags: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_FCNTL, fd, POSIX_F_SETFD, flags, 0, 4)?;
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_FCNTL,
+        fd,
+        POSIX_F_SETFD,
+        flags,
+        0,
+        4,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -357,8 +433,15 @@ pub fn posix_unsetenv(
     name_offset: Word,
     name_len: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) =
-        call_port(service_port, POSIX_REQUEST_UNSETENV, name_offset, name_len, 0, 0, 3)?;
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_UNSETENV,
+        name_offset,
+        name_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -400,7 +483,29 @@ pub fn posix_read(
     out_offset: Word,
     len: Word,
 ) -> Result<Word, RequestError> {
-    let (status, bytes, _) = call_port(service_port, POSIX_REQUEST_READ, fd, out_offset, len, 0, 4)?;
+    let (status, bytes, _) =
+        call_port(service_port, POSIX_REQUEST_READ, fd, out_offset, len, 0, 4)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(bytes)
+}
+
+pub fn posix_read_direct(
+    service_port: CapabilityDescriptor,
+    fd: Word,
+    out_offset: Word,
+    len: Word,
+) -> Result<Word, RequestError> {
+    let (status, bytes, _) = call_port(
+        service_port,
+        POSIX_REQUEST_READ_DIRECT,
+        fd,
+        out_offset,
+        len,
+        0,
+        4,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -413,7 +518,15 @@ pub fn posix_write(
     input_offset: Word,
     len: Word,
 ) -> Result<Word, RequestError> {
-    let (status, bytes, _) = call_port(service_port, POSIX_REQUEST_WRITE, fd, input_offset, len, 0, 4)?;
+    let (status, bytes, _) = call_port(
+        service_port,
+        POSIX_REQUEST_WRITE,
+        fd,
+        input_offset,
+        len,
+        0,
+        4,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -425,7 +538,15 @@ pub fn posix_stat(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(Word, Word, Word, Word, Word), RequestError> {
-    let (status, inode, metadata) = call_port(service_port, POSIX_REQUEST_STAT, path_offset, path_len, 0, 0, 3)?;
+    let (status, inode, metadata) = call_port(
+        service_port,
+        POSIX_REQUEST_STAT,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -478,28 +599,71 @@ pub fn posix_seek(
     offset: Word,
     whence: Word,
 ) -> Result<Word, RequestError> {
-    let (status, new_offset, _) = call_port(service_port, POSIX_REQUEST_SEEK, fd, offset, whence, 0, 4)?;
+    let (status, new_offset, _) =
+        call_port(service_port, POSIX_REQUEST_SEEK, fd, offset, whence, 0, 4)?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
     Ok(new_offset)
 }
 
-pub fn posix_mkdir(service_port: CapabilityDescriptor, path_offset: Word, path_len: Word) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_MKDIR, path_offset, path_len, 0, 0, 3)?;
-    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+pub fn posix_mkdir(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_MKDIR,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
     Ok(())
 }
 
-pub fn posix_unlink(service_port: CapabilityDescriptor, path_offset: Word, path_len: Word) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_UNLINK, path_offset, path_len, 0, 0, 3)?;
-    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+pub fn posix_unlink(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_UNLINK,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
     Ok(())
 }
 
-pub fn posix_rmdir(service_port: CapabilityDescriptor, path_offset: Word, path_len: Word) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_RMDIR, path_offset, path_len, 0, 0, 3)?;
-    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+pub fn posix_rmdir(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_RMDIR,
+        path_offset,
+        path_len,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
     Ok(())
 }
 
@@ -510,7 +674,17 @@ pub fn posix_rename(
     new_path_offset: Word,
     new_path_len: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(service_port, POSIX_REQUEST_RENAME, old_path_offset, old_path_len, new_path_offset, new_path_len, 5)?;
-    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_RENAME,
+        old_path_offset,
+        old_path_len,
+        new_path_offset,
+        new_path_len,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
     Ok(())
 }

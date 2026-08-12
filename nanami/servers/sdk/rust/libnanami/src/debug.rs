@@ -20,25 +20,25 @@ fn write_server_tagged_line_prefix(s: &str) -> bool {
     };
 
     let name = &rest[..end];
-    let max = 12usize;
-    let mut ascii_name = [0u8; 12];
+    const SERVER_NAME_MAX: usize = 20usize;
+    let mut ascii_name = [0u8; SERVER_NAME_MAX];
     let mut used = 0usize;
     for b in name.as_bytes().iter().copied() {
         if !b.is_ascii() {
             return false;
         }
-        if used >= max {
+        if used >= SERVER_NAME_MAX {
             break;
         }
         ascii_name[used] = b;
         used += 1;
     }
-    if used == 0 || used > max {
+    if used == 0 || used > SERVER_NAME_MAX {
         return false;
     }
 
     write_char('[');
-    let pad = max.saturating_sub(used);
+    let pad = SERVER_NAME_MAX.saturating_sub(used);
     for _ in 0..pad {
         write_char(' ');
     }

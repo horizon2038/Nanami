@@ -12,6 +12,8 @@ pub const RTC_SERVICE: &str = "rtc-service";
 pub const BLOCK_DEVICE: &str = "block-device";
 pub const VFS_SERVICE: &str = "vfs-service";
 pub const POSIX_SERVICE: &str = "posix-service";
+pub const TERMINAL_SERVICE: &str = "terminal-service";
+pub const EXEC_SERVICE: &str = "exec-service";
 
 pub const SERVICE_KIND_NET_DEVICE: Word = 1;
 pub const SERVICE_KIND_NETWORK_SERVICE: Word = 2;
@@ -22,6 +24,9 @@ pub const SERVICE_KIND_HONOKA_SERVICE: Word = 6;
 pub const SERVICE_KIND_RTC_SERVICE: Word = 7;
 pub const SERVICE_KIND_BLOCK_DEVICE: Word = 8;
 pub const SERVICE_KIND_VFS_SERVICE: Word = 9;
+pub const SERVICE_KIND_POSIX_SERVICE: Word = 10;
+pub const SERVICE_KIND_TERMINAL_SERVICE: Word = 11;
+pub const SERVICE_KIND_EXEC_SERVICE: Word = 12;
 
 pub fn register_service(name: &str) -> Result<(), RequestError> {
     let _ = register_service_with_pid(name)?;
@@ -80,6 +85,14 @@ pub fn register_posix_service() -> Result<(), RequestError> {
     register_service(POSIX_SERVICE)
 }
 
+pub fn register_terminal_service() -> Result<(), RequestError> {
+    register_service(TERMINAL_SERVICE)
+}
+
+pub fn register_exec_service() -> Result<(), RequestError> {
+    register_service(EXEC_SERVICE)
+}
+
 pub fn connect_net_device_with_pid(destination_slot: Word) -> Result<Word, RequestError> {
     connect_service_with_pid(NET_DEVICE, destination_slot)
 }
@@ -112,6 +125,14 @@ pub fn connect_posix_service(destination_slot: Word) -> Result<(), RequestError>
     connect_service(POSIX_SERVICE, destination_slot)
 }
 
+pub fn connect_terminal_service(destination_slot: Word) -> Result<(), RequestError> {
+    connect_service(TERMINAL_SERVICE, destination_slot)
+}
+
+pub fn connect_exec_service(destination_slot: Word) -> Result<(), RequestError> {
+    connect_service(EXEC_SERVICE, destination_slot)
+}
+
 pub fn connect_display_service(destination_slot: Word) -> Result<(), RequestError> {
     connect_service(DISPLAY_SERVICE, destination_slot)
 }
@@ -139,6 +160,9 @@ pub fn service_name_from_kind(kind: Word) -> &'static [u8] {
         SERVICE_KIND_RTC_SERVICE => b"rtc-service",
         SERVICE_KIND_BLOCK_DEVICE => b"block-device",
         SERVICE_KIND_VFS_SERVICE => b"vfs-service",
+        SERVICE_KIND_POSIX_SERVICE => b"posix-service",
+        SERVICE_KIND_TERMINAL_SERVICE => b"terminal-service",
+        SERVICE_KIND_EXEC_SERVICE => b"exec-service",
         _ => b"unknown",
     }
 }

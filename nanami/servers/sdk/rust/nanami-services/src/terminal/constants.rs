@@ -1,0 +1,26 @@
+use crate::Word;
+
+pub const TERMINAL_SERVICE: &str = "terminal-service";
+
+pub const TERMINAL_REQUEST_CONTROL: Word = 0xc101;
+pub const TERMINAL_REQUEST_CREATE: Word = 0xc102;
+pub const TERMINAL_REQUEST_WRITE_INPUT: Word = 0xc103;
+pub const TERMINAL_REQUEST_READ_INPUT: Word = 0xc104;
+pub const TERMINAL_REQUEST_WRITE_OUTPUT: Word = 0xc105;
+pub const TERMINAL_REQUEST_READ_OUTPUT: Word = 0xc106;
+pub const TERMINAL_REQUEST_GET_SIZE: Word = 0xc107;
+pub const TERMINAL_REQUEST_ATTACH_OUTPUT_NOTIFICATION: Word = 0xc108;
+pub const TERMINAL_REQUEST_ATTACH_INPUT_NOTIFICATION: Word = 0xc109;
+pub const TERMINAL_REQUEST_CLEAR: Word = 0xc10a;
+pub const TERMINAL_REQUEST_SET_ECHO: Word = 0xc10b;
+
+pub const TERMINAL_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
+pub const TERMINAL_CLEAR_INPUT: Word = 1 << 0;
+pub const TERMINAL_CLEAR_OUTPUT: Word = 1 << 1;
+
+pub const TERMINAL_DEFAULT_SHM_BYTES: Word = 0x4000;
+pub const TERMINAL_DEFAULT_COLUMNS: Word = 80;
+pub const TERMINAL_DEFAULT_ROWS: Word = 24;
+
+pub const TERMINAL_NOTIFICATION_OUTPUT: Word = 1 << 51;
+pub const TERMINAL_NOTIFICATION_INPUT: Word = 1 << 52;

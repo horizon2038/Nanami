@@ -12,10 +12,20 @@ pub const VFS_REQUEST_WRITE: Word = 0x9109;
 pub const VFS_REQUEST_REMOVE: Word = 0x910a;
 pub const VFS_REQUEST_MKDIR: Word = 0x910b;
 pub const VFS_REQUEST_RENAME: Word = 0x910c;
+pub const VFS_REQUEST_OPEN_COMPOUND: Word = 0x910d;
+pub const VFS_REQUEST_READ_DELEGATED: Word = 0x910e;
 
 pub const VFS_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
+pub const VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY: Word = 2;
 
 pub const VFS_DEFAULT_SHM_BYTES: Word = 0x4000;
+pub const VFS_DELEGATE_ID_SHIFT: Word = 32;
+pub const VFS_DELEGATE_VALUE_MASK: Word = 0xffff_ffff;
+pub const VFS_OPEN_CREATE: Word = 1 << 0;
+pub const VFS_OPEN_TRUNCATE: Word = 1 << 1;
+pub const VFS_OPEN_DIRECTORY: Word = 1 << 2;
+pub const VFS_OPEN_HANDLE_MASK: Word = 0xffff_ffff;
+pub const VFS_OPEN_INODE_SHIFT: Word = 32;
 pub const VFS_FILE_TYPE_UNKNOWN: Word = 0;
 pub const VFS_FILE_TYPE_REGULAR: Word = 1;
 pub const VFS_FILE_TYPE_DIRECTORY: Word = 2;

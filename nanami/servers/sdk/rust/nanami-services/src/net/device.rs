@@ -76,3 +76,19 @@ pub fn net_device_control_ex(
     )?;
     Ok((status, detail0, detail1))
 }
+
+pub fn net_device_attach_rx_notification(
+    device_port: CapabilityDescriptor,
+    source_notification_slot: Word,
+) -> Result<bool, RequestError> {
+    let (status, irq_enabled, _) = net_device_control_ex(
+        device_port,
+        super::constants::NET_DEVICE_CONTROL_ATTACH_RX_NOTIFICATION,
+        source_notification_slot,
+        0,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(irq_enabled != 0)
+}

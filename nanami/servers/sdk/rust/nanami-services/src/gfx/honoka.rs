@@ -3,6 +3,7 @@ use a9n_abi::CapabilityDescriptor;
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
 pub const HONOKA_REQUEST_CREATE_WINDOW: Word = 0x7001;
+pub const HONOKA_REQUEST_DESTROY_WINDOW: Word = 0x7000;
 pub const HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER: Word = 0x7002;
 pub const HONOKA_REQUEST_MOVE_WINDOW: Word = 0x7003;
 pub const HONOKA_REQUEST_SET_WINDOW_VISIBLE: Word = 0x7004;
@@ -11,6 +12,7 @@ pub const HONOKA_REQUEST_ATTACH_INPUT_NOTIFICATION: Word = 0x7006;
 pub const HONOKA_REQUEST_SET_WINDOW_TITLE: Word = 0x7007;
 pub const HONOKA_REQUEST_CREATE_WINDOW_WITH_TITLE: Word = 0x7008;
 pub const HONOKA_REQUEST_GET_WINDOW_CONTENT_SIZE: Word = 0x7009;
+pub const HONOKA_REQUEST_SET_WINDOW_OPACITY: Word = 0x700a;
 pub const HONOKA_REQUEST_INVALIDATE_LOGICAL_FRAMEBUFFER: Word = 0x7010;
 pub const HONOKA_NOTIFICATION_PRESENT: Word = 1 << 48;
 pub const HONOKA_NOTIFICATION_INPUT: Word = 1 << 49;
@@ -22,6 +24,7 @@ pub const HONOKA_DAMAGE_QUEUE_CAPACITY: usize = 64;
 pub const HONOKA_DAMAGE_ENTRY_WORDS: usize = 4;
 pub const HONOKA_WINDOW_TITLE_BYTES: usize = 24;
 pub const HONOKA_CREATE_WINDOW_TITLE_BYTES: usize = 16;
+pub const HONOKA_WINDOW_OPACITY_OPAQUE: u8 = u8::MAX;
 
 pub fn honoka_create_window(
     honoka_port: CapabilityDescriptor,
@@ -43,6 +46,25 @@ pub fn honoka_create_window(
         return Err(RequestError::Status(status));
     }
     Ok(window_id)
+}
+
+pub fn honoka_destroy_window(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_DESTROY_WINDOW,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }
 
 pub fn honoka_create_window_with_title(
@@ -148,6 +170,26 @@ pub fn honoka_set_window_visible(
         HONOKA_REQUEST_SET_WINDOW_VISIBLE,
         window_id,
         if visible { 1 } else { 0 },
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_set_window_opacity(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    opacity: u8,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_SET_WINDOW_OPACITY,
+        window_id,
+        opacity as Word,
         0,
         0,
         3,

@@ -6,6 +6,7 @@ pub mod honoka;
 
 pub const DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO: Word = 0x5001;
 pub const DISPLAY_SERVICE_REQUEST_PREPARE_SHARED_FRAMEBUFFER: Word = 0x5002;
+pub const DISPLAY_SERVICE_REQUEST_PRESENT: Word = 0x5003;
 
 pub fn display_service_get_screen_info(
     display_service_port: CapabilityDescriptor,
@@ -41,4 +42,28 @@ pub fn display_service_prepare_shared_framebuffer(
         return Err(RequestError::Status(status));
     }
     Ok((detail0, detail1))
+}
+
+pub fn display_service_present(
+    display_service_port: CapabilityDescriptor,
+    x: Word,
+    y: Word,
+    width: Word,
+    height: Word,
+) -> Result<(), RequestError> {
+    let position = (x & 0xffff_ffff) | ((y & 0xffff_ffff) << 32);
+    let size = (width & 0xffff_ffff) | ((height & 0xffff_ffff) << 32);
+    let (status, _, _) = call_port(
+        display_service_port,
+        DISPLAY_SERVICE_REQUEST_PRESENT,
+        position,
+        size,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }

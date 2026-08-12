@@ -40,10 +40,24 @@ pub const POSIX_REQUEST_UNSETENV: Word = 0xa125;
 pub const POSIX_REQUEST_ENV_COUNT: Word = 0xa126;
 pub const POSIX_REQUEST_ENV_AT: Word = 0xa127;
 
+// socket requests
+// TODO: implement socket requests
+pub const POSIX_REQUEST_SOCKET: Word = 0xa128;
+pub const POSIX_REQUEST_BIND: Word = 0xa129;
+pub const POSIX_REQUEST_LISTEN: Word = 0xa12a;
+pub const POSIX_REQUEST_ACCEPT: Word = 0xa12b;
+pub const POSIX_REQUEST_CONNECT: Word = 0xa12c;
+pub const POSIX_REQUEST_SEND: Word = 0xa12d;
+pub const POSIX_REQUEST_RECV: Word = 0xa12e;
+pub const POSIX_REQUEST_SENDTO: Word = 0xa12f;
+pub const POSIX_REQUEST_RECVFROM: Word = 0xa130;
+pub const POSIX_REQUEST_READ_DIRECT: Word = 0xa131;
+
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
+pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;
 pub const POSIX_WAIT_NOHANG: Word = 1;
 
-pub const POSIX_DEFAULT_SHM_BYTES: Word = 0x4000;
+pub const POSIX_DEFAULT_SHM_BYTES: Word = 0x10000;
 pub const POSIX_PATH_MAX: usize = 128;
 pub const POSIX_ENV_NAME_MAX: usize = 32;
 pub const POSIX_ENV_VALUE_MAX: usize = 128;

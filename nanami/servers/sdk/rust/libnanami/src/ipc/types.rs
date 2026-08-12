@@ -1,5 +1,7 @@
 use crate::Word;
 
+pub const HARDWARE_CONTEXT_WORDS: usize = 23;
+
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceRequest {
     pub identifier: Word,
@@ -23,5 +25,7 @@ pub enum ServiceEvent {
         program_counter: Word,
         fault_address: Word,
         architecture_fault_code: Word,
+        hardware_context: [Word; HARDWARE_CONTEXT_WORDS],
+        hardware_context_count: usize,
     },
 }

@@ -43,7 +43,6 @@ impl SharedFramebuffer {
 
 struct DisplayState {
     screen: ScreenInfo,
-    hardware_paddr: Word,
     hardware_vaddr: Word,
     shared: SharedFramebuffer,
 }
@@ -185,7 +184,6 @@ fn nanami_main() -> libnanami::NanamiResult {
     fill_screen(&screen_info, mapped_fb);
     let mut display = DisplayState {
         screen: screen_info,
-        hardware_paddr: fb_phys,
         hardware_vaddr: mapped_fb,
         shared: SharedFramebuffer::EMPTY,
     };
@@ -269,20 +267,26 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
 
-            match libnanami::request_shared_framebuffer_memory(
+            match libnanami::request_shared_memory(
                 request.identifier,
-                display.hardware_paddr,
                 display.screen.framebuffer_bytes,
             ) {
-                Ok((_, peer_vaddr)) => {
+                Ok((local_vaddr, peer_vaddr)) => {
+                    unsafe {
+                        core::ptr::write_bytes(
+                            local_vaddr as *mut u8,
+                            0,
+                            display.screen.framebuffer_bytes as usize,
+                        );
+                    }
                     display.shared = SharedFramebuffer {
                         owner_pid: request.identifier,
-                        local_vaddr: display.hardware_vaddr,
+                        local_vaddr,
                         peer_vaddr,
                         bytes: display.screen.framebuffer_bytes,
                     };
                     libnanami::println!(
-                        "[fb-server] hardware framebuffer shared pid={} vaddr={:#x} bytes={:#x}",
+                        "[fb-server] shared framebuffer ready pid={} vaddr={:#x} bytes={:#x}",
                         request.identifier,
                         peer_vaddr,
                         display.screen.framebuffer_bytes
@@ -338,25 +342,38 @@ fn present_shared_framebuffer(
 
     let width = width.min(display.screen.width as usize - x);
     let height = height.min(display.screen.height as usize - y);
-    if shared.local_vaddr == display.hardware_vaddr {
+    let row_bytes = width.saturating_mul(4);
+    let stride = display.screen.stride as usize;
+    fence(Ordering::Acquire);
+
+    if x == 0 && row_bytes == stride {
+        let offset = y.saturating_mul(stride);
+        let bytes = row_bytes.saturating_mul(height);
+        if offset.saturating_add(bytes) > shared.bytes as usize {
+            return Err(RequestError::InvalidArgument);
+        }
+        copy_to_hardware(
+            shared.local_vaddr.saturating_add(offset),
+            display.hardware_vaddr.saturating_add(offset),
+            bytes,
+        );
         fence(Ordering::Release);
         return Ok(width.saturating_mul(height) as Word);
     }
-    let row_bytes = width.saturating_mul(4);
-    fence(Ordering::Acquire);
+
     let mut row = 0usize;
     while row < height {
         let offset = y
             .saturating_add(row)
-            .saturating_mul(display.screen.stride as usize)
+            .saturating_mul(stride)
             .saturating_add(x.saturating_mul(4));
         if offset.saturating_add(row_bytes) > shared.bytes as usize {
             return Err(RequestError::InvalidArgument);
         }
-        copy_row_to_hardware(
+        copy_to_hardware(
             shared.local_vaddr.saturating_add(offset),
             display.hardware_vaddr.saturating_add(offset),
-            width,
+            row_bytes,
         );
         row += 1;
     }
@@ -364,29 +381,9 @@ fn present_shared_framebuffer(
     Ok(width.saturating_mul(height) as Word)
 }
 
-fn copy_row_to_hardware(source: Word, destination: Word, pixels: usize) {
-    let mut pixel = 0usize;
-    if pixels != 0 && (destination & 7) != 0 {
-        unsafe {
-            let value = core::ptr::read(source as *const u32);
-            core::ptr::write_volatile(destination as *mut u32, value);
-        }
-        pixel = 1;
-    }
-    while pixel + 2 <= pixels {
-        let offset = pixel * 4;
-        unsafe {
-            let value = core::ptr::read((source + offset) as *const u64);
-            core::ptr::write_volatile((destination + offset) as *mut u64, value);
-        }
-        pixel += 2;
-    }
-    if pixel < pixels {
-        let offset = pixel * 4;
-        unsafe {
-            let value = core::ptr::read((source + offset) as *const u32);
-            core::ptr::write_volatile((destination + offset) as *mut u32, value);
-        }
+fn copy_to_hardware(source: Word, destination: Word, bytes: usize) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes);
     }
 }
 

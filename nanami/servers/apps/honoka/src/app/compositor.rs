@@ -185,7 +185,15 @@ impl Compositor {
 
         let mut i = 0usize;
         while i < count {
-            self.render_and_present(self.dirty_rects[i]);
+            self.render_rect(self.dirty_rects[i]);
+            i += 1;
+        }
+
+        i = 0;
+        while i < count {
+            if let Err(error) = self.framebuffer.present(self.dirty_rects[i]) {
+                libnanami::println!("[honoka] display present failed: {}", error);
+            }
             i += 1;
         }
 

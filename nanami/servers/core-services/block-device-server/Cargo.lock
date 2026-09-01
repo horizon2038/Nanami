@@ -10,12 +10,19 @@ checksum = "f13feb37ee5cfc4b43d8bd78a4c1fcd2d8e9a4c653d971b54b2c6c886a34b4ff"
 
 [[package]]
 name = "a9n_abi"
-version = "0.3.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bf3d2647d6a896ff4562f56102567e9687ca61a48eb507dc62c1eac32d669dd"
+checksum = "75ab6f2d8b0e697b2b340fbaecffdf7a978f24de339b438008d5973c29b0e81e"
 dependencies = [
  "a9n-types",
+ "bitflags",
 ]
+
+[[package]]
+name = "bitflags"
+version = "2.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
 name = "block_device_server"

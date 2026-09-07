@@ -59,8 +59,9 @@ Drivers and subsystem servers are not linked into Alpha or the microkernel.
 ## Features
 
 - Capability-based process, memory, device, and service management
-- User-space device drivers for virtio block, virtio network, PS/2, PIT, RTC,
-  and the boot framebuffer
+- A user-space Device Driver Manager that selects platform drivers at boot
+- User-space drivers for AHCI, virtio block/network, HPET, PIT, PS/2, RTC, and
+  the boot framebuffer
 - ext2 root filesystem with application and service manifests
 - IPv4 networking with DHCP, ARP, ICMP, UDP, DNS, and TCP support
 - Honoka compositing desktop with shared-memory windows and input delivery
@@ -77,8 +78,8 @@ Drivers and subsystem servers are not linked into Alpha or the microkernel.
 Nanami separates boot policy into three stages:
 
 1. `nanami/servers/boot-list` is embedded in the initramfs and contains only
-   boot-critical services, including the timer, block driver, VFS, and system
-   manager.
+   boot-critical services. The Device Driver Manager selects the timer and
+   block drivers before VFS and the system manager consume them.
 2. `/nanami/system-list` is read from the ext2 root filesystem and starts upper
    services such as networking, input, graphics, POSIX, and Alter.
 3. `/nanami/session-list` starts the user session after system services are
@@ -92,10 +93,16 @@ policy.
 | Architecture | Platform | Status |
 | --- | --- | --- |
 | x86_64 | QEMU/UEFI | Supported |
-| aarch64 | QEMU or hardware | Planned |
+| AArch64 | QEMU `virt`/U-Boot | Supported (headless) |
+| AArch64 | Hardware | Planned |
 | riscv64 | QEMU or hardware | Planned |
 
-The current QEMU configuration uses legacy-compatible virtio PCI devices.
+x86_64's user-space Device Driver Manager maps the RSDP supplied in
+`arch_info[0]`, validates the RSDP and XSDT/RSDT, and discovers HPET itself.
+It selects AHCI through PCI, with virtio-blk and PIT retained as fallbacks.
+AArch64 uses a PCI boot disk and a modern virtio-mmio root disk on QEMU `virt`
+with GICv2. Its user-space timer is intentionally deferred: EL0 access to the
+architectural virtual timer is not enabled or exposed.
 
 ## Requirements
 
@@ -104,7 +111,7 @@ The current QEMU configuration uses legacy-compatible virtio PCI devices.
 - CMake
 - GNU Make
 - Python 3
-- QEMU with x86_64 system emulation
+- QEMU with x86_64 and/or AArch64 system emulation
 - NASM for the x86_64 A9N HAL
 - Git with submodule support
 
@@ -130,26 +137,42 @@ Build the bootable release image:
 
 ```bash
 make image
+make image ARCH=aarch64
 ```
 
 This command performs the following steps:
 
 1. Builds Nanami core services and applications.
-2. Creates the boot initramfs.
+2. Creates the boot initramfs and the ext2 root filesystem.
 3. Builds Nanami as an external Nun payload.
-4. Delegates A9N, A9NLoader-rs, and UEFI image assembly to SPENCER.
+4. Builds A9N with SMP enabled.
+5. Delegates A9NLoader-rs and disk-image assembly to SPENCER.
 
-The resulting boot image is written to:
+The resulting boot images are written to:
 
 ```text
-spencer/out/x86_64-qemu-release/spencer.img
+spencer/out/x86_64-pc99-release/spencer.img
+spencer/out/aarch64-qemu-release/spencer.img
 ```
+
+The default Spencer platform is `pc99` for x86_64 (both QEMU and hardware),
+and `qemu` for AArch64. If setting `PLATFORM` explicitly, use these names;
+`PLATFORM=qemu` is no longer valid for x86_64.
+
+The x86_64 `spencer.img` is a complete GPT disk image. It contains a FAT32 EFI
+System Partition with A9NLoader, A9N, and Nanami, followed by a Nanami ext2 root
+partition. The storage driver discovers the root partition by its GPT type GUID
+(`6e616e61-6d69-4f53-a000-4e414e414d49`), so the boot and root filesystems do not
+need separate drives.
 
 The ext2 root filesystem can also be created explicitly:
 
 ```bash
 make fs-image SIZE_MB=64 OUT=out/ext2.img
+make fs-image ARCH=aarch64 SIZE_MB=64
 ```
+
+Without `OUT`, the AArch64 rootfs is written to `out/ext2-aarch64.img`.
 
 ## Run with QEMU
 
@@ -157,7 +180,12 @@ Build the system, create or refresh the ext2 root filesystem, and launch QEMU:
 
 ```bash
 make run
+make run ARCH=aarch64
 ```
+
+The AArch64 QEMU profile is currently headless and uses `NET_MODE=none`. It does
+not start a user session until platform timer, display, and input drivers are
+available.
 
 On Linux, user-mode networking is selected by default. On macOS, bridged
 `vmnet` networking is selected and the default IPv4 interface is detected
@@ -179,12 +207,14 @@ Useful run-time options include:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `NET_MODE` | `user` on Linux, `bridged` on macOS | `user`, `bridged`, or `none` |
+| `NET_MODE` | host default on x86_64; `none` on AArch64 | `user`, `bridged`, or `none` |
 | `NET_DEVICE` | `virtio` | `virtio` or `e1000` |
 | `QEMU_MEMORY` | `4G` | Guest memory size |
-| `QEMU_SMP` | `1` | Guest CPU count |
+| `QEMU_SMP` | `4` | Guest CPU count (1–64) |
 | `QEMU_ACCEL` | `auto` | QEMU accelerator, or `none` |
-| `BLOCK_IMAGE` | `out/ext2.img` | Root filesystem image |
+| `QEMU_HPET` | `on` | x86_64 HPET exposure; use `off` to test the PIT fallback |
+| `STORAGE_DEVICE` | `ahci` | x86_64 root disk controller: `ahci` or `virtio` |
+| `BLOCK_IMAGE` | `out/ext2.img` or `out/ext2-aarch64.img` | ext2 staging image; on x86_64 it is embedded in `spencer.img` |
 | `SIZE_MB` | `64` | Default root filesystem size |
 | `PCAP` | `out/net0.pcap` | Bridged network capture, or `none` |
 
@@ -192,6 +222,31 @@ With user networking, guest TCP port 80 is forwarded to
 `127.0.0.1:1234` by default. This can be changed with `HOSTFWD_HTTP`.
 `QEMU_ACCEL=auto` uses KVM on Linux when available, HVF on Intel macOS, and
 software emulation for x86_64 guests on Apple Silicon.
+
+## Boot on x86_64 hardware
+
+`make image` produces the complete disk image at
+`spencer/out/x86_64-pc99-release/spencer.img`. Write that one image to a whole,
+dedicated SATA/AHCI disk, then select its UEFI boot entry. USB mass storage and
+NVMe are not storage backends yet: firmware may load the EFI partition from
+them, but Nanami cannot mount the root partition after handoff. The write
+replaces the target disk's partition table and all existing contents, so
+identify the device by model and capacity and unmount its volumes before
+writing; do not use a system disk or a partition path. The firmware must support
+x86_64 UEFI, and Secure Boot must be disabled unless the EFI loader is signed.
+
+At runtime, the driver scans AHCI controllers and ports and accepts only a disk
+containing exactly one Nanami root partition. It exposes partition-relative I/O
+to ext2-server and refuses ambiguous multi-disk configurations instead of
+choosing an arbitrary writable disk.
+
+Nanami reads the architecture name, platform name, and available core count
+from A9N v0.3.0's `init_info`; it does not probe PCB affinities to discover cores.
+Alpha stays on logical Core 0. Services and applications are assigned to
+the remaining cores in round-robin order. A single-core guest remains
+supported and places all processes on Core 0. Inside the guest,
+`nanami-info smp` reports the topology, and `nanami-info platform` reports the
+kernel-supplied architecture, platform, and available core count.
 
 ## External ABI Binaries
 
@@ -204,8 +259,11 @@ EXTRA_FREEBSD_BINS="/path/to/sh" make fs-image
 ```
 
 Linux binaries are installed under `/alter/linux/bin`; FreeBSD binaries are
-installed under `/alter/freebsd/bin`. Alter implements a developing subset of
-each ABI, so compatibility depends on the syscalls used by the program.
+installed under `/alter/freebsd/bin`. Alter/Linux selects x86_64 or AArch64
+syscall numbers, register layouts, ELF machine validation, and Linux structure
+layouts at build time. Its filesystem subset includes `link(2)`/`linkat(2)`, so
+BusyBox applet installation can create hard links. Compatibility still depends
+on the syscalls and flags used by each program.
 
 ## Repository Structure
 

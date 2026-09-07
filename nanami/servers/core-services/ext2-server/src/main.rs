@@ -11,6 +11,7 @@ const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
 const BLOCK_SHM_BYTES: Word = 0x4000;
 const BLOCK_BUFFER_OFFSET: Word = 0;
+const BLOCK_READ_RETRY_LIMIT: usize = 4;
 const BLOCK_CONNECT_RETRIES: usize = 64;
 const BLOCK_CONNECT_RETRY_MS: Word = 100;
 const MAX_SESSIONS: usize = 16;
@@ -118,6 +119,7 @@ const EXT2_GROUP_EMPTY: Ext2GroupDescriptor = Ext2GroupDescriptor {
 struct Ext2Inode {
     mode: u16,
     size: u32,
+    links_count: u16,
     block: [u32; EXT2_INODE_BLOCK_POINTERS],
 }
 
@@ -151,6 +153,7 @@ impl CachedInode {
         inode: Ext2Inode {
             mode: 0,
             size: 0,
+            links_count: 0,
             block: [0; EXT2_INODE_BLOCK_POINTERS],
         },
     };
@@ -338,6 +341,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         nanami_services::vfs::VFS_REQUEST_MKDIR => handle_create(request, runtime, true),
         nanami_services::vfs::VFS_REQUEST_WRITE => handle_write_file(request, runtime),
         nanami_services::vfs::VFS_REQUEST_REMOVE => handle_remove(request, runtime),
+        nanami_services::vfs::VFS_REQUEST_LINK => handle_link(request, runtime),
         nanami_services::vfs::VFS_REQUEST_RENAME => handle_rename(request, runtime),
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
@@ -729,6 +733,43 @@ fn handle_remove(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, W
     }
 }
 
+fn handle_link(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    let Some(session) = find_session(runtime, request.identifier) else {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some((old_parent, old_name, old_name_len)) = lookup_parent_path(
+        runtime,
+        session,
+        request.arg0 as usize,
+        request.arg1 as usize,
+    ) else {
+        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    let Some((new_parent, new_name, new_name_len)) = lookup_parent_path(
+        runtime,
+        session,
+        request.arg2 as usize,
+        request.arg3 as usize,
+    ) else {
+        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    if unsafe { lookup_in_directory(runtime, new_parent, new_name, new_name_len).is_some() } {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    match link_node(
+        runtime,
+        old_parent,
+        old_name,
+        old_name_len,
+        new_parent,
+        new_name,
+        new_name_len,
+    ) {
+        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Err(status) => (status, 0, 0),
+    }
+}
+
 fn handle_rename(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
@@ -866,16 +907,44 @@ fn read_blocks_uncached(
     {
         return Err(RequestError::InvalidArgument);
     }
-    let read = nanami_services::block::block_device_read(
-        runtime.block_port,
-        block as Word,
-        count as Word,
-        BLOCK_BUFFER_OFFSET,
-    )?;
+    let mut attempt = 0usize;
+    let read = loop {
+        match nanami_services::block::block_device_read(
+            runtime.block_port,
+            block as Word,
+            count as Word,
+            BLOCK_BUFFER_OFFSET,
+        ) {
+            Ok(read) => break read,
+            Err(error)
+                if attempt + 1 < BLOCK_READ_RETRY_LIMIT && is_retryable_block_read_error(error) =>
+            {
+                attempt += 1;
+                libnanami::print!("[ext2-server] retry block read attempt=");
+                libnanami::print!("{}", attempt + 1);
+                libnanami::print!(" block=");
+                libnanami::print!("{}", block);
+                libnanami::print!(" count=");
+                libnanami::print!("{}", count);
+                libnanami::print!("\n");
+                libnanami::yield_now();
+            }
+            Err(error) => return Err(error),
+        }
+    };
     if read as usize != bytes {
         return Err(RequestError::Protocol);
     }
     Ok(())
+}
+
+fn is_retryable_block_read_error(error: RequestError) -> bool {
+    matches!(
+        error,
+        RequestError::Transport
+            | RequestError::Protocol
+            | RequestError::Status(libnanami::OS_RESPONSE_FATAL)
+    )
 }
 
 fn write_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
@@ -1097,6 +1166,7 @@ fn read_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<Ext2Inode, Req
     let inode = Ext2Inode {
         mode: r16(p + 0),
         size: r32(p + 4),
+        links_count: r16(p + 26),
         block: blocks,
     };
     store_cached_inode(runtime, inode_no, inode);
@@ -1130,6 +1200,7 @@ fn write_inode(
     w16_mem(p + 0, inode.mode);
     w32_mem(p + 4, inode.size);
     w32_mem(p + 24, sectors);
+    w16_mem(p + 26, inode.links_count);
     let mut i = 0usize;
     while i < EXT2_INODE_BLOCK_POINTERS {
         w32_mem(p + 40 + i * 4, inode.block[i]);
@@ -1550,9 +1621,8 @@ fn read_file(
             }
             run_blocks += 1;
         }
-        if read_blocks(runtime, physical_block as usize, run_blocks).is_err() {
-            return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
-        }
+        read_blocks(runtime, physical_block as usize, run_blocks)
+            .map_err(map_request_error_to_status)?;
         let n = min(remaining, run_blocks * runtime.block_size - block_offset);
         unsafe {
             ptr::copy_nonoverlapping(
@@ -1624,6 +1694,7 @@ fn create_node(
         } else {
             0
         },
+        links_count: if is_directory { 2 } else { 1 },
         block: [0; EXT2_INODE_BLOCK_POINTERS],
     };
     if is_directory {
@@ -1675,7 +1746,7 @@ fn remove_node(
 ) -> Result<(), Word> {
     let (inode_no, block, offset) = find_directory_entry(runtime, parent_inode, name, name_len)
         .ok_or(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
-    let inode =
+    let mut inode =
         read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (inode.mode & EXT2_S_IFDIR) == EXT2_S_IFDIR && !is_directory_empty(runtime, inode)? {
         return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
@@ -1687,10 +1758,51 @@ fn remove_node(
         invalidate_cached_dentry(runtime, parent_inode, name, name_len);
         store_cached_dentry(runtime, parent_inode, name, name_len, None);
     }
-    free_inode_blocks(runtime, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-    free_inode(runtime, inode_no as usize).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-    invalidate_cached_inode(runtime, inode_no);
-    invalidate_cached_dentries_for_inode(runtime, inode_no);
+    if (inode.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR && inode.links_count > 1 {
+        inode.links_count -= 1;
+        write_inode(runtime, inode_no, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    } else {
+        free_inode_blocks(runtime, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        free_inode(runtime, inode_no as usize).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        invalidate_cached_inode(runtime, inode_no);
+        invalidate_cached_dentries_for_inode(runtime, inode_no);
+    }
+    Ok(())
+}
+
+fn link_node(
+    runtime: &mut Ext2Runtime,
+    old_parent: u32,
+    old_name: *const u8,
+    old_name_len: usize,
+    new_parent: u32,
+    new_name: *const u8,
+    new_name_len: usize,
+) -> Result<(), Word> {
+    let (inode_no, _, _) = find_directory_entry(runtime, old_parent, old_name, old_name_len)
+        .ok_or(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+    let mut inode =
+        read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+    if (inode.mode & EXT2_S_IFDIR) == EXT2_S_IFDIR {
+        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+    }
+    inode.links_count = inode
+        .links_count
+        .checked_add(1)
+        .ok_or(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)?;
+    write_inode(runtime, inode_no, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    if let Err(status) = insert_directory_entry(
+        runtime,
+        new_parent,
+        inode_no,
+        new_name,
+        new_name_len,
+        EXT2_FT_REG_FILE,
+    ) {
+        inode.links_count -= 1;
+        let _ = write_inode(runtime, inode_no, inode);
+        return Err(status);
+    }
     Ok(())
 }
 

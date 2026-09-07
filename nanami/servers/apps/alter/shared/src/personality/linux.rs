@@ -6,6 +6,7 @@ use crate::abi::{
     SLOT_HONOKA_PRESENT_NOTIFICATION_BASE, SLOT_HONOKA_SERVICE, SLOT_INPUT_SERVICE,
     SLOT_NETWORK_SERVICE,
 };
+use crate::arch::{self, PLATFORM, STAT_SIZE, UNAME_MACHINE};
 use crate::common::virtual_fs::{self, VirtualNode};
 use crate::elf::ElfMetadata;
 use crate::loader::{load_cached_fork_linux_elf_image, load_linux_elf_image, LoadError};
@@ -18,6 +19,16 @@ use crate::state::{
     LinuxFile, LinuxFileKind, OsPersonality, Runtime, LINUX_CWD_MAX, LINUX_FD_MAX,
     LINUX_PIPE_BYTES, LINUX_TERMINAL_LINE_MAX,
 };
+
+#[cfg(target_arch = "x86_64")]
+#[path = "linux/arch/x86_64.rs"]
+mod arch_syscalls;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "linux/arch/aarch64.rs"]
+mod arch_syscalls;
+
+pub use arch_syscalls::*;
 
 #[derive(Clone, Copy)]
 pub enum EmulationAction {
@@ -376,6 +387,7 @@ pub fn dispatch_syscall(
         SYS_MKDIR => sys_mkdir(runtime, native_pid, context.args[0]),
         SYS_RMDIR => sys_rmdir(runtime, native_pid, context.args[0]),
         SYS_RENAME => sys_rename(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_LINK => sys_link(runtime, native_pid, context.args[0], context.args[1]),
         SYS_UNLINK => sys_unlink(runtime, native_pid, context.args[0]),
         SYS_READLINK => sys_readlink(
             runtime,
@@ -415,6 +427,15 @@ pub fn dispatch_syscall(
             context.args[0],
             context.args[1],
             context.args[2],
+        ),
+        SYS_LINKAT => sys_linkat(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+            context.args[4],
         ),
         SYS_RENAMEAT => sys_renameat(
             runtime,
@@ -2550,10 +2571,7 @@ fn sys_terminal_read_now(
     }
     ensure_terminal_input_notification(runtime, terminal_id)?;
 
-    let canonical = runtime
-        .managed_process(pid)
-        .map(|process| process.terminal_canonical)
-        .unwrap_or(true);
+    let canonical = runtime.terminal_canonical(pid).unwrap_or(true);
     let bytes = if canonical {
         drain_terminal_canonical_line(runtime, pid, chunk)?
     } else {
@@ -3909,12 +3927,12 @@ fn clone_options(context: LinuxSyscallContext) -> CloneOptions {
             0
         },
         child_tid: if context.number == SYS_CLONE {
-            context.args[3]
+            arch::clone_child_tid(context.args)
         } else {
             0
         },
         tls: if context.number == SYS_CLONE {
-            context.args[4]
+            arch::clone_tls(context.args)
         } else {
             0
         },
@@ -4214,6 +4232,30 @@ fn sys_unlink(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, 
     map_unit(posix::posix_unlink(runtime.posix_port, 0, vfs_len), 0)
 }
 
+fn sys_link(
+    runtime: &mut Runtime,
+    pid: Word,
+    old_path_ptr: Word,
+    new_path_ptr: Word,
+) -> Result<Word, i32> {
+    let old_len = resolve_path(runtime, pid, old_path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
+    let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
+    let new_len = resolve_path(runtime, pid, new_path_ptr)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
+    posix::posix_link(
+        runtime.posix_port,
+        LINUX_SECOND_PATH_OFFSET,
+        old_vfs_len,
+        0,
+        new_vfs_len,
+    )
+    .map(|_| 0)
+    .map_err(map_request_error)
+}
+
 fn sys_unlinkat(
     runtime: &mut Runtime,
     pid: Word,
@@ -4234,6 +4276,45 @@ fn sys_unlinkat(
     map_unit(posix::posix_unlink(runtime.posix_port, 0, vfs_len), 0)
 }
 
+fn sys_linkat(
+    runtime: &mut Runtime,
+    pid: Word,
+    old_dirfd: Word,
+    old_path_ptr: Word,
+    new_dirfd: Word,
+    new_path_ptr: Word,
+    flags: Word,
+) -> Result<Word, i32> {
+    if flags & !LINUX_AT_SYMLINK_FOLLOW != 0 {
+        return Err(EINVAL);
+    }
+    let old_raw_len = read_c_string(runtime, pid, old_path_ptr)?;
+    if !path_is_absolute(runtime.posix_shm, old_raw_len) && !is_at_fdcwd(old_dirfd) {
+        return Err(ENOSYS);
+    }
+    let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
+    let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
+
+    let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
+    if !path_is_absolute(runtime.posix_shm, new_raw_len) && !is_at_fdcwd(new_dirfd) {
+        return Err(ENOSYS);
+    }
+    let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
+    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
+    posix::posix_link(
+        runtime.posix_port,
+        LINUX_SECOND_PATH_OFFSET,
+        old_vfs_len,
+        0,
+        new_vfs_len,
+    )
+    .map(|_| 0)
+    .map_err(map_request_error)
+}
+
 fn sys_rmdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
     reject_virtual_fs_mutation(runtime.posix_shm, len)?;
@@ -4249,14 +4330,14 @@ fn sys_rename(
 ) -> Result<Word, i32> {
     let old_len = resolve_path(runtime, pid, old_path_ptr)?;
     reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
-    move_shm_bytes(runtime, 0, ALTER_IO_OFFSET as Word, old_len);
-    let old_vfs_len = translate_guest_path_at(runtime, pid, ALTER_IO_OFFSET as Word, old_len)?;
+    move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
+    let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_len = resolve_path(runtime, pid, new_path_ptr)?;
     reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
-        ALTER_IO_OFFSET as Word,
+        LINUX_SECOND_PATH_OFFSET,
         old_vfs_len,
         0,
         new_vfs_len,
@@ -4279,8 +4360,8 @@ fn sys_renameat(
     }
     let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
     reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
-    move_shm_bytes(runtime, 0, ALTER_IO_OFFSET as Word, old_len);
-    let old_vfs_len = translate_guest_path_at(runtime, pid, ALTER_IO_OFFSET as Word, old_len)?;
+    move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
+    let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
     if !path_is_absolute(runtime.posix_shm, new_raw_len) && !is_at_fdcwd(new_dirfd) {
         return Err(ENOSYS);
@@ -4290,7 +4371,7 @@ fn sys_renameat(
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
-        ALTER_IO_OFFSET as Word,
+        LINUX_SECOND_PATH_OFFSET,
         old_vfs_len,
         0,
         new_vfs_len,
@@ -4340,16 +4421,30 @@ fn readlink_from_current_path(
         let Some(process) = runtime.managed_process(pid) else {
             return Err(ESRCH);
         };
-        let bytes = ::core::cmp::min(process.image_name_len as Word, len);
+        // Managed rootfs executables are exposed to Linux under /bin.  A
+        // basename-only target makes BusyBox --install call link(2) with a
+        // nonexistent path relative to the current directory.
+        const GUEST_BIN_PREFIX: &[u8] = b"/bin/";
+        let name_len = process.image_name_len;
+        let total = GUEST_BIN_PREFIX.len().saturating_add(name_len);
+        let bytes = ::core::cmp::min(total, len as usize);
+        let prefix_bytes = ::core::cmp::min(GUEST_BIN_PREFIX.len(), bytes);
         unsafe {
             ::core::ptr::copy_nonoverlapping(
-                process.image_name.as_ptr(),
+                GUEST_BIN_PREFIX.as_ptr(),
                 runtime.posix_shm as *mut u8,
-                bytes as usize,
+                prefix_bytes,
             );
+            if bytes > prefix_bytes {
+                ::core::ptr::copy_nonoverlapping(
+                    process.image_name.as_ptr(),
+                    (runtime.posix_shm + prefix_bytes as Word) as *mut u8,
+                    bytes - prefix_bytes,
+                );
+            }
         }
-        write_target_memory(runtime, pid, user_buffer, bytes)?;
-        return Ok(bytes);
+        write_target_memory(runtime, pid, user_buffer, bytes as Word)?;
+        return Ok(bytes as Word);
     }
     Err(EINVAL)
 }
@@ -4641,14 +4736,9 @@ fn write_linux_pipe_stat(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Re
         return Err(EFAULT);
     }
     unsafe {
-        ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, LINUX_STAT_SIZE);
-        write_u64(runtime.posix_shm, 0);
-        write_u64(runtime.posix_shm + 8, 0);
-        write_u64(runtime.posix_shm + 16, 1);
-        write_u32(runtime.posix_shm + 24, (LINUX_S_IFIFO | 0o600) as u32);
-        write_u64(runtime.posix_shm + 56, 4096);
+        arch::write_stat_buffer(runtime.posix_shm, 0, 4096, LINUX_S_IFIFO | 0o600, 0);
     }
-    write_target_memory(runtime, pid, user_ptr, LINUX_STAT_SIZE as Word)
+    write_target_memory(runtime, pid, user_ptr, STAT_SIZE as Word)
 }
 
 fn sys_uname(runtime: &mut Runtime, pid: Word, user_buffer: Word) -> Result<Word, i32> {
@@ -4662,7 +4752,7 @@ fn sys_uname(runtime: &mut Runtime, pid: Word, user_buffer: Word) -> Result<Word
     write_uts_field(runtime.posix_shm, 65, b"nanami");
     write_uts_field(runtime.posix_shm, 130, b"0.1.0");
     write_uts_field(runtime.posix_shm, 195, b"#1 Nanami/A9N");
-    write_uts_field(runtime.posix_shm, 260, b"x86_64");
+    write_uts_field(runtime.posix_shm, 260, UNAME_MACHINE);
     write_uts_field(runtime.posix_shm, 325, b"(none)");
     write_target_memory(runtime, pid, user_buffer, 390)?;
     Ok(0)
@@ -6020,6 +6110,9 @@ fn trace_syscall_action(
     context: LinuxSyscallContext,
     action: EmulationAction,
 ) {
+    if !runtime.trace_ever_enabled {
+        return;
+    }
     let Some(process) = runtime.managed_process(pid) else {
         return;
     };
@@ -6080,6 +6173,9 @@ fn trace_syscall_action(
 }
 
 fn record_syscall_result(runtime: &mut Runtime, pid: Word, syscall: Word, value: isize) {
+    if !runtime.trace_ever_enabled {
+        return;
+    }
     if let Some(process) = runtime.managed_process_mut(pid) {
         if !process.trace_enabled {
             return;
@@ -6101,6 +6197,9 @@ fn record_action_result(runtime: &mut Runtime, pid: Word, syscall: Word, action:
 }
 
 fn process_trace_enabled(runtime: &Runtime, pid: Word) -> bool {
+    if !runtime.trace_ever_enabled {
+        return false;
+    }
     runtime
         .managed_process(pid)
         .map(|process| process.trace_enabled)
@@ -6310,9 +6409,9 @@ fn syscall_arg_count(number: Word) -> usize {
         SYS_CLOSE | SYS_EXIT | SYS_EXIT_GROUP | SYS_PIPE | SYS_GETPGID => 1,
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
-        | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_UNLINK | SYS_UTIMES | SYS_DUP2 | SYS_RENAME
-        | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID | SYS_MSYNC
-        | SYS_NANOSLEEP => 2,
+        | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
+        | SYS_RENAME | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID
+        | SYS_MSYNC | SYS_NANOSLEEP => 2,
         SYS_READ
         | SYS_WRITE
         | SYS_READV
@@ -6349,7 +6448,7 @@ fn syscall_arg_count(number: Word) -> usize {
         | SYS_SCHED_GETAFFINITY => 3,
         SYS_MMAP | SYS_SELECT | SYS_PSELECT6 | SYS_PRLIMIT64 | SYS_UTIMENSAT | SYS_RENAMEAT
         | SYS_READLINKAT | SYS_MKNODAT | SYS_FACCESSAT2 => 4,
-        SYS_CLONE | SYS_STATX | SYS_FCHOWNAT => 5,
+        SYS_CLONE | SYS_STATX | SYS_FCHOWNAT | SYS_LINKAT => 5,
         _ => 6,
     }
 }
@@ -6406,6 +6505,7 @@ fn syscall_name(number: Word) -> &'static [u8] {
         SYS_GETCWD => b"getcwd",
         SYS_CHDIR => b"chdir",
         SYS_RENAME => b"rename",
+        SYS_LINK => b"link",
         SYS_MKDIR => b"mkdir",
         SYS_RMDIR => b"rmdir",
         SYS_UNLINK => b"unlink",
@@ -6437,6 +6537,7 @@ fn syscall_name(number: Word) -> &'static [u8] {
         SYS_FUTIMESAT => b"futimesat",
         SYS_NEWFSTATAT => b"newfstatat",
         SYS_UNLINKAT => b"unlinkat",
+        SYS_LINKAT => b"linkat",
         SYS_RENAMEAT => b"renameat",
         SYS_READLINKAT => b"readlinkat",
         SYS_FACCESSAT => b"faccessat",
@@ -7050,7 +7151,7 @@ fn rewrite_linux_stack(
     cursor = push_bytes_to_stack(
         stack_buffer,
         cursor,
-        b"x86_64",
+        PLATFORM,
         &mut platform_guest,
         stack_base,
     )?;
@@ -7827,19 +7928,9 @@ fn write_linux_stat(
     let mode = linux_mode_for_kind(kind);
     let rdev = ((major & 0xfff) << 8) | (minor & 0xff);
     unsafe {
-        ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, LINUX_STAT_SIZE);
-        write_u64(runtime.posix_shm, 0);
-        write_u64(runtime.posix_shm + 8, inode);
-        write_u64(runtime.posix_shm + 16, 1);
-        write_u32(runtime.posix_shm + 24, mode as u32);
-        write_u32(runtime.posix_shm + 28, 0);
-        write_u32(runtime.posix_shm + 32, 0);
-        write_u64(runtime.posix_shm + 40, rdev);
-        write_u64(runtime.posix_shm + 48, size);
-        write_u64(runtime.posix_shm + 56, 4096);
-        write_u64(runtime.posix_shm + 64, align_up_word(size, 512) / 512);
+        arch::write_stat_buffer(runtime.posix_shm, inode, size, mode, rdev);
     }
-    write_target_memory(runtime, pid, user_ptr, LINUX_STAT_SIZE as Word)
+    write_target_memory(runtime, pid, user_ptr, STAT_SIZE as Word)
 }
 
 fn write_linux_statx(
@@ -7915,10 +8006,7 @@ fn terminal_bounded_len(runtime: &Runtime, len: Word) -> Result<Word, i32> {
 }
 
 fn terminal_id_for_pid(runtime: &Runtime, pid: Word) -> Result<Word, i32> {
-    let terminal_id = runtime
-        .managed_process(pid)
-        .map(|process| process.terminal_id)
-        .ok_or(ESRCH)?;
+    let terminal_id = runtime.terminal_id(pid).ok_or(ESRCH)?;
     if terminal_id == 0 {
         return Err(ENOTTY);
     }
@@ -8202,10 +8290,10 @@ fn ensure_standard_terminal_fd(runtime: &mut Runtime, pid: Word, fd: Word) {
     if fd > 2 || runtime.linux_file(pid, fd).is_some() {
         return;
     }
-    let Some(process) = runtime.managed_process(pid) else {
+    let Some(terminal_id) = runtime.terminal_id(pid) else {
         return;
     };
-    if process.terminal_id == 0 {
+    if terminal_id == 0 {
         return;
     }
     if runtime.set_linux_file(pid, fd, LinuxFile::terminal()) {
@@ -8681,9 +8769,11 @@ const ENOTCONN: i32 = 107;
 const ENOTSOCK: i32 = 88;
 const EINPROGRESS: i32 = 115;
 
-const LINUX_STAT_SIZE: usize = 144;
 const LINUX_STATX_SIZE: usize = 256;
 const LINUX_PAGE_SIZE: Word = 4096;
+// read_c_string() uses [0, LINUX_PAGE_SIZE) as its page-sized scratch area.
+// Keep the saved first pathname outside it for two-path syscalls.
+const LINUX_SECOND_PATH_OFFSET: Word = LINUX_PAGE_SIZE;
 const LINUX_CPU_MASK_BYTES: Word = 8;
 const LINUX_ITIMERVAL_BYTES: Word = 32;
 const LINUX_ITIMER_PROF: Word = 2;
@@ -8708,6 +8798,7 @@ const LINUX_EXEC_STRING_MAX: usize = 4096;
 const LINUX_EXEC_PATH_MAX: usize = 256;
 const LINUX_AT_FDCWD: Word = (-100isize) as Word;
 const LINUX_AT_REMOVEDIR: Word = 0x200;
+const LINUX_AT_SYMLINK_FOLLOW: Word = 0x400;
 const LINUX_AT_EMPTY_PATH: Word = 0x1000;
 const LINUX_PROT_NONE: Word = 0x0;
 const LINUX_PROT_READ: Word = 0x1;
@@ -8919,115 +9010,6 @@ const AT_CLKTCK: Word = 17;
 const AT_SECURE: Word = 23;
 const AT_RANDOM: Word = 25;
 const AT_EXECFN: Word = 31;
-
-pub const SYS_READ: Word = 0;
-pub const SYS_WRITE: Word = 1;
-pub const SYS_OPEN: Word = 2;
-pub const SYS_CLOSE: Word = 3;
-pub const SYS_POLL: Word = 7;
-pub const SYS_STAT: Word = 4;
-pub const SYS_FSTAT: Word = 5;
-pub const SYS_LSTAT: Word = 6;
-pub const SYS_LSEEK: Word = 8;
-pub const SYS_RT_SIGACTION: Word = 13;
-pub const SYS_RT_SIGPROCMASK: Word = 14;
-pub const SYS_RT_SIGSUSPEND: Word = 130;
-pub const SYS_SIGALTSTACK: Word = 131;
-pub const SYS_IOCTL: Word = 16;
-pub const SYS_READV: Word = 19;
-pub const SYS_WRITEV: Word = 20;
-pub const SYS_PIPE: Word = 22;
-pub const SYS_MMAP: Word = 9;
-pub const SYS_MPROTECT: Word = 10;
-pub const SYS_MUNMAP: Word = 11;
-pub const SYS_MSYNC: Word = 26;
-pub const SYS_MREMAP: Word = 25;
-pub const SYS_MADVISE: Word = 28;
-pub const SYS_BRK: Word = 12;
-pub const SYS_ACCESS: Word = 21;
-pub const SYS_SELECT: Word = 23;
-pub const SYS_DUP: Word = 32;
-pub const SYS_DUP2: Word = 33;
-pub const SYS_NANOSLEEP: Word = 35;
-pub const SYS_SETITIMER: Word = 38;
-pub const SYS_GETPID: Word = 39;
-pub const SYS_SOCKET: Word = 41;
-pub const SYS_CONNECT: Word = 42;
-pub const SYS_ACCEPT: Word = 43;
-pub const SYS_SENDTO: Word = 44;
-pub const SYS_RECVFROM: Word = 45;
-pub const SYS_SENDMSG: Word = 46;
-pub const SYS_RECVMSG: Word = 47;
-pub const SYS_SHUTDOWN: Word = 48;
-pub const SYS_BIND: Word = 49;
-pub const SYS_LISTEN: Word = 50;
-pub const SYS_GETSOCKNAME: Word = 51;
-pub const SYS_GETPEERNAME: Word = 52;
-pub const SYS_SETSOCKOPT: Word = 54;
-pub const SYS_GETSOCKOPT: Word = 55;
-pub const SYS_FCNTL: Word = 72;
-pub const SYS_CLONE: Word = 56;
-pub const SYS_FORK: Word = 57;
-pub const SYS_VFORK: Word = 58;
-pub const SYS_EXECVE: Word = 59;
-pub const SYS_EXIT: Word = 60;
-pub const SYS_WAIT4: Word = 61;
-pub const SYS_KILL: Word = 62;
-pub const SYS_UNAME: Word = 63;
-pub const SYS_GETCWD: Word = 79;
-pub const SYS_CHDIR: Word = 80;
-pub const SYS_RENAME: Word = 82;
-pub const SYS_MKDIR: Word = 83;
-pub const SYS_RMDIR: Word = 84;
-pub const SYS_CREAT: Word = 85;
-pub const SYS_UNLINK: Word = 87;
-pub const SYS_READLINK: Word = 89;
-pub const SYS_CHOWN: Word = 92;
-pub const SYS_FCHOWN: Word = 93;
-pub const SYS_LCHOWN: Word = 94;
-pub const SYS_GETUID: Word = 102;
-pub const SYS_GETGID: Word = 104;
-pub const SYS_GETEUID: Word = 107;
-pub const SYS_GETEGID: Word = 108;
-pub const SYS_GETPPID: Word = 110;
-pub const SYS_SETPGID: Word = 109;
-pub const SYS_GETRESUID: Word = 118;
-pub const SYS_GETRESGID: Word = 120;
-pub const SYS_GETPGID: Word = 121;
-pub const SYS_MKNOD: Word = 133;
-pub const SYS_GETTIMEOFDAY: Word = 96;
-pub const SYS_GETRLIMIT: Word = 97;
-pub const SYS_ARCH_PRCTL: Word = 158;
-pub const SYS_FUTEX: Word = 202;
-pub const SYS_SCHED_GETAFFINITY: Word = 204;
-pub const SYS_GETDENTS64: Word = 217;
-pub const SYS_GETTID: Word = 186;
-pub const SYS_SET_TID_ADDRESS: Word = 218;
-pub const SYS_CLOCK_GETTIME: Word = 228;
-pub const SYS_UTIMES: Word = 235;
-pub const SYS_EXIT_GROUP: Word = 231;
-pub const SYS_OPENAT: Word = 257;
-pub const SYS_MKDIRAT: Word = 258;
-pub const SYS_MKNODAT: Word = 259;
-pub const SYS_FCHOWNAT: Word = 260;
-pub const SYS_FUTIMESAT: Word = 261;
-pub const SYS_NEWFSTATAT: Word = 262;
-pub const SYS_UNLINKAT: Word = 263;
-pub const SYS_RENAMEAT: Word = 264;
-pub const SYS_READLINKAT: Word = 267;
-pub const SYS_FACCESSAT: Word = 269;
-pub const SYS_PSELECT6: Word = 270;
-pub const SYS_PPOLL: Word = 271;
-pub const SYS_SET_ROBUST_LIST: Word = 273;
-pub const SYS_UTIMENSAT: Word = 280;
-pub const SYS_PRLIMIT64: Word = 302;
-pub const SYS_GETRANDOM: Word = 318;
-pub const SYS_STATX: Word = 332;
-pub const SYS_RSEQ: Word = 334;
-pub const SYS_FACCESSAT2: Word = 439;
-pub const SYS_DUP3: Word = 292;
-pub const SYS_PIPE2: Word = 293;
-pub const SYS_ACCEPT4: Word = 288;
 
 const LINUX_DIRENT64_NAME_OFFSET: usize = 19;
 const LINUX_DT_UNKNOWN: Word = 0;

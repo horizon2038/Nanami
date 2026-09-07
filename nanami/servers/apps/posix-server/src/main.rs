@@ -135,6 +135,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_STAT => handle_stat(runtime, request),
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
+        POSIX_REQUEST_LINK => handle_link(runtime, request),
         POSIX_REQUEST_RENAME => handle_rename(runtime, request),
         POSIX_REQUEST_FSTAT => handle_fstat(runtime, request),
         POSIX_REQUEST_READ_DIR => handle_read_dir(runtime, request),
@@ -564,6 +565,34 @@ fn handle_unlink(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word,
         Err(e) => return (map_request_error_to_status(e), 0, 0),
     }
     match nanami_services::vfs::vfs_remove(runtime.vfs_port, VFS_PATH_OFFSET as Word, len as Word) {
+        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Err(e) => (map_request_error_to_status(e), 0, 0),
+    }
+}
+
+fn handle_link(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
+    let Some(index) = find_session(runtime, request.identifier) else {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some((old_path, old_len)) =
+        resolve_client_path(runtime, index, request.arg0 as usize, request.arg1 as usize)
+    else {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some((new_path, new_len)) =
+        resolve_client_path(runtime, index, request.arg2 as usize, request.arg3 as usize)
+    else {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    write_vfs_path(runtime, VFS_PATH_OFFSET, &old_path[..old_len]);
+    write_vfs_path(runtime, VFS_PATH2_OFFSET, &new_path[..new_len]);
+    match nanami_services::vfs::vfs_link(
+        runtime.vfs_port,
+        VFS_PATH_OFFSET as Word,
+        old_len as Word,
+        VFS_PATH2_OFFSET as Word,
+        new_len as Word,
+    ) {
         Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
         Err(e) => (map_request_error_to_status(e), 0, 0),
     }

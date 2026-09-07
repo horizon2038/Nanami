@@ -71,6 +71,37 @@ pub fn linux_open(path: *const u8, flags: usize) -> isize {
     ret
 }
 
+pub fn linux_link(old_path: *const u8, new_path: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") 86usize => ret,
+            in("rdi") old_path,
+            in("rsi") new_path,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+pub fn linux_unlink(path: *const u8) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") 87usize => ret,
+            in("rdi") path,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 pub fn linux_readv(fd: usize, iov: *const LinuxIoVec, count: usize) -> isize {
     let ret: isize;
     unsafe {

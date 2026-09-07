@@ -12,7 +12,7 @@ pub mod common;
 #[path = "../../shared/src/personality.rs"]
 pub mod personality;
 
-pub use crate::common::{abi, elf, fault, launch, loader, process, state};
+pub use crate::common::{abi, arch, elf, fault, launch, loader, process, state};
 pub use crate::personality::linux;
 
 use abi::*;

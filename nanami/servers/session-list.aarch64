@@ -1,0 +1,2 @@
+# No session is started until platform timer, display, and input drivers are
+# selected by the Device Driver Manager.

@@ -647,6 +647,28 @@ pub fn posix_unlink(
     Ok(())
 }
 
+pub fn posix_link(
+    service_port: CapabilityDescriptor,
+    old_path_offset: Word,
+    old_path_len: Word,
+    new_path_offset: Word,
+    new_path_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_LINK,
+        old_path_offset,
+        old_path_len,
+        new_path_offset,
+        new_path_len,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
 pub fn posix_rmdir(
     service_port: CapabilityDescriptor,
     path_offset: Word,

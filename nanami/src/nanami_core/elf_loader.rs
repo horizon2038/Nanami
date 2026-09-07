@@ -5,6 +5,10 @@ const ELF64_PHDR_SIZE: usize = 56;
 const ELF64_SHDR_SIZE: usize = 64;
 const ELF64_SYM_SIZE: usize = 24;
 const ET_DYN: u16 = 3;
+#[cfg(target_arch = "x86_64")]
+const ELF_MACHINE: u16 = 0x3e;
+#[cfg(target_arch = "aarch64")]
+const ELF_MACHINE: u16 = 0xb7;
 const PT_LOAD: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_DYNSYM: u32 = 11;
@@ -60,6 +64,9 @@ fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, 
         return Err(CapabilityError::InvalidArgument);
     }
     if image[4] != 2 || image[5] != 1 {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    if read_u16(image, 18)? != ELF_MACHINE {
         return Err(CapabilityError::InvalidArgument);
     }
 

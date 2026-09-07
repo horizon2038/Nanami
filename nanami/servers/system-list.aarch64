@@ -1,0 +1,4 @@
+# Rootfs system services available in the headless AArch64 configuration.
+terminal-service 21 /bin/terminal-service
+posix-service 21 /bin/posix-server
+alter-linux 21 /bin/alter-linux

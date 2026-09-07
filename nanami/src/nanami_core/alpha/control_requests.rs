@@ -1,6 +1,21 @@
 use super::*;
 
 impl Alpha {
+    pub(super) fn handle_driver_platform_info_request(
+        &self,
+        request: OsRequestEvent,
+    ) -> Result<(usize, usize), CapabilityError> {
+        if request.identifier == 0 || request.identifier != self.driver_manager_pid {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        match request.arg0 {
+            crate::nanami_core::communication::DRIVER_PLATFORM_INFO_RSDP_ADDRESS => {
+                Ok((self.platform_rsdp_address, 0))
+            }
+            _ => Err(CapabilityError::InvalidArgument),
+        }
+    }
+
     pub(super) fn handle_nanami_control_request(
         &mut self,
         request: OsRequestEvent,
@@ -40,6 +55,16 @@ impl Alpha {
             NANAMI_INFO_PROCESS => {
                 let info = self.processes.statistics();
                 Ok((info.running, info.exited))
+            }
+            NANAMI_INFO_SMP => {
+                let online_cores = self.processes.online_core_count();
+                Ok((online_cores, self.processes.active_core_mask()))
+            }
+            NANAMI_INFO_ARCHITECTURE_NAME => {
+                encode_info_name_chunk(&self.architecture_name, request.arg1)
+            }
+            NANAMI_INFO_PLATFORM_NAME => {
+                encode_info_name_chunk(&self.platform_name, request.arg1)
             }
             _ => Err(CapabilityError::InvalidArgument),
         }

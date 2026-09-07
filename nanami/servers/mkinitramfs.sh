@@ -8,6 +8,8 @@ APPS="${APPS:-all}"
 EXTRA_LINUX_BINS="${EXTRA_LINUX_BINS:-}"
 EXTRA_FREEBSD_BINS="${EXTRA_FREEBSD_BINS:-}"
 RUST_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+NANAMI_RUST_TARGET_NAME="${NANAMI_RUST_TARGET_NAME:-x86_64-unknown-a9n}"
+NANAMI_TARGET_ARCH="${NANAMI_TARGET_ARCH:-${NANAMI_RUST_TARGET_NAME%%-*}}"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/bin"
@@ -33,12 +35,26 @@ is_selected() {
     return 1
 }
 
+is_supported_on_target() {
+    app_name="$1"
+    if [ "$NANAMI_TARGET_ARCH" = "aarch64" ]; then
+        case "$app_name" in
+            ahci-server|hpet-server|timer-server) return 1 ;;
+        esac
+    fi
+    return 0
+}
+
 copy_count=0
 
 for manifest in boot-list; do
-    if [ -f "$ROOT_DIR/$manifest" ]; then
-        cp "$ROOT_DIR/$manifest" "$STAGE_DIR/nanami/$manifest"
-        echo "[initramfs] + $STAGE_DIR/nanami/$manifest (from $ROOT_DIR/$manifest)"
+    manifest_source="$ROOT_DIR/$manifest"
+    if [ -f "$ROOT_DIR/$manifest.$NANAMI_TARGET_ARCH" ]; then
+        manifest_source="$ROOT_DIR/$manifest.$NANAMI_TARGET_ARCH"
+    fi
+    if [ -f "$manifest_source" ]; then
+        cp "$manifest_source" "$STAGE_DIR/nanami/$manifest"
+        echo "[initramfs] + $STAGE_DIR/nanami/$manifest (from $manifest_source)"
         copy_count=$((copy_count + 1))
     fi
 done
@@ -71,6 +87,7 @@ for app_dir in "$ROOT_DIR"/core-services/* "$ROOT_DIR"/core-services/*/*; do
     [ -d "$app_dir" ] || continue
     app_rel=${app_dir#"$ROOT_DIR"/core-services/}
     app_name=$(printf '%s' "$app_rel" | tr '/' '-')
+    is_supported_on_target "$app_name" || continue
 
     # C++ app outputs: core-services/<name>/build/*.elf
     if [ -f "$app_dir/Makefile" ] && is_selected "$app_name" cpp; then
@@ -88,7 +105,7 @@ for app_dir in "$ROOT_DIR"/core-services/* "$ROOT_DIR"/core-services/*/*; do
     if [ -f "$app_dir/Cargo.toml" ] && is_selected "$app_name" rust; then
         crate_name=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' "$app_dir/Cargo.toml" | head -n 1)
         if [ -n "$crate_name" ]; then
-            bin="$RUST_TARGET_DIR/x86_64-unknown-a9n/release/$crate_name"
+            bin="$RUST_TARGET_DIR/$NANAMI_RUST_TARGET_NAME/release/$crate_name"
             if [ -f "$bin" ]; then
                 dst="$STAGE_DIR/bin/$app_name"
                 cp "$bin" "$dst"

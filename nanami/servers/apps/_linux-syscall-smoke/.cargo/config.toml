@@ -9,3 +9,8 @@ build-std-features = ["compiler-builtins-mem"]
 rustflags = [
   "-C", "link-arg=-T../../sdk/arch/x86_64/linker/nanami_user.ld",
 ]
+
+[target.aarch64-unknown-a9n]
+rustflags = [
+  "-C", "link-arg=-T../../sdk/arch/aarch64/linker/nanami_user.ld",
+]

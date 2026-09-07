@@ -1,0 +1,24 @@
+[package]
+name = "hpet_server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hpet_server"
+path = "../timer-server/src/main.rs"
+
+[dependencies]
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+
+[features]
+default = ["hpet"]
+hpet = []
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

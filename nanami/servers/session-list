@@ -4,3 +4,4 @@
 #
 # System Manager starts these after all system-list entries have been spawned.
 shell 16 /bin/shell
+# alter-linux-test 16 /bin/alter-linux-test

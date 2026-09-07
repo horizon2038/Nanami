@@ -31,6 +31,12 @@ fn main(init_info: &InitInfo) {
         init_info.get_pre_release_string(),
         init_info.get_build_metadata_string()
     );
+    crate::force_info!(
+        "Environment: architecture={} platform={} cores={}",
+        init_info.get_architecture_name_string(),
+        init_info.get_platform_name_string(),
+        init_info.core_count
+    );
 
     crate::info!("[entry] main entered");
     unsafe {

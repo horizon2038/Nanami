@@ -7,6 +7,7 @@ use nun::{CapabilityDescriptor, CapabilityError, Word};
 pub const PROCESS_ROOT_SLOT_BASE: usize = 200;
 pub const MAX_IO_RANGES_PER_PROCESS: usize = 16;
 pub const MAX_IRQS_PER_PROCESS: usize = 8;
+pub const A9N_CPU_COUNT_MAX: Word = 64;
 
 const INVALID_IRQ: Word = usize::MAX;
 const USER_PAGE_SIZE: usize = 4096;
@@ -34,6 +35,7 @@ pub struct ProcessEntry {
     pub address_space: CapabilityDescriptor,
     pub os_port: CapabilityDescriptor,
     pub os_port_identifier: Word,
+    pub affinity: Word,
     pub irq_count: usize,
     pub irq_numbers: [Word; MAX_IRQS_PER_PROCESS],
     pub io_range_count: usize,
@@ -73,6 +75,8 @@ pub struct ProcessManager {
     alpha_entry: ProcessEntry,
     alpha_vm_space: *mut BootstrapVmSpace,
     next_pid: usize,
+    online_core_count: Word,
+    next_affinity: Word,
     root_slot_limit: usize,
     reserved_root_slots: &'static [usize],
     entries: Vec<ProcessEntry>,
@@ -133,7 +137,12 @@ impl ProcessManager {
         alpha_os_port: CapabilityDescriptor,
         root_slot_limit: usize,
         reserved_root_slots: &'static [usize],
-    ) -> Self {
+        online_core_count: Word,
+    ) -> Result<Self, CapabilityError> {
+        if !(1..=A9N_CPU_COUNT_MAX).contains(&online_core_count) {
+            crate::error!("[smp.err] invalid init_info.core_count={}", online_core_count);
+            return Err(CapabilityError::InvalidArgument);
+        }
         crate::info!("process: ProcessManager::new_alpha");
         let alpha_entry = ProcessEntry {
             used: true,
@@ -145,6 +154,7 @@ impl ProcessManager {
             address_space: alpha_address_space,
             os_port: alpha_os_port,
             os_port_identifier: 0,
+            affinity: 0,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,
@@ -157,10 +167,12 @@ impl ProcessManager {
             exit_code: 0,
         };
         let alpha_vm_space = core::ptr::addr_of_mut!(ALPHA_VM_SPACE);
-        Self {
+        Ok(Self {
             alpha_entry,
             alpha_vm_space,
             next_pid: 1,
+            online_core_count,
+            next_affinity: if online_core_count > 1 { 1 } else { 0 },
             root_slot_limit,
             reserved_root_slots,
             entries: Vec::new(),
@@ -170,7 +182,7 @@ impl ProcessManager {
             physical_allocations: Vec::new(),
             deferred_physical_allocations: Vec::new(),
             lazy_mappings: Vec::new(),
-        }
+        })
     }
 
     pub fn alpha_vm_space_mut(&mut self) -> &mut BootstrapVmSpace {
@@ -179,6 +191,41 @@ impl ProcessManager {
 
     pub fn alpha_entry(&self) -> ProcessEntry {
         self.alpha_entry
+    }
+
+    pub fn online_core_count(&self) -> Word {
+        self.online_core_count
+    }
+
+    pub fn allocate_affinity(&mut self) -> Word {
+        if self.online_core_count <= 1 {
+            return 0;
+        }
+
+        let affinity = if self.next_affinity == 0 || self.next_affinity >= self.online_core_count {
+            1
+        } else {
+            self.next_affinity
+        };
+        self.next_affinity = affinity + 1;
+        if self.next_affinity >= self.online_core_count {
+            self.next_affinity = 1;
+        }
+        affinity
+    }
+
+    pub fn active_core_mask(&self) -> Word {
+        let mut mask = if self.alpha_entry.used && !self.alpha_entry.exited {
+            1usize << self.alpha_entry.affinity
+        } else {
+            0
+        };
+        for entry in self.entries.iter() {
+            if entry.used && !entry.exited && entry.affinity < Word::BITS as usize {
+                mask |= 1usize << entry.affinity;
+            }
+        }
+        mask
     }
 
     pub fn vm_space_mut(&mut self, pid: usize) -> Option<&mut VmSpace> {
@@ -496,6 +543,7 @@ impl ProcessManager {
         address_space: CapabilityDescriptor,
         os_port: CapabilityDescriptor,
         os_port_identifier: Word,
+        affinity: Word,
         next_frame_slot: usize,
         user_heap_next_va: usize,
         user_heap_limit_va: usize,
@@ -510,6 +558,7 @@ impl ProcessManager {
             address_space,
             os_port,
             os_port_identifier,
+            affinity,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,

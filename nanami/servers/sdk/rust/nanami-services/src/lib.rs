@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod block;
+pub mod device;
 pub mod exec;
 pub mod gfx;
 pub mod input;

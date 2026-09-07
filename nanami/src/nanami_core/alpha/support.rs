@@ -1,5 +1,24 @@
 use super::*;
 
+// Names in init_info are 32-byte C strings. Return two words per request,
+// preserving the complete field rather than truncating it to one IPC reply.
+pub(super) fn encode_info_name_chunk(
+    name: &[u8; 32],
+    chunk: Word,
+) -> Result<(Word, Word), CapabilityError> {
+    const WORD_BYTES: usize = core::mem::size_of::<Word>();
+    const CHUNK_BYTES: usize = 2 * WORD_BYTES;
+    if chunk >= name.len() / CHUNK_BYTES {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    let start = chunk * CHUNK_BYTES;
+    let mut first = [0u8; WORD_BYTES];
+    let mut second = [0u8; WORD_BYTES];
+    first.copy_from_slice(&name[start..start + WORD_BYTES]);
+    second.copy_from_slice(&name[start + WORD_BYTES..start + CHUNK_BYTES]);
+    Ok((Word::from_le_bytes(first), Word::from_le_bytes(second)))
+}
+
 pub(super) fn validate_process_device_slot(slot: usize) -> Result<(), CapabilityError> {
     if slot < PROCESS_DEVICE_SLOT_MIN || slot > PROCESS_DEVICE_SLOT_MAX {
         return Err(CapabilityError::InvalidArgument);
@@ -310,13 +329,16 @@ pub(super) fn pack_framebuffer_color_information(
 pub(super) fn process_priority_for_image(image_name: &str) -> Word {
     match strip_elf_suffix(basename(image_name)) {
         // Timer must preempt clients promptly; animation and network timeouts depend on it.
-        "timer-server" => PROCESS_PRIORITY_TIMER_SERVER,
+        "timer-server" | "hpet-server" => PROCESS_PRIORITY_TIMER_SERVER,
         // Input pipeline must stay above the compositor and every input consumer.
         "input-server" | "ps2-server" => PROCESS_PRIORITY_INPUT_SERVER,
         // GUI servers are above GUI clients, but below timer/input IRQ-facing services.
         "fb-server" | "honoka" => PROCESS_PRIORITY_GUI_SERVER,
         // Background servers stay above clients, but below the GUI critical path.
-        "block-device-server" | "virtio-blk-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
+        "block-device-server" | "virtio-blk-server" | "ahci-server" => {
+            PROCESS_PRIORITY_BACKGROUND_SERVER + 2
+        }
+        "driver-manager" => PROCESS_PRIORITY_TIMER_SERVER,
         "virtio-net" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
         "ext2-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
         "net-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
@@ -396,7 +418,7 @@ pub(super) fn parse_boot_list_line(line: &str) -> Option<BootListEntry<'_>> {
     let priority = parse_decimal_word(tokens.next()?)?;
     let image_path = tokens.next()?;
     Some(BootListEntry {
-        _name: name,
+        name,
         priority,
         image_path,
     })

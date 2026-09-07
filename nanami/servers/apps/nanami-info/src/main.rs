@@ -22,8 +22,10 @@ fn nanami_main() -> libnanami::NanamiResult {
     match libnanami::process_arg(1) {
         Some(b"memory") => write_memory_info(&mut text),
         Some(b"process") => write_process_info(&mut text),
+        Some(b"smp") => write_smp_info(&mut text),
+        Some(b"platform") => write_platform_info(&mut text),
         _ => {
-            let _ = text.write_str("usage: nanami-info memory|process\n");
+            let _ = text.write_str("usage: nanami-info memory|process|smp|platform\n");
         }
     }
     write_output(text.as_bytes());
@@ -56,6 +58,38 @@ fn write_process_info(text: &mut FixedText) {
         }
         Err(error) => {
             let _ = writeln!(text, "nanami-info: process request failed: {}", error);
+        }
+    }
+}
+
+fn write_smp_info(text: &mut FixedText) {
+    match libnanami::request_nanami_info_smp() {
+        Ok(info) => {
+            let _ = writeln!(text, "SMP");
+            let _ = writeln!(
+                text,
+                "  enabled: {}",
+                if info.enabled { "yes" } else { "no" }
+            );
+            let _ = writeln!(text, "  online cores: {}", info.online_cores);
+            let _ = writeln!(text, "  active core mask: {:#x}", info.active_core_mask);
+        }
+        Err(error) => {
+            let _ = writeln!(text, "nanami-info: smp request failed: {}", error);
+        }
+    }
+}
+
+fn write_platform_info(text: &mut FixedText) {
+    match libnanami::request_nanami_info_platform() {
+        Ok(info) => {
+            let _ = writeln!(text, "Platform");
+            let _ = writeln!(text, "  architecture: {}", info.architecture_name());
+            let _ = writeln!(text, "  platform: {}", info.platform_name());
+            let _ = writeln!(text, "  available cores: {}", info.core_count);
+        }
+        Err(error) => {
+            let _ = writeln!(text, "nanami-info: platform request failed: {}", error);
         }
     }
 }

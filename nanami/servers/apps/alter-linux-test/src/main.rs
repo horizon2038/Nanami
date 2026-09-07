@@ -15,11 +15,12 @@ const ALTER_REQUEST_KILL_TERMINAL: Word = 0xb107;
 const ALTER_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 const TEST_TIMEOUT_MS: Word = 300_000;
-const DIRECT_ARGV: [&[u8]; 2] = [b"/alter/linux/bin/iwasm", b"/bin/hello-world.wasm"];
+const DIRECT_ARGV: [&[u8]; 1] = [b"/alter/linux/bin/linux-syscall-smoke"];
 const BASH_ARGV: [&[u8]; 1] = [b"/alter/linux/bin/bash"];
 const TEST_ENV: [&[u8]; 4] = [b"PATH=/bin:/usr/bin", b"PWD=/", b"HOME=/", b"TERM=nanami"];
 const IWASM_COMMAND: &[u8] =
     b"iwasm /bin/hello-world.wasm; printf '\\036IWASM-STATUS:%s\\037\\n' \"$?\"\n";
+const BUSYBOX_INSTALL_COMMAND: &[u8] = b"busybox mkdir /tmp/busybox-bin; busybox --install /tmp/busybox-bin && /tmp/busybox-bin/echo busybox-installed; printf '\\036BUSYBOX-INSTALL:%s\\037\\n' \"$?\"\n";
 const NETWORK_COMMAND: &[u8] = b"busybox ip a; printf '\\036IP-STATUS:%s\\037\\n' \"$?\"; busybox ping -c 1 -W 3 10.0.2.2; printf '\\036PING-STATUS:%s\\037\\n' \"$?\"; busybox nslookup example.com 10.0.2.3 >/tmp/nslookup.out 2>&1; printf '\\036UDP-STATUS:%s\\037\\n' \"$?\"; printf 'alter-tcp-ok' | busybox nc -w 3 10.0.2.2 18080; printf '\\036TCP-STATUS:%s\\037\\n' \"$?\"\n";
 const VIRTUAL_DEV_COMMAND: &[u8] =
     b"busybox ls /dev/input; printf '\\036DEV-STATUS:%s\\037\\n' \"$?\"\n";
@@ -38,8 +39,11 @@ const GRAPHICS_COMMAND: &[u8] =
 const KEYBOARD_ARGV: [&[u8]; 3] = [b"/alter/linux/bin/busybox", b"cat", b"/dev/input/event0"];
 const MOUSE_ARGV: [&[u8]; 3] = [b"/alter/linux/bin/busybox", b"cat", b"/dev/input/event1"];
 const PROMPT: &[u8] = b"# ";
-const WASM_OUTPUT: &[u8] = b"Hello, Alter/Linux + WAMR!";
+const DIRECT_OUTPUT: &[u8] = b"Linux syscall smoke test passed!";
+const IWASM_OUTPUT: &[u8] = b"Hello, Alter/Linux + WAMR!";
 const STATUS_OUTPUT: &[u8] = b"\x1eIWASM-STATUS:0\x1f";
+const BUSYBOX_INSTALLED_OUTPUT: &[u8] = b"busybox-installed";
+const BUSYBOX_INSTALL_OUTPUT: &[u8] = b"\x1eBUSYBOX-INSTALL:0\x1f";
 const IP_LINK_OUTPUT: &[u8] = b"eth0";
 const IP_STATUS_OUTPUT: &[u8] = b"\x1eIP-STATUS:0\x1f";
 const PING_STATUS_OUTPUT: &[u8] = b"\x1ePING-STATUS:0\x1f";
@@ -68,7 +72,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::println!("[alter-test] iwasm regression start");
+    libnanami::println!("[alter-test] regression start");
     libnanami::ipc::init_ipc_tls()?;
 
     let alter_port = connect_service("alter-linux", SLOT_ALTER_LINUX)?;
@@ -78,13 +82,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     if alter_shm_size < 0x1000 {
         return fail("alter shared memory too small", alter_port, 0);
     }
-
     let (terminal_shm, terminal_shm_size) =
         nanami_services::terminal::terminal_attach_shared_memory(terminal_port, 0x4000)?;
     if terminal_shm_size < 0x1000 {
         return fail("terminal shared memory too small", alter_port, 0);
     }
-
     libnanami::request_notification_port_create(SLOT_TEST_NOTIFICATION, 0)?;
     let terminal_id = nanami_services::terminal::terminal_create(terminal_port, 80, 24)?;
     nanami_services::terminal::terminal_attach_output_notification(
@@ -97,7 +99,6 @@ fn nanami_main() -> libnanami::NanamiResult {
         TEST_TIMEOUT_MS,
         SLOT_TEST_NOTIFICATION,
     )?;
-
     let launch_len = write_launch_block(alter_shm, &DIRECT_ARGV, &TEST_ENV);
     let (status, direct_pid, _) = libnanami::call_service_port(
         alter_port,
@@ -109,11 +110,11 @@ fn nanami_main() -> libnanami::NanamiResult {
         5,
     )?;
     if status != libnanami::OS_RESPONSE_OK {
-        return fail("direct iwasm spawn failed", alter_port, terminal_id);
+        return fail("Linux syscall smoke spawn failed", alter_port, terminal_id);
     }
 
     let notification = libnanami::ipc::process_slot_descriptor(SLOT_TEST_NOTIFICATION);
-    let mut direct_patterns = [(WASM_OUTPUT, 0usize)];
+    let mut direct_patterns = [(DIRECT_OUTPUT, 0usize)];
     if !wait_for_output(
         terminal_port,
         terminal_id,
@@ -121,16 +122,29 @@ fn nanami_main() -> libnanami::NanamiResult {
         notification,
         &mut direct_patterns,
     )? {
-        return fail("direct iwasm output timeout", alter_port, terminal_id);
+        return fail(
+            "Linux syscall smoke output timeout",
+            alter_port,
+            terminal_id,
+        );
     }
     if !wait_for_exit(alter_port, timer_port, direct_pid)? {
-        return fail("direct iwasm status failed", alter_port, terminal_id);
+        return fail("Linux syscall smoke status failed", alter_port, terminal_id);
     }
     let _ = libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, direct_pid, 1, 0, 0, 3);
     libnanami::println!(
-        "[alter-test] PASS direct iwasm pid={} output-and-status-ok",
+        "[alter-test] PASS Linux syscall smoke pid={} output-and-status-ok",
         direct_pid
     );
+
+    if cfg!(target_arch = "aarch64") {
+        libnanami::println!(
+            "[alter-test] PASS AArch64 Linux ELF pid={} syscalls-and-link-ok",
+            direct_pid
+        );
+        cleanup(alter_port, terminal_id);
+        return Ok(());
+    }
 
     let launch_len = write_launch_block(alter_shm, &BASH_ARGV, &TEST_ENV);
     let (status, bash_pid, _) = libnanami::call_service_port(
@@ -158,9 +172,30 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 
     nanami_services::terminal::terminal_set_echo(terminal_port, terminal_id, false)?;
+    write_terminal_input(
+        terminal_port,
+        terminal_id,
+        terminal_shm,
+        BUSYBOX_INSTALL_COMMAND,
+    )?;
+    let mut busybox_install_patterns = [
+        (BUSYBOX_INSTALLED_OUTPUT, 0usize),
+        (BUSYBOX_INSTALL_OUTPUT, 0usize),
+    ];
+    if !wait_for_output(
+        terminal_port,
+        terminal_id,
+        terminal_shm,
+        notification,
+        &mut busybox_install_patterns,
+    )? {
+        return fail("busybox --install failed", alter_port, terminal_id);
+    }
+    libnanami::println!("[alter-test] PASS busybox --install hard links");
+
     write_terminal_input(terminal_port, terminal_id, terminal_shm, IWASM_COMMAND)?;
 
-    let mut result_patterns = [(WASM_OUTPUT, 0usize), (STATUS_OUTPUT, 0usize)];
+    let mut result_patterns = [(IWASM_OUTPUT, 0usize), (STATUS_OUTPUT, 0usize)];
     if !wait_for_output(
         terminal_port,
         terminal_id,

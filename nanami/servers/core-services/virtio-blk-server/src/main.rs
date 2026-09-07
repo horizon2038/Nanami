@@ -9,40 +9,42 @@ use libnanami::{self, RequestError, Word};
 
 #[path = "app/arch.rs"]
 mod arch;
+#[cfg(target_arch = "x86_64")]
 #[path = "app/pci.rs"]
 mod pci;
 #[path = "app/util.rs"]
 mod util;
 
+use arch::*;
+#[cfg(target_arch = "x86_64")]
 use pci::{
     configure_pci_command_for_intx, disable_pci_msi_capabilities, resolve_irq_number,
     scan_virtio_blk,
 };
 use util::{fail_device, log_request_error};
 
+#[cfg(target_arch = "x86_64")]
 const SLOT_IO_PCI_CFG: Word = 16;
+#[cfg(target_arch = "x86_64")]
 const SLOT_IO_VIRTIO: Word = 17;
+#[cfg(target_arch = "x86_64")]
 const SLOT_NOTIFICATION: Word = 18;
+#[cfg(target_arch = "x86_64")]
 const SLOT_INTERRUPT: Word = 19;
 const SLOT_SERVICE_PORT: Word = 20;
 
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_VENDOR_ID: u16 = 0x1af4;
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_BLK_DEVICE_ID_LEGACY: u16 = 0x1001;
+#[cfg(target_arch = "x86_64")]
 const VIRTIO_BLK_DEVICE_ID_MODERN: u16 = 0x1042;
-
-const VIRTIO_PCI_DEVICE_FEATURES: Word = 0x00;
-const VIRTIO_PCI_GUEST_FEATURES: Word = 0x04;
-const VIRTIO_PCI_QUEUE_ADDRESS: Word = 0x08;
-const VIRTIO_PCI_QUEUE_SIZE: Word = 0x0c;
-const VIRTIO_PCI_QUEUE_SELECT: Word = 0x0e;
-const VIRTIO_PCI_QUEUE_NOTIFY: Word = 0x10;
-const VIRTIO_PCI_DEVICE_STATUS: Word = 0x12;
-const VIRTIO_PCI_ISR_STATUS: Word = 0x13;
-const VIRTIO_PCI_LEGACY_DEVICE_CONFIG_BASE: Word = 0x14;
 
 const VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1;
 const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
+#[cfg(target_arch = "aarch64")]
+const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 const VIRTIO_STATUS_FAILED: u8 = 128;
 
 const QUEUE_INDEX: u16 = 0;
@@ -64,6 +66,7 @@ const DMA_DATA_OFFSET: usize = DMA_HEADER_OFFSET + core::mem::size_of::<VirtioBl
 const DMA_STATUS_OFFSET: usize = DMA_DATA_OFFSET + MAX_TRANSFER_BYTES;
 const DMA_TOTAL_BYTES: usize = 0x9000;
 
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct VirtioPciDevice {
     bus: u8,
@@ -130,7 +133,9 @@ struct BlockRuntime {
     header_vaddr: usize,
     data_vaddr: usize,
     status_vaddr: usize,
-    capacity_sectors: u64,
+    disk_capacity_sectors: u64,
+    partition_start_sector: u64,
+    partition_sectors: u64,
 }
 
 #[panic_handler]
@@ -140,7 +145,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 fn vio_read(io_desc: Word, io_base: Word, offset: Word, width: Word) -> Result<Word, RequestError> {
-    libnanami::io::io_read(io_desc, io_base + offset, width)
+    arch::read(io_desc, io_base, offset, width)
 }
 
 fn vio_write(
@@ -150,21 +155,15 @@ fn vio_write(
     width: Word,
     value: Word,
 ) -> Result<(), RequestError> {
-    libnanami::io::io_write(io_desc, io_base + offset, width, value)
+    arch::write(io_desc, io_base, offset, width, value)
 }
 
 fn read_device_status(io_desc: Word, io_base: Word) -> Result<u8, RequestError> {
-    Ok(vio_read(io_desc, io_base, VIRTIO_PCI_DEVICE_STATUS, 1)? as u8)
+    Ok(vio_read(io_desc, io_base, REG_DEVICE_STATUS, 1)? as u8)
 }
 
 fn write_device_status(io_desc: Word, io_base: Word, status: u8) -> Result<(), RequestError> {
-    vio_write(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_DEVICE_STATUS,
-        1,
-        status as Word,
-    )
+    vio_write(io_desc, io_base, REG_DEVICE_STATUS, 1, status as Word)
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -216,23 +215,12 @@ unsafe fn used_ring_ptr(base: *mut u8, queue_size: u16) -> *mut VirtqUsedElem {
 }
 
 fn notify_queue(io_desc: Word, io_base: Word) -> Result<(), RequestError> {
-    vio_write(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_QUEUE_NOTIFY,
-        2,
-        QUEUE_INDEX as Word,
-    )
+    vio_write(io_desc, io_base, REG_QUEUE_NOTIFY, 2, QUEUE_INDEX as Word)
 }
 
 fn read_capacity_sectors(io_desc: Word, io_base: Word) -> Result<u64, RequestError> {
-    let lo = vio_read(io_desc, io_base, VIRTIO_PCI_LEGACY_DEVICE_CONFIG_BASE, 4)? as u64;
-    let hi = vio_read(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_LEGACY_DEVICE_CONFIG_BASE + 4,
-        4,
-    )? as u64;
+    let lo = vio_read(io_desc, io_base, REG_CONFIG_BASE, 4)? as u64;
+    let hi = vio_read(io_desc, io_base, REG_CONFIG_BASE + 4, 4)? as u64;
     Ok(lo | (hi << 32))
 }
 
@@ -240,19 +228,16 @@ fn submit_blk_request_dma(
     runtime: &mut BlockRuntime,
     dma_paddr_base: usize,
     request_type: u32,
-    block_index: usize,
+    sector: u64,
     bytes: usize,
 ) -> Result<(), RequestError> {
-    let sector = block_index
-        .checked_mul(BLOCK_SIZE / VIRTIO_SECTOR_BYTES)
-        .ok_or(RequestError::InvalidArgument)? as u64;
     let sector_count = (bytes / VIRTIO_SECTOR_BYTES) as u64;
     if bytes == 0
         || bytes > MAX_TRANSFER_BYTES
         || bytes % VIRTIO_SECTOR_BYTES != 0
         || sector
             .checked_add(sector_count)
-            .map_or(true, |end| end > runtime.capacity_sectors)
+            .map_or(true, |end| end > runtime.disk_capacity_sectors)
     {
         return Err(RequestError::InvalidArgument);
     }
@@ -332,14 +317,12 @@ fn submit_blk_request_dma(
                     libnanami::print!("{:#x}", status);
                     libnanami::print!(" type=");
                     libnanami::print!("{}", request_type as usize);
-                    libnanami::print!(" block=");
-                    libnanami::print!("{}", block_index);
                     libnanami::print!(" sector=");
                     libnanami::print!("{}", sector as usize);
                     libnanami::print!(" bytes=");
                     libnanami::print!("{}", bytes);
                     libnanami::print!(" capacity=");
-                    libnanami::print!("{}", runtime.capacity_sectors as usize);
+                    libnanami::print!("{}", runtime.disk_capacity_sectors as usize);
                     libnanami::print!("\n");
                     Err(RequestError::Unsupported)
                 };
@@ -349,7 +332,7 @@ fn submit_blk_request_dma(
         if runtime.irq_wait_enabled {
             let wait_result = libnanami::ipc::notification_wait(runtime.notification_desc)
                 .and_then(|_| {
-                    vio_read(runtime.io_desc, runtime.io_base, VIRTIO_PCI_ISR_STATUS, 1)?;
+                    arch::acknowledge_interrupt(runtime.io_desc, runtime.io_base)?;
                     libnanami::ipc::interrupt_ack(runtime.interrupt_desc)
                 });
             if let Err(error) = wait_result {
@@ -360,6 +343,72 @@ fn submit_blk_request_dma(
             libnanami::yield_now();
         }
     }
+}
+
+fn submit_partition_request_dma(
+    runtime: &mut BlockRuntime,
+    dma_paddr_base: usize,
+    request_type: u32,
+    block_index: usize,
+    bytes: usize,
+) -> Result<(), RequestError> {
+    let sector_count = (bytes / VIRTIO_SECTOR_BYTES) as u64;
+    let partition_sector = block_index
+        .checked_mul(BLOCK_SIZE / VIRTIO_SECTOR_BYTES)
+        .ok_or(RequestError::InvalidArgument)? as u64;
+    if partition_sector
+        .checked_add(sector_count)
+        .map_or(true, |end| end > runtime.partition_sectors)
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let sector = runtime
+        .partition_start_sector
+        .checked_add(partition_sector)
+        .ok_or(RequestError::InvalidArgument)?;
+    submit_blk_request_dma(runtime, dma_paddr_base, request_type, sector, bytes)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn select_nanami_root(
+    runtime: &mut BlockRuntime,
+    dma_paddr_base: usize,
+) -> Result<(), RequestError> {
+    submit_blk_request_dma(
+        runtime,
+        dma_paddr_base,
+        VIRTIO_BLK_T_IN,
+        1,
+        VIRTIO_SECTOR_BYTES,
+    )?;
+    let sector = unsafe {
+        core::slice::from_raw_parts(runtime.data_vaddr as *const u8, VIRTIO_SECTOR_BYTES)
+    };
+    let header = nanami_gpt::parse_primary_header(sector, runtime.disk_capacity_sectors)
+        .map_err(|_| RequestError::Protocol)?;
+    let entry_bytes = header
+        .partition_entry_bytes()
+        .map_err(|_| RequestError::Unsupported)?;
+    let transfer_bytes = entry_bytes.div_ceil(VIRTIO_SECTOR_BYTES) * VIRTIO_SECTOR_BYTES;
+    submit_blk_request_dma(
+        runtime,
+        dma_paddr_base,
+        VIRTIO_BLK_T_IN,
+        header.partition_entry_lba,
+        transfer_bytes,
+    )?;
+    let entries =
+        unsafe { core::slice::from_raw_parts(runtime.data_vaddr as *const u8, transfer_bytes) };
+    let partition =
+        nanami_gpt::find_nanami_root(header, entries).map_err(|_| RequestError::Protocol)?;
+    runtime.partition_start_sector = partition.first_lba;
+    runtime.partition_sectors = partition.sector_count;
+    libnanami::println!(
+        "[virtio-blk] Nanami root LBA={} sectors={}",
+        partition.first_lba,
+        partition.sector_count
+    );
+    Ok(())
 }
 
 fn handle_control(
@@ -397,7 +446,7 @@ fn handle_control(
         nanami_services::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
             libnanami::OS_RESPONSE_OK,
             BLOCK_SIZE as Word,
-            (runtime.capacity_sectors / (BLOCK_SIZE / VIRTIO_SECTOR_BYTES) as u64) as Word,
+            (runtime.partition_sectors / (BLOCK_SIZE / VIRTIO_SECTOR_BYTES) as u64) as Word,
         ),
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
@@ -419,7 +468,12 @@ fn handle_read(
         Some(v) => v,
         None => return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
-    if count == 0 || offset + bytes > session.shm_size as usize || bytes > MAX_TRANSFER_BYTES {
+    if count == 0
+        || offset
+            .checked_add(bytes)
+            .map_or(true, |end| end > session.shm_size as usize)
+        || bytes > MAX_TRANSFER_BYTES
+    {
         libnanami::print!("[virtio-blk] invalid read block=");
         libnanami::print!("{}", block);
         libnanami::print!(" count=");
@@ -431,7 +485,7 @@ fn handle_read(
         libnanami::print!("\n");
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    match submit_blk_request_dma(runtime, dma_paddr_base, VIRTIO_BLK_T_IN, block, bytes) {
+    match submit_partition_request_dma(runtime, dma_paddr_base, VIRTIO_BLK_T_IN, block, bytes) {
         Ok(()) => unsafe {
             ptr::copy_nonoverlapping(
                 runtime.data_vaddr as *const u8,
@@ -460,7 +514,12 @@ fn handle_write(
         Some(v) => v,
         None => return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
-    if count == 0 || offset + bytes > session.shm_size as usize || bytes > MAX_TRANSFER_BYTES {
+    if count == 0
+        || offset
+            .checked_add(bytes)
+            .map_or(true, |end| end > session.shm_size as usize)
+        || bytes > MAX_TRANSFER_BYTES
+    {
         libnanami::print!("[virtio-blk] invalid write block=");
         libnanami::print!("{}", block);
         libnanami::print!(" count=");
@@ -479,7 +538,7 @@ fn handle_write(
             bytes,
         );
     }
-    match submit_blk_request_dma(runtime, dma_paddr_base, VIRTIO_BLK_T_OUT, block, bytes) {
+    match submit_partition_request_dma(runtime, dma_paddr_base, VIRTIO_BLK_T_OUT, block, bytes) {
         Ok(()) => (libnanami::OS_RESPONSE_OK, bytes as Word, 0),
         Err(e) => (map_request_error_to_status(e), 0, 0),
     }
@@ -525,20 +584,28 @@ fn log_device_error(
     err.into()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn log_device_failure(msg: &str, io_desc: Word, io_base: Word) -> libnanami::NanamiError {
     libnanami::print!(msg);
     fail_device(io_desc, io_base);
     libnanami::NanamiError::UNKNOWN
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[virtio-blk] bootstrap start\n");
+struct PreparedTransport {
+    descriptor: Word,
+    base: Word,
+    notification: Word,
+    interrupt: Word,
+    irq_registered: bool,
+    irq_wait_enabled: bool,
+}
 
-    let service_port_desc = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+#[cfg(target_arch = "x86_64")]
+fn prepare_transport() -> Result<PreparedTransport, libnanami::NanamiError> {
     let pci_io_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_PCI_CFG);
     let mut dev_io_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_VIRTIO);
-    let notif_desc = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
-    let irq_desc = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT);
+    let notification = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
+    let interrupt = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT);
 
     let mut full_io_granted = false;
     match libnanami::request_io_port(0x0000, 0xffff, SLOT_IO_PCI_CFG) {
@@ -549,10 +616,10 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
         Err(_) => match libnanami::request_io_port(0x0cf8, 0x0cff, SLOT_IO_PCI_CFG) {
             Ok(()) => libnanami::print!("[virtio-blk] pci cfg io ports granted\n"),
-            Err(e) => {
+            Err(error) => {
                 return Err(log_device_error(
                     "[virtio-blk] failed to request PCI cfg io ports: ",
-                    e,
+                    error,
                     dev_io_desc,
                     0,
                 ));
@@ -560,64 +627,55 @@ fn nanami_main() -> libnanami::NanamiResult {
         },
     }
 
-    let found = match scan_virtio_blk(pci_io_desc) {
-        Ok(v) => v,
-        Err(_) => {
-            return Err(log_device_failure(
-                "[virtio-blk] virtio-blk pci device not found\n",
-                dev_io_desc,
-                0,
-            ));
-        }
-    };
-    libnanami::print!("[virtio-blk] found pci bus=");
-    libnanami::print!("{}", found.bus as usize);
-    libnanami::print!(" dev=");
-    libnanami::print!("{}", found.dev as usize);
-    libnanami::print!(" func=");
-    libnanami::print!("{}", found.func as usize);
-    libnanami::print!(" vid=");
-    libnanami::print!("{:#x}", found.vendor_id);
-    libnanami::print!(" did=");
-    libnanami::print!("{:#x}", found.device_id);
-    libnanami::print!(" io=");
-    libnanami::print!("{:#x}", found.io_base);
-    libnanami::print!(" irq=");
-    libnanami::print!("{}", found.irq_line as usize);
-    libnanami::print!("\n");
+    let found = scan_virtio_blk(pci_io_desc).map_err(|_| {
+        log_device_failure(
+            "[virtio-blk] virtio-blk pci device not found\n",
+            dev_io_desc,
+            0,
+        )
+    })?;
+    libnanami::println!(
+        "[virtio-blk] found pci bus={} dev={} func={} vid={:#x} did={:#x} io={:#x} irq={}",
+        found.bus,
+        found.dev,
+        found.func,
+        found.vendor_id,
+        found.device_id,
+        found.io_base,
+        found.irq_line
+    );
 
-    if let Err(e) = configure_pci_command_for_intx(pci_io_desc, found) {
-        return Err(log_device_error(
+    configure_pci_command_for_intx(pci_io_desc, found).map_err(|error| {
+        log_device_error(
             "[virtio-blk] pci command configure failed: ",
-            e,
+            error,
             dev_io_desc,
             found.io_base as Word,
-        ));
-    }
-    if let Err(e) = disable_pci_msi_capabilities(pci_io_desc, found) {
-        return Err(log_device_error(
+        )
+    })?;
+    disable_pci_msi_capabilities(pci_io_desc, found).map_err(|error| {
+        log_device_error(
             "[virtio-blk] pci msi disable failed: ",
-            e,
+            error,
             dev_io_desc,
             found.io_base as Word,
-        ));
-    }
+        )
+    })?;
 
     let io_base = found.io_base as Word;
-    match libnanami::request_io_port(io_base, io_base + 0xff, SLOT_IO_VIRTIO) {
-        Ok(()) => libnanami::print!("[virtio-blk] virtio io range granted\n"),
-        Err(e) => {
-            if full_io_granted {
-                libnanami::print!("[virtio-blk] virtio io range already covered by full range\n");
-            } else {
-                return Err(log_device_error(
-                    "[virtio-blk] failed to request virtio io range: ",
-                    e,
-                    dev_io_desc,
-                    io_base,
-                ));
-            }
+    if let Err(error) = libnanami::request_io_port(io_base, io_base + 0xff, SLOT_IO_VIRTIO) {
+        if full_io_granted {
+            libnanami::print!("[virtio-blk] virtio io range already covered by full range\n");
+        } else {
+            return Err(log_device_error(
+                "[virtio-blk] failed to request virtio io range: ",
+                error,
+                dev_io_desc,
+                io_base,
+            ));
         }
+    } else {
+        libnanami::print!("[virtio-blk] virtio io range granted\n");
     }
 
     let mut irq_registered = false;
@@ -625,15 +683,15 @@ fn nanami_main() -> libnanami::NanamiResult {
     if let Ok(Some(irq_number)) = resolve_irq_number(pci_io_desc, found) {
         if libnanami::request_irq(irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT).is_ok() {
             irq_registered = true;
-            if let Err(e) = libnanami::ipc::bind_current_thread_notification(notif_desc) {
-                return Err(log_device_error(
+            libnanami::ipc::bind_current_thread_notification(notification).map_err(|error| {
+                log_device_error(
                     "[virtio-blk] notification bind failed: ",
-                    e,
+                    error,
                     dev_io_desc,
                     io_base,
-                ));
-            }
-            match libnanami::ipc::interrupt_ack(irq_desc) {
+                )
+            })?;
+            match libnanami::ipc::interrupt_ack(interrupt) {
                 Ok(()) => {
                     irq_wait_enabled = true;
                     libnanami::print!("[virtio-blk] irq granted\n");
@@ -645,24 +703,91 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
-    let (dma_paddr_base, mut runtime) = match init_virtio_blk_with_dma_base(
-        dev_io_desc,
-        io_base,
-        notif_desc,
-        irq_desc,
+    Ok(PreparedTransport {
+        descriptor: dev_io_desc,
+        base: io_base,
+        notification,
+        interrupt,
         irq_registered,
         irq_wait_enabled,
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+fn prepare_transport() -> Result<PreparedTransport, libnanami::NanamiError> {
+    let (_, mapped_base) =
+        libnanami::request_mmio(MMIO_PHYSICAL_BASE, MMIO_REGION_BYTES).map_err(|error| {
+            log_request_error("[virtio-blk] virtio-mmio mapping failed: ", error);
+            libnanami::NanamiError::UNKNOWN
+        })?;
+
+    let mut offset = 0;
+    while offset < MMIO_REGION_BYTES {
+        let base = mapped_base + offset;
+        let magic = arch::read(0, base, REG_MAGIC_VALUE, 4).unwrap_or(0) as u32;
+        let version = arch::read(0, base, REG_VERSION, 4).unwrap_or(0) as u32;
+        let device_id = arch::read(0, base, REG_DEVICE_ID, 4).unwrap_or(0) as u32;
+        if magic == VIRTIO_MAGIC_VALUE
+            && version == VIRTIO_MMIO_VERSION
+            && device_id == VIRTIO_BLOCK_DEVICE_ID
+        {
+            let vendor_id = arch::read(0, base, REG_VENDOR_ID, 4).unwrap_or(0);
+            libnanami::println!(
+                "[virtio-blk] found virtio-mmio paddr={:#x} vaddr={:#x} vendor={:#x}",
+                MMIO_PHYSICAL_BASE + offset,
+                base,
+                vendor_id
+            );
+            return Ok(PreparedTransport {
+                descriptor: 0,
+                base,
+                notification: 0,
+                interrupt: 0,
+                irq_registered: false,
+                irq_wait_enabled: false,
+            });
+        }
+        offset += MMIO_TRANSPORT_STRIDE;
+    }
+
+    libnanami::print!("[virtio-blk] virtio-mmio block device not found\n");
+    Err(libnanami::NanamiError::UNKNOWN)
+}
+
+fn nanami_main() -> libnanami::NanamiResult {
+    libnanami::print!("[virtio-blk] bootstrap start\n");
+
+    let service_port_desc = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let transport = prepare_transport()?;
+
+    let (dma_paddr_base, mut runtime) = match init_virtio_blk_with_dma_base(
+        transport.descriptor,
+        transport.base,
+        transport.notification,
+        transport.interrupt,
+        transport.irq_registered,
+        transport.irq_wait_enabled,
     ) {
         Ok(v) => v,
         Err(e) => {
             return Err(log_device_error(
                 "[virtio-blk] queue init failed: ",
                 e,
-                dev_io_desc,
-                io_base,
+                transport.descriptor,
+                transport.base,
             ));
         }
     };
+
+    #[cfg(target_arch = "x86_64")]
+    select_nanami_root(&mut runtime, dma_paddr_base).map_err(|e| {
+        log_device_error(
+            "[virtio-blk] Nanami GPT root selection failed: ",
+            e,
+            runtime.io_desc,
+            runtime.io_base,
+        )
+    })?;
 
     nanami_services::registry::register_block_device().map_err(|e| {
         log_device_error(
@@ -717,7 +842,7 @@ fn nanami_main() -> libnanami::NanamiResult {
             }
             ServiceEvent::Notification { .. } => {
                 if runtime.irq_registered {
-                    let _ = vio_read(runtime.io_desc, runtime.io_base, VIRTIO_PCI_ISR_STATUS, 1);
+                    let _ = arch::acknowledge_interrupt(runtime.io_desc, runtime.io_base);
                     if libnanami::ipc::interrupt_ack(runtime.interrupt_desc).is_err() {
                         runtime.irq_wait_enabled = false;
                     }
@@ -737,6 +862,23 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+fn write_mmio_address(
+    descriptor: Word,
+    base: Word,
+    low_register: Word,
+    address: usize,
+) -> Result<(), RequestError> {
+    vio_write(descriptor, base, low_register, 4, address as Word)?;
+    vio_write(
+        descriptor,
+        base,
+        low_register + 4,
+        4,
+        ((address as u64) >> 32) as Word,
+    )
+}
+
 fn init_virtio_blk_with_dma_base(
     io_desc: Word,
     io_base: Word,
@@ -745,27 +887,41 @@ fn init_virtio_blk_with_dma_base(
     irq_registered: bool,
     irq_wait_enabled: bool,
 ) -> Result<(usize, BlockRuntime), RequestError> {
-    vio_write(io_desc, io_base, VIRTIO_PCI_DEVICE_STATUS, 1, 0)?;
-    vio_write(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_DEVICE_STATUS,
-        1,
-        (VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER) as Word,
-    )?;
+    vio_write(io_desc, io_base, REG_DEVICE_STATUS, 1, 0)?;
+    let base_status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    vio_write(io_desc, io_base, REG_DEVICE_STATUS, 1, base_status as Word)?;
 
-    let _features = vio_read(io_desc, io_base, VIRTIO_PCI_DEVICE_FEATURES, 4)?;
-    vio_write(io_desc, io_base, VIRTIO_PCI_GUEST_FEATURES, 4, 0)?;
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, 0)?;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Virtio MMIO v2 requires negotiation of VIRTIO_F_VERSION_1 (bit 32).
+        vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 0)?;
+        let _low_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES_SELECT, 4, 0)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, 0)?;
+
+        vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 1)?;
+        let high_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
+        if (high_features & 1) == 0 {
+            return Err(RequestError::Unsupported);
+        }
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES_SELECT, 4, 1)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, 1)?;
+
+        let feature_status = base_status | VIRTIO_STATUS_FEATURES_OK;
+        write_device_status(io_desc, io_base, feature_status)?;
+        if (read_device_status(io_desc, io_base)? & VIRTIO_STATUS_FEATURES_OK) == 0 {
+            return Err(RequestError::Unsupported);
+        }
+    }
     let capacity_sectors = read_capacity_sectors(io_desc, io_base)?;
 
-    vio_write(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_QUEUE_SELECT,
-        2,
-        QUEUE_INDEX as Word,
-    )?;
-    let queue_size = vio_read(io_desc, io_base, VIRTIO_PCI_QUEUE_SIZE, 2)? as u16;
+    vio_write(io_desc, io_base, REG_QUEUE_SELECT, 2, QUEUE_INDEX as Word)?;
+    let queue_size = vio_read(io_desc, io_base, REG_QUEUE_SIZE_MAX, 2)? as u16;
     if capacity_sectors < 2 || queue_size < 3 || total_queue_bytes(queue_size) > QUEUE_MEM_BYTES {
         return Err(RequestError::Unsupported);
     }
@@ -777,25 +933,38 @@ fn init_virtio_blk_with_dma_base(
         ptr::write_bytes(dma_vaddr as *mut u8, 0, DMA_TOTAL_BYTES);
     }
 
+    #[cfg(target_arch = "x86_64")]
     vio_write(
         io_desc,
         io_base,
-        VIRTIO_PCI_QUEUE_ADDRESS,
+        REG_QUEUE_ADDRESS,
         4,
         ((dma_paddr + DMA_QUEUE_OFFSET) >> 12) as Word,
     )?;
+    #[cfg(target_arch = "aarch64")]
+    {
+        let desc_address = dma_paddr + DMA_QUEUE_OFFSET;
+        let driver_address = desc_address + queue_size as usize * core::mem::size_of::<VirtqDesc>();
+        let device_address = desc_address + used_offset(queue_size);
+        if vio_read(io_desc, io_base, REG_QUEUE_READY, 4)? != 0 {
+            return Err(RequestError::Unsupported);
+        }
+        vio_write(io_desc, io_base, REG_QUEUE_SIZE, 4, queue_size as Word)?;
+        write_mmio_address(io_desc, io_base, REG_QUEUE_DESC_LOW, desc_address)?;
+        write_mmio_address(io_desc, io_base, REG_QUEUE_DRIVER_LOW, driver_address)?;
+        write_mmio_address(io_desc, io_base, REG_QUEUE_DEVICE_LOW, device_address)?;
+        vio_write(io_desc, io_base, REG_QUEUE_READY, 4, 1)?;
+    }
     unsafe {
         *avail_flags_ptr((dma_vaddr + DMA_QUEUE_OFFSET) as *mut u8, queue_size) = 0;
         *used_flags_ptr((dma_vaddr + DMA_QUEUE_OFFSET) as *mut u8, queue_size) = 0;
     }
 
-    vio_write(
-        io_desc,
-        io_base,
-        VIRTIO_PCI_DEVICE_STATUS,
-        1,
-        (VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK) as Word,
-    )?;
+    #[cfg(target_arch = "x86_64")]
+    let ready_status = base_status | VIRTIO_STATUS_DRIVER_OK;
+    #[cfg(target_arch = "aarch64")]
+    let ready_status = base_status | VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK;
+    write_device_status(io_desc, io_base, ready_status)?;
     libnanami::print!("[virtio-blk] queue ready qsize=");
     libnanami::print!("{}", queue_size as usize);
     libnanami::print!(" blocks=");
@@ -826,7 +995,9 @@ fn init_virtio_blk_with_dma_base(
             header_vaddr: dma_vaddr + DMA_HEADER_OFFSET,
             data_vaddr: dma_vaddr + DMA_DATA_OFFSET,
             status_vaddr: dma_vaddr + DMA_STATUS_OFFSET,
-            capacity_sectors,
+            disk_capacity_sectors: capacity_sectors,
+            partition_start_sector: 0,
+            partition_sectors: capacity_sectors,
         },
     ))
 }

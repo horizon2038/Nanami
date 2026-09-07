@@ -5,6 +5,9 @@ pub mod hal;
 pub mod heap;
 pub mod io;
 pub mod ipc;
+mod platform;
+
+pub use platform::{request_nanami_info_platform, NanamiPlatformInfo};
 
 use a9n_abi::capability_call::ipc_port::MessageInfo;
 pub use a9n_abi::Word;
@@ -103,7 +106,10 @@ const OS_REQUEST_PROCESS_MEMORY_CLONE: Word = 0x1020;
 const OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN: Word = 0x1021;
 const OS_REQUEST_PROCESS_ALIVE: Word = 0x1022;
 const OS_REQUEST_NANAMI_INFO: Word = 0x1023;
+const OS_REQUEST_DRIVER_PLATFORM_INFO: Word = 0x1024;
 const OS_REQUEST_DEBUG_PING: Word = 0x10ff;
+
+pub const DRIVER_PLATFORM_INFO_RSDP_ADDRESS: Word = 1;
 
 pub const OS_RESPONSE_OK: Word = 0;
 pub const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
@@ -122,6 +128,7 @@ pub const FRAMEBUFFER_INFORMATION_COLOR_AND_ID: Word = 3;
 
 const NANAMI_INFO_MEMORY: Word = 1;
 const NANAMI_INFO_PROCESS: Word = 2;
+const NANAMI_INFO_SMP: Word = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NanamiMemoryInfo {
@@ -139,6 +146,13 @@ impl NanamiMemoryInfo {
 pub struct NanamiProcessInfo {
     pub running: Word,
     pub exited: Word,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NanamiSmpInfo {
+    pub online_cores: Word,
+    pub active_core_mask: Word,
+    pub enabled: bool,
 }
 
 impl NanamiProcessInfo {
@@ -285,8 +299,11 @@ macro_rules! nanami_entry {
         #[cfg(target_arch = "x86_64")]
         $crate::define_x86_64_entry!($entry);
 
-        #[cfg(not(target_arch = "x86_64"))]
-        compile_error!("nanami_entry! is currently supported only on x86_64");
+        #[cfg(target_arch = "aarch64")]
+        $crate::define_aarch64_entry!($entry);
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        compile_error!("nanami_entry! is supported only on x86_64 and aarch64");
     };
 }
 
@@ -923,6 +940,39 @@ pub fn request_nanami_info_process() -> Result<NanamiProcessInfo, RequestError> 
         return Err(RequestError::Status(status));
     }
     Ok(NanamiProcessInfo { running, exited })
+}
+
+pub fn request_nanami_info_smp() -> Result<NanamiSmpInfo, RequestError> {
+    let (status, online_cores, active_core_mask) =
+        call_os_port(OS_REQUEST_NANAMI_INFO, NANAMI_INFO_SMP, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    let valid_core_mask = if online_cores >= Word::BITS as Word {
+        Word::MAX
+    } else {
+        (1usize << online_cores) - 1
+    };
+    if online_cores == 0 || active_core_mask & !valid_core_mask != 0 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(NanamiSmpInfo {
+        online_cores,
+        active_core_mask,
+        enabled: online_cores > 1,
+    })
+}
+
+/// Query raw architecture boot data reserved for the boot-selected Device
+/// Driver Manager. For x86_64 this exposes the RSDP physical address, not a
+/// kernel-discovered device address. Alpha rejects every other process.
+pub fn request_driver_platform_info(kind: Word) -> Result<(Word, Word), RequestError> {
+    let (status, detail0, detail1) =
+        call_os_port(OS_REQUEST_DRIVER_PLATFORM_INFO, kind, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((detail0, detail1))
 }
 
 pub fn request_irq(

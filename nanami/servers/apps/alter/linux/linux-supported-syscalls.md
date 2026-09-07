@@ -1,7 +1,9 @@
 # Alter/Linux Syscall Support
 
-Alter/Linux implements a developing x86_64 Linux syscall personality over
-Nanami's POSIX, VFS, terminal, process, memory, timer, and network services.
+Alter/Linux implements developing x86_64 and AArch64 Linux syscall
+personalities over Nanami's POSIX, VFS, terminal, process, memory, timer, and
+network services. Syscall numbers, trap registers, ELF machine checks, and
+architecture-dependent Linux layouts are selected for the build target.
 This list reflects syscalls dispatched by the current implementation; it does
 not imply complete Linux semantics for every flag or edge case.
 
@@ -11,8 +13,8 @@ not imply complete Linux semantics for every flag or edge case.
 `getdents64`, `stat`, `lstat`, `fstat`, `newfstatat`, `statx`, `access`,
 `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `mkdir`, `mkdirat`,
 `mknod`, `mknodat`, `rmdir`, `unlink`, `unlinkat`, `rename`, `renameat`,
-`chown`, `lchown`, `fchown`, `fchownat`, `utimes`, `futimesat`, and
-`utimensat`.
+`link`, `linkat`, `chown`, `lchown`, `fchown`, `fchownat`, `utimes`,
+`futimesat`, and `utimensat`.
 
 ## File Descriptors and Polling
 

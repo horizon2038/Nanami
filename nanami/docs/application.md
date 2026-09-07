@@ -1,7 +1,8 @@
 # Nanami Application Guide
 
 This guide describes how to add native Nanami applications, services, and
-drivers. The current native application ABI supports x86_64 only.
+drivers. The Rust application ABI supports x86_64 and AArch64; the freestanding
+C++ SDK remains x86_64-only.
 
 ## Component Placement
 
@@ -124,8 +125,9 @@ panic = "abort"
 ```
 
 Use an existing neighboring `.cargo/config.toml` as the target configuration.
-It selects `sdk/arch/x86_64/x86_64-unknown-a9n.json`, enables `build-std`, and
-passes the Nanami user linker script.
+The top-level build selects the target under `sdk/arch/x86_64` or
+`sdk/arch/aarch64`, enables `build-std`, and passes the matching Nanami user
+linker script.
 
 The empty `[workspace]` prevents Cargo from treating each application as a
 member of an unrelated parent workspace.
@@ -138,6 +140,10 @@ From the repository root:
 make image
 make fs-image SIZE_MB=64 OUT=out/ext2.img
 make run
+
+make image ARCH=aarch64
+make fs-image ARCH=aarch64 SIZE_MB=64
+make run ARCH=aarch64
 ```
 
 `make image` builds all active components, creates the initramfs, and delegates

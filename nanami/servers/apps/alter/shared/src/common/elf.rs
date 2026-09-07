@@ -1,5 +1,7 @@
 use libnanami::Word;
 
+use crate::arch::ELF_MACHINE;
+
 const ELF64_HEADER_SIZE: usize = 64;
 const ELF64_PHDR_SIZE: usize = 56;
 const PT_LOAD: u32 = 1;
@@ -53,7 +55,7 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
     if elf_type != 2 && elf_type != 3 {
         return Err(ElfError::Unsupported);
     }
-    if read_u16(image, 18)? != 0x3e {
+    if read_u16(image, 18)? != ELF_MACHINE {
         return Err(ElfError::Unsupported);
     }
 

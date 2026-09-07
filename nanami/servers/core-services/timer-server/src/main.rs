@@ -4,19 +4,16 @@
 use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{self, RequestError, Word};
 
-const SLOT_IO_PIT: Word = 16;
+#[path = "arch.rs"]
+mod arch;
+
+const SLOT_TIMER_RESOURCE: Word = 16;
 const SLOT_NOTIFICATION: Word = 18;
 const SLOT_INTERRUPT: Word = 19;
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_CLIENT_NOTIFICATION_BASE: Word = 32;
 const MAX_CLIENT_NOTIFICATIONS: usize = 128;
 const MAX_PENDING_ASYNC_TIMERS: usize = 512;
-
-const PIT_PORT_COUNTER0: Word = 0x40;
-const PIT_PORT_COMMAND: Word = 0x43;
-const PIT_COMMAND_RATE_GEN_LOHI: Word = 0x34;
-const PIT_BASE_HZ: u64 = 1_193_182;
-const PIT_TICK_HZ: u64 = 100;
 
 #[derive(Clone, Copy)]
 struct ClientNotificationEntry {
@@ -54,7 +51,7 @@ impl PendingAsyncTimer {
 
 struct TimerState {
     ticks: u64,
-    pit_started: bool,
+    timer_started: bool,
     schedule_count: usize,
     fire_count: usize,
     client_notifications: [ClientNotificationEntry; MAX_CLIENT_NOTIFICATIONS],
@@ -65,7 +62,7 @@ impl TimerState {
     const fn new() -> Self {
         Self {
             ticks: 0,
-            pit_started: false,
+            timer_started: false,
             schedule_count: 0,
             fire_count: 0,
             client_notifications: [ClientNotificationEntry::EMPTY; MAX_CLIENT_NOTIFICATIONS],
@@ -91,23 +88,23 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
     libnanami::print!("[timer-server] service registered: timer-service\n");
 
-    if let Err(e) = libnanami::request_io_port(PIT_PORT_COUNTER0, PIT_PORT_COMMAND, SLOT_IO_PIT) {
-        return Err(log_error("[timer-server] request pit io failed: ", e));
-    }
+    let prepared_timer = arch::prepare(SLOT_TIMER_RESOURCE)
+        .map_err(|e| log_error("[timer-server] timer prepare failed: ", e))?;
 
-    if let Err(e) = libnanami::request_irq(0, SLOT_NOTIFICATION, SLOT_INTERRUPT) {
-        return Err(log_error("[timer-server] request irq0 failed: ", e));
+    if let Err(e) =
+        libnanami::request_irq(prepared_timer.irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT)
+    {
+        return Err(log_error("[timer-server] request timer irq failed: ", e));
     }
 
     let notif_desc = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
     let irq_desc = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT);
-    let pit_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_PIT);
     if let Err(e) = libnanami::ipc::bind_current_thread_notification(notif_desc) {
         return Err(log_error("[timer-server] bind notification failed: ", e));
     }
 
     libnanami::print!("[timer-server] ready lazy tick-hz=");
-    libnanami::print!("{}", PIT_TICK_HZ as usize);
+    libnanami::print!("{}", arch::TICK_HZ as usize);
     libnanami::print!("\n");
 
     let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
@@ -143,7 +140,8 @@ fn nanami_main() -> libnanami::NanamiResult {
 
         match event {
             ServiceEvent::Request(request) => {
-                pending_status = handle_request(request, &mut state, pit_desc, irq_desc);
+                pending_status =
+                    handle_request(request, &mut state, prepared_timer.resource, irq_desc);
                 has_pending_reply = true;
             }
             ServiceEvent::Notification { .. } => {
@@ -167,14 +165,14 @@ fn nanami_main() -> libnanami::NanamiResult {
 fn handle_request(
     request: ServiceRequest,
     state: &mut TimerState,
-    pit_desc: Word,
+    timer_resource: Word,
     irq_desc: Word,
 ) -> (Word, Word, Word) {
     match request.code {
         nanami_services::timer::TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS => {
             match schedule_timer(
                 state,
-                pit_desc,
+                timer_resource,
                 irq_desc,
                 request.identifier,
                 request.arg1,
@@ -188,7 +186,7 @@ fn handle_request(
         nanami_services::timer::TIMER_SERVICE_REQUEST_SLEEP_ASYNC_MILLISECONDS => {
             match schedule_timer(
                 state,
-                pit_desc,
+                timer_resource,
                 irq_desc,
                 request.identifier,
                 request.arg1,
@@ -202,7 +200,7 @@ fn handle_request(
         nanami_services::timer::TIMER_SERVICE_REQUEST_INTERVAL_MILLISECONDS => {
             match schedule_timer(
                 state,
-                pit_desc,
+                timer_resource,
                 irq_desc,
                 request.identifier,
                 request.arg1,
@@ -214,11 +212,11 @@ fn handle_request(
             }
         }
         nanami_services::timer::TIMER_SERVICE_REQUEST_MONOTONIC_TICKS => {
-            match ensure_pit_started(state, pit_desc, irq_desc) {
+            match ensure_timer_started(state, timer_resource, irq_desc) {
                 Ok(()) => (
                     libnanami::OS_RESPONSE_OK,
                     state.ticks as Word,
-                    PIT_TICK_HZ as Word,
+                    arch::TICK_HZ as Word,
                 ),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
@@ -229,6 +227,7 @@ fn handle_request(
 
 fn handle_notification(irq_desc: Word, state: &mut TimerState) -> Result<(), RequestError> {
     state.ticks = state.ticks.saturating_add(1);
+    arch::rearm()?;
     libnanami::ipc::interrupt_ack(irq_desc)?;
     fire_expired_async_timers(state);
     Ok(())
@@ -236,7 +235,7 @@ fn handle_notification(irq_desc: Word, state: &mut TimerState) -> Result<(), Req
 
 fn schedule_timer(
     state: &mut TimerState,
-    pit_desc: Word,
+    timer_resource: Word,
     irq_desc: Word,
     requester_pid: Word,
     source_notification_slot: Word,
@@ -256,7 +255,7 @@ fn schedule_timer(
     if wait_ticks == 0 {
         return libnanami::ipc::notification_notify(descriptor);
     }
-    ensure_pit_started(state, pit_desc, irq_desc)?;
+    ensure_timer_started(state, timer_resource, irq_desc)?;
     let interval_ticks = if interval_ms == 0 {
         0
     } else {
@@ -282,17 +281,17 @@ fn schedule_timer(
     Err(RequestError::Unsupported)
 }
 
-fn ensure_pit_started(
+fn ensure_timer_started(
     state: &mut TimerState,
-    pit_desc: Word,
+    timer_resource: Word,
     irq_desc: Word,
 ) -> Result<(), RequestError> {
-    if state.pit_started {
+    if state.timer_started {
         return Ok(());
     }
-    pit_program_periodic(pit_desc, PIT_TICK_HZ)?;
+    arch::start(timer_resource)?;
     libnanami::ipc::interrupt_ack(irq_desc)?;
-    state.pit_started = true;
+    state.timer_started = true;
     Ok(())
 }
 
@@ -395,37 +394,7 @@ fn retire_notification_descriptor(state: &mut TimerState, descriptor: Word) {
 }
 
 fn milliseconds_to_ticks(wait_ms: u64) -> u64 {
-    wait_ms.saturating_mul(PIT_TICK_HZ).saturating_add(999) / 1000
-}
-
-fn pit_program_periodic(pit_desc: Word, tick_hz: u64) -> Result<(), RequestError> {
-    if tick_hz == 0 || tick_hz > PIT_BASE_HZ {
-        return Err(RequestError::InvalidArgument);
-    }
-
-    let mut divisor = PIT_BASE_HZ / tick_hz;
-    if divisor == 0 {
-        divisor = 1;
-    }
-    if divisor > u16::MAX as u64 {
-        divisor = u16::MAX as u64;
-    }
-
-    let divisor_u16 = divisor as u16;
-    libnanami::io::io_write(pit_desc, PIT_PORT_COMMAND, 1, PIT_COMMAND_RATE_GEN_LOHI)?;
-    libnanami::io::io_write(
-        pit_desc,
-        PIT_PORT_COUNTER0,
-        1,
-        (divisor_u16 & 0x00ff) as Word,
-    )?;
-    libnanami::io::io_write(
-        pit_desc,
-        PIT_PORT_COUNTER0,
-        1,
-        ((divisor_u16 >> 8) & 0x00ff) as Word,
-    )?;
-    Ok(())
+    wait_ms.saturating_mul(arch::TICK_HZ).saturating_add(999) / 1000
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {

@@ -1,4 +1,4 @@
-use super::arch::x86_64::*;
+use super::arch::*;
 use super::*;
 
 const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;

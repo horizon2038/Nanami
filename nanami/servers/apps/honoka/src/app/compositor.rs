@@ -140,7 +140,10 @@ impl Compositor {
             framebuffer,
             windows: [Window::EMPTY; MAX_WINDOWS],
             next_window_id: 1,
-            cursor_x: (screen.width / 2) as i32,
+            // The wallpaper logo occupies the exact screen center and is almost the same color as
+            // the pointer. Start over the darker right-hand area so the cursor is visible before
+            // the first mouse event arrives.
+            cursor_x: (screen.width.saturating_mul(3) / 4) as i32,
             cursor_y: (screen.height / 2) as i32,
             dragging_window: None,
             drag_origin_x: 0,

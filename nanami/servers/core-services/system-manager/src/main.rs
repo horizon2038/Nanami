@@ -7,6 +7,7 @@ use libnanami::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_VFS_SERVICE: Word = 23;
+const SLOT_TIMER_SERVICE: Word = 24;
 const VFS_SHM_BYTES: Word = 0x40000;
 const PATH_OFFSET: usize = 0;
 const MANIFEST_OFFSET: usize = 512;
@@ -20,18 +21,28 @@ const USER_STACK_BASE: usize = 0x0400_0000;
 const USER_STACK_PAGES: usize = 64;
 const USER_STACK_TOP: usize = USER_STACK_BASE + USER_STACK_PAGES * 4096;
 const USER_ARG_STACK_BASE: usize = USER_STACK_TOP - EXEC_ARG_STACK_BYTES;
-const REG_RSP: Word = 18;
+#[cfg(target_arch = "x86_64")]
+const REG_STACK_POINTER: Word = 18;
+#[cfg(target_arch = "aarch64")]
+const REG_STACK_POINTER: Word = 31;
 const REGISTER_MESSAGE_BASE: Word = 3;
 const STACK_VERIFY_BYTES: Word = 16;
 const EXEC_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << (Word::BITS - 1);
 const MAX_ENTRIES: usize = 32;
 const MAX_EXEC_CLIENTS: usize = 16;
 const MAX_EXEC_CHILDREN: usize = 64;
-const CONNECT_RETRIES: usize = 80;
+const CONNECT_RETRIES: usize = 500;
+const CONNECT_RETRY_DELAY_MS: Word = 10;
 const SYSTEM_LIST_PATH: &[u8] = b"/nanami/system-list";
 const SESSION_LIST_PATH: &[u8] = b"/nanami/session-list";
+#[cfg(target_arch = "x86_64")]
 const FALLBACK_SYSTEM_LIST: &str = include_str!("../../../system-list");
+#[cfg(target_arch = "x86_64")]
 const FALLBACK_SESSION_LIST: &str = include_str!("../../../session-list");
+#[cfg(target_arch = "aarch64")]
+const FALLBACK_SYSTEM_LIST: &str = include_str!("../../../system-list.aarch64");
+#[cfg(target_arch = "aarch64")]
+const FALLBACK_SESSION_LIST: &str = include_str!("../../../session-list.aarch64");
 
 #[derive(Clone, Copy)]
 struct SystemEntry<'a> {
@@ -225,6 +236,7 @@ fn read_manifest_from_vfs(
 }
 
 fn connect_vfs_service() -> Result<(), RequestError> {
+    let timer_port = connect_retry_timer();
     let mut tries = 0usize;
     loop {
         match nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
@@ -234,10 +246,38 @@ fn connect_vfs_service() -> Result<(), RequestError> {
                 if tries >= CONNECT_RETRIES {
                     return Err(error);
                 }
-                spin_delay();
+                retry_delay(timer_port);
             }
         }
     }
+}
+
+fn connect_retry_timer() -> Option<Word> {
+    let timer_port = libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
+    let mut tries = 0usize;
+    loop {
+        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return Some(timer_port),
+            Err(_) => {
+                tries += 1;
+                if tries >= CONNECT_RETRIES {
+                    return None;
+                }
+                libnanami::yield_now();
+            }
+        }
+    }
+}
+
+fn retry_delay(timer_port: Option<Word>) {
+    if let Some(port) = timer_port {
+        if nanami_services::timer::timer_service_sleep_milliseconds(port, CONNECT_RETRY_DELAY_MS)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    libnanami::yield_now();
 }
 
 fn spawn_system_entries(manifest: &str, vfs_client: &mut Option<VfsClient>) -> SpawnSummary {
@@ -308,28 +348,37 @@ fn spawn_vfs_path(
     priority: Word,
 ) -> Result<Word, RequestError> {
     let (_, size, kind) =
-        nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
+        nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
+            .map_err(|error| log_spawn_stage("stat", error))?;
     if kind != nanami_services::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
         return Err(RequestError::InvalidArgument);
     }
 
-    let (image_base, mapped_size) = libnanami::request_heap(size)?;
+    let (image_base, mapped_size) =
+        libnanami::request_heap(size).map_err(|error| log_spawn_stage("heap", error))?;
     if image_base == 0 || mapped_size < size {
         return Err(RequestError::Protocol);
     }
 
-    let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
+    let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
+        .map_err(|error| log_spawn_stage("open", error))?;
     let mut offset = 0usize;
     while offset < size as usize {
         let remaining = size as usize - offset;
         let chunk = remaining.min(vfs.shm_size as usize);
-        let read = nanami_services::vfs::vfs_read(
+        let read = match nanami_services::vfs::vfs_read(
             vfs.port,
             handle,
             offset as Word,
             chunk as Word,
             FILE_CHUNK_OFFSET as Word,
-        )? as usize;
+        ) {
+            Ok(read) => read as usize,
+            Err(error) => {
+                let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+                return Err(log_spawn_stage("read", error));
+            }
+        };
         if read == 0 {
             let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
             return Err(RequestError::Protocol);
@@ -346,6 +395,16 @@ fn spawn_vfs_path(
     let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
 
     libnanami::request_process_spawn_memory(image_base, size, priority)
+        .map_err(|error| log_spawn_stage("process", error))
+}
+
+fn log_spawn_stage(stage: &str, error: RequestError) -> RequestError {
+    libnanami::print!("[system-manager] spawn stage=");
+    libnanami::print!("{}", stage);
+    libnanami::print!(" error=");
+    print_request_error(error);
+    libnanami::print!("\n");
+    error
 }
 
 fn spawn_vfs_path_with_launch(
@@ -498,7 +557,7 @@ fn install_initial_stack(
     if sp < word_bytes {
         return Err(RequestError::InvalidArgument);
     }
-    // Process entry runs a `call` into Rust; keep the entry RSP 16-byte aligned.
+    // Native entry code follows the platform ABI and requires a 16-byte aligned stack.
     sp = (sp - word_bytes) & !15;
     let mut out = sp;
     write_stack_word(&mut stack, &mut out, launch.argc as Word);
@@ -537,9 +596,9 @@ fn install_initial_stack(
         stack_bytes as Word,
     )?;
     let pcb = libnanami::ipc::process_slot_descriptor(EXEC_CHILD_PCB_SLOT);
-    write_register_value(pcb, REG_RSP, guest_sp)?;
+    write_register_value(pcb, REG_STACK_POINTER, guest_sp)?;
     if launch.diagnostics {
-        let rsp = read_register_value(pcb, REG_RSP).unwrap_or(0);
+        let stack_pointer = read_register_value(pcb, REG_STACK_POINTER).unwrap_or(0);
         let mut stack_argc = 0;
         let mut stack_argv0 = 0;
         if libnanami::request_process_memory_read(pid, guest_sp, local, STACK_VERIFY_BYTES).is_ok()
@@ -548,9 +607,9 @@ fn install_initial_stack(
             stack_argv0 = read_word_from_buffer(&stack, core::mem::size_of::<Word>());
         }
         libnanami::println!(
-            "[system-manager] argv stack pid={} rsp={:#x} argc={} argv0={:#x}",
+            "[system-manager] argv stack pid={} sp={:#x} argc={} argv0={:#x}",
             pid,
-            rsp,
+            stack_pointer,
             stack_argc,
             stack_argv0
         );
@@ -637,7 +696,6 @@ fn run_exec_service(mut runtime: ExecRuntime) -> libnanami::NanamiResult {
     loop {
         let event = match pending {
             ExecReply::Send(status, detail0, detail1) => {
-                pending = ExecReply::Drop;
                 libnanami::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
             }
             ExecReply::Drop => libnanami::ipc::service_receive_event(service_port),
@@ -1029,10 +1087,6 @@ fn read_shm_word(base: Word, offset: usize) -> Word {
         i += 1;
     }
     Word::from_ne_bytes(bytes)
-}
-
-fn spin_delay() {
-    libnanami::yield_now();
 }
 
 fn log_error(prefix: &str, error: RequestError) -> RequestError {

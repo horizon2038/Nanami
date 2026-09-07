@@ -52,6 +52,7 @@ pub const POSIX_REQUEST_RECV: Word = 0xa12e;
 pub const POSIX_REQUEST_SENDTO: Word = 0xa12f;
 pub const POSIX_REQUEST_RECVFROM: Word = 0xa130;
 pub const POSIX_REQUEST_READ_DIRECT: Word = 0xa131;
+pub const POSIX_REQUEST_LINK: Word = 0xa132;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;

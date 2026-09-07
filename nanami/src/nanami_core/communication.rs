@@ -54,7 +54,10 @@ pub const OS_REQUEST_PROCESS_MEMORY_CLONE: usize = 0x1020;
 pub const OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN: usize = 0x1021;
 pub const OS_REQUEST_PROCESS_ALIVE: usize = 0x1022;
 pub const OS_REQUEST_NANAMI_INFO: usize = 0x1023;
+pub const OS_REQUEST_DRIVER_PLATFORM_INFO: usize = 0x1024;
 pub const OS_REQUEST_DEBUG_PING: usize = 0x10ff;
+
+pub const DRIVER_PLATFORM_INFO_RSDP_ADDRESS: usize = 1;
 
 pub const OS_RESPONSE_OK: usize = 0;
 pub const OS_RESPONSE_INVALID_ARGUMENT: usize = 1;

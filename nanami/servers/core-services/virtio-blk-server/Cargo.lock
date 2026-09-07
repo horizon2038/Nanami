@@ -33,6 +33,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanami-gpt"
+version = "0.1.0"
+
+[[package]]
 name = "nanami-services"
 version = "0.1.0"
 dependencies = [
@@ -45,5 +49,6 @@ name = "virtio_blk_server"
 version = "0.1.0"
 dependencies = [
  "libnanami",
+ "nanami-gpt",
  "nanami-services",
 ]

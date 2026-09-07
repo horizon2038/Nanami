@@ -1,6 +1,10 @@
 use crate::Word;
 
+#[cfg(target_arch = "x86_64")]
 pub const HARDWARE_CONTEXT_WORDS: usize = 23;
+
+#[cfg(target_arch = "aarch64")]
+pub const HARDWARE_CONTEXT_WORDS: usize = 35;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceRequest {

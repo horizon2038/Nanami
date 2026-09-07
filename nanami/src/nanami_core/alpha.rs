@@ -8,17 +8,22 @@ mod support;
 #[path = "alpha/arch/x86_64.rs"]
 mod arch_impl;
 
+#[cfg(target_arch = "aarch64")]
+#[path = "alpha/arch/aarch64.rs"]
+mod arch_impl;
+
 use self::support::*;
 
 use crate::nanami_core::capability_space::RootCapabilitySpace;
 use crate::nanami_core::communication::{
     CommunicationEvent, CommunicationManager, KernelFaultEvent, NotificationEvent, OsRequestEvent,
-    OS_REQUEST_DEBUG_PING, OS_REQUEST_DMA_REQUEST, OS_REQUEST_EXIT, OS_REQUEST_HEAP_ALLOC,
-    OS_REQUEST_INITIAL_FRAMEBUFFER_INFORMATION, OS_REQUEST_IO_PORT_CONTROL, OS_REQUEST_IRQ_CONTROL,
-    OS_REQUEST_MAPPING_RELEASE, OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NANAMI_CONTROL,
-    OS_REQUEST_NANAMI_INFO, OS_REQUEST_NOTIFICATION_PORT_COPY, OS_REQUEST_NOTIFICATION_PORT_CREATE,
-    OS_REQUEST_PAGE_ALLOC, OS_REQUEST_PROCESS_ALIVE, OS_REQUEST_PROCESS_EXEC_MEMORY,
-    OS_REQUEST_PROCESS_KILL, OS_REQUEST_PROCESS_MAP_ANONYMOUS, OS_REQUEST_PROCESS_MEMORY_CLONE,
+    OS_REQUEST_DEBUG_PING, OS_REQUEST_DMA_REQUEST, OS_REQUEST_DRIVER_PLATFORM_INFO,
+    OS_REQUEST_EXIT, OS_REQUEST_HEAP_ALLOC, OS_REQUEST_INITIAL_FRAMEBUFFER_INFORMATION,
+    OS_REQUEST_IO_PORT_CONTROL, OS_REQUEST_IRQ_CONTROL, OS_REQUEST_MAPPING_RELEASE,
+    OS_REQUEST_MMIO_REQUEST, OS_REQUEST_NANAMI_CONTROL, OS_REQUEST_NANAMI_INFO,
+    OS_REQUEST_NOTIFICATION_PORT_COPY, OS_REQUEST_NOTIFICATION_PORT_CREATE, OS_REQUEST_PAGE_ALLOC,
+    OS_REQUEST_PROCESS_ALIVE, OS_REQUEST_PROCESS_EXEC_MEMORY, OS_REQUEST_PROCESS_KILL,
+    OS_REQUEST_PROCESS_MAP_ANONYMOUS, OS_REQUEST_PROCESS_MEMORY_CLONE,
     OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN, OS_REQUEST_PROCESS_MEMORY_READ,
     OS_REQUEST_PROCESS_MEMORY_WRITE, OS_REQUEST_PROCESS_REAP, OS_REQUEST_PROCESS_SPAWN,
     OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER, OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER_SUSPENDED,
@@ -81,9 +86,15 @@ const TEMP_MAP_STRIDE: usize = 0x0020_0000;
 const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
 const PROCESS_COPY_TEMP_WINDOW_SIZE: usize = 0x0100_0000;
 const PROCESS_ZERO_TEMP_BASE: usize = PROCESS_COPY_TEMP_BASE + PROCESS_COPY_TEMP_WINDOW_SIZE;
-const PROCESS_SPAWN_MEMORY_MAX_BYTES: usize = 64 * 1024 * 1024;
+// The copy window below is also the largest image that can be staged at once.
+// Keep the static backing buffer at that effective limit: making it larger only
+// inflates Nanami's BSS (and can make the init ELF exceed A9N's load capacity).
+const PROCESS_SPAWN_MEMORY_MAX_BYTES: usize = PROCESS_COPY_TEMP_WINDOW_SIZE;
 const NANAMI_INFO_MEMORY: usize = 1;
 const NANAMI_INFO_PROCESS: usize = 2;
+const NANAMI_INFO_SMP: usize = 3;
+const NANAMI_INFO_ARCHITECTURE_NAME: usize = 4;
+const NANAMI_INFO_PLATFORM_NAME: usize = 5;
 static mut PROCESS_COPY_BOUNCE_BUFFER: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
 static mut PROCESS_MEMORY_IMAGE_BUFFER: [u8; PROCESS_SPAWN_MEMORY_MAX_BYTES] =
     [0; PROCESS_SPAWN_MEMORY_MAX_BYTES];
@@ -137,6 +148,10 @@ pub struct Alpha {
     initial_framebuffer: InitialFramebufferInformation,
     interrupt_region: CapabilityDescriptor,
     root_io_port: CapabilityDescriptor,
+    driver_manager_pid: usize,
+    architecture_name: [u8; 32],
+    platform_name: [u8; 32],
+    platform_rsdp_address: usize,
     runtime_stack_top: usize,
 }
 
@@ -157,9 +172,27 @@ struct InitialFramebufferInformation {
     blue_size: usize,
 }
 
+impl InitialFramebufferInformation {
+    const UNAVAILABLE: Self = Self {
+        display_id: 0,
+        address: 0,
+        size_bytes: 0,
+        width: 0,
+        height: 0,
+        stride: 0,
+        bits_per_pixel: 0,
+        red_position: 0,
+        red_size: 0,
+        green_position: 0,
+        green_size: 0,
+        blue_position: 0,
+        blue_size: 0,
+    };
+}
+
 #[derive(Clone, Copy)]
 struct BootListEntry<'a> {
-    _name: &'a str,
+    name: &'a str,
     priority: Word,
     image_path: &'a str,
 }
@@ -220,7 +253,8 @@ impl Alpha {
             os_port,
             1usize << root.root_radix,
             &PROCESS_ROOT_RESERVED_SLOTS,
-        );
+            init_info.core_count,
+        )?;
         let communication = CommunicationManager::new(os_port);
         info!("managers ready");
 
@@ -253,16 +287,21 @@ impl Alpha {
 
         info!("capture initial framebuffer information");
         let initial_framebuffer = extract_initial_framebuffer_information(init_info)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        info!(
-            "framebuffer phys={:#018x} size={:#x} {}x{} stride={} bpp={}",
-            initial_framebuffer.address,
-            initial_framebuffer.size_bytes,
-            initial_framebuffer.width,
-            initial_framebuffer.height,
-            initial_framebuffer.stride,
-            initial_framebuffer.bits_per_pixel
-        );
+            .unwrap_or_else(|| {
+                info!("framebuffer unavailable; continuing without display services");
+                InitialFramebufferInformation::UNAVAILABLE
+            });
+        if initial_framebuffer.address != 0 {
+            info!(
+                "framebuffer phys={:#018x} size={:#x} {}x{} stride={} bpp={}",
+                initial_framebuffer.address,
+                initial_framebuffer.size_bytes,
+                initial_framebuffer.width,
+                initial_framebuffer.height,
+                initial_framebuffer.stride,
+                initial_framebuffer.bits_per_pixel
+            );
+        }
 
         info!("alpha bootstrap complete");
         let interrupt_region =
@@ -278,13 +317,20 @@ impl Alpha {
             initial_framebuffer,
             interrupt_region,
             root_io_port,
+            driver_manager_pid: 0,
+            architecture_name: init_info.architecture_name,
+            platform_name: init_info.platform_name,
+            platform_rsdp_address: init_info.arch_info[0],
             runtime_stack_top: 0,
         })
     }
 
     pub fn start(&mut self) {
         self.spawn_components_from_initramfs();
-        info!("alpha online");
+        crate::force_info!(
+            "alpha online: smp_cores={} alpha_core=0",
+            self.processes.online_core_count()
+        );
     }
 
     fn spawn_components_from_initramfs(&mut self) {
@@ -299,14 +345,35 @@ impl Alpha {
                 let Some(entry) = parse_boot_list_line(line) else {
                     continue;
                 };
+                let is_driver_manager = entry.name == "device-manager";
                 match self.spawn_initramfs_image(
                     entry.image_path,
                     0,
                     None,
-                    true,
+                    !is_driver_manager,
                     Some(entry.priority),
                 ) {
-                    Ok(_) => {
+                    Ok(pid) => {
+                        if is_driver_manager {
+                            self.driver_manager_pid = pid;
+                            let manager = self
+                                .processes
+                                .find_entry_by_pid(pid)
+                                .ok_or(CapabilityError::InvalidArgument);
+                            match manager
+                                .and_then(|entry| arch::process_control_block::resume(entry.pcb))
+                            {
+                                Ok(()) => info!("[driver-manager] privileged pid={}", pid),
+                                Err(error) => {
+                                    failed += 1;
+                                    error!(
+                                        "[proc.err] driver manager resume failed pid={} err={:?}",
+                                        pid, error
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         spawned += 1;
                     }
                     Err(e) => {
@@ -618,6 +685,9 @@ impl Alpha {
             }
             OS_REQUEST_NANAMI_INFO => {
                 response_from_details_result(self.handle_nanami_info_request(request))
+            }
+            OS_REQUEST_DRIVER_PLATFORM_INFO => {
+                response_from_details_result(self.handle_driver_platform_info_request(request))
             }
             OS_REQUEST_IRQ_CONTROL => {
                 response_from_status_result(self.handle_irq_control_request(request))

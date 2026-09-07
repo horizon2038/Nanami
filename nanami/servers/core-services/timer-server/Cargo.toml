@@ -7,6 +7,10 @@ edition = "2021"
 libnanami = { path = "../../sdk/rust/libnanami" }
 nanami-services = { path = "../../sdk/rust/nanami-services" }
 
+[features]
+default = []
+hpet = []
+
 [profile.dev]
 panic = "abort"
 

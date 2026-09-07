@@ -1,5 +1,7 @@
 use libnanami::Word;
 
+use crate::arch::{CPU_INFO, PROC_VERSION};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum VirtualNode {
@@ -270,10 +272,8 @@ pub fn directory_entry(
 
 pub fn static_file(node: VirtualNode) -> Option<&'static [u8]> {
     match node {
-        VirtualNode::ProcVersion => Some(b"Linux version 6.1.0-alter (Nanami/A9N) x86_64\n"),
-        VirtualNode::ProcCpuInfo => Some(
-            b"processor\t: 0\nvendor_id\t: A9N Project\nmodel name\t: Alter virtual x86_64 processor\n",
-        ),
+        VirtualNode::ProcVersion => Some(PROC_VERSION),
+        VirtualNode::ProcCpuInfo => Some(CPU_INFO),
         _ => None,
     }
 }

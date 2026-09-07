@@ -1,11 +1,22 @@
 #![no_std]
 #![no_main]
 
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".global _start",
+    ".type _start,@function",
+    "_start:",
+    // Linux enters with a 16-byte-aligned stack. Make a real call so the
+    // Rust function sees the SysV AMD64 function-entry alignment it expects.
+    "call linux_smoke_main",
+    "ud2",
+);
+
 mod arch;
 
 use arch::{
-    linux_clock_gettime, linux_close, linux_exit_group, linux_getpid, linux_nanosleep, linux_open,
-    linux_readv, linux_write, LinuxIoVec, LinuxTimespec,
+    linux_clock_gettime, linux_close, linux_exit_group, linux_getpid, linux_link, linux_nanosleep,
+    linux_open, linux_readv, linux_unlink, linux_write, LinuxIoVec, LinuxTimespec,
 };
 
 #[panic_handler]
@@ -13,18 +24,51 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     linux_exit_group(125)
 }
 
+#[cfg(target_arch = "aarch64")]
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    linux_smoke_main()
+}
+
+#[no_mangle]
+pub extern "C" fn linux_smoke_main() -> ! {
     let pid = linux_getpid();
     if pid == 0 {
         linux_exit_group(77);
     }
     verify_readv();
+    verify_link();
     verify_nanosleep();
     println("Hello from Linux syscall smoke test!\n");
     println("\x1b[32mLinux syscall smoke test passed!\x1b[0m\n");
 
     linux_exit_group(0)
+}
+
+fn verify_link() {
+    let source = b"/bin/linux-syscall-smoke\0";
+    let target = b"/tmp/linux-syscall-smoke-link\0";
+    let _ = linux_unlink(target.as_ptr());
+    if linux_link(source.as_ptr(), target.as_ptr()) != 0 {
+        linux_exit_group(83);
+    }
+
+    let fd = linux_open(target.as_ptr(), 0);
+    if fd < 0 {
+        linux_exit_group(84);
+    }
+    let mut magic = [0u8; 4];
+    let iov = [LinuxIoVec {
+        base: magic.as_mut_ptr(),
+        len: magic.len(),
+    }];
+    let read = linux_readv(fd as usize, iov.as_ptr(), iov.len());
+    let _ = linux_close(fd as usize);
+    let unlinked = linux_unlink(target.as_ptr());
+    if read != 4 || magic != [0x7f, b'E', b'L', b'F'] || unlinked != 0 {
+        linux_exit_group(85);
+    }
+    println("Linux link smoke test passed!\n");
 }
 
 fn verify_nanosleep() {

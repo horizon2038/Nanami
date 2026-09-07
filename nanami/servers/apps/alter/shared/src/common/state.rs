@@ -283,6 +283,13 @@ pub struct ManagedProcess {
     pub mappings: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
 }
 
+#[derive(Clone, Copy)]
+pub struct FaultProcess {
+    pub pid: Word,
+    pub pcb: Word,
+    pub personality: OsPersonality,
+}
+
 impl ManagedProcess {
     pub const EMPTY: Self = Self {
         pid: 0,
@@ -432,6 +439,9 @@ pub struct Runtime {
     pub exec_stack_buffer_size: Word,
     pub fork_image_cache: [Option<CachedElfImage>; FORK_IMAGE_CACHE_ENTRIES],
     pub trapped_faults: Word,
+    // False for the normal non-strace case. Once enabled it remains true so
+    // hot syscall paths can skip all trace-related process-table scans.
+    pub trace_ever_enabled: bool,
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
 }
@@ -489,6 +499,7 @@ impl Runtime {
             exec_stack_buffer_size: 0,
             fork_image_cache: [None; FORK_IMAGE_CACHE_ENTRIES],
             trapped_faults: 0,
+            trace_ever_enabled: false,
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
         }
@@ -560,8 +571,9 @@ impl Runtime {
         {
             match nanami_services::posix::posix_read_direct(self.posix_port, fd, out_offset, len) {
                 Ok(bytes) => return Ok((bytes, self.posix_direct_shm + out_offset)),
-                Err(RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)) => {}
-                Err(error) => return Err(error),
+                // The delegated path is an optimization. A transient IPC or backing-store
+                // failure must not turn an otherwise valid Linux read into EIO.
+                Err(_) => {}
             }
         }
         let bytes = nanami_services::posix::posix_read(self.posix_port, fd, out_offset, len)?;
@@ -787,12 +799,40 @@ impl Runtime {
         if fd as usize >= LINUX_FD_MAX {
             return None;
         }
-        let file = self.managed_process(pid)?.files[fd as usize];
-        if file.is_open() {
-            Some(file)
-        } else {
-            None
+        let mut i = 0usize;
+        while i < self.managed.len() {
+            let process = &self.managed[i];
+            if process.pid == pid && process.pcb != 0 {
+                let file = process.files[fd as usize];
+                return if file.is_open() { Some(file) } else { None };
+            }
+            i += 1;
         }
+        None
+    }
+
+    pub fn terminal_id(&self, pid: Word) -> Option<Word> {
+        let mut i = 0usize;
+        while i < self.managed.len() {
+            let process = &self.managed[i];
+            if process.pid == pid && process.pcb != 0 {
+                return Some(process.terminal_id);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    pub fn terminal_canonical(&self, pid: Word) -> Option<bool> {
+        let mut i = 0usize;
+        while i < self.managed.len() {
+            let process = &self.managed[i];
+            if process.pid == pid && process.pcb != 0 {
+                return Some(process.terminal_canonical);
+            }
+            i += 1;
+        }
+        None
     }
 
     pub fn set_linux_file(&mut self, pid: Word, fd: Word, file: LinuxFile) -> bool {
@@ -979,7 +1019,7 @@ impl Runtime {
         }
         let mut i = 0usize;
         while i < self.managed.len() {
-            let entry = self.managed[i];
+            let entry = &self.managed[i];
             if entry.pid == pid && entry.pcb != 0 {
                 return Some(entry.pcb);
             }
@@ -988,30 +1028,43 @@ impl Runtime {
         None
     }
 
-    pub fn process_for_fault_identifier(&self, identifier: Word) -> Option<ManagedProcess> {
-        if let Some(process) = self.managed_process(identifier) {
-            Some(process)
-        } else if identifier == 0 {
-            self.single_managed_process()
-        } else {
-            None
+    pub fn process_for_fault_identifier(&self, identifier: Word) -> Option<FaultProcess> {
+        if identifier != 0 {
+            let mut i = 0usize;
+            while i < self.managed.len() {
+                let process = &self.managed[i];
+                if process.pid == identifier && process.pcb != 0 {
+                    return Some(FaultProcess {
+                        pid: process.pid,
+                        pcb: process.pcb,
+                        personality: process.personality,
+                    });
+                }
+                i += 1;
+            }
+            return None;
         }
+        self.single_managed_fault_process()
     }
 
-    fn single_managed_process(&self) -> Option<ManagedProcess> {
-        let mut found = ManagedProcess::EMPTY;
+    fn single_managed_fault_process(&self) -> Option<FaultProcess> {
+        let mut found = None;
         let mut count = 0usize;
         let mut i = 0usize;
         while i < self.managed.len() {
-            let entry = self.managed[i];
+            let entry = &self.managed[i];
             if entry.pid != 0 && entry.pcb != 0 {
-                found = entry;
+                found = Some(FaultProcess {
+                    pid: entry.pid,
+                    pcb: entry.pcb,
+                    personality: entry.personality,
+                });
                 count += 1;
             }
             i += 1;
         }
         if count == 1 {
-            Some(found)
+            found
         } else {
             None
         }
@@ -1154,6 +1207,9 @@ impl Runtime {
     }
 
     pub fn set_trace_enabled(&mut self, pid: Word, enabled: bool) -> bool {
+        if enabled {
+            self.trace_ever_enabled = true;
+        }
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
         };

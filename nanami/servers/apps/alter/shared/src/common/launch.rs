@@ -2,9 +2,11 @@ use libnanami::ipc::ServiceRequest;
 use libnanami::Word;
 
 use crate::abi::*;
+use crate::arch::PLATFORM_NUL;
+use crate::elf::ElfMetadata;
 use crate::loader::{load_cached_fork_linux_elf_image, map_request_error_to_status};
 use crate::personality;
-use crate::process::{read_register_value, write_exec_registers, REG_RSP};
+use crate::process::{read_register_value, write_exec_registers, REG_PC, REG_RSP};
 use crate::state::{OsPersonality, ReplyAction, Runtime};
 
 pub struct LaunchInfo {
@@ -70,7 +72,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
         Ok(pid) => {
             let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
             if let Err(status) =
-                prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics)
+                prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics, None)
             {
                 libnanami::println!(
                     "[alter] spawn failed stage=stack image={} pid={} status={}",
@@ -169,9 +171,15 @@ fn spawn_rootfs_linux_image(
             let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
             let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
             let graphics = (request.arg3 & ALTER_LAUNCH_FLAG_GRAPHICS) != 0;
-            if let Err(status) =
-                prepare_initial_stack(runtime, pid, pcb, info, personality, diagnostics)
-            {
+            if let Err(status) = prepare_initial_stack(
+                runtime,
+                pid,
+                pcb,
+                info,
+                personality,
+                diagnostics,
+                Some(loaded.metadata),
+            ) {
                 libnanami::println!(
                     "[alter] spawn failed stage=rootfs-stack image={} pid={} status={}",
                     image_name,
@@ -326,8 +334,11 @@ fn prepare_initial_stack(
     info: &LaunchInfo,
     personality: OsPersonality,
     diagnostics: bool,
+    loaded_metadata: Option<ElfMetadata>,
 ) -> Result<(), Word> {
-    let elf = read_target_elf_metadata(runtime, pid);
+    let elf = loaded_metadata
+        .map(target_elf_metadata_from_loaded)
+        .unwrap_or_else(|| read_target_elf_metadata(runtime, pid));
     if elf.has_interpreter {
         libnanami::println!(
             "[alter] dynamic ELF is not supported yet pid={} interp=PT_INTERP",
@@ -399,7 +410,7 @@ fn prepare_initial_stack(
     string_cursor = push_raw_bytes(
         stack_buffer,
         string_cursor,
-        b"x86_64\0",
+        PLATFORM_NUL,
         &mut platform_guest,
         stack_base,
     )?;
@@ -486,6 +497,7 @@ fn prepare_initial_stack(
             .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
     }
     if diagnostics {
+        let pc = read_register_value(pcb, REG_PC).unwrap_or(0);
         let rsp = read_register_value(pcb, REG_RSP).unwrap_or(0);
         let mut stack_argc = 0;
         let mut stack_argv0 = 0;
@@ -494,9 +506,10 @@ fn prepare_initial_stack(
             stack_argv0 = read_word_from_buffer(stack_buffer, 8);
         }
         libnanami::println!(
-            "[alter/{}] stack verify pid={} rsp={:#x} argc={} argv0={:#x} personality={}",
+            "[alter/{}] stack verify pid={} pc={:#x} rsp={:#x} argc={} argv0={:#x} personality={}",
             personality::name(personality),
             pid,
+            pc,
             rsp,
             stack_argc,
             stack_argv0,
@@ -684,6 +697,34 @@ struct TargetElfMetadata {
     tls_file_size: Word,
     tls_memory_size: Word,
     tls_align: Word,
+}
+
+fn target_elf_metadata_from_loaded(metadata: ElfMetadata) -> TargetElfMetadata {
+    // Alpha uses the same 4 MiB load bias for ET_DYN images on both architectures.
+    let load_bias = if metadata.elf_type == 3 {
+        LINUX_DEFAULT_IMAGE_BASE
+    } else {
+        0
+    };
+    TargetElfMetadata {
+        entry_point: metadata.entry_point.saturating_add(load_bias),
+        program_header_vaddr: if metadata.program_header_vaddr == 0 {
+            0
+        } else {
+            metadata.program_header_vaddr.saturating_add(load_bias)
+        },
+        program_header_entry_size: metadata.program_header_entry_size,
+        program_header_count: metadata.program_header_count,
+        has_interpreter: metadata.has_interpreter,
+        tls_vaddr: if metadata.tls_memory_size == 0 {
+            0
+        } else {
+            metadata.tls_vaddr.saturating_add(load_bias)
+        },
+        tls_file_size: metadata.tls_file_size,
+        tls_memory_size: metadata.tls_memory_size,
+        tls_align: metadata.tls_align,
+    }
 }
 
 impl TargetElfMetadata {

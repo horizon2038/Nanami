@@ -4,15 +4,15 @@ version = 4
 
 [[package]]
 name = "a9n-types"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f13feb37ee5cfc4b43d8bd78a4c1fcd2d8e9a4c653d971b54b2c6c886a34b4ff"
+checksum = "8f57fbfb986c183548f5bc794f5fbf8f2a7347315b3479cfa19d20de035f8f9a"
 
 [[package]]
 name = "a9n_abi"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75ab6f2d8b0e697b2b340fbaecffdf7a978f24de339b438008d5973c29b0e81e"
+checksum = "9f652e93ae03b67bf9a6964b26727a40b48d6615ae9d24fbe99633f5d3decaa1"
 dependencies = [
  "a9n-types",
  "bitflags",

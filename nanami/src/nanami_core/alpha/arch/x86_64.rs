@@ -3,6 +3,10 @@ use core::arch::asm;
 use super::Alpha;
 use crate::info;
 
+pub(super) const fn ipc_buffer_tls_base(ipc_buffer_va: usize) -> usize {
+    ipc_buffer_va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS
+}
+
 extern "C" fn run_on_relocated_stack(alpha_ptr: *mut Alpha) -> ! {
     let alpha = unsafe { &mut *alpha_ptr };
     info!("[stack] switched to runtime stack");

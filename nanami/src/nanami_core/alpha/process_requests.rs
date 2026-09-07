@@ -1,6 +1,29 @@
 use super::*;
 
 impl Alpha {
+    fn configure_process_affinity(
+        &mut self,
+        pcb: CapabilityDescriptor,
+    ) -> Result<Word, CapabilityError> {
+        // The available cores come from init_info. A newly created, suspended
+        // PCB starts on core 0; no affinity probing is needed.
+        let affinity = self.processes.allocate_affinity();
+        if affinity == 0 {
+            return Ok(affinity);
+        }
+
+        match configure_pcb_affinity(pcb, affinity) {
+            Ok(()) => Ok(affinity),
+            Err(error) => {
+                error!(
+                    "[smp.warn] affinity assignment failed requested={} err={:?}; keeping core=0",
+                    affinity, error
+                );
+                Ok(0)
+            }
+        }
+    }
+
     pub(super) fn ensure_process_frame_chunks(
         &mut self,
         pid: usize,
@@ -103,11 +126,20 @@ impl Alpha {
         );
 
         let (pid, process_root_slot) = self.processes.alloc_process_slot()?;
+        let mut spawn_stage = "process-arena";
         macro_rules! spawn_try {
             ($expr:expr) => {
                 match $expr {
                     Ok(value) => value,
                     Err(error) => {
+                        error!(
+                            "[proc.err] spawn failed pid={} image={} stage={} source-line={} err={:?}",
+                            pid,
+                            image_name,
+                            spawn_stage,
+                            line!(),
+                            error
+                        );
                         self.cleanup_failed_spawn(pid, process_root_slot);
                         return Err(error);
                     }
@@ -128,6 +160,7 @@ impl Alpha {
         );
         let process_generic = spawn_try!(self.memory.ensure_process_arena(process_root_slot));
 
+        spawn_stage = "process-root";
         info!(
             "[proc] create child root slot={:>3} desc={:#018x}",
             process_root_slot, child_root
@@ -141,6 +174,7 @@ impl Alpha {
             process_root_slot as Word,
         ));
 
+        spawn_stage = "process-objects";
         info!("[proc] populate child root");
         spawn_try!(arch::generic::convert(
             process_generic,
@@ -237,6 +271,7 @@ impl Alpha {
         let initial_stack_pointer = stack_top - 32;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
         let raw_fault_process = elf.ipc_buffer_start.is_none() && resolver_port.is_some();
+        spawn_stage = "ipc-buffer";
         let (has_ipc_buffer, ipc_buffer_va, ipc_buffer_frame_slot, ipc_buffer_tls_base) =
             match elf.ipc_buffer_start {
                 Some(va) => {
@@ -249,12 +284,7 @@ impl Alpha {
                     }
                     let frame_slot = (va - image_base) / PAGE_SIZE;
                     spawn_try!(self.ensure_process_frame_chunks(pid, child_root, frame_slot, 1));
-                    (
-                        true,
-                        va,
-                        frame_slot,
-                        va + (nun::TLS_BASE_OFFSET as usize) * nun::BYTE_BITS,
-                    )
+                    (true, va, frame_slot, arch_impl::ipc_buffer_tls_base(va))
                 }
                 None if raw_fault_process => {
                     info!("[proc] raw fault-handler ELF without Nanami IPC buffer");
@@ -276,6 +306,7 @@ impl Alpha {
             TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE
         );
 
+        spawn_stage = "vm-tracking";
         spawn_try!(self.processes.ensure_vm_space_for_pid(pid));
         spawn_try!(self.processes.register_lazy_mapping(
             pid,
@@ -296,6 +327,7 @@ impl Alpha {
         ));
         info!("[proc] lazy vm tracker ready pid={:>3}", pid);
 
+        spawn_stage = "image-pages";
         let mut image_page = 0usize;
         while image_page < image_pages {
             let image_va = image_base + image_page * PAGE_SIZE;
@@ -308,6 +340,7 @@ impl Alpha {
         } else {
             0
         };
+        spawn_stage = "stack-pages";
         let mut stack_page = 0usize;
         while stack_page < USER_STACK_PAGES {
             let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
@@ -332,6 +365,7 @@ impl Alpha {
             "[proc] configure pcb={:#018x} root={:#018x} as={:#018x} ip={:#018x} sp={:#018x}",
             child_pcb, child_root, child_address_space, elf.entry_point, initial_stack_pointer
         );
+        spawn_stage = "pcb-configuration";
         let priority = priority_override.unwrap_or_else(|| process_priority_for_image(image_name));
         let resolver_port = if let Some(external_resolver) = resolver_port {
             spawn_try!(arch::node::copy(
@@ -363,7 +397,10 @@ impl Alpha {
             priority,
             0,
         ));
+        spawn_stage = "affinity";
+        let affinity = spawn_try!(self.configure_process_affinity(child_pcb));
 
+        spawn_stage = "process-install";
         spawn_try!(self.processes.install_process(
             pid,
             reaper_pid,
@@ -373,19 +410,28 @@ impl Alpha {
             child_address_space,
             child_os_port,
             pid as Word,
+            affinity,
             total_frames,
             heap_base,
             USER_HEAP_LIMIT,
         ));
         if auto_resume {
+            spawn_stage = "process-resume";
             spawn_try!(arch::process_control_block::resume(child_pcb));
         }
+        crate::force_info!(
+            "[smp] process pid={:>3} image={} affinity={}",
+            pid,
+            image_name,
+            affinity
+        );
         info!(
-            "[proc] child {} image={} pid={:>3} priority={:>2} root={:#018x} entry={:#018x}",
+            "[proc] child {} image={} pid={:>3} priority={:>2} core={:>2} root={:#018x} entry={:#018x}",
             if auto_resume { "resumed" } else { "prepared" },
             image_name,
             pid,
             priority,
+            affinity,
             child_root,
             elf.entry_point
         );
@@ -1164,4 +1210,23 @@ impl Alpha {
         );
         Ok(())
     }
+}
+
+fn configure_pcb_affinity(
+    pcb: CapabilityDescriptor,
+    affinity: Word,
+) -> Result<(), CapabilityError> {
+    let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
+        false, // address_space
+        false, // root_node
+        false, // frame_ipc_buffer
+        false, // notification_port
+        false, // ipc_port_resolver
+        false, // instruction_pointer
+        false, // stack_pointer
+        false, // thread_local_base
+        false, // priority
+        true,  // affinity
+    );
+    arch::process_control_block::configure(pcb, config, 0, 0, 0, 0, 0, 0, 0, 0, 0, affinity)
 }

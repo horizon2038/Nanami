@@ -8,7 +8,7 @@ usage() {
   cat >&2 <<'USAGE'
 Usage: create-ext2-image.sh <size-mb> [output.img]
 
-Creates a raw ext2 image for Nanami's virtio-blk/ext2-server path.
+Creates a raw ext2 image for Nanami's block-device/ext2-server path.
 The default output path is <repo>/out/ext2.img.
 apps/ is seeded into /bin under extensionless executable names. If the image cannot contain the selected files,
 the writer fails instead of silently skipping entries. Set ROOTFS_APPS to a
@@ -42,6 +42,16 @@ SIZE_MB="$1"
 OUT="${2:-$ROOT_DIR/out/ext2.img}"
 EXTRA_LINUX_BINS="${EXTRA_LINUX_BINS:-}"
 EXTRA_FREEBSD_BINS="${EXTRA_FREEBSD_BINS:-}"
+NANAMI_TARGET_ARCH="${NANAMI_TARGET_ARCH:-${ARCH:-x86_64}}"
+
+case "$NANAMI_TARGET_ARCH" in
+  x86-64|x86_64) NANAMI_TARGET_ARCH=x86_64 ;;
+  aarch64) ;;
+  *)
+    echo "[ext2-image] NANAMI_TARGET_ARCH must be x86_64 or aarch64" >&2
+    exit 1
+    ;;
+esac
 
 case "$SIZE_MB" in
   ''|*[!0-9]*)
@@ -58,7 +68,7 @@ fi
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 
-python3 - "$SIZE_MB" "$OUT" "$ROOT_DIR" "$EXTRA_LINUX_BINS" "$EXTRA_FREEBSD_BINS" <<'PY'
+python3 - "$SIZE_MB" "$OUT" "$ROOT_DIR" "$EXTRA_LINUX_BINS" "$EXTRA_FREEBSD_BINS" "$NANAMI_TARGET_ARCH" <<'PY'
 import math
 import os
 import shlex
@@ -70,6 +80,9 @@ out = sys.argv[2]
 root_dir = sys.argv[3]
 extra_linux_bins = sys.argv[4]
 extra_freebsd_bins = sys.argv[5]
+target_arch = sys.argv[6]
+rust_target_name = f'{target_arch}-unknown-a9n'
+expected_elf_machine = {'x86_64': 0x3e, 'aarch64': 0xb7}[target_arch]
 rootfs_apps_filter = os.environ.get('ROOTFS_APPS', '').strip()
 servers_dir = os.path.join(root_dir, 'nanami', 'servers')
 apps_dir = os.path.join(servers_dir, 'apps')
@@ -170,12 +183,10 @@ def collect_rootfs_binaries():
         if os.path.isfile(cargo_toml):
             crate_name = parse_crate_name(cargo_toml)
             if crate_name:
-                binary_path = os.path.join(
-                    rust_target_dir, 'x86_64-unknown-a9n', 'release', crate_name
-                )
+                binary_path = os.path.join(rust_target_dir, rust_target_name, 'release', crate_name)
                 if os.path.isfile(binary_path):
                     binaries.append((app_name, binary_path))
-        if os.path.isfile(makefile):
+        if target_arch == 'x86_64' and os.path.isfile(makefile):
             build_dir = os.path.join(current, 'build')
             if os.path.isdir(build_dir):
                 for name in sorted(os.listdir(build_dir)):
@@ -213,8 +224,30 @@ def collect_extra_binaries(raw, label):
         binaries.append((out_name, path))
     return binaries
 
-system_list = read_optional(os.path.join(servers_dir, 'system-list'))
-session_list = read_optional(os.path.join(servers_dir, 'session-list'))
+def read_arch_manifest(name):
+    arch_path = os.path.join(servers_dir, f'{name}.{target_arch}')
+    if os.path.isfile(arch_path):
+        return read_optional(arch_path)
+    return read_optional(os.path.join(servers_dir, name))
+
+def validate_elf_machine(path, label):
+    data = read_optional(path)
+    # EXTRA_*_BINS also carries interpreter payloads such as WebAssembly
+    # modules. Validate the machine whenever the payload is an ELF, while
+    # leaving non-ELF data available to the guest interpreter.
+    if not data.startswith(b'\x7fELF'):
+        return
+    if len(data) < 20 or data[:6] != b'\x7fELF\x02\x01':
+        raise SystemExit(f'[ext2-image] {label} is not a little-endian ELF64 binary: {path}')
+    machine = struct.unpack_from('<H', data, 18)[0]
+    if machine != expected_elf_machine:
+        raise SystemExit(
+            f'[ext2-image] {label} has ELF machine {machine:#x}, expected '
+            f'{expected_elf_machine:#x} for {target_arch}: {path}'
+        )
+
+system_list = read_arch_manifest('system-list')
+session_list = read_arch_manifest('session-list')
 honoka_theme_dir = os.path.join(apps_dir, 'honoka', 'assets', 'themes')
 manifest_files = []
 if system_list:
@@ -260,10 +293,17 @@ linux_binaries = []
 freebsd_binaries = []
 seen_bin_names = set()
 candidates = []
+linux_candidates = []
 for name, path in collect_rootfs_binaries():
     if rootfs_app_allowed(name):
-        candidates.append((name, path))
-linux_candidates = collect_extra_binaries(extra_linux_bins, 'linux')
+        if name.startswith('_linux-'):
+            # Guest-only smoke programs use the native code generator but
+            # execute through Alter's Linux syscall personality.
+            # Keep them out of Nanami's native /bin namespace.
+            linux_candidates.append((name[1:], path))
+        else:
+            candidates.append((name, path))
+linux_candidates.extend(collect_extra_binaries(extra_linux_bins, 'linux'))
 freebsd_candidates = collect_extra_binaries(extra_freebsd_bins, 'freebsd')
 
 if not rootfs_apps_filter:
@@ -287,6 +327,7 @@ for name, path in candidates:
 
 seen_linux_names = set()
 for name, path in linux_candidates:
+    validate_elf_machine(path, 'Linux binary')
     if name in seen_linux_names:
         raise SystemExit(f'[ext2-image] duplicate /alter/linux/bin entry: {name}')
     seen_linux_names.add(name)
@@ -296,6 +337,7 @@ for name, path in linux_candidates:
 
 seen_freebsd_names = set()
 for name, path in freebsd_candidates:
+    validate_elf_machine(path, 'FreeBSD binary')
     if name in seen_freebsd_names:
         raise SystemExit(f'[ext2-image] duplicate /alter/freebsd/bin entry: {name}')
     seen_freebsd_names.add(name)

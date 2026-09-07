@@ -6,9 +6,10 @@ use super::constants::{
     VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY, VFS_CONTROL_ATTACH_SHARED_MEMORY,
     VFS_DELEGATE_ID_SHIFT, VFS_DELEGATE_VALUE_MASK, VFS_OPEN_HANDLE_MASK, VFS_OPEN_INODE_SHIFT,
     VFS_REQUEST_CLOSE, VFS_REQUEST_CONTROL, VFS_REQUEST_CREATE, VFS_REQUEST_FSTAT,
-    VFS_REQUEST_MKDIR, VFS_REQUEST_OPEN, VFS_REQUEST_OPEN_COMPOUND, VFS_REQUEST_READ,
-    VFS_REQUEST_READ_DELEGATED, VFS_REQUEST_READ_DIR, VFS_REQUEST_REMOVE, VFS_REQUEST_RENAME,
-    VFS_REQUEST_STAT, VFS_REQUEST_WRITE, VFS_STAT_SIZE_MASK, VFS_STAT_TYPE_SHIFT,
+    VFS_REQUEST_LINK, VFS_REQUEST_MKDIR, VFS_REQUEST_OPEN, VFS_REQUEST_OPEN_COMPOUND,
+    VFS_REQUEST_READ, VFS_REQUEST_READ_DELEGATED, VFS_REQUEST_READ_DIR, VFS_REQUEST_REMOVE,
+    VFS_REQUEST_RENAME, VFS_REQUEST_STAT, VFS_REQUEST_WRITE, VFS_STAT_SIZE_MASK,
+    VFS_STAT_TYPE_SHIFT,
 };
 
 pub fn vfs_attach_shared_memory(
@@ -223,6 +224,28 @@ pub fn vfs_remove(
         0,
         0,
         3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn vfs_link(
+    service_port: CapabilityDescriptor,
+    old_path_offset: Word,
+    old_path_len: Word,
+    new_path_offset: Word,
+    new_path_len: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        VFS_REQUEST_LINK,
+        old_path_offset,
+        old_path_len,
+        new_path_offset,
+        new_path_len,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));

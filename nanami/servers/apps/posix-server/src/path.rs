@@ -11,7 +11,7 @@ pub(crate) fn resolve_client_path(
     path_offset: usize,
     path_len: usize,
 ) -> Option<([u8; PATH_MAX], usize)> {
-    let session = runtime.sessions[session_index];
+    let session = &runtime.sessions[session_index];
     if path_len == 0
         || path_offset.checked_add(path_len)? > session.shm_size as usize
         || path_len > PATH_MAX

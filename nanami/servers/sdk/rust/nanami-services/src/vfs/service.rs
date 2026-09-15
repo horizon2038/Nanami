@@ -8,8 +8,8 @@ use super::constants::{
     VFS_REQUEST_CLOSE, VFS_REQUEST_CONTROL, VFS_REQUEST_CREATE, VFS_REQUEST_FSTAT,
     VFS_REQUEST_LINK, VFS_REQUEST_MKDIR, VFS_REQUEST_OPEN, VFS_REQUEST_OPEN_COMPOUND,
     VFS_REQUEST_READ, VFS_REQUEST_READ_DELEGATED, VFS_REQUEST_READ_DIR, VFS_REQUEST_REMOVE,
-    VFS_REQUEST_RENAME, VFS_REQUEST_STAT, VFS_REQUEST_WRITE, VFS_STAT_SIZE_MASK,
-    VFS_STAT_TYPE_SHIFT,
+    VFS_REQUEST_RENAME, VFS_REQUEST_STAT, VFS_REQUEST_WRITE, VFS_REQUEST_WRITE_DELEGATED,
+    VFS_STAT_SIZE_MASK, VFS_STAT_TYPE_SHIFT,
 };
 
 pub fn vfs_attach_shared_memory(
@@ -163,6 +163,37 @@ pub fn vfs_write(
         file_offset,
         len,
         input_offset,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(bytes)
+}
+
+/// The owner keeps the file handle; the delegated peer supplies the data buffer.
+pub fn vfs_write_delegated(
+    service_port: CapabilityDescriptor,
+    handle: Word,
+    file_offset: Word,
+    len: Word,
+    delegate_id: Word,
+    input_offset: Word,
+) -> Result<Word, RequestError> {
+    if delegate_id == 0
+        || delegate_id > VFS_DELEGATE_VALUE_MASK
+        || input_offset > VFS_DELEGATE_VALUE_MASK
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let source = (delegate_id << VFS_DELEGATE_ID_SHIFT) | input_offset;
+    let (status, bytes, _) = call_port(
+        service_port,
+        VFS_REQUEST_WRITE_DELEGATED,
+        handle,
+        file_offset,
+        len,
+        source,
         5,
     )?;
     if status != OS_RESPONSE_OK {

@@ -15,6 +15,10 @@ path = "hotpath-tests.rs"
 name = "alpha-alter"
 path = "alpha-alter-tests.rs"
 
+[[test]]
+name = "posix-io"
+path = "posix-io/main.rs"
+
 [dependencies]
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 

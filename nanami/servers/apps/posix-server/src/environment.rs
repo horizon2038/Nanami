@@ -2,7 +2,6 @@ use core::ptr;
 
 use libnanami::ipc::ServiceRequest;
 use libnanami::Word;
-use nanami_services::posix::*;
 
 use crate::state::{EnvironmentVariable, Runtime, Session, ENV_NAME_MAX, ENV_VALUE_MAX};
 
@@ -25,7 +24,7 @@ pub(crate) fn handle_getenv(runtime: &mut Runtime, request: ServiceRequest) -> (
     let Some(env_index) = find_env_index(&runtime.sessions[index], &name[..name_len]) else {
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
-    let env = runtime.sessions[index].env[env_index];
+    let env = &runtime.sessions[index].env[env_index];
     if env.value_len > request.arg3 as usize {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
@@ -112,7 +111,7 @@ pub(crate) fn handle_env_at(runtime: &mut Runtime, request: ServiceRequest) -> (
         }
         if seen == target {
             let needed = env.name_len + 1 + env.value_len;
-            let session = runtime.sessions[index];
+            let session = &runtime.sessions[index];
             if needed > max_len || out_offset.saturating_add(needed) > session.shm_size as usize {
                 return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
@@ -143,7 +142,7 @@ fn read_client_name(
     offset: usize,
     len: usize,
 ) -> Option<([u8; ENV_NAME_MAX], usize)> {
-    let session = runtime.sessions[session_index];
+    let session = &runtime.sessions[session_index];
     if len == 0 || len > ENV_NAME_MAX || offset.checked_add(len)? > session.shm_size as usize {
         return None;
     }
@@ -164,7 +163,7 @@ fn read_client_value(
     offset: usize,
     len: usize,
 ) -> Option<([u8; ENV_VALUE_MAX], usize)> {
-    let session = runtime.sessions[session_index];
+    let session = &runtime.sessions[session_index];
     if len > ENV_VALUE_MAX || offset.checked_add(len)? > session.shm_size as usize {
         return None;
     }
@@ -182,7 +181,7 @@ fn write_client_bytes(
     offset: usize,
     bytes: &[u8],
 ) -> bool {
-    let session = runtime.sessions[session_index];
+    let session = &runtime.sessions[session_index];
     if offset.saturating_add(bytes.len()) > session.shm_size as usize {
         return false;
     }

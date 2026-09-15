@@ -8,6 +8,7 @@ const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
 const PT_TLS: u32 = 7;
+pub const MAX_LOAD_SEGMENTS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub struct LoadSegment {
@@ -27,6 +28,9 @@ pub struct ElfMetadata {
     pub program_header_count: Word,
     pub load_segment_count: Word,
     pub has_interpreter: bool,
+    pub interpreter_offset: Word,
+    pub interpreter_size: Word,
+    pub segments: [LoadSegment; MAX_LOAD_SEGMENTS],
     pub first_load: LoadSegment,
     pub program_header_vaddr: Word,
     pub tls_vaddr: Word,
@@ -75,6 +79,8 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
 
     let mut load_count = 0usize;
     let mut has_interpreter = false;
+    let mut interpreter_offset = 0;
+    let mut interpreter_size = 0;
     let mut first_load = LoadSegment {
         offset: 0,
         virtual_address: 0,
@@ -83,6 +89,7 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
         flags: 0,
     };
     let mut program_header_vaddr = 0;
+    let mut segments = [first_load; MAX_LOAD_SEGMENTS];
     let mut tls_vaddr = 0;
     let mut tls_file_size = 0;
     let mut tls_memory_size = 0;
@@ -103,6 +110,17 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
             if segment.memory_size < segment.file_size {
                 return Err(ElfError::Invalid);
             }
+            if load_count == MAX_LOAD_SEGMENTS
+                || segment.offset.checked_add(segment.file_size).is_none()
+                || segment
+                    .virtual_address
+                    .checked_add(segment.memory_size)
+                    .is_none()
+                || (segment.virtual_address & 4095) != (segment.offset & 4095)
+            {
+                return Err(ElfError::Invalid);
+            }
+            segments[load_count] = segment;
             if load_count == 0 {
                 first_load = segment;
             }
@@ -114,7 +132,18 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
             }
             load_count += 1;
         } else if p_type == PT_INTERP {
+            if has_interpreter {
+                return Err(ElfError::Invalid);
+            }
             has_interpreter = true;
+            interpreter_offset = read_u64(image, base + 8)? as Word;
+            interpreter_size = read_u64(image, base + 32)? as Word;
+            if interpreter_size < 2
+                || interpreter_size > 256
+                || interpreter_offset.checked_add(interpreter_size).is_none()
+            {
+                return Err(ElfError::Invalid);
+            }
         } else if p_type == PT_PHDR {
             program_header_vaddr = read_u64(image, base + 16)? as Word;
         } else if p_type == PT_TLS {
@@ -138,6 +167,9 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
         program_header_count: phnum as Word,
         load_segment_count: load_count as Word,
         has_interpreter,
+        interpreter_offset,
+        interpreter_size,
+        segments,
         first_load,
         program_header_vaddr,
         tls_vaddr,
@@ -145,6 +177,60 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
         tls_memory_size,
         tls_align,
     })
+}
+
+/// Check coverage by the union of possibly adjacent or overlapping ELF ranges.
+pub fn ranges_cover(ranges: &[(Word, Word)], base: Word, size: Word) -> bool {
+    let Some(end) = base.checked_add(size) else {
+        return false;
+    };
+    let mut cursor = base;
+    while cursor < end {
+        let mut next = cursor;
+        for &(start, bytes) in ranges {
+            let Some(limit) = start.checked_add(bytes) else {
+                return false;
+            };
+            if start <= cursor && cursor < limit {
+                next = next.max(limit.min(end));
+            }
+        }
+        if next == cursor {
+            return false;
+        }
+        cursor = next;
+    }
+    true
+}
+
+pub fn parse_elf64_image(image: &[u8]) -> Result<ElfMetadata, ElfError> {
+    let metadata = parse_elf64_header(image)?;
+    for segment in metadata.segments.iter().take(metadata.load_segment_count) {
+        if segment
+            .offset
+            .checked_add(segment.file_size)
+            .filter(|&end| end <= image.len())
+            .is_none()
+        {
+            return Err(ElfError::Invalid);
+        }
+    }
+    if metadata.has_interpreter {
+        let end = metadata
+            .interpreter_offset
+            .checked_add(metadata.interpreter_size)
+            .ok_or(ElfError::Invalid)?;
+        let path = image
+            .get(metadata.interpreter_offset..end)
+            .ok_or(ElfError::Invalid)?;
+        if path.last() != Some(&0)
+            || path[..path.len() - 1].contains(&0)
+            || path.first() != Some(&b'/')
+        {
+            return Err(ElfError::Invalid);
+        }
+    }
+    Ok(metadata)
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, ElfError> {

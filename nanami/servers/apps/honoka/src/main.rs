@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+#[path = "app/background.rs"]
+pub mod background;
 #[path = "app/compositor.rs"]
 pub mod compositor;
 #[path = "app/constants.rs"]

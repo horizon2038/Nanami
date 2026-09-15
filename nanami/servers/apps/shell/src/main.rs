@@ -13,6 +13,7 @@ mod file;
 #[path = "app/font.rs"]
 mod font;
 mod foreground;
+mod scrollback;
 
 use font::{TextRenderer, DEFAULT_TEXT_COLOR};
 
@@ -144,9 +145,7 @@ struct Shell {
     framebuffer: Word,
     present_notification: Word,
     text: TextRenderer,
-    rows: [[u8; COLS]; MAX_ROWS],
-    row_colors: [[u32; COLS]; MAX_ROWS],
-    row_count: usize,
+    scrollback: scrollback::Scrollback,
     scroll_offset: usize,
     input: [u8; MAX_LINE],
     input_len: usize,
@@ -179,9 +178,7 @@ impl Shell {
             framebuffer,
             present_notification,
             text,
-            rows: [[0; COLS]; MAX_ROWS],
-            row_colors: [[DEFAULT_TEXT_COLOR; COLS]; MAX_ROWS],
-            row_count: 0,
+            scrollback: scrollback::Scrollback::new(),
             scroll_offset: 0,
             input: [0; MAX_LINE],
             input_len: 0,
@@ -216,15 +213,15 @@ impl Shell {
         let mut row = 0usize;
         while row < ROWS {
             let source = start + row;
-            if source >= self.row_count {
+            if source >= self.scrollback.len() {
                 break;
             }
             self.text.draw_text_colored(
                 self.framebuffer,
                 CONTENT_WIDTH,
                 row * FONT_H,
-                &self.rows[source],
-                &self.row_colors[source],
+                self.scrollback.line(source),
+                self.scrollback.colors(source),
             );
             self.draw_block_cursor(source, row);
             row += 1;
@@ -251,7 +248,7 @@ impl Shell {
             return;
         }
         let source = self.visible_start() + row;
-        if source >= self.row_count {
+        if source >= self.scrollback.len() {
             return;
         }
         let y = row * FONT_H;
@@ -265,16 +262,16 @@ impl Shell {
             self.framebuffer,
             CONTENT_WIDTH,
             y,
-            &self.rows[source],
-            &self.row_colors[source],
+            self.scrollback.line(source),
+            self.scrollback.colors(source),
         );
         self.draw_block_cursor(source, row);
     }
 
     fn draw_block_cursor(&self, logical_row: usize, screen_row: usize) {
         if !self.cursor_visible
-            || logical_row + 1 != self.row_count
-            || self.rows[logical_row] != self.prompt_line()
+            || logical_row + 1 != self.scrollback.len()
+            || self.scrollback.line(logical_row) != &self.prompt_line()
         {
             return;
         }
@@ -445,7 +442,7 @@ impl Shell {
                 i += 1;
             }
         } else if bytes_eq(&self.input[..self.input_len], b"clear") {
-            self.row_count = 0;
+            self.scrollback.clear();
         } else if bytes_eq(&self.input[..self.input_len], b"about") {
             self.push_line_bytes(b"Honoka shell: shared-memory UI client");
         } else if bytes_eq(&self.input[..self.input_len], b"echo") {
@@ -549,7 +546,7 @@ impl Shell {
     fn push_foreground_output(&mut self, output: foreground::CommandOutput) -> bool {
         let mut scrolled = false;
         if output.clear_screen() {
-            self.row_count = 0;
+            self.scrollback.clear();
             self.scroll_offset = 0;
             self.foreground_partial_row = false;
             scrolled = true;
@@ -569,10 +566,9 @@ impl Shell {
         colors: [u32; COLS],
         partial: bool,
     ) -> bool {
-        if self.foreground_partial_row && self.row_count != 0 {
-            let row = self.row_count - 1;
-            self.rows[row] = line;
-            self.row_colors[row] = colors;
+        if self.foreground_partial_row && self.scrollback.len() != 0 {
+            let row = self.scrollback.len() - 1;
+            self.scrollback.replace(row, line, colors);
             self.foreground_partial_row = partial;
             return false;
         }
@@ -1432,13 +1428,13 @@ impl Shell {
     }
 
     fn refresh_prompt_line(&mut self) {
-        if self.row_count == 0 {
+        if self.scrollback.len() == 0 {
             return;
         }
-        let row = self.row_count - 1;
+        let row = self.scrollback.len() - 1;
         let line = self.prompt_line();
-        self.rows[row] = line;
-        self.row_colors[row] = [DEFAULT_TEXT_COLOR; COLS];
+        self.scrollback
+            .replace(row, line, [DEFAULT_TEXT_COLOR; COLS]);
         self.scroll_to_bottom();
         self.repaint_present_logical_row(row);
     }
@@ -1505,7 +1501,10 @@ impl Shell {
             return;
         }
         self.cursor_visible = !self.cursor_visible;
-        self.refresh_prompt_line();
+        // Blinking changes pixels, not the prompt or the user's scroll position.
+        if let Some(row) = self.scrollback.len().checked_sub(1) {
+            self.repaint_present_logical_row(row);
+        }
     }
 
     fn repaint_present_logical_row(&mut self, logical_row: usize) {
@@ -1522,15 +1521,15 @@ impl Shell {
     }
 
     fn visible_start(&self) -> usize {
-        if self.row_count <= ROWS {
+        if self.scrollback.len() <= ROWS {
             0
         } else {
-            self.scroll_offset.min(self.row_count - ROWS)
+            self.scroll_offset.min(self.scrollback.len() - ROWS)
         }
     }
 
     fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.row_count.saturating_sub(ROWS);
+        self.scroll_offset = self.scrollback.len().saturating_sub(ROWS);
     }
 
     fn scroll_page_up(&mut self) {
@@ -1545,8 +1544,8 @@ impl Shell {
 
     fn scroll_page_down(&mut self) {
         let old = self.scroll_offset;
-        self.scroll_offset =
-            (self.scroll_offset + ROWS.saturating_sub(1)).min(self.row_count.saturating_sub(ROWS));
+        self.scroll_offset = (self.scroll_offset + ROWS.saturating_sub(1))
+            .min(self.scrollback.len().saturating_sub(ROWS));
         if self.scroll_offset == old {
             return;
         }
@@ -1555,15 +1554,15 @@ impl Shell {
     }
 
     fn scroll_lines(&mut self, delta: i16) {
-        if self.row_count <= ROWS || delta == 0 {
+        if self.scrollback.len() <= ROWS || delta == 0 {
             return;
         }
         let old = self.scroll_offset;
         if delta > 0 {
             self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
         } else {
-            self.scroll_offset =
-                (self.scroll_offset + (-delta) as usize).min(self.row_count.saturating_sub(ROWS));
+            self.scroll_offset = (self.scroll_offset + (-delta) as usize)
+                .min(self.scrollback.len().saturating_sub(ROWS));
         }
         if self.scroll_offset == old {
             return;
@@ -1635,14 +1634,14 @@ impl Shell {
     }
 
     fn remove_prompt_row_if_present(&mut self) -> bool {
-        if self.row_count == 0 {
+        if self.scrollback.len() == 0 {
             return false;
         }
-        let row = self.row_count - 1;
-        if self.rows[row] != self.prompt_line() {
+        let row = self.scrollback.len() - 1;
+        if self.scrollback.line(row) != &self.prompt_line() {
             return false;
         }
-        self.row_count -= 1;
+        self.scrollback.pop();
         true
     }
 
@@ -1658,24 +1657,12 @@ impl Shell {
     }
 
     fn push_colored_line(&mut self, line: [u8; COLS], colors: [u32; COLS]) -> bool {
-        let following_bottom =
-            self.row_count <= ROWS || self.scroll_offset >= self.row_count.saturating_sub(ROWS);
-        let mut scrolled = false;
-        if self.row_count >= MAX_ROWS {
-            scrolled = true;
-            let limit = self.row_count.min(MAX_ROWS);
-            let mut i = 1usize;
-            while i < limit {
-                self.rows[i - 1] = self.rows[i];
-                self.row_colors[i - 1] = self.row_colors[i];
-                i += 1;
-            }
-            self.row_count = limit.saturating_sub(1);
+        let following_bottom = self.scrollback.len() <= ROWS
+            || self.scroll_offset >= self.scrollback.len().saturating_sub(ROWS);
+        let scrolled = self.scrollback.push(line, colors);
+        if scrolled {
             self.scroll_offset = self.scroll_offset.saturating_sub(1);
         }
-        self.rows[self.row_count] = line;
-        self.row_colors[self.row_count] = colors;
-        self.row_count += 1;
         if following_bottom {
             self.scroll_to_bottom();
         }

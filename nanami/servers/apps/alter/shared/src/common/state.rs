@@ -64,7 +64,7 @@ impl LinuxFile {
         resource: 0,
     };
 
-    pub const fn posix(posix_fd: Word, flags: Word) -> Self {
+    pub const fn posix(posix_fd: Word, flags: Word, status_flags: Word) -> Self {
         Self {
             kind: LinuxFileKind::Posix,
             posix_fd,
@@ -73,7 +73,9 @@ impl LinuxFile {
             peer_port: 0,
             peer_ip: 0,
             offset: 0,
-            resource: 0,
+            // Posix descriptors use resource for immutable Linux open flags;
+            // descriptor flags (CLOEXEC) remain separate in flags.
+            resource: status_flags,
         }
     }
 
@@ -433,6 +435,8 @@ pub struct Runtime {
     pub loaded_segment_count: Word,
     pub exec_image_buffer: Word,
     pub exec_image_buffer_size: Word,
+    pub interpreter_image_buffer: Word,
+    pub interpreter_image_buffer_size: Word,
     pub exec_snapshot_buffer: Word,
     pub exec_snapshot_buffer_size: Word,
     pub exec_stack_buffer: Word,
@@ -493,6 +497,8 @@ impl Runtime {
             loaded_segment_count: 0,
             exec_image_buffer: 0,
             exec_image_buffer_size: 0,
+            interpreter_image_buffer: 0,
+            interpreter_image_buffer_size: 0,
             exec_snapshot_buffer: 0,
             exec_snapshot_buffer_size: 0,
             exec_stack_buffer: 0,
@@ -578,6 +584,33 @@ impl Runtime {
         }
         let bytes = nanami_services::posix::posix_read(self.posix_port, fd, out_offset, len)?;
         Ok((bytes, self.posix_shm + out_offset))
+    }
+
+    pub fn pread_posix(
+        &self,
+        fd: Word,
+        out: Word,
+        len: Word,
+        offset: Word,
+    ) -> Result<(Word, Word), RequestError> {
+        if self.posix_direct_shm != 0
+            && out
+                .checked_add(len)
+                .filter(|end| *end <= self.posix_direct_shm_size)
+                .is_some()
+        {
+            if let Ok(bytes) = nanami_services::posix::posix_pread_direct(
+                self.posix_port,
+                fd,
+                out,
+                len,
+                offset,
+            ) {
+                return Ok((bytes, self.posix_direct_shm + out));
+            }
+        }
+        let bytes = nanami_services::posix::posix_pread(self.posix_port, fd, out, len, offset)?;
+        Ok((bytes, self.posix_shm + out))
     }
 
     pub fn cached_fork_image(&self, path: &[u8]) -> Option<CachedElfImage> {
@@ -898,12 +931,13 @@ impl Runtime {
         let Some(parent) = self.managed_process(parent_pid) else {
             return false;
         };
+        let (cwd, cwd_len, files) = (parent.cwd, parent.cwd_len, parent.files);
         let Some(child) = self.managed_process_mut(child_pid) else {
             return false;
         };
-        child.cwd = parent.cwd;
-        child.cwd_len = parent.cwd_len;
-        child.files = parent.files;
+        child.cwd = cwd;
+        child.cwd_len = cwd_len;
+        child.files = files;
         true
     }
 
@@ -1081,10 +1115,10 @@ impl Runtime {
         None
     }
 
-    pub fn managed_process(&self, pid: Word) -> Option<ManagedProcess> {
+    pub fn managed_process(&self, pid: Word) -> Option<&ManagedProcess> {
         let mut i = 0usize;
         while i < self.managed.len() {
-            let entry = self.managed[i];
+            let entry = &self.managed[i];
             if entry.pid == pid && entry.pcb != 0 {
                 return Some(entry);
             }
@@ -1363,6 +1397,31 @@ impl Runtime {
             }
         }
         true
+    }
+
+    pub fn mapping_at(&self, pid: Word, address: Word) -> Option<ProcessMapping> {
+        self.managed_process(pid)?
+            .mappings
+            .iter()
+            .copied()
+            .find(|mapping| {
+                mapping.base != 0
+                    && address >= mapping.base
+                    && address - mapping.base < mapping.size
+            })
+    }
+
+    pub fn next_mapping(&self, pid: Word, address: Word, end: Word) -> Option<ProcessMapping> {
+        self.managed_process(pid)?
+            .mappings
+            .iter()
+            .copied()
+            .filter(|mapping| {
+                mapping.base != 0
+                    && mapping.base < end
+                    && mapping.base.saturating_add(mapping.size) > address
+            })
+            .min_by_key(|mapping| mapping.base)
     }
 
     pub fn mapping_prot(&self, pid: Word, base: Word, size: Word) -> Option<Word> {

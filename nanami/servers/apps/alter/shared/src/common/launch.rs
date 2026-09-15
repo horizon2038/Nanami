@@ -72,7 +72,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
         Ok(pid) => {
             let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
             if let Err(status) =
-                prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics, None)
+                prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics, None, None)
             {
                 libnanami::println!(
                     "[alter] spawn failed stage=stack image={} pid={} status={}",
@@ -161,6 +161,15 @@ fn spawn_rootfs_linux_image(
         }
     };
 
+    if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
+        return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
+    let interpreter = match crate::common::dynamic::prepare(runtime, &loaded) {
+        Ok(image) => image,
+        Err(error) => {
+            return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0)
+        }
+    };
     match libnanami::request_process_spawn_memory_fault_handler_suspended(
         loaded.address,
         loaded.size,
@@ -171,6 +180,12 @@ fn spawn_rootfs_linux_image(
             let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
             let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
             let graphics = (request.arg3 & ALTER_LAUNCH_FLAG_GRAPHICS) != 0;
+            if let Some(interpreter) = interpreter.as_ref() {
+                if let Err(error) = crate::common::dynamic::install(pid, interpreter) {
+                    discard_spawned_process(pid);
+                    return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0);
+                }
+            }
             if let Err(status) = prepare_initial_stack(
                 runtime,
                 pid,
@@ -179,6 +194,7 @@ fn spawn_rootfs_linux_image(
                 personality,
                 diagnostics,
                 Some(loaded.metadata),
+                interpreter.as_ref(),
             ) {
                 libnanami::println!(
                     "[alter] spawn failed stage=rootfs-stack image={} pid={} status={}",
@@ -204,12 +220,15 @@ fn spawn_rootfs_linux_image(
                 discard_spawned_process(pid);
                 return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
-            if !register_linux_stack_mappings(runtime, pid) {
+            if !register_linux_stack_mappings(runtime, pid)
+                || !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref())
+            {
                 libnanami::println!(
                     "[alter] spawn failed stage=rootfs-stack-track image={} pid={}",
                     image_name,
                     pid
                 );
+                runtime.remove_process(pid);
                 discard_spawned_process(pid);
                 return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
@@ -335,23 +354,31 @@ fn prepare_initial_stack(
     personality: OsPersonality,
     diagnostics: bool,
     loaded_metadata: Option<ElfMetadata>,
+    interpreter: Option<&crate::common::dynamic::Interpreter>,
 ) -> Result<(), Word> {
     let elf = loaded_metadata
         .map(target_elf_metadata_from_loaded)
         .unwrap_or_else(|| read_target_elf_metadata(runtime, pid));
-    if elf.has_interpreter {
-        libnanami::println!(
-            "[alter] dynamic ELF is not supported yet pid={} interp=PT_INTERP",
-            pid
-        );
+    if elf.has_interpreter && interpreter.is_none() {
         return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
     }
-    let (stack_buffer, stack_buffer_size) =
-        libnanami::request_heap(LINUX_INITIAL_STACK_BYTES as Word)
+    if runtime.exec_stack_buffer_size < LINUX_INITIAL_STACK_BYTES as Word {
+        let (address, size) = libnanami::request_heap(LINUX_INITIAL_STACK_BYTES as Word)
             .map_err(map_request_error_to_status)?;
-    if stack_buffer_size < LINUX_INITIAL_STACK_BYTES as Word {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        if size < LINUX_INITIAL_STACK_BYTES as Word {
+            let _ = libnanami::request_mapping_release(address, size);
+            return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        }
+        if runtime.exec_stack_buffer != 0 {
+            let _ = libnanami::request_mapping_release(
+                runtime.exec_stack_buffer,
+                runtime.exec_stack_buffer_size,
+            );
+        }
+        runtime.exec_stack_buffer = address;
+        runtime.exec_stack_buffer_size = size;
     }
+    let stack_buffer = runtime.exec_stack_buffer;
     unsafe {
         ::core::ptr::write_bytes(stack_buffer as *mut u8, 0, LINUX_INITIAL_STACK_BYTES);
     }
@@ -447,7 +474,12 @@ fn prepare_initial_stack(
     out = write_aux(stack_buffer, out, AT_PHENT, elf.program_header_entry_size);
     out = write_aux(stack_buffer, out, AT_PHNUM, elf.program_header_count);
     out = write_aux(stack_buffer, out, AT_PAGESZ, 4096);
-    out = write_aux(stack_buffer, out, AT_BASE, 0);
+    out = write_aux(
+        stack_buffer,
+        out,
+        AT_BASE,
+        interpreter.map_or(0, |image| image.load_bias),
+    );
     out = write_aux(stack_buffer, out, AT_FLAGS, 0);
     out = write_aux(stack_buffer, out, AT_ENTRY, elf.entry_point);
     out = write_aux(stack_buffer, out, AT_HWCAP, 0);
@@ -493,7 +525,8 @@ fn prepare_initial_stack(
             .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
         let _ = runtime.set_fs_base(pid, fs_base);
     } else {
-        write_exec_registers(pcb, elf.entry_point, guest_sp, 0, 0, 0, 0, 0)
+        let entry = interpreter.map_or(elf.entry_point, |image| image.entry);
+        write_exec_registers(pcb, entry, guest_sp, 0, 0, 0, 0, 0)
             .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
     }
     if diagnostics {

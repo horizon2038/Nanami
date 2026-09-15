@@ -2,7 +2,7 @@ use libnanami::{RequestError, Word};
 use nanami_services::posix;
 
 use crate::abi::{ALTER_IO_OFFSET, ALTER_PATH_MAX};
-use crate::elf::{parse_elf64_header, ElfError, ElfMetadata};
+use crate::elf::{parse_elf64_header, parse_elf64_image, ElfError, ElfMetadata};
 use crate::state::Runtime;
 
 #[derive(Clone, Copy)]
@@ -24,6 +24,14 @@ pub struct LoadedElfImage {
 enum ImageBuffer {
     Reusable,
     Cached,
+    Interpreter,
+}
+
+pub fn load_interpreter_elf_image(
+    runtime: &mut Runtime,
+    path: &[u8],
+) -> Result<LoadedElfImage, LoadError> {
+    load_elf_image(runtime, path, ImageBuffer::Interpreter)
 }
 
 pub fn load_linux_elf_image(
@@ -116,18 +124,24 @@ fn load_elf_image(
     }
 
     let (image, allocation_size) = match buffer {
-        ImageBuffer::Reusable => {
-            if runtime.exec_image_buffer == 0 || runtime.exec_image_buffer_size < size {
+        ImageBuffer::Reusable | ImageBuffer::Interpreter => {
+            let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter) {
+                (&mut runtime.interpreter_image_buffer, &mut runtime.interpreter_image_buffer_size)
+            } else {
+                (&mut runtime.exec_image_buffer, &mut runtime.exec_image_buffer_size)
+            };
+            if *address == 0 || *capacity < size {
                 let (image, image_size) =
                     libnanami::request_heap(size).map_err(|_| LoadError::Io)?;
                 if image_size < size {
                     let _ = libnanami::request_mapping_release(image, image_size);
                     return Err(LoadError::Io);
                 }
-                runtime.exec_image_buffer = image;
-                runtime.exec_image_buffer_size = image_size;
+                if *address != 0 { let _ = libnanami::request_mapping_release(*address, *capacity); }
+                *address = image;
+                *capacity = image_size;
             }
-            (runtime.exec_image_buffer, runtime.exec_image_buffer_size)
+            (*address, *capacity)
         }
         ImageBuffer::Cached => {
             let (image, image_size) = libnanami::request_heap(size).map_err(|_| LoadError::Io)?;
@@ -189,7 +203,7 @@ fn read_and_parse_elf(
     }
     posix::posix_close(runtime.posix_port, fd).map_err(|_| LoadError::Io)?;
     let image = unsafe { ::core::slice::from_raw_parts(image as *const u8, size as usize) };
-    parse_elf64_header(image).map_err(map_elf_error)
+    parse_elf64_image(image).map_err(map_elf_error)
 }
 
 fn read_client_path(

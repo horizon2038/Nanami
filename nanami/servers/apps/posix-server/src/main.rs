@@ -129,9 +129,9 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_UNSETENV => handle_unsetenv(runtime, request),
         POSIX_REQUEST_ENV_COUNT => handle_env_count(runtime, request),
         POSIX_REQUEST_ENV_AT => handle_env_at(runtime, request),
-        POSIX_REQUEST_READ => handle_read(runtime, request),
-        POSIX_REQUEST_READ_DIRECT => handle_read_direct(runtime, request),
-        POSIX_REQUEST_WRITE => handle_write(runtime, request),
+        POSIX_REQUEST_READ | POSIX_REQUEST_PREAD => handle_read(runtime, request),
+        POSIX_REQUEST_READ_DIRECT | POSIX_REQUEST_PREAD_DIRECT => handle_read_direct(runtime, request),
+        POSIX_REQUEST_WRITE | POSIX_REQUEST_PWRITE => handle_write(runtime, request),
         POSIX_REQUEST_STAT => handle_stat(runtime, request),
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
@@ -264,7 +264,7 @@ fn handle_open(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, W
         if (request.arg2 & POSIX_O_DIRECTORY) != 0 {
             return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
-        return alloc_open_file_and_fd(runtime, index, kind, 0);
+        return alloc_open_file_and_fd(runtime, index, kind, 0, request.arg2);
     }
     write_vfs_path(runtime, VFS_PATH_OFFSET, &path[..len]);
     let mut flags = 0;
@@ -289,7 +289,7 @@ fn handle_open(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, W
             } else {
                 FdKind::Regular
             };
-            alloc_open_file_and_fd(runtime, index, fd_kind, vfs_handle)
+            alloc_open_file_and_fd(runtime, index, fd_kind, vfs_handle, request.arg2)
         }
         Err(e) => (map_request_error_to_status(e), 0, 0),
     }
@@ -347,6 +347,15 @@ fn handle_read_with_mode(
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let mut entry = runtime.open_files[open_index];
+    let positioned = matches!(
+        request.code,
+        POSIX_REQUEST_PREAD | POSIX_REQUEST_PREAD_DIRECT
+    );
+    let file_offset = if positioned {
+        request.arg3
+    } else {
+        entry.offset
+    };
     match entry.kind {
         FdKind::DevNull => (libnanami::OS_RESPONSE_OK, 0, 0),
         FdKind::DevZero => {
@@ -375,7 +384,7 @@ fn handle_read_with_mode(
                 nanami_services::vfs::vfs_read_delegated(
                     runtime.vfs_port,
                     entry.vfs_handle,
-                    entry.offset,
+                    file_offset,
                     chunk as Word,
                     runtime.sessions[index].direct_vfs_delegate,
                     out_offset as Word,
@@ -384,7 +393,7 @@ fn handle_read_with_mode(
                 nanami_services::vfs::vfs_read(
                     runtime.vfs_port,
                     entry.vfs_handle,
-                    entry.offset,
+                    file_offset,
                     chunk as Word,
                     VFS_IO_OFFSET as Word,
                 )
@@ -401,8 +410,10 @@ fn handle_read_with_mode(
                             );
                         }
                     }
-                    entry.offset = entry.offset.saturating_add(bytes);
-                    runtime.open_files[open_index] = entry;
+                    if !positioned {
+                        entry.offset = entry.offset.saturating_add(bytes);
+                        runtime.open_files[open_index] = entry;
+                    }
                     (libnanami::OS_RESPONSE_OK, bytes, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
@@ -452,6 +463,18 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, 
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let mut entry = runtime.open_files[open_index];
+    let positioned = request.code == POSIX_REQUEST_PWRITE;
+    let file_offset =
+        if entry.kind == FdKind::Regular && entry.status_flags & POSIX_O_APPEND != 0 {
+            match nanami_services::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
+                Ok((_, size, _)) => size,
+                Err(error) => return (map_request_error_to_status(error), 0, 0),
+            }
+        } else if positioned {
+            request.arg3
+        } else {
+            entry.offset
+        };
     match entry.kind {
         FdKind::DevNull => (libnanami::OS_RESPONSE_OK, len as Word, 0),
         FdKind::Regular => {
@@ -470,13 +493,15 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, 
             match nanami_services::vfs::vfs_write(
                 runtime.vfs_port,
                 entry.vfs_handle,
-                entry.offset,
+                file_offset,
                 chunk as Word,
                 VFS_IO_OFFSET as Word,
             ) {
                 Ok(bytes) => {
-                    entry.offset = entry.offset.saturating_add(bytes);
-                    runtime.open_files[open_index] = entry;
+                    if !positioned {
+                        entry.offset = file_offset.saturating_add(bytes);
+                        runtime.open_files[open_index] = entry;
+                    }
                     (libnanami::OS_RESPONSE_OK, bytes, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),

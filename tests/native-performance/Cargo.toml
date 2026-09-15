@@ -1,0 +1,17 @@
+[package]
+name = "nanami-native-performance-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "heap-tests.rs"
+
+[[test]]
+name = "hotpaths"
+path = "hotpath-tests.rs"
+
+[dependencies]
+rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
+
+[workspace]

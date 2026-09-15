@@ -57,8 +57,7 @@ impl TextRenderer {
             false
         } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
             libnanami::println!("[shell] fontdue ready bytes={:#x}", FONT_BYTES.len());
-            let font = Box::leak(Box::new(font));
-            prerasterize_glyph_cache(&mut glyphs, font);
+            prerasterize_glyph_cache(&mut glyphs, &font);
             true
         } else {
             libnanami::println!("[shell] fontdue parse failed; using bitmap fallback");
@@ -108,7 +107,7 @@ impl TextRenderer {
             return;
         }
         let index = (ch as usize) - FIRST;
-        let glyph = self.glyphs[index];
+        let glyph = &self.glyphs[index];
         if !glyph.cached {
             return;
         }
@@ -159,7 +158,13 @@ fn log_heap_stats(prefix: &str) {
 }
 
 fn allocate_glyph_cache() -> Box<[CachedGlyph; COUNT]> {
-    Box::new([CachedGlyph::EMPTY; COUNT])
+    let mut glyphs = Box::<[CachedGlyph; COUNT]>::new_uninit();
+    let first = glyphs.as_mut_ptr().cast::<CachedGlyph>();
+    for index in 0..COUNT {
+        unsafe { first.add(index).write(CachedGlyph::EMPTY) };
+    }
+    // Every element was initialized in place, without a cache-sized stack copy.
+    unsafe { glyphs.assume_init() }
 }
 
 fn prerasterize_glyph_cache(glyphs: &mut [CachedGlyph; COUNT], font: &Font) {

@@ -1,7 +1,4 @@
-use alloc::{
-    alloc::{alloc, handle_alloc_error, Layout},
-    boxed::Box,
-};
+use alloc::boxed::Box;
 
 use fontdue::{Font, FontSettings};
 
@@ -42,21 +39,20 @@ impl CachedGlyph {
 }
 
 pub struct TextRenderer {
-    glyphs: *mut CachedGlyph,
+    glyphs: Box<[CachedGlyph; COUNT]>,
     use_fontdue: bool,
 }
 
 impl TextRenderer {
     pub fn new() -> Self {
         log_heap_stats("[honoka] title font init begin");
-        let glyphs = allocate_glyph_cache();
+        let mut glyphs = allocate_glyph_cache();
         let use_fontdue = if FONT_BYTES.is_empty() {
             libnanami::println!("[honoka] title font missing; using bitmap fallback");
             false
         } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
             libnanami::println!("[honoka] title fontdue ready bytes={:#x}", FONT_BYTES.len());
-            let font = Box::leak(Box::new(font));
-            prerasterize_glyph_cache(glyphs, font);
+            prerasterize_glyph_cache(&mut glyphs, &font);
             true
         } else {
             libnanami::println!("[honoka] title fontdue parse failed; using bitmap fallback");
@@ -107,12 +103,12 @@ impl TextRenderer {
         }
     }
 
-    fn cached_glyph(&self, ch: u8) -> Option<CachedGlyph> {
+    fn cached_glyph(&self, ch: u8) -> Option<&CachedGlyph> {
         if !(FIRST as u8..(FIRST + COUNT) as u8).contains(&ch) {
             return None;
         }
         let index = (ch as usize) - FIRST;
-        let glyph = unsafe { *self.glyphs.add(index) };
+        let glyph = &self.glyphs[index];
         if glyph.cached {
             Some(glyph)
         } else {
@@ -140,30 +136,22 @@ fn log_heap_stats(prefix: &str) {
     );
 }
 
-fn allocate_glyph_cache() -> *mut CachedGlyph {
-    let layout = Layout::array::<CachedGlyph>(COUNT).unwrap();
-    let ptr = unsafe { alloc(layout) as *mut CachedGlyph };
-    if ptr.is_null() {
-        handle_alloc_error(layout);
+fn allocate_glyph_cache() -> Box<[CachedGlyph; COUNT]> {
+    let mut glyphs = Box::<[CachedGlyph; COUNT]>::new_uninit();
+    let first = glyphs.as_mut_ptr().cast::<CachedGlyph>();
+    for index in 0..COUNT {
+        unsafe { first.add(index).write(CachedGlyph::EMPTY) };
     }
-    let mut i = 0usize;
-    while i < COUNT {
-        unsafe {
-            ptr.add(i).write(CachedGlyph::EMPTY);
-        }
-        i += 1;
-    }
-    ptr
+    // Every element is initialized before exposing the owned cache.
+    unsafe { glyphs.assume_init() }
 }
 
-fn prerasterize_glyph_cache(glyphs: *mut CachedGlyph, font: &Font) {
+fn prerasterize_glyph_cache(glyphs: &mut [CachedGlyph; COUNT], font: &Font) {
     let mut i = 0usize;
     while i < COUNT {
         let ch = (FIRST + i) as u8;
         let glyph = rasterize_glyph(font, ch);
-        unsafe {
-            glyphs.add(i).write(glyph);
-        }
+        glyphs[i] = glyph;
         i += 1;
     }
 }
@@ -196,7 +184,7 @@ fn draw_cached_glyph(
     dirty: Rect,
     x: i32,
     y: i32,
-    glyph: CachedGlyph,
+    glyph: &CachedGlyph,
     color: u32,
     background: u32,
     opacity: u8,

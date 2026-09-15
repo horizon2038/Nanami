@@ -5,6 +5,9 @@ use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{RequestError, Word};
 use nanami_services::terminal::*;
 
+mod ring;
+use ring::ByteRing;
+
 const SLOT_SERVICE_PORT: Word = 20;
 const MAX_TERMINALS: usize = 8;
 const MAX_CLIENTS: usize = 24;
@@ -62,49 +65,6 @@ impl TerminalSession {
         input: ByteRing::EMPTY,
         output: ByteRing::EMPTY,
     };
-}
-
-#[derive(Clone, Copy)]
-struct ByteRing {
-    buffer: [u8; RING_BYTES],
-    read: usize,
-    write: usize,
-    len: usize,
-}
-
-impl ByteRing {
-    const EMPTY: Self = Self {
-        buffer: [0; RING_BYTES],
-        read: 0,
-        write: 0,
-        len: 0,
-    };
-
-    fn push(&mut self, byte: u8) -> bool {
-        if self.len >= self.buffer.len() {
-            return false;
-        }
-        self.buffer[self.write] = byte;
-        self.write = (self.write + 1) % self.buffer.len();
-        self.len += 1;
-        true
-    }
-
-    fn pop(&mut self) -> Option<u8> {
-        if self.len == 0 {
-            return None;
-        }
-        let byte = self.buffer[self.read];
-        self.read = (self.read + 1) % self.buffer.len();
-        self.len -= 1;
-        Some(byte)
-    }
-
-    fn clear(&mut self) {
-        self.read = 0;
-        self.write = 0;
-        self.len = 0;
-    }
 }
 
 struct Runtime {
@@ -255,17 +215,32 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> 
     let Some(index) = find_terminal(runtime, request.arg0) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
+    // Output has no per-byte editing. With echo disabled, input does not either.
+    // Keep the editing/echo path below unchanged.
+    let terminal = &mut runtime.terminals[index];
+    if !input || !terminal.echo_enabled {
+        let (ring, notification) = if input {
+            (&mut terminal.input, terminal.input_notification)
+        } else {
+            (&mut terminal.output, terminal.output_notification)
+        };
+        let done = unsafe {
+            ring.write_from(
+                (client.shm + request.arg1) as *const u8,
+                request.arg2 as usize,
+            )
+        };
+        if done != 0 {
+            notify_terminal(notification);
+        }
+        return (libnanami::OS_RESPONSE_OK, done as Word, 0);
+    }
     let mut done = 0usize;
     let mut echoed_any = false;
     while done < request.arg2 as usize {
-        let byte = unsafe {
-            core::ptr::read((client.shm + request.arg1 + done as Word) as *const u8)
-        };
-        let (ok, echoed) = if input {
-            push_input_byte(&mut runtime.terminals[index], byte)
-        } else {
-            (runtime.terminals[index].output.push(byte), true)
-        };
+        let byte =
+            unsafe { core::ptr::read((client.shm + request.arg1 + done as Word) as *const u8) };
+        let (ok, echoed) = push_input_byte(&mut runtime.terminals[index], byte);
         if !ok {
             break;
         }
@@ -273,12 +248,8 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> 
         done += 1;
     }
     if done != 0 {
-        if input {
-            notify_terminal(runtime.terminals[index].input_notification);
-            if echoed_any {
-                notify_terminal(runtime.terminals[index].output_notification);
-            }
-        } else {
+        notify_terminal(runtime.terminals[index].input_notification);
+        if echoed_any {
             notify_terminal(runtime.terminals[index].output_notification);
         }
     }
@@ -365,21 +336,17 @@ fn handle_read(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> (
         };
         return (libnanami::OS_RESPONSE_OK, len as Word, 0);
     }
-    let mut done = 0usize;
-    while done < request.arg2 as usize {
-        let byte = if input {
-            runtime.terminals[index].input.pop()
-        } else {
-            runtime.terminals[index].output.pop()
-        };
-        let Some(byte) = byte else {
-            break;
-        };
-        unsafe {
-            core::ptr::write((client.shm + request.arg1 + done as Word) as *mut u8, byte);
-        }
-        done += 1;
-    }
+    let ring = if input {
+        &mut runtime.terminals[index].input
+    } else {
+        &mut runtime.terminals[index].output
+    };
+    let done = unsafe {
+        ring.read_into(
+            (client.shm + request.arg1) as *mut u8,
+            request.arg2 as usize,
+        )
+    };
     (libnanami::OS_RESPONSE_OK, done as Word, 0)
 }
 

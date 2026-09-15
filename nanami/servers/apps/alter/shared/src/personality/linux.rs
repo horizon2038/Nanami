@@ -66,6 +66,10 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[2],
         ),
+        SYS_PREAD64 | SYS_PWRITE64 => sys_positioned_io(
+            runtime, native_pid, context.args[0], context.args[1], context.args[2],
+            context.args[3], context.number == SYS_PWRITE64,
+        ),
         SYS_READV => sys_readv(
             runtime,
             native_pid,
@@ -98,7 +102,7 @@ pub fn dispatch_syscall(
             runtime,
             native_pid,
             context.args[0],
-            LINUX_O_CREAT | LINUX_O_TRUNC,
+            LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_TRUNC,
         ),
         SYS_OPEN => sys_open(runtime, native_pid, context.args[0], context.args[1]),
         SYS_OPENAT => sys_openat(
@@ -233,7 +237,7 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[4],
         ),
-        SYS_NEWFSTATAT => sys_stat(runtime, native_pid, context.args[1], context.args[2]),
+        SYS_NEWFSTATAT => sys_newfstatat(runtime, native_pid, context.args[0], context.args[1], context.args[2], context.args[3]),
         SYS_STATX => sys_statx(
             runtime,
             native_pid,
@@ -341,7 +345,9 @@ pub fn dispatch_syscall(
                 context.args[2],
             ) {
                 Ok(()) => EmulationAction::Resume,
-                Err(errno) => EmulationAction::Return(-(errno as isize)),
+                // Once exec has replaced the image, its old syscall PC is invalid.
+                Err(ExecError::ImageReplaced) => EmulationAction::Exit(127),
+                Err(ExecError::Errno(errno)) => EmulationAction::Return(-(errno as isize)),
             };
             trace_syscall_action(runtime, native_pid, context, action);
             return action;
@@ -549,7 +555,11 @@ fn sys_read(
         LinuxFileKind::Framebuffer => {
             return sys_framebuffer_read(runtime, pid, fd, user_buffer, len);
         }
-        LinuxFileKind::Posix => {}
+        LinuxFileKind::Posix => {
+            if file.resource & LINUX_O_ACCMODE == LINUX_O_WRONLY {
+                return Err(EBADF);
+            }
+        }
         LinuxFileKind::Empty => return Err(EBADF),
     }
     let mut done = 0;
@@ -566,6 +576,82 @@ fn sys_read(
         }
         write_target_memory_from(pid, user_buffer + done, source, bytes)?;
         done += bytes;
+    }
+    Ok(done)
+}
+
+fn sys_positioned_io(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    buffer: Word,
+    len: Word,
+    offset: Word,
+    write: bool,
+) -> Result<Word, i32> {
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::VirtualDirectory {
+        return Err(EISDIR);
+    }
+    if file.kind != LinuxFileKind::Posix {
+        return Err(ESPIPE);
+    }
+    let access = file.resource & LINUX_O_ACCMODE;
+    if (write && access == LINUX_O_RDONLY) || (!write && access == LINUX_O_WRONLY) {
+        return Err(EBADF);
+    }
+    if offset > isize::MAX as Word {
+        return Err(EINVAL);
+    }
+    if buffer == 0 && len != 0 {
+        return Err(EFAULT);
+    }
+    let len = len.min(isize::MAX as Word);
+    buffer.checked_add(len).ok_or(EFAULT)?;
+    offset
+        .checked_add(len)
+        .filter(|end| *end <= isize::MAX as Word)
+        .ok_or(EINVAL)?;
+    let mut done = 0;
+    while done < len {
+        let chunk = (len - done).min(if write {
+            runtime.posix_shm_size
+        } else {
+            runtime.posix_read_buffer_size()
+        });
+        if chunk == 0 {
+            return if done != 0 { Ok(done) } else { Err(EIO) };
+        }
+        let result = if write {
+            read_target_memory(runtime, pid, buffer + done, chunk).and_then(|_| {
+                posix::posix_pwrite(runtime.posix_port, file.posix_fd, 0, chunk, offset + done)
+                    .map_err(map_request_error)
+            })
+        } else {
+            runtime
+                .pread_posix(file.posix_fd, 0, chunk, offset + done)
+                .map_err(map_request_error)
+                .and_then(|(bytes, source)| {
+                    if bytes > chunk {
+                        return Err(EIO);
+                    }
+                    if bytes != 0 {
+                        write_target_memory_from(pid, buffer + done, source, bytes)?;
+                    }
+                    Ok(bytes)
+                })
+        };
+        match result {
+            Ok(bytes) if bytes <= chunk => {
+                done += bytes;
+                if bytes < chunk {
+                    break;
+                }
+            }
+            Ok(_) => return if done != 0 { Ok(done) } else { Err(EIO) },
+            Err(_) if done != 0 => break,
+            Err(errno) => return Err(errno),
+        }
     }
     Ok(done)
 }
@@ -1228,7 +1314,11 @@ fn sys_write(
         LinuxFileKind::Framebuffer => {
             return sys_framebuffer_write(runtime, pid, fd, user_buffer, len);
         }
-        LinuxFileKind::Posix => {}
+        LinuxFileKind::Posix => {
+            if file.resource & LINUX_O_ACCMODE == LINUX_O_RDONLY {
+                return Err(EBADF);
+            }
+        }
         LinuxFileKind::Empty => return Err(EBADF),
     }
     let mut done = 0;
@@ -3147,16 +3237,13 @@ fn sys_open(
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     let fd =
         posix::posix_open(runtime.posix_port, 0, vfs_len, flags).map_err(map_path_request_error)?;
-    if (linux_flags & LINUX_O_APPEND) != 0 {
-        let _ = posix::posix_seek(runtime.posix_port, fd, 0, posix::POSIX_SEEK_END);
-    }
     let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {
         0
     };
     runtime
-        .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags), 0)
+        .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags, linux_flags), 0)
         .ok_or(EMFILE)
 }
 
@@ -3179,16 +3266,13 @@ fn sys_openat(
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     let fd =
         posix::posix_open(runtime.posix_port, 0, vfs_len, flags).map_err(map_path_request_error)?;
-    if (linux_flags & LINUX_O_APPEND) != 0 {
-        let _ = posix::posix_seek(runtime.posix_port, fd, 0, posix::POSIX_SEEK_END);
-    }
     let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {
         0
     };
     runtime
-        .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags), 0)
+        .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags, linux_flags), 0)
         .ok_or(EMFILE)
 }
 
@@ -3550,7 +3634,7 @@ fn sys_fork(
         return Err(ENOSYS);
     }
     reap_exited_children(runtime, parent_pid);
-    let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
+    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let image_name =
         ::core::str::from_utf8(&parent.image_name[..parent.image_name_len]).map_err(|_| EINVAL)?;
     let personality = parent.personality;
@@ -3581,16 +3665,19 @@ fn sys_fork(
     };
     let child_pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
 
-    if let Err(error) = fork_step(
+    let image_ranges = match fork_step(
         "clone image",
         clone_process_image(runtime, parent_pid, child_pid),
     ) {
-        discard_spawned_child(child_pid);
-        return Err(error);
-    }
+        Ok(ranges) => ranges,
+        Err(error) => {
+            discard_spawned_child(child_pid);
+            return Err(error);
+        }
+    };
     if let Err(error) = fork_step(
         "clone mappings",
-        clone_process_mappings(runtime, parent_pid, child_pid),
+        clone_process_mappings(runtime, parent_pid, child_pid, &image_ranges),
     ) {
         discard_spawned_child(child_pid);
         return Err(error);
@@ -3890,12 +3977,11 @@ fn reap_exited_children(runtime: &mut Runtime, parent_pid: Word) {
     }
 }
 
-fn fork_step(stage: &str, result: Result<(), i32>) -> Result<(), i32> {
-    if let Err(error) = result {
+fn fork_step<T>(stage: &str, result: Result<T, i32>) -> Result<T, i32> {
+    result.map_err(|error| {
         libnanami::println!("[alter/linux] fork failed stage={} errno={}", stage, error);
-        return Err(error);
-    }
-    Ok(())
+        error
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -3960,19 +4046,30 @@ fn write_clone_tid_pointers(
     Ok(())
 }
 
+enum ExecError {
+    Errno(i32),
+    ImageReplaced,
+}
+
+impl From<i32> for ExecError {
+    fn from(errno: i32) -> Self {
+        Self::Errno(errno)
+    }
+}
+
 fn sys_execve(
     runtime: &mut Runtime,
     pid: Word,
     path_ptr: Word,
     argv_ptr: Word,
     envp_ptr: Word,
-) -> Result<(), i32> {
+) -> Result<(), ExecError> {
     let len = resolve_path(runtime, pid, path_ptr).map_err(|errno| {
         log_execve_stage_error(runtime, pid, "resolve-path", 0, errno);
         errno
     })?;
     if len as usize > LINUX_EXEC_PATH_MAX {
-        return Err(ENAMETOOLONG);
+        return Err(ExecError::Errno(ENAMETOOLONG));
     }
     let mut exec_path = [0u8; LINUX_EXEC_PATH_MAX];
     let path_len = len as usize;
@@ -4006,23 +4103,20 @@ fn sys_execve(
         Ok(loaded) => loaded,
         Err(error) => {
             log_execve_load_error(runtime, pid, vfs_len, error);
-            return Err(map_load_error(error));
+            return Err(ExecError::Errno(map_load_error(error)));
         }
     };
-    if loaded.metadata.has_interpreter {
-        libnanami::println!(
-            "[alter/linux] execve rejected dynamic ELF pid={} interp=PT_INTERP",
-            pid
-        );
-        return Err(ENOEXEC);
-    }
     let personality = runtime
         .managed_process(pid)
         .map(|process| process.personality)
         .ok_or(ESRCH)?;
+    if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
+        return Err(ExecError::Errno(ENOEXEC));
+    }
+    let interpreter =
+        crate::common::dynamic::prepare(runtime, &loaded).map_err(map_load_error)?;
     let preferred_image_base = preferred_exec_image_base(personality, &loaded.metadata);
     let exec_elf = current_elf_metadata_from_loaded(&loaded.metadata, preferred_image_base);
-    close_cloexec_files(runtime, pid);
     if let Err(error) = libnanami::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
     {
         let errno = map_request_error(error);
@@ -4033,14 +4127,23 @@ fn sys_execve(
             loaded.size,
             errno
         );
-        return Err(errno);
+        return Err(ExecError::Errno(errno));
     }
+    close_cloexec_files(runtime, pid);
     if !runtime.reset_process_runtime_for_exec(pid) {
-        return Err(ESRCH);
+        return Err(ExecError::ImageReplaced);
+    }
+    if let Some(interpreter) = interpreter.as_ref() {
+        if crate::common::dynamic::install(pid, interpreter).is_err() {
+            return Err(ExecError::ImageReplaced);
+        }
+    }
+    if !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref()) {
+        return Err(ExecError::ImageReplaced);
     }
     let (base, base_len) = basename_in_bytes(&exec_path, path_len);
     if !runtime.set_process_image_name(pid, &exec_path[base..base + base_len]) {
-        return Err(ENOMEM);
+        return Err(ExecError::ImageReplaced);
     }
     if let Err(errno) = rewrite_linux_stack(
         runtime,
@@ -4050,6 +4153,7 @@ fn sys_execve(
         &snapshot,
         preferred_image_base,
         Some(exec_elf),
+        interpreter.as_ref(),
     ) {
         libnanami::println!(
             "[alter/linux] execve stack rewrite failed pid={} image_base={:#x} errno={}",
@@ -4057,7 +4161,7 @@ fn sys_execve(
             preferred_image_base,
             errno
         );
-        return Err(errno);
+        return Err(ExecError::ImageReplaced);
     }
     Ok(())
 }
@@ -4498,6 +4602,39 @@ fn sys_stat(runtime: &mut Runtime, pid: Word, path_ptr: Word, stat_ptr: Word) ->
     Ok(0)
 }
 
+fn sys_newfstatat(
+    runtime: &mut Runtime,
+    pid: Word,
+    dirfd: Word,
+    path_ptr: Word,
+    stat_ptr: Word,
+    flags: Word,
+) -> Result<Word, i32> {
+    // AT_SYMLINK_NOFOLLOW and AT_NO_AUTOMOUNT are accepted by Linux stat.
+    if flags & !(LINUX_AT_EMPTY_PATH | 0x100 | 0x800) != 0 {
+        return Err(EINVAL);
+    }
+    let raw_len = read_c_string(runtime, pid, path_ptr)?;
+    if raw_len == 0 {
+        if flags & LINUX_AT_EMPTY_PATH == 0 {
+            return Err(ENOENT);
+        }
+        if !is_at_fdcwd(dirfd) {
+            return sys_fstat(runtime, pid, dirfd, stat_ptr);
+        }
+        // An empty path with AT_FDCWD designates the current directory.
+        unsafe {
+            *(runtime.posix_shm as *mut u8) = b'.';
+        }
+    } else if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
+        return Err(EOPNOTSUPP);
+    }
+    let len = resolve_current_shm_path(runtime, pid, raw_len.max(1))?;
+    let stat = stat_current_path(runtime, pid, len)?;
+    write_linux_stat(runtime, pid, stat_ptr, stat)?;
+    Ok(0)
+}
+
 fn sys_chown(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
     let _ = stat_current_path(runtime, pid, len)?;
@@ -4817,7 +4954,10 @@ fn sys_mmap(
     if (_prot & !LINUX_PROT_ALL) != 0 {
         return Err(EINVAL);
     }
-    if (fd as isize) >= 0 && (flags & LINUX_MAP_ANONYMOUS) == 0 {
+    if (flags & LINUX_MAP_FIXED) != 0 && (requested_addr & (LINUX_PAGE_SIZE - 1)) != 0 {
+        return Err(EINVAL);
+    }
+    if (flags & LINUX_MAP_ANONYMOUS) == 0 {
         let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
         return match file.kind {
             LinuxFileKind::Framebuffer => {
@@ -4826,7 +4966,8 @@ fn sys_mmap(
                 }
                 sys_framebuffer_mmap(runtime, pid, file, len, _prot, offset)
             }
-            _ => Err(ENOSYS),
+            LinuxFileKind::Posix => sys_file_mmap(runtime, pid, requested_addr, len, _prot, flags, file, offset),
+            _ => Err(ENODEV),
         };
     }
     if requested_addr != 0 && (flags & LINUX_MAP_FIXED) != 0 {
@@ -4836,9 +4977,8 @@ fn sys_mmap(
             len.checked_add(fixed_offset).ok_or(ENOMEM)?,
             LINUX_PAGE_SIZE,
         );
-        if runtime.has_mapping(pid, fixed_base, mapped) {
-            sys_munmap(runtime, pid, fixed_base, mapped)?;
-        }
+        // MAP_FIXED replaces every overlap, including partially mapped ranges.
+        sys_munmap(runtime, pid, fixed_base, mapped)?;
         if _prot == LINUX_PROT_NONE {
             if !runtime.add_mapping(pid, fixed_base, mapped, _prot) {
                 return Err(ENOMEM);
@@ -4891,6 +5031,69 @@ fn sys_mmap(
     Ok(base)
 }
 
+fn sys_file_mmap(
+    runtime: &mut Runtime,
+    pid: Word,
+    addr: Word,
+    len: Word,
+    prot: Word,
+    flags: Word,
+    file: LinuxFile,
+    offset: Word,
+) -> Result<Word, i32> {
+    if offset & (LINUX_PAGE_SIZE - 1) != 0 || offset > isize::MAX as Word {
+        return Err(EINVAL);
+    }
+    if flags & 3 != 2 || prot == LINUX_PROT_NONE {
+        return Err(EOPNOTSUPP);
+    }
+    if file.resource & LINUX_O_ACCMODE == LINUX_O_WRONLY {
+        return Err(EACCES);
+    }
+    let (_, file_size, kind, _, _) =
+        posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
+    if kind != posix::POSIX_FILE_TYPE_REGULAR {
+        return Err(ENODEV);
+    }
+    let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
+    let base = sys_mmap(
+        runtime,
+        pid,
+        addr,
+        mapped,
+        prot,
+        flags | LINUX_MAP_ANONYMOUS,
+        Word::MAX,
+        0,
+    )?;
+    let result = (|| {
+        let bytes = mapped.min(file_size.saturating_sub(offset));
+        let mut copied = 0;
+        while copied < bytes {
+            let chunk = (bytes - copied).min(runtime.posix_read_buffer_size());
+            if chunk == 0 {
+                return Err(EIO);
+            }
+            let (read, source) = runtime
+                .pread_posix(file.posix_fd, 0, chunk, offset + copied)
+                .map_err(map_request_error)?;
+            if read == 0 {
+                break;
+            }
+            if read > chunk {
+                return Err(EIO);
+            }
+            write_target_memory_from(pid, base + copied, source, read)?;
+            copied += read;
+        }
+        Ok(base)
+    })();
+    if result.is_err() {
+        let _ = sys_munmap(runtime, pid, base, mapped);
+    }
+    result
+}
+
 fn sys_munmap(runtime: &mut Runtime, pid: Word, addr: Word, len: Word) -> Result<Word, i32> {
     if addr == 0 || len == 0 || (addr & (LINUX_PAGE_SIZE - 1)) != 0 {
         return Err(EINVAL);
@@ -4905,14 +5108,18 @@ fn sys_munmap(runtime: &mut Runtime, pid: Word, addr: Word, len: Word) -> Result
     if let Some(index) = framebuffer_index {
         let _ = present_graphics_session(runtime, index as Word + 1, pid);
     }
-    if !runtime.has_mapping(pid, addr, mapped) {
-        return Err(EINVAL);
-    }
-    if runtime.mapping_prot(pid, addr, mapped) != Some(LINUX_PROT_NONE) {
-        release_present_mapping_pages(runtime, pid, addr, mapped)?;
-    }
-    if !runtime.remove_mapping(pid, addr, mapped) {
-        return Err(EINVAL);
+    let end = addr.checked_add(mapped).ok_or(EINVAL)?;
+    let mut cursor = addr;
+    while let Some(mapping) = runtime.next_mapping(pid, cursor, end) {
+        let start = cursor.max(mapping.base);
+        let next = end.min(mapping.base.checked_add(mapping.size).ok_or(EINVAL)?);
+        if mapping.prot != LINUX_PROT_NONE {
+            release_present_mapping_pages(runtime, pid, start, next - start)?;
+        }
+        if !runtime.remove_mapping(pid, start, next - start) {
+            return Err(ENOMEM);
+        }
+        cursor = next;
     }
     if let Some(index) = framebuffer_index {
         let session = runtime.graphics[index];
@@ -5076,11 +5283,13 @@ fn release_present_mapping_pages(
     let mut cursor = base;
     let end = base.checked_add(size).ok_or(ENOMEM)?;
     while cursor < end {
-        if runtime.mapping_prot(pid, cursor, LINUX_PAGE_SIZE) != Some(LINUX_PROT_NONE) {
-            libnanami::request_process_mapping_release(pid, cursor, LINUX_PAGE_SIZE)
+        let mapping = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
+        let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
+        if mapping.prot != LINUX_PROT_NONE {
+            libnanami::request_process_mapping_release(pid, cursor, next - cursor)
                 .map_err(map_request_error)?;
         }
-        cursor += LINUX_PAGE_SIZE;
+        cursor = next;
     }
     Ok(())
 }
@@ -5094,15 +5303,17 @@ fn ensure_present_mapping_pages(
     let mut cursor = base;
     let end = base.checked_add(size).ok_or(ENOMEM)?;
     while cursor < end {
-        if runtime.mapping_prot(pid, cursor, LINUX_PAGE_SIZE) == Some(LINUX_PROT_NONE) {
+        let mapping = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
+        let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
+        if mapping.prot == LINUX_PROT_NONE {
             let (mapped_base, mapped) =
-                libnanami::request_process_map_anonymous_at(pid, cursor, LINUX_PAGE_SIZE)
+                libnanami::request_process_map_anonymous_at(pid, cursor, next - cursor)
                     .map_err(map_request_error)?;
-            if mapped_base != cursor || mapped < LINUX_PAGE_SIZE {
+            if mapped_base != cursor || mapped < next - cursor {
                 return Err(ENOMEM);
             }
         }
-        cursor += LINUX_PAGE_SIZE;
+        cursor = next;
     }
     Ok(())
 }
@@ -5809,12 +6020,20 @@ fn sys_fcntl(
                 Err(EBADF)
             }
         }
-        LINUX_F_GETFL => runtime
-            .linux_file(pid, fd)
-            .map(|file| file.flags & !LINUX_FD_CLOEXEC)
-            .ok_or(EBADF),
+        LINUX_F_GETFL => {
+            let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind != LinuxFileKind::Posix { return Ok(file.flags & !LINUX_FD_CLOEXEC); }
+            let flags = posix::posix_fcntl_status_flags(runtime.posix_port, file.posix_fd, None).map_err(map_request_error)?;
+            Ok((file.resource & !(LINUX_O_CREAT | LINUX_O_TRUNC | LINUX_O_CLOEXEC | LINUX_O_APPEND | LINUX_O_NONBLOCK))
+                | if flags & posix::POSIX_O_APPEND != 0 { LINUX_O_APPEND } else { 0 }
+                | if flags & posix::POSIX_O_NONBLOCK != 0 { LINUX_O_NONBLOCK } else { 0 })
+        }
         LINUX_F_SETFL => {
             let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind == LinuxFileKind::Posix {
+                return posix::posix_fcntl_status_flags(runtime.posix_port, file.posix_fd, Some(translate_open_flags(argument)))
+                    .map_err(map_request_error);
+            }
             file.flags = (file.flags & LINUX_FD_CLOEXEC) | (argument & LINUX_SOCK_NONBLOCK);
             if runtime.set_linux_file(pid, fd, file) {
                 Ok(0)
@@ -6419,7 +6638,6 @@ fn syscall_arg_count(number: Word) -> usize {
         | SYS_SENDMSG
         | SYS_RECVMSG
         | SYS_OPENAT
-        | SYS_NEWFSTATAT
         | SYS_FACCESSAT
         | SYS_IOCTL
         | SYS_LSEEK
@@ -6447,7 +6665,8 @@ fn syscall_arg_count(number: Word) -> usize {
         | SYS_SETITIMER
         | SYS_SCHED_GETAFFINITY => 3,
         SYS_MMAP | SYS_SELECT | SYS_PSELECT6 | SYS_PRLIMIT64 | SYS_UTIMENSAT | SYS_RENAMEAT
-        | SYS_READLINKAT | SYS_MKNODAT | SYS_FACCESSAT2 => 4,
+        | SYS_READLINKAT | SYS_MKNODAT | SYS_FACCESSAT2 | SYS_PREAD64 | SYS_PWRITE64
+        | SYS_NEWFSTATAT => 4,
         SYS_CLONE | SYS_STATX | SYS_FCHOWNAT | SYS_LINKAT => 5,
         _ => 6,
     }
@@ -6456,6 +6675,8 @@ fn syscall_arg_count(number: Word) -> usize {
 fn syscall_name(number: Word) -> &'static [u8] {
     match number {
         SYS_READ => b"read",
+        SYS_PREAD64 => b"pread64",
+        SYS_PWRITE64 => b"pwrite64",
         SYS_WRITE => b"write",
         SYS_READV => b"readv",
         SYS_SENDMSG => b"sendmsg",
@@ -6632,7 +6853,7 @@ fn clone_process_image(
     runtime: &mut Runtime,
     parent_pid: Word,
     child_pid: Word,
-) -> Result<(), i32> {
+) -> Result<[(Word, Word); LINUX_MAX_LOAD_SEGMENTS], i32> {
     libnanami::request_process_memory_read(
         parent_pid,
         LINUX_IMAGE_BASE,
@@ -6670,13 +6891,12 @@ fn clone_process_image(
     .map_err(map_request_error)?;
 
     let mut ranges = [(0, 0); LINUX_MAX_LOAD_SEGMENTS];
+    let mut writable = [false; LINUX_MAX_LOAD_SEGMENTS];
     let mut range_count = 0usize;
     let mut i = 0;
     while i < phnum {
         let base = i * phentsize;
-        if read_shm_u32(runtime, base as usize) == LINUX_PT_LOAD
-            && (read_shm_u32(runtime, (base + 4) as usize) & LINUX_PF_W) != 0
-        {
+        if read_shm_u32(runtime, base as usize) == LINUX_PT_LOAD {
             let vaddr = read_shm_u64(runtime, (base + 16) as usize) + load_bias;
             let memsz = read_shm_u64(runtime, (base + 40) as usize);
             let start = align_down_word(vaddr, LINUX_PAGE_SIZE);
@@ -6685,6 +6905,7 @@ fn clone_process_image(
                 return Err(EINVAL);
             }
             ranges[range_count] = (start, end.saturating_sub(start));
+            writable[range_count] = (read_shm_u32(runtime, (base + 4) as usize) & LINUX_PF_W) != 0;
             range_count += 1;
         }
         i += 1;
@@ -6692,23 +6913,32 @@ fn clone_process_image(
     let mut range_index = 0usize;
     while range_index < range_count {
         let (start, size) = ranges[range_index];
-        copy_present_process_range(runtime, parent_pid, child_pid, start, size)?;
+        if writable[range_index] {
+            copy_present_process_range(runtime, parent_pid, child_pid, start, size)?;
+        }
         range_index += 1;
     }
-    Ok(())
+    Ok(ranges)
 }
 
 fn clone_process_mappings(
     runtime: &mut Runtime,
     parent_pid: Word,
     child_pid: Word,
+    image_ranges: &[(Word, Word); LINUX_MAX_LOAD_SEGMENTS],
 ) -> Result<(), i32> {
-    let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
+    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let mut i = 0usize;
     while i < parent.mappings.len() {
         let mapping = parent.mappings[i];
         if mapping.base != 0 {
             if is_initial_stack_mapping(mapping.base, mapping.size) {
+                i += 1;
+                continue;
+            }
+            // Alpha already loaded the executable; clone_process_image copied
+            // its mutable segments. RELRO can split those tracked ranges.
+            if crate::elf::ranges_cover(image_ranges, mapping.base, mapping.size) {
                 i += 1;
                 continue;
             }
@@ -6965,7 +7195,7 @@ fn snapshot_exec_strings(
         env_offsets: [0; ALTER_LAUNCH_MAX_ENVS],
         env_lens: [0; ALTER_LAUNCH_MAX_ENVS],
     };
-    let mut i = 1usize;
+    let mut i = 0usize;
     while i < argc {
         let (offset, len) = snapshot_guest_string(
             &mut guest_page,
@@ -7052,6 +7282,7 @@ fn rewrite_linux_stack(
     snapshot: &ExecStringSnapshot,
     preferred_image_base: Word,
     loaded_elf: Option<CurrentElfMetadata>,
+    interpreter: Option<&crate::common::dynamic::Interpreter>,
 ) -> Result<(), i32> {
     let pcb = runtime
         .managed_process(pid)
@@ -7101,18 +7332,11 @@ fn rewrite_linux_stack(
         i += 1;
     }
 
-    let (command_base, command_len) = basename_in_bytes(exec_path, exec_path_len);
-    cursor = push_bytes_to_stack(
-        stack_buffer,
-        cursor,
-        &exec_path[command_base..command_base + command_len],
-        &mut argv_guest[0],
-        stack_base,
-    )?;
     if argc == 0 {
+        cursor = push_bytes_to_stack(stack_buffer, cursor, b"", &mut argv_guest[0], stack_base)?;
         argc = 1;
     } else {
-        i = 1;
+        i = 0;
         while i < argc {
             cursor = push_snapshot_string_to_stack(
                 snapshot,
@@ -7194,7 +7418,12 @@ fn rewrite_linux_stack(
     out = write_aux(stack_buffer, out, AT_PHENT, elf.program_header_entry_size);
     out = write_aux(stack_buffer, out, AT_PHNUM, elf.program_header_count);
     out = write_aux(stack_buffer, out, AT_PAGESZ, LINUX_PAGE_SIZE);
-    out = write_aux(stack_buffer, out, AT_BASE, 0);
+    out = write_aux(
+        stack_buffer,
+        out,
+        AT_BASE,
+        interpreter.map_or(0, |image| image.load_bias),
+    );
     out = write_aux(stack_buffer, out, AT_FLAGS, 0);
     out = write_aux(stack_buffer, out, AT_ENTRY, elf.entry_point);
     out = write_aux(stack_buffer, out, AT_HWCAP, 0);
@@ -7232,7 +7461,8 @@ fn rewrite_linux_stack(
             return Err(ESRCH);
         }
     } else {
-        write_exec_registers(pcb, elf.entry_point, guest_sp, 0, 0, 0, 0, 0).map_err(|_| EIO)?;
+        let entry = interpreter.map_or(elf.entry_point, |image| image.entry);
+        write_exec_registers(pcb, entry, guest_sp, 0, 0, 0, 0, 0).map_err(|_| EIO)?;
         if !runtime.set_fs_base(pid, 0) {
             return Err(ESRCH);
         }
@@ -7600,7 +7830,8 @@ fn read_c_string(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Wor
     while copied < max {
         let source = user_ptr.checked_add(copied as Word).ok_or(EFAULT)?;
         let page_remaining = (LINUX_PAGE_SIZE - (source & (LINUX_PAGE_SIZE - 1))) as usize;
-        let chunk = ::core::cmp::min(max - copied, page_remaining);
+        // Most paths terminate near the start: avoid copying an entire page.
+        let chunk = ::core::cmp::min(max - copied, page_remaining).min(128.max(copied));
         libnanami::request_process_memory_read(
             pid,
             source,
@@ -7990,6 +8221,12 @@ fn translate_open_flags(flags: Word) -> Word {
     if (flags & LINUX_O_DIRECTORY) != 0 {
         out |= posix::POSIX_O_DIRECTORY;
     }
+    if flags & LINUX_O_APPEND != 0 {
+        out |= posix::POSIX_O_APPEND;
+    }
+    if flags & LINUX_O_NONBLOCK != 0 {
+        out |= posix::POSIX_O_NONBLOCK;
+    }
     out
 }
 
@@ -8351,7 +8588,7 @@ fn duplicate_linux_file(runtime: &mut Runtime, file: LinuxFile) -> Result<LinuxF
         | LinuxFileKind::SocketNetlink => Ok(file),
         LinuxFileKind::Posix => {
             let fd = duplicate_posix_backend_fd(runtime, file.posix_fd)?;
-            Ok(LinuxFile::posix(fd, file.flags))
+            Ok(LinuxFile::posix(fd, file.flags, file.resource))
         }
     }
 }
@@ -8537,7 +8774,7 @@ fn inherit_linux_files(
     parent_pid: Word,
     child_pid: Word,
 ) -> Result<(), i32> {
-    let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
+    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     if !runtime.set_cwd(child_pid, &parent.cwd[..parent.cwd_len]) {
         return Err(EINVAL);
     }
@@ -8878,6 +9115,7 @@ const LINUX_CLONE_CHILD_SETTID: Word = 0x0100_0000;
 const LINUX_O_CREAT: Word = 0o100;
 const LINUX_O_ACCMODE: Word = 0o3;
 const LINUX_O_RDONLY: Word = 0;
+const LINUX_O_WRONLY: Word = 1;
 const LINUX_O_TRUNC: Word = 0o1000;
 const LINUX_O_APPEND: Word = 0o2000;
 const LINUX_O_NONBLOCK: Word = 0o4000;

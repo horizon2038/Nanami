@@ -64,7 +64,7 @@ default_block_image_stale() {
   if [ ! -f "$BLOCK_IMAGE" ]; then
     return 0
   fi
-  if [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
+  if [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "${LINUX_ROOTFS_DIR:-}" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
     return 0
   fi
   if find "$ROOT_DIR/nanami/servers/apps" \
@@ -172,7 +172,7 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
     REBUILD_BLOCK_IMAGE=1
   else
     REBUILD_BLOCK_IMAGE=0
-    if [ ! -f "$BLOCK_IMAGE" ] || [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
+    if [ ! -f "$BLOCK_IMAGE" ] || [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "${LINUX_ROOTFS_DIR:-}" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
       REBUILD_BLOCK_IMAGE=1
     fi
   fi
@@ -197,7 +197,7 @@ elif [ "$BLOCK_IMAGE_IS_DEFAULT" -eq 1 ]; then
   fi
 else
   REBUILD_BLOCK_IMAGE=0
-  if [ ! -f "$BLOCK_IMAGE" ] || [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
+  if [ ! -f "$BLOCK_IMAGE" ] || [ -n "$EXTRA_LINUX_BINS" ] || [ -n "$EXTRA_FREEBSD_BINS" ] || [ -n "${LINUX_ROOTFS_DIR:-}" ] || [ -n "$ROOTFS_APPS" ] || [ "${ROOTFS_REBUILD:-0}" = "1" ]; then
     REBUILD_BLOCK_IMAGE=1
   fi
 fi

@@ -1,6 +1,7 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 use libnanami::Word;
 
+use crate::background::BackgroundCache;
 use crate::constants::{
     MAX_WINDOWS, MENU_BAR_HEIGHT, SLOT_WINDOW_INPUT_NOTIFICATION_BASE, TITLE_BAR_HEIGHT,
 };
@@ -103,6 +104,7 @@ impl Window {
 
 pub struct Compositor {
     framebuffer: Framebuffer,
+    background: Option<BackgroundCache>,
     windows: [Window; MAX_WINDOWS],
     next_window_id: Word,
     cursor_x: i32,
@@ -136,8 +138,14 @@ impl Compositor {
     ) -> Option<Self> {
         let screen = framebuffer.screen();
         let theme = parse_theme(&framebuffer, theme_data)?;
+        let background = BackgroundCache::new(screen, |canvas| {
+            let full = Rect::new(0, 0, screen.width as i32, screen.height as i32);
+            draw_background(canvas, screen, theme, full);
+            draw_menu_bar(canvas, screen, theme, full);
+        });
         let mut this = Self {
             framebuffer,
+            background,
             windows: [Window::EMPTY; MAX_WINDOWS],
             next_window_id: 1,
             // The wallpaper logo occupies the exact screen center and is almost the same color as
@@ -770,8 +778,12 @@ impl Compositor {
         let theme = self.theme;
         let first_window = self.first_visible_window_for_dirty(dirty);
         if first_window == 0 {
-            draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
-            draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+            if let Some(background) = &self.background {
+                background.paint(&self.framebuffer, dirty);
+            } else {
+                draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+                draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+            }
             draw_clock(
                 &self.framebuffer,
                 &self.text,

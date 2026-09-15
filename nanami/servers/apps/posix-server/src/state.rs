@@ -106,6 +106,7 @@ pub(crate) struct OpenFile {
     pub(crate) active: bool,
     pub(crate) kind: FdKind,
     pub(crate) offset: Word,
+    pub(crate) status_flags: Word,
     pub(crate) vfs_handle: Word,
     pub(crate) ref_count: Word,
 }
@@ -115,6 +116,7 @@ impl OpenFile {
         active: false,
         kind: FdKind::Empty,
         offset: 0,
+        status_flags: 0,
         vfs_handle: 0,
         ref_count: 0,
     };

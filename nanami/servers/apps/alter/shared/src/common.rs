@@ -2,6 +2,8 @@
 pub mod abi;
 #[path = "common/arch.rs"]
 pub mod arch;
+#[path = "common/dynamic.rs"]
+pub mod dynamic;
 #[path = "common/elf.rs"]
 pub mod elf;
 #[path = "common/fault.rs"]

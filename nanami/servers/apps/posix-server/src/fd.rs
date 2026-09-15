@@ -9,6 +9,7 @@ pub(crate) fn alloc_open_file_and_fd(
     session_index: usize,
     kind: FdKind,
     vfs_handle: Word,
+    status_flags: Word,
 ) -> (Word, Word, Word) {
     let Some(open_index) = alloc_open_file(runtime, kind, vfs_handle) else {
         if matches!(kind, FdKind::Regular | FdKind::Directory) {
@@ -16,6 +17,8 @@ pub(crate) fn alloc_open_file_and_fd(
         }
         return (libnanami::OS_RESPONSE_FATAL, 0, 0);
     };
+    runtime.open_files[open_index].status_flags =
+        status_flags & (POSIX_O_APPEND | POSIX_O_NONBLOCK);
     match alloc_fd(&mut runtime.sessions[session_index], open_index) {
         (libnanami::OS_RESPONSE_OK, fd, detail) => (libnanami::OS_RESPONSE_OK, fd, detail),
         _ => {
@@ -100,7 +103,10 @@ pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
     )
 }
 
-pub(crate) fn handle_fcntl(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
+pub(crate) fn handle_fcntl(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
@@ -121,6 +127,18 @@ pub(crate) fn handle_fcntl(runtime: &mut Runtime, request: ServiceRequest) -> (W
             runtime.sessions[index].fds[fd].flags = request.arg2 & POSIX_FD_CLOEXEC;
             (libnanami::OS_RESPONSE_OK, 0, 0)
         }
+        POSIX_F_GETFL | POSIX_F_SETFL => {
+            let open_index = runtime.sessions[index].fds[fd].open_file;
+            if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
+                return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+            }
+            if request.arg1 == POSIX_F_SETFL {
+                runtime.open_files[open_index].status_flags = request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK);
+                (libnanami::OS_RESPONSE_OK, 0, 0)
+            } else {
+                (libnanami::OS_RESPONSE_OK, runtime.open_files[open_index].status_flags, 0)
+            }
+        }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
@@ -133,6 +151,7 @@ fn alloc_open_file(runtime: &mut Runtime, kind: FdKind, vfs_handle: Word) -> Opt
                 active: true,
                 kind,
                 offset: 0,
+                status_flags: 0,
                 vfs_handle,
                 ref_count: 1,
             };

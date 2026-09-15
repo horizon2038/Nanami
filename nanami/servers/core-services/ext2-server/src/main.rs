@@ -6,14 +6,15 @@ use core::ptr;
 use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{self, RequestError, Word};
 
+mod block_connection;
+use block_connection::connect_block_device;
+
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
 const BLOCK_SHM_BYTES: Word = 0x4000;
 const BLOCK_BUFFER_OFFSET: Word = 0;
 const BLOCK_READ_RETRY_LIMIT: usize = 4;
-const BLOCK_CONNECT_RETRIES: usize = 64;
-const BLOCK_CONNECT_RETRY_MS: Word = 100;
 const MAX_SESSIONS: usize = 16;
 const MAX_DELEGATED_SESSIONS: usize = 16;
 const MAX_HANDLES: usize = 64;
@@ -288,39 +289,6 @@ fn nanami_main() -> libnanami::NanamiResult {
             } => {
                 libnanami::print!("[ext2-server] fault id={}", identifier);
                 libnanami::print!(" reason={:#x}\n", reason);
-            }
-        }
-    }
-}
-
-fn connect_block_device() -> Result<Word, RequestError> {
-    let timer_port = match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-        Ok(()) => Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
-        Err(e) => {
-            log_request_error("[ext2-server] timer connect failed: ", e);
-            None
-        }
-    };
-    let mut tries = 0usize;
-    loop {
-        match nanami_services::registry::connect_block_device_with_pid(SLOT_BLOCK_DEVICE) {
-            Ok(_) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE)),
-            Err(e) => {
-                if tries == 0 || tries + 1 == BLOCK_CONNECT_RETRIES {
-                    log_request_error("[ext2-server] waiting block-device: ", e);
-                }
-                tries += 1;
-                if tries >= BLOCK_CONNECT_RETRIES {
-                    return Err(e);
-                }
-                if let Some(timer) = timer_port {
-                    let _ = nanami_services::timer::timer_service_sleep_milliseconds(
-                        timer,
-                        BLOCK_CONNECT_RETRY_MS,
-                    );
-                } else {
-                    libnanami::yield_now();
-                }
             }
         }
     }

@@ -16,6 +16,9 @@ space-separated list of app names to intentionally seed only selected apps.
 Set EXTRA_LINUX_BINS to a shell-quoted list of external Linux binaries to seed
 into /alter/linux/bin. Extra binaries are stored under Linux-visible executable
 names: a source named busybox.elf is installed as /alter/linux/bin/busybox.
+Set LINUX_ROOTFS_DIR to a directory tree to additionally seed under /alter/linux,
+including lib/ and lib64/ for dynamic executables. Entries must not overwrite
+seeded files. Symlinks and special files are rejected; supply regular files.
 Set EXTRA_FREEBSD_BINS to a shell-quoted list of external FreeBSD binaries to
 seed into /alter/freebsd/bin. Extra binaries are stored under FreeBSD-visible
 executable names: a source named sh.elf is installed as /alter/freebsd/bin/sh.
@@ -884,7 +887,10 @@ def write_dirent(off, inode, rec_len, name, file_type):
     image[off + 7] = file_type
     image[off + 8:off + 8 + len(name_b)] = name_b
 
+directory_records = {}
+
 def write_directory(block, self_inode, parent_inode, entries):
+    directory_records[self_inode] = (block, parent_inode, entries)
     base = block * block_size
     records = [
         ('.', self_inode, EXT2_FT_DIR),
@@ -958,6 +964,87 @@ write_directory(alter_freebsd_usr_block, EXT2_ALTER_FREEBSD_USR_INO, EXT2_ALTER_
 write_directory(alter_freebsd_usr_bin_block, EXT2_ALTER_FREEBSD_USR_BIN_INO, EXT2_ALTER_FREEBSD_USR_INO, [
     (name, inode, EXT2_FT_REG_FILE) for name, inode, _data in freebsd_binaries
 ])
+
+linux_rootfs = os.environ.get('LINUX_ROOTFS_DIR', '')
+if linux_rootfs:
+    import stat
+    if not os.path.isdir(linux_rootfs):
+        raise SystemExit(f'[ext2-image] invalid LINUX_ROOTFS_DIR: {linux_rootfs}')
+    next_inode = EXT2_FIRST_APP_INO + len(rootfs_binaries) + len(linux_binaries) + len(freebsd_binaries)
+    directories = {'': EXT2_ALTER_LINUX_INO}
+
+    def allocate_inode():
+        global next_inode
+        inode = next_inode
+        next_inode += 1
+        mark_inode_used(inode)
+        return inode
+
+    # Do not follow host symlinks: an absolute guest link could escape the root
+    # and accidentally package an unrelated host file.
+    for directory, subdirs, files in os.walk(linux_rootfs, followlinks=False):
+        relative = os.path.relpath(directory, linux_rootfs)
+        relative = '' if relative == '.' else relative
+        parent = directories[relative]
+        block, grandparent, entries = directory_records[parent]
+        for name in sorted(subdirs + files):
+            source = os.path.join(directory, name)
+            mode = os.lstat(source).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+                raise SystemExit(f'[ext2-image] rootfs entry must be a regular file or directory: {source}')
+            if not name.isascii() or len(name.encode('ascii')) > 255:
+                raise SystemExit(f'[ext2-image] unsupported rootfs name: {name!r}')
+            existing = next((entry for entry in entries if entry[0] == name), None)
+            if stat.S_ISDIR(mode):
+                if existing:
+                    if existing[2] != EXT2_FT_DIR:
+                        raise SystemExit(f'[ext2-image] rootfs path collision: {source}')
+                    inode = existing[1]
+                else:
+                    inode = allocate_inode()
+                    child_block = alloc_data_block()
+                    write_inode(inode, EXT2_S_IFDIR | (mode & 0o777), block_size, 2, [child_block])
+                    write_directory(child_block, inode, parent, [])
+                    entries.append((name, inode, EXT2_FT_DIR))
+                    gdt[(inode - 1) // inodes_per_group]['used_dirs'] += 1
+                directories[os.path.join(relative, name)] = inode
+                continue
+            if existing:
+                raise SystemExit(f'[ext2-image] duplicate rootfs file: {source}')
+            data = read_optional(source)
+            if data.startswith(b'\x7fELF'):
+                validate_elf_machine(source, 'Linux rootfs ELF')
+            if len(data) > EXT2_MAX_FILE_BLOCKS * block_size:
+                raise SystemExit(f'[ext2-image] rootfs file too large: {source}')
+            inode = allocate_inode()
+            blocks = alloc_file_blocks(data)
+            indirect = alloc_data_block() if len(blocks) > EXT2_MAX_DIRECT_BLOCKS else 0
+            remaining = blocks[EXT2_MAX_DIRECT_BLOCKS + EXT2_SINGLE_INDIRECT_CAPACITY:]
+            double = alloc_data_block() if remaining else 0
+            second = [alloc_data_block() for _ in range(math.ceil(len(remaining) / EXT2_SINGLE_INDIRECT_CAPACITY))]
+            write_inode(inode, EXT2_S_IFREG | (mode & 0o777), len(data), 1, blocks, indirect, double, len(second))
+            write_file_data(blocks, data)
+            if indirect:
+                for index, data_block in enumerate(blocks[EXT2_MAX_DIRECT_BLOCKS:EXT2_MAX_DIRECT_BLOCKS + EXT2_SINGLE_INDIRECT_CAPACITY]):
+                    w32(indirect * block_size + index * 4, data_block)
+            for first_index, second_block in enumerate(second):
+                w32(double * block_size + first_index * 4, second_block)
+                start = first_index * EXT2_SINGLE_INDIRECT_CAPACITY
+                for index, data_block in enumerate(remaining[start:start + EXT2_SINGLE_INDIRECT_CAPACITY]):
+                    w32(second_block * block_size + index * 4, data_block)
+            entries.append((name, inode, EXT2_FT_REG_FILE))
+        write_directory(block, parent, grandparent, entries)
+        w16(inode_off(parent) + 26, 2 + sum(entry[2] == EXT2_FT_DIR for entry in entries))
+
+    # Overlay allocation changed the primary superblock and group counters.
+    w32(s + 12, blocks_count - sum(desc['used_blocks'] for desc in gdt))
+    w32(s + 16, inodes_count - sum(desc['used_inodes'] for desc in gdt))
+    for index, desc in enumerate(gdt):
+        off = gdt_off + index * 32
+        w16(off + 12, desc['count'] - desc['used_blocks'])
+        w16(off + 14, inodes_per_group - desc['used_inodes'])
+        w16(off + 16, desc['used_dirs'])
+    print(f'[ext2-image] seeded Linux rootfs tree: {linux_rootfs}')
 
 with open(out, 'wb') as f:
     f.write(image)

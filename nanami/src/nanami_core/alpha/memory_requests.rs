@@ -82,13 +82,13 @@ impl Alpha {
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
+        let vm = processes
+            .vm_space_mut(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         let mut i = 0usize;
         while i < page_count {
             let frame = process_frame_descriptor(root_node, start_slot + i);
             let va = heap_base + i * PAGE_SIZE;
-            let vm = processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
             memory.map_frame(address_space, frame, va, vm)?;
             i += 1;
         }
@@ -118,7 +118,7 @@ impl Alpha {
             .take_deferred_physical_allocation(pid, base_va, page_count);
         let allocated_frames = if let Some(allocation) = reuse_allocation {
             self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
-            let mut frames = Vec::new();
+            let mut frames = Vec::with_capacity(page_count);
             let mut i = 0usize;
             while i < page_count {
                 let frame_index = allocation.base_page + i;
@@ -152,13 +152,13 @@ impl Alpha {
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
+        let vm = processes
+            .vm_space_mut(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         let mut i = 0usize;
         while i < page_count {
             let frame = process_frame_descriptor(root_node, start_slot + i);
             let va = base_va + i * PAGE_SIZE;
-            let vm = processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
             memory.map_frame_strict(address_space, frame, va, vm)?;
             i += 1;
         }
@@ -717,14 +717,12 @@ impl Alpha {
             self.map_alpha_temporary_frame(src_frame, src_temp_va)?;
 
             if src_frame == dst_frame {
-                let bounce = core::ptr::addr_of_mut!(PROCESS_COPY_BOUNCE_BUFFER) as *mut u8;
                 unsafe {
-                    ptr::copy_nonoverlapping(
+                    ptr::copy(
                         (src_temp_va + src_offset) as *const u8,
-                        bounce,
+                        (src_temp_va + dst_offset) as *mut u8,
                         chunk,
                     );
-                    ptr::copy_nonoverlapping(bounce, (src_temp_va + dst_offset) as *mut u8, chunk);
                 }
                 self.unmap_alpha_temporary_frame(src_frame, src_temp_va)?;
             } else {
@@ -820,11 +818,6 @@ impl Alpha {
         if page_va & (PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
-        let entry = self
-            .processes
-            .find_entry_by_pid(pid)
-            .ok_or(CapabilityError::InvalidArgument)?;
-
         let frame = match self
             .processes
             .vm_space_mut(pid)
@@ -832,6 +825,10 @@ impl Alpha {
         {
             Some(frame) => frame,
             None => {
+                let entry = self
+                    .processes
+                    .find_entry_by_pid(pid)
+                    .ok_or(CapabilityError::InvalidArgument)?;
                 self.materialize_lazy_page(pid, entry.root_node, entry.address_space, page_va)?;
                 self.processes
                     .vm_space_mut(pid)

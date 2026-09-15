@@ -16,7 +16,7 @@ mod arch;
 
 use arch::{
     linux_clock_gettime, linux_close, linux_exit_group, linux_getpid, linux_link, linux_nanosleep,
-    linux_open, linux_readv, linux_unlink, linux_write, LinuxIoVec, LinuxTimespec,
+    linux_open, linux_readv, linux_unlink, linux_write, linux_writev, LinuxIoVec, LinuxTimespec,
 };
 
 #[panic_handler]
@@ -37,6 +37,7 @@ pub extern "C" fn linux_smoke_main() -> ! {
         linux_exit_group(77);
     }
     verify_readv();
+    verify_writev();
     verify_link();
     verify_nanosleep();
     println("Hello from Linux syscall smoke test!\n");
@@ -69,6 +70,136 @@ fn verify_link() {
         linux_exit_group(85);
     }
     println("Linux link smoke test passed!\n");
+}
+
+fn verify_writev() {
+    let path = b"/tmp/linux-writev-smoke\0";
+    let _ = linux_unlink(path.as_ptr());
+    let fd = linux_open(path.as_ptr(), 0o100 | 0o1000 | 1); // CREAT | TRUNC | WRONLY
+    if fd < 0 {
+        linux_exit_group(86);
+    }
+    let mut source = [0u8; 80000];
+    for (i, byte) in source.iter_mut().enumerate() {
+        *byte = (i.wrapping_mul(7) >> 3) as u8;
+    }
+    let iov = [
+        LinuxIoVec {
+            base: source.as_mut_ptr().wrapping_add(17),
+            len: 7001,
+        },
+        LinuxIoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        },
+        LinuxIoVec {
+            base: source.as_mut_ptr().wrapping_add(9000),
+            len: 70000,
+        },
+    ];
+    let null_fd = linux_open(b"/dev/null\0".as_ptr(), 1);
+    if null_fd < 0 || linux_writev(null_fd as usize, iov.as_ptr(), iov.len()) != 77001 {
+        linux_exit_group(93);
+    }
+    let _ = linux_close(null_fd as usize);
+    if linux_writev(fd as usize, iov.as_ptr(), iov.len()) != 77001 {
+        linux_exit_group(87);
+    }
+    // Commit the good first vector when a later, non-null guest address is unmapped.
+    let partial = [
+        LinuxIoVec {
+            base: source.as_mut_ptr(),
+            len: 4,
+        },
+        LinuxIoVec {
+            base: 0xdead0000 as *mut u8,
+            len: 16,
+        },
+    ];
+    if linux_writev(fd as usize, partial.as_ptr(), partial.len()) != 4 {
+        linux_exit_group(88);
+    }
+    if linux_writev(fd as usize, partial[1..].as_ptr(), 1) >= 0 {
+        linux_exit_group(89);
+    }
+    let _ = linux_close(fd as usize);
+    let fd = linux_open(path.as_ptr(), 0);
+    if fd < 0 || linux_writev(fd as usize, iov.as_ptr(), iov.len()) != -9 {
+        linux_exit_group(90);
+    }
+    let mut output = [0u8; 77005];
+    let out = [LinuxIoVec {
+        base: output.as_mut_ptr(),
+        len: output.len(),
+    }];
+    if linux_readv(fd as usize, out.as_ptr(), 1) != output.len() as isize
+        || output[..7001] != source[17..7018]
+        || output[7001..77001] != source[9000..79000]
+        || output[77001..] != source[..4]
+    {
+        linux_exit_group(91);
+    }
+    let _ = linux_close(fd as usize);
+
+    // The fixture uses 1-KiB ext2 blocks: 280 KiB reaches double indirection.
+    let fd = linux_open(path.as_ptr(), 0o1000 | 1);
+    if fd < 0 {
+        linux_exit_group(94);
+    }
+    let blocks = [
+        LinuxIoVec {
+            base: source.as_mut_ptr().wrapping_add(31),
+            len: 3000,
+        },
+        LinuxIoVec {
+            base: source.as_mut_ptr().wrapping_add(7000),
+            len: 1096,
+        },
+    ];
+    for _ in 0..70 {
+        if linux_writev(fd as usize, blocks.as_ptr(), blocks.len()) != 4096 {
+            linux_exit_group(95);
+        }
+    }
+    let _ = linux_close(fd as usize);
+    let fd = linux_open(path.as_ptr(), 0);
+    if fd < 0 {
+        linux_exit_group(96);
+    }
+    let out = [LinuxIoVec {
+        base: output.as_mut_ptr(),
+        len: 4096,
+    }];
+    for _ in 0..70 {
+        if linux_readv(fd as usize, out.as_ptr(), 1) != 4096
+            || output[..3000] != source[31..3031]
+            || output[3000..4096] != source[7000..8096]
+        {
+            linux_exit_group(97);
+        }
+    }
+    let _ = linux_close(fd as usize);
+    let _ = linux_unlink(path.as_ptr());
+    let prefix = b"Linux writev ";
+    let suffix = b"smoke test passed!\n";
+    let terminal = [
+        LinuxIoVec {
+            base: prefix.as_ptr() as *mut u8,
+            len: prefix.len(),
+        },
+        LinuxIoVec {
+            base: core::ptr::null_mut(),
+            len: 0,
+        },
+        LinuxIoVec {
+            base: suffix.as_ptr() as *mut u8,
+            len: suffix.len(),
+        },
+    ];
+    if linux_writev(1, terminal.as_ptr(), terminal.len()) != (prefix.len() + suffix.len()) as isize
+    {
+        linux_exit_group(92);
+    }
 }
 
 fn verify_nanosleep() {

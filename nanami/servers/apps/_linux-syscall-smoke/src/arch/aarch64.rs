@@ -141,6 +141,10 @@ pub fn linux_readv(fd: usize, iov: *const LinuxIoVec, count: usize) -> isize {
     unsafe { syscall3(65, fd, iov as usize, count) }
 }
 
+pub fn linux_writev(fd: usize, iov: *const LinuxIoVec, count: usize) -> isize {
+    unsafe { syscall3(66, fd, iov as usize, count) }
+}
+
 pub fn linux_close(fd: usize) -> isize {
     unsafe { syscall1(57, fd) }
 }

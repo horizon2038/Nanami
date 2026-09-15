@@ -11,6 +11,10 @@ path = "heap-tests.rs"
 name = "hotpaths"
 path = "hotpath-tests.rs"
 
+[[test]]
+name = "alpha-alter"
+path = "alpha-alter-tests.rs"
+
 [dependencies]
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 

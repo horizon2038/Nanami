@@ -270,7 +270,9 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
-        self.ensure_page_tables(address_space, virtual_address, vm_space)?;
+        if !vm_space.page_tables_ready(virtual_address) {
+            self.ensure_page_tables(address_space, virtual_address, vm_space)?;
+        }
 
         let attr = Attribute::ALL;
 
@@ -292,7 +294,9 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
-        self.ensure_page_tables(address_space, virtual_address, vm_space)?;
+        if !vm_space.page_tables_ready(virtual_address) {
+            self.ensure_page_tables(address_space, virtual_address, vm_space)?;
+        }
 
         let attr = Attribute::ALL;
         match arch::address_space::map(address_space, frame_descriptor, virtual_address, attr) {
@@ -499,7 +503,7 @@ impl MemoryManager {
             return Err(CapabilityError::InvalidArgument);
         }
 
-        let mut allocated = Vec::new();
+        let mut allocated = Vec::with_capacity(count);
         let mut copied = 0usize;
         while copied < count {
             let dst_slot = destination_base_slot + copied;

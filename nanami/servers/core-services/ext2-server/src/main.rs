@@ -1253,6 +1253,8 @@ fn ensure_data_block(
         let mut block = r32(entry_addr);
         if block == 0 {
             block = alloc_block(runtime)? as u32;
+            // Allocation uses block_shm for bitmap and free-count metadata.
+            read_block(runtime, indirect_block)?;
             w32_mem(entry_addr, block);
             write_block(runtime, indirect_block)?;
             zero_block(runtime, block as usize)?;
@@ -1277,6 +1279,7 @@ fn ensure_data_block(
     let mut indirect_block = r32(first_entry_addr);
     if indirect_block == 0 {
         indirect_block = alloc_block(runtime)? as u32;
+        read_block(runtime, double_block)?;
         w32_mem(first_entry_addr, indirect_block);
         write_block(runtime, double_block)?;
         zero_block(runtime, indirect_block as usize)?;
@@ -1288,6 +1291,7 @@ fn ensure_data_block(
     let mut block = r32(entry_addr);
     if block == 0 {
         block = alloc_block(runtime)? as u32;
+        read_block(runtime, indirect_block)?;
         w32_mem(entry_addr, block);
         write_block(runtime, indirect_block)?;
         zero_block(runtime, block as usize)?;

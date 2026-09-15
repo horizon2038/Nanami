@@ -7,6 +7,12 @@ use nun::CapabilityDescriptor;
 const BOOTSTRAP_VM_FRAME_MAPS: usize = 1 << 14;
 const BOOTSTRAP_VM_PT_MAPS: usize = 256;
 
+// Both supported architectures use 4-KiB pages and 512 entries per leaf table.
+// Frame unmapping does not remove page tables. Remember only the most recently
+// mapped 2-MiB region; destroying/replacing the VmSpace discards this hint too.
+const PAGE_TABLE_REGION_SHIFT: u32 = 12 + 9;
+const NO_PAGE_TABLE_REGION: usize = usize::MAX;
+
 pub trait VmTracker {
     fn record_frame(
         &mut self,
@@ -21,12 +27,14 @@ pub trait VmTracker {
     fn find_frame(&self, virtual_address: usize) -> Option<CapabilityDescriptor>;
     fn find_page_table_slot(&self, virtual_address: usize) -> Option<usize>;
     fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor>;
+    fn page_tables_ready(&self, virtual_address: usize) -> bool;
 }
 
 #[derive(Clone, Copy)]
 pub struct BootstrapVmSpace {
     frame_by_va: StaticAvlTree<BOOTSTRAP_VM_FRAME_MAPS>,
     page_table_by_va: StaticAvlTree<BOOTSTRAP_VM_PT_MAPS>,
+    page_table_region: usize,
 }
 
 impl BootstrapVmSpace {
@@ -34,6 +42,7 @@ impl BootstrapVmSpace {
         Self {
             frame_by_va: StaticAvlTree::new(),
             page_table_by_va: StaticAvlTree::new(),
+            page_table_region: NO_PAGE_TABLE_REGION,
         }
     }
 }
@@ -44,7 +53,9 @@ impl VmTracker for BootstrapVmSpace {
         virtual_address: usize,
         frame_descriptor: CapabilityDescriptor,
     ) -> Result<(), ()> {
-        self.frame_by_va.insert(virtual_address, frame_descriptor)
+        self.frame_by_va.insert(virtual_address, frame_descriptor)?;
+        self.page_table_region = virtual_address >> PAGE_TABLE_REGION_SHIFT;
+        Ok(())
     }
 
     fn record_page_table(
@@ -67,11 +78,16 @@ impl VmTracker for BootstrapVmSpace {
     fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
         self.frame_by_va.remove(virtual_address)
     }
+
+    fn page_tables_ready(&self, virtual_address: usize) -> bool {
+        self.page_table_region == virtual_address >> PAGE_TABLE_REGION_SHIFT
+    }
 }
 
 pub struct VmSpace {
     frame_by_va: AvlTree,
     page_table_by_va: AvlTree,
+    page_table_region: usize,
 }
 
 impl VmSpace {
@@ -79,6 +95,7 @@ impl VmSpace {
         Self {
             frame_by_va: AvlTree::new(),
             page_table_by_va: AvlTree::new(),
+            page_table_region: NO_PAGE_TABLE_REGION,
         }
     }
 
@@ -93,7 +110,9 @@ impl VmTracker for VmSpace {
         virtual_address: usize,
         frame_descriptor: CapabilityDescriptor,
     ) -> Result<(), ()> {
-        self.frame_by_va.insert(virtual_address, frame_descriptor)
+        self.frame_by_va.insert(virtual_address, frame_descriptor)?;
+        self.page_table_region = virtual_address >> PAGE_TABLE_REGION_SHIFT;
+        Ok(())
     }
 
     fn record_page_table(
@@ -115,5 +134,9 @@ impl VmTracker for VmSpace {
 
     fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
         self.frame_by_va.remove(virtual_address)
+    }
+
+    fn page_tables_ready(&self, virtual_address: usize) -> bool {
+        self.page_table_region == virtual_address >> PAGE_TABLE_REGION_SHIFT
     }
 }

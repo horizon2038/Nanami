@@ -86,7 +86,7 @@ impl Alpha {
         page_count: usize,
     ) -> Result<Vec<(usize, usize)>, CapabilityError> {
         self.ensure_process_frame_chunks(pid, process_root, start_slot, page_count)?;
-        let mut allocated = Vec::new();
+        let mut allocated = Vec::with_capacity(page_count);
         let mut done = 0usize;
         while done < page_count {
             let global_slot = start_slot + done;

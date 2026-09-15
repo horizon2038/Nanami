@@ -1,3 +1,6 @@
+#[path = "linux/vectored.rs"]
+mod vectored;
+
 use libnanami::{RequestError, Word};
 use nanami_services::{gfx::honoka, input, net, posix, vfs};
 
@@ -2921,6 +2924,70 @@ fn sys_writev(
     let mut bases = [0 as Word; LINUX_IOV_MAX as usize];
     let mut lens = [0 as Word; LINUX_IOV_MAX as usize];
     read_linux_iovecs(runtime, pid, iov_ptr, iov_count, &mut bases, &mut lens)?;
+
+    // Datagram, pipe and device writes retain their individual-write semantics.
+    // Only byte streams can share one service write across iovec boundaries.
+    if lens[..iov_count as usize].iter().any(|&len| len != 0) {
+        ensure_standard_terminal_fd(runtime, pid, fd);
+        let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+        let iovecs = bases[..iov_count as usize]
+            .iter()
+            .copied()
+            .zip(lens.iter().copied());
+        if file.kind == LinuxFileKind::Posix {
+            if file.resource & LINUX_O_ACCMODE == LINUX_O_RDONLY {
+                return Err(EBADF);
+            }
+            return vectored::writev(
+                iovecs,
+                bounded_len(runtime, Word::MAX)?,
+                |source, offset, len| {
+                    libnanami::request_process_memory_read(
+                        pid,
+                        source,
+                        runtime.posix_shm + offset,
+                        len,
+                    )
+                    .map_err(map_request_error)
+                },
+                |len| {
+                    posix::posix_write(runtime.posix_port, file.posix_fd, 0, len)
+                        .map_err(map_request_error)
+                },
+            );
+        }
+        if file.kind == LinuxFileKind::Terminal {
+            let terminal_id = terminal_id_for_pid(runtime, pid)?;
+            let capacity = terminal_bounded_len(runtime, Word::MAX)?;
+            return vectored::writev(
+                iovecs,
+                capacity,
+                |source, offset, len| {
+                    libnanami::request_process_memory_read(
+                        pid,
+                        source,
+                        runtime.terminal_shm + offset,
+                        len,
+                    )
+                    .map_err(map_request_error)
+                },
+                |len| {
+                    let written = nanami_services::terminal::terminal_write_output(
+                        runtime.terminal_port,
+                        terminal_id,
+                        0,
+                        len,
+                    )
+                    .map_err(map_request_error)?;
+                    if written == 0 {
+                        Err(EIO)
+                    } else {
+                        Ok(written)
+                    }
+                },
+            );
+        }
+    }
 
     let mut total = 0 as Word;
     let mut i = 0usize;

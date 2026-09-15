@@ -119,6 +119,23 @@ pub fn linux_readv(fd: usize, iov: *const LinuxIoVec, count: usize) -> isize {
     ret
 }
 
+pub fn linux_writev(fd: usize, iov: *const LinuxIoVec, count: usize) -> isize {
+    let ret: isize;
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") 20usize => ret,
+            in("rdi") fd,
+            in("rsi") iov,
+            in("rdx") count,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 pub fn linux_close(fd: usize) -> isize {
     let ret: isize;
     unsafe {

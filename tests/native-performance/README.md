@@ -8,6 +8,9 @@ or anything in A9N.
 The subsequent background-cache, scrollback and terminal-transfer work is
 documented in [Native hot-path follow-up](hotpaths.md).
 
+The Alpha mapping and Alter vectored-I/O follow-up is documented in
+[Alpha / Alter transfer paths](alpha-alter.md).
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

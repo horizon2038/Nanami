@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+#[path = "../../../nanami/servers/core-services/usb-server/src/xhci/capabilities.rs"]
+mod capabilities;
+#[path = "capability-tests.rs"]
+mod capability_tests;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/descriptors.rs"]
 mod descriptors;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/hid.rs"]
@@ -267,19 +271,15 @@ fn stopped_endpoint_ring_reset_clears_old_cycle_and_pending_state() {
 
 #[test]
 fn superspeed_psiv_is_separate_from_usb2_classes() {
-    let mut speeds = 0;
-    protocol::add_superspeed(&mut speeds, (5 << 16) | (3 << 4) | (1 << 8) | 4).unwrap();
-    // Asymmetric receive/transmit entries can share a PSIV.
-    for link in [2, 3] {
-        protocol::add_superspeed(
-            &mut speeds,
-            (10 << 16) | (3 << 4) | (1 << 8) | (link << 6) | 5,
-        )
-        .unwrap();
-    }
-    assert_eq!(speeds, (1 << 4) | (1 << 5));
-    assert!(protocol::add_superspeed(&mut speeds, (5 << 16) | (3 << 4) | 4).is_err());
-    assert!(protocol::add_superspeed(&mut speeds, (480 << 16) | (2 << 4) | (1 << 8) | 3).is_err());
+    let entries = [
+        (5 << 16) | (3 << 4) | (1 << 8) | 4,
+        // Asymmetric Rx/Tx share a PSIV and can have different rates.
+        (10 << 16) | (3 << 4) | (1 << 8) | (2 << 6) | 5,
+        (5 << 16) | (3 << 4) | (1 << 8) | (3 << 6) | 5,
+    ];
+    let speeds = protocol::Speeds::parse(3, 0x10, &entries, |_, _| panic!()).unwrap();
+    assert_eq!(speeds.usb3, (1 << 4) | (1 << 5));
+    assert_eq!(speeds.usb2, 0);
 }
 
 #[test]
@@ -366,15 +366,15 @@ fn controller_speed_ids_are_not_assumed_to_be_standard() {
             .collect::<Vec<_>>(),
         [1, 2, 3]
     );
-    let mut speeds = 0;
-    protocol::add_psi(&mut speeds, (1500 << 16) | (1 << 4) | 7).unwrap();
-    protocol::add_psi(&mut speeds, (12 << 16) | (2 << 4) | 5).unwrap();
-    protocol::add_psi(&mut speeds, (480 << 16) | (2 << 4) | 9).unwrap();
-    assert_eq!(protocol::classify(speeds, 7), 2);
-    assert_eq!(protocol::classify(speeds, 5), 1);
-    assert_eq!(protocol::classify(speeds, 9), 3);
-    assert_eq!(protocol::classify(speeds, 1), 0);
-    assert!(protocol::add_psi(&mut speeds, (480 << 16) | (2 << 4) | 9).is_err());
-    assert!(protocol::add_psi(&mut speeds, (1500 << 16) | (1 << 4)).is_err());
-    assert!(protocol::add_psi(&mut speeds, (5 << 16) | (3 << 4) | (1 << 8) | 4).is_err());
+    let entries = [
+        (1500 << 16) | (1 << 4) | 7,
+        (12 << 16) | (2 << 4) | 5,
+        (480 << 16) | (2 << 4) | 9,
+    ];
+    let speeds = protocol::Speeds::parse(2, 0, &entries, |_, _| panic!()).unwrap();
+    assert_eq!(protocol::classify(speeds.usb2, 7), 2);
+    assert_eq!(protocol::classify(speeds.usb2, 5), 1);
+    assert_eq!(protocol::classify(speeds.usb2, 9), 3);
+    assert_eq!(protocol::classify(speeds.usb2, 1), 0);
+    assert_eq!(speeds.usb3, 0);
 }

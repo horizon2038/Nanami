@@ -1,3 +1,4 @@
+mod discovery;
 mod probe;
 
 use crate::{
@@ -24,45 +25,16 @@ struct Session {
 pub struct Storage {
     root: Option<Root>,
     session: Option<Session>,
+    discovery: Option<discovery::Discovery>,
 }
 
 impl Storage {
-    pub fn initialize(
-        controllers: &mut [Controller],
-        input: &mut Input,
-        timer: Word,
-        discovery_failed: bool,
-    ) -> Self {
-        let probed = probe::probe(controllers, input, timer);
-        let roots = if discovery_failed || probed.is_err() {
-            2
-        } else if matches!(probed, Ok(Some(_))) {
-            1
-        } else {
-            0
-        };
-        let selected = nanami_services::device::select_storage_root(roots);
-        let root = match (probed, selected) {
-            (Ok(Some(root)), Ok(true)) if !discovery_failed => Some(root),
-            (Err(error), _) | (_, Err(error)) => {
-                libnanami::println!("[usb-server] root probe/selection failed: {}", error);
-                None
-            }
-            _ => None,
-        };
+    pub fn new(manager: Word, discovery_failed: bool) -> Self {
         Self {
-            root,
+            root: None,
             session: None,
+            discovery: Some(discovery::Discovery::new(manager, discovery_failed)),
         }
-    }
-
-    pub fn register(&self) -> Result<(), RequestError> {
-        if self.root.is_some() {
-            // usb-service and block-device deliberately alias the same port.
-            nanami_services::registry::register_block_device()?;
-            libnanami::print!("[usb-server] service registered: block-device\n");
-        }
-        Ok(())
     }
 
     pub fn request(

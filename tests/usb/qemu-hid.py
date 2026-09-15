@@ -7,18 +7,23 @@ restricted user-mode NIC; there is no forwarding or LAN injection.
 import argparse
 import json
 import pathlib
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from late_root import boot_without_root
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
 parser.add_argument('--smp', type=int, default=4)
 parser.add_argument('--memory', default='4G')
 parser.add_argument('--coexist-ps2', action='store_true')
+parser.add_argument('--hpet', choices=('on', 'off'), default='on')
+parser.add_argument('--bash-smoke', action='store_true', help='Exercise interactive bash forks instead of HTTP/hotplug (requires bash and busybox in rootfs)')
+parser.add_argument('--no-network', action='store_true', help='Omit the virtual NIC (requires --bash-smoke)')
 parser.add_argument('--stress', type=int, default=0, help='Number of modifier press/release pairs before typing')
 parser.add_argument('--high-mmio', action='store_true', help='Keep the firmware default high PCI BAR assignment')
 parser.add_argument('--usb-storage', action='store_true', help='Boot/rootfs on USB BOT, with AHCI present but no SATA media')
@@ -27,13 +32,20 @@ parser.add_argument('--usb2', action='store_true', help='Make the storage connec
 parser.add_argument('--duplicate-root', action='store_true', help='Attach another Nanami USB root and require fail-closed selection')
 parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug the USB root and check that I/O never binds the replacement')
 parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
+parser.add_argument('--late-root', action='store_true', help='Boot firmware/initramfs from a private rootless SATA clone, then attach USB root after usb-server is online')
 args = parser.parse_args()
+if args.no_network and not args.bash_smoke:
+    parser.error('--no-network requires --bash-smoke; the default test launches HTTP')
+if args.bash_smoke and (args.unplug_root or args.duplicate_root):
+    parser.error('--bash-smoke requires a stable, unique root disk')
 if args.usb_storage and args.virtio_storage:
     parser.error('--usb-storage and --virtio-storage are mutually exclusive')
 if args.unplug_root and not args.usb_storage:
     parser.error('--unplug-root requires --usb-storage')
 if args.empty_sata and not args.usb_storage:
     parser.error('--empty-sata requires --usb-storage')
+if args.late_root and (not args.usb_storage or args.empty_sata or args.duplicate_root or args.unplug_root):
+    parser.error('--late-root requires --usb-storage without other root attachment scenarios')
 if not args.image.is_file():
     parser.error('--image must be a regular image file, not a physical device')
 repo = pathlib.Path(__file__).resolve().parents[2]
@@ -45,17 +57,20 @@ if sys.platform == 'darwin':
     subprocess.run(['cp', '-c', str(args.image.resolve()), str(base_image)], check=True)
 else:
     shutil.copyfile(args.image, base_image)
+if args.late_root:
+    boot_without_root(base_image, logs / 'boot-only.img')
 firmware = repo / 'spencer/a9nloader-rs/tools'
 shutil.copyfile(firmware / 'OVMF_VARS.fd', logs / 'OVMF_VARS.fd')
 serial = logs / 'serial.log'
 qmp_path = logs / 'qmp.sock'
 command = [
-    'qemu-system-x86_64', '-machine', f'hpet=on,i8042={"on" if args.coexist_ps2 else "off"}',
+    'qemu-system-x86_64', '-machine', f'hpet={args.hpet},i8042={"on" if args.coexist_ps2 else "off"}',
     '-cpu', 'max', '-smp', str(args.smp), '-m', args.memory, '-display', 'none',
     *([] if args.high_mmio else ['-fw_cfg', 'name=opt/ovmf/X-PciMmio64Mb,string=0']),
     '-serial', f'file:{serial}', '-qmp', f'unix:{qmp_path},server=on,wait=off',
-    '-netdev', 'user,id=net0,restrict=on',
-    '-device', 'virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on',
+    *(['-nic', 'none'] if args.no_network else [
+        '-netdev', 'user,id=net0,restrict=on',
+        '-device', 'virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on']),
     '-device', 'qemu-xhci,id=xhci,addr=6,msi=off,msix=off' + (',p3=0' if args.usb2 else ''),
     '-device', 'usb-kbd,id=usb-kbd,bus=xhci.0,port=1',
     '-device', 'usb-mouse,id=usb-mouse,bus=xhci.0,port=2',
@@ -63,7 +78,9 @@ command = [
     '-drive', f'if=pflash,format=raw,file={logs / "OVMF_VARS.fd"}',
     *([] if args.virtio_storage else ['-device', 'ich9-ahci,id=ahci,addr=3']),
     '-drive', f'if=none,id=disk,format=raw,snapshot=on,file={base_image}',
-    '-device', ('usb-storage,id=usb-root,drive=disk,bus=xhci.0,port=3,bootindex=1' if args.usb_storage
+    *(['-drive', f'if=none,id=boot-only,format=raw,snapshot=on,file={logs / "boot-only.img"}'] if args.late_root else []),
+    '-device', ('ide-hd,drive=boot-only,bus=ahci.0,bootindex=1' if args.late_root
+                else 'usb-storage,id=usb-root,drive=disk,bus=xhci.0,port=3,bootindex=1' if args.usb_storage
                 else 'virtio-blk-pci,drive=disk,addr=3,bootindex=1,disable-legacy=off,disable-modern=on'
                 if args.virtio_storage else 'ide-hd,drive=disk,bus=ahci.0,bootindex=1'),
     '--no-reboot', '--no-shutdown',
@@ -116,14 +133,30 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                 if serial.exists() and predicate(serial.read_text(errors='replace')):
                     return
                 time.sleep(0.2)
-            qmp('screendump', {'filename': str(logs / 'timeout.ppm')})
+            qmp('stop')
+            qmp('screendump', {'filename': str(logs / 'timeout.png'), 'format': 'png'})
             diagnostics = {}
-            for command in ['info registers -a', 'info irq', 'info usb']:
+            for command in ['info registers -a', 'info irq', 'info usb', 'info mice', 'info pic', 'info lapic']:
                 diagnostics[command] = qmp('human-monitor-command', {'command-line': command})
+            for cpu in range(args.smp):
+                diagnostics[f'cpu {cpu} lapic'] = qmp('human-monitor-command', {'command-line': 'info lapic', 'cpu-index': cpu})
             (logs / 'timeout-monitor.json').write_text(json.dumps(diagnostics, indent=2))
             raise RuntimeError('Guest timed out; inspect serial.log and timeout-monitor.json')
 
         qmp('qmp_capabilities')
+        if args.late_root:
+            wait_for(lambda s: 'usb-server] online controllers=' in s
+                     and 'ahci-server] stopped status=' in s and s.count('boot-hid=1') >= 2)
+            # Deliberately keep the root absent through the initial scan. This
+            # is a test stimulus, not a timeout-based discovery policy in the OS.
+            time.sleep(2)
+            log = serial.read_text(errors='replace')
+            assert 'storage=true' not in log
+            assert 'service registered: block-device' not in log
+            assert 'service registered: vfs-service' not in log
+            qmp('device_add', {'driver': 'usb-storage', 'id': 'usb-root', 'drive': 'disk',
+                               'bus': 'xhci.0', 'port': '3'})
+            print('Attached USB root after the initial empty scan', flush=True)
         if args.duplicate_root:
             wait_for(lambda s: 'root probe/selection failed:' in s and 'usb-server] online controllers=' in s)
             log = serial.read_text(errors='replace')
@@ -137,11 +170,18 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             log = serial.read_text(errors='replace')
             assert 'usb-server] service registered: block-device' in log
             assert 'ahci-server] service registered: block-device' not in log
+            if args.late_root:
+                assert log.count('usb-server] service registered: block-device') == 1
+                assert 'usb-server] no root yet; watching storage connections' in log
+                assert all(record['stats']['wr_bytes'] == 0 for record in qmp('query-blockstats')
+                           if record.get('device') == 'boot-only'), 'Probe wrote to the firmware-only disk'
+                print('PASS: late USB root published once and mounted without rebooting', flush=True)
             if args.empty_sata:
                 assert all(record['stats']['wr_bytes'] == 0 for record in qmp('query-blockstats')
                            if record.get('device') == 'non-root'), 'Probe wrote to the non-root disk'
             print('USB BOT rootfs mounted; AHCI did not claim an empty controller', flush=True)
         print('USB keyboard/mouse enumerated; desktop ready', flush=True)
+        print('Active pointers: ' + json.dumps(qmp('query-mice')), flush=True)
         time.sleep(5)
         for _ in range(args.stress):
             for down in (True, False):
@@ -152,7 +192,7 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         # no i8042 controller, so a PS/2 driver cannot make this test pass.
         def type_text(text):
             for char in text:
-                key = {'-': 'minus', '\n': 'ret', ' ': 'spc'}.get(char, char)
+                key = {'-': 'minus', '\n': 'ret', ' ': 'spc', '/': 'slash', '.': 'dot'}.get(char, char)
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': key}], 'hold-time': 50})
                 time.sleep(0.8)
 
@@ -170,10 +210,27 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             assert root_written_bytes() > before, 'No filesystem writes reached the USB snapshot'
             print('Filesystem mkdir reached USB WRITE commands (snapshot only)', flush=True)
 
-        type_text('http-server\n')
-        qmp('screendump', {'filename': str(logs / 'after-keyboard.ppm')})
-        wait_for(lambda s: 'tcp listen port=80' in s)
-        print('USB keyboard launched HTTP', flush=True)
+        if args.bash_smoke:
+            type_text('alter -t /alter/linux/bin/bash\n')
+            wait_for(lambda s: re.search(r'managed rootfs process image=bash pid=(\d+)', s))
+            bash_pid = re.search(r'managed rootfs process image=bash pid=(\d+)', serial.read_text(errors='replace'))[1]
+            wait_for(lambda s: f'read stdin pid={bash_pid} ' in s)
+            for iteration in range(3):
+                start = len(serial.read_text(errors='replace'))
+                type_text('/bin/busybox ls\n')
+                wait_for(lambda s: re.search(r'exit pid=\d+ syscall=\d+ status=\d+\b', s[start:]))
+                exited = re.search(r'exit pid=\d+ syscall=\d+ status=(\d+)\b', serial.read_text(errors='replace')[start:])
+                assert exited[1] == '0', f'Bash child failed with status {exited[1]}'
+                print(f'PASS: bash child {iteration + 1} exited successfully', flush=True)
+            type_text('exit\n')
+            wait_for(lambda s: re.search(r'exit pid=' + bash_pid + r' syscall=\d+ status=0\b', s))
+            qmp('screendump', {'filename': str(logs / 'after-bash.png'), 'format': 'png'})
+            print('PASS: interactive bash fork/exec/wait/exit over USB input', flush=True)
+        else:
+            type_text('http-server\n')
+            qmp('screendump', {'filename': str(logs / 'after-keyboard.ppm')})
+            wait_for(lambda s: 'tcp listen port=80' in s)
+            print('USB keyboard launched HTTP', flush=True)
         if args.unplug_root:
             qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'f12'}], 'hold-time': 100})
             time.sleep(2)
@@ -208,7 +265,7 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             {'type': 'rel', 'data': {'axis': 'x', 'value': 120}},
             {'type': 'rel', 'data': {'axis': 'y', 'value': 60}},
         ]})
-        time.sleep(1)
+        time.sleep(5 if args.bash_smoke else 1)
         qmp('screendump', {'filename': str(logs / 'after-mouse.ppm')})
         def cursor_region(path, x, y):
             magic, dimensions, depth, pixels = path.read_bytes().split(b'\n', 3)
@@ -222,6 +279,11 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         for x, y in [(width * 3 // 4, height // 2), (width * 3 // 4 + 120, height // 2 + 60)]:
             if cursor_region(logs / 'before-mouse.ppm', x, y) == cursor_region(logs / 'after-mouse.ppm', x, y):
                 raise RuntimeError(f'USB cursor did not leave/enter expected region {x},{y}')
+        if args.bash_smoke:
+            if cursor_region(logs / 'before-mouse.ppm', width - 48, 4) == cursor_region(logs / 'after-mouse.ppm', width - 48, 4):
+                raise RuntimeError('Desktop clock did not advance after bash exit')
+            print('PASS: USB cursor and desktop clock still update after bash exit', flush=True)
+            raise SystemExit(0)
         # Stop the foreground HTTP process, then hold Shift across USB removal.
         # The subsequent lowercase command must not inherit a stuck modifier.
         qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'f12'}], 'hold-time': 100})

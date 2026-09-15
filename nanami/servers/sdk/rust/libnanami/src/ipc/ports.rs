@@ -75,6 +75,14 @@ fn take_interrupted_notification(notification_descriptor: CapabilityDescriptor) 
     if BOUND_NOTIFICATION.load(Ordering::Acquire) != notification_descriptor {
         return None;
     }
+    take_pending_notification()
+}
+
+pub(super) fn take_pending_notification() -> Option<Word> {
+    // The usual receive path needs only a load, not a read-modify-write.
+    if PENDING_NOTIFICATION.load(Ordering::Acquire) == 0 {
+        return None;
+    }
     let identifier = PENDING_NOTIFICATION.swap(0, Ordering::AcqRel);
     (identifier != 0).then_some(identifier)
 }

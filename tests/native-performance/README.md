@@ -20,6 +20,12 @@ The lookup, timer, storage and input follow-up is documented in
 The HTTP ARP, TCP receive-flow-control, and NIC backlog regression tests are documented in
 [HTTP / network regressions](../network/README.md).
 
+The deferred-notification service receive regressions are documented in
+[Deferred IPC notifications](ipc/README.md).
+
+USB root discovery and late-attachment regressions are documented in
+[USB input and root storage](../usb/README.md).
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

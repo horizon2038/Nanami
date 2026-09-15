@@ -7,6 +7,9 @@ impl Controller {
             if !self.running {
                 return;
             }
+            if self.port_major[port] == 0 {
+                continue; // Unassigned/unsupported protocol: do not touch PORTSC.
+            }
             let offset = PORTSC + (port - 1) * 16;
             let status = unsafe { read(self.op, offset) };
             let existing = self.slots.iter().position(|slot| {
@@ -39,6 +42,7 @@ impl Controller {
 
     fn detach(&mut self, slot: u8, input: &mut Input) {
         if let Some(mut device) = self.slots[slot as usize].take() {
+            self.storage_changed |= device.storage.is_some();
             for endpoint in &mut device.endpoints {
                 endpoint.keyboard.release(|event| input.emit(event));
                 endpoint.mouse.release(|event| input.emit(event));
@@ -103,7 +107,15 @@ impl Controller {
             1 | 2 => 8,
             3 => 64,
             4 => 512,
-            _ => return Err(RequestError::Unsupported),
+            _ => {
+                libnanami::println!(
+                    "[usb-server] port {} unsupported speed-id={} PORTSC={:#010x}",
+                    port,
+                    speed,
+                    status
+                );
+                return Err(RequestError::Unsupported);
+            }
         };
         let event = self.command(
             Trb {
@@ -175,6 +187,7 @@ impl Controller {
                 }])
                 .ok_or(RequestError::Protocol)?;
         }
+        self.storage_changed |= device.storage.is_some();
         self.slots[slot as usize] = Some(device);
         for endpoint in &self.slots[slot as usize].as_ref().unwrap().endpoints {
             self.doorbell(slot, endpoint.dci);

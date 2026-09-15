@@ -1,12 +1,18 @@
 use super::*;
 use crate::arch::ControllerResource;
 
+mod extended;
+
 impl Controller {
     pub fn initialize(
         resource: ControllerResource,
         timer: Word,
         irq_slot: Word,
     ) -> Result<Self, RequestError> {
+        if resource.bytes < 0x20 {
+            libnanami::println!("[usb-server] xHCI BAR too short: {:#x}", resource.bytes);
+            return Err(RequestError::Protocol);
+        }
         let base = resource.mmio;
         let cap = unsafe { read(base, 0) };
         let op_offset = (cap & 0xff) as usize;
@@ -17,6 +23,10 @@ impl Controller {
         let slots = (hcs1 as u8 as usize).min(MAX_SLOTS);
         let doorbells = unsafe { read(base, 0x14) } as usize & !3;
         let runtime = unsafe { read(base, 0x18) } as usize & !31;
+        libnanami::println!(
+            "[usb-server] xHCI cap={:#010x} hcs1={:#010x} hcs2={:#010x} hcc={:#010x} dboff={:#x} rtsoff={:#x} bytes={:#x}",
+            cap, hcs1, hcs2, hcc, doorbells, runtime, resource.bytes
+        );
         if cap >> 16 < 0x0096
             || op_offset < 0x20
             || ports == 0
@@ -25,101 +35,25 @@ impl Controller {
             || doorbells + (slots + 1) * 4 > resource.bytes
             || runtime + 0x40 > resource.bytes
         {
+            libnanami::println!("[usb-server] unsupported xHCI register layout/version");
             return Err(RequestError::Unsupported);
         }
         let op = base + op_offset;
         let address64 = hcc & 1 != 0;
-        if unsafe { read(op, 8) } & 1 == 0 {
+        let page_size = unsafe { read(op, 8) };
+        if page_size & 1 == 0 {
+            libnanami::println!(
+                "[usb-server] unsupported xHCI page-size mask={:#x}",
+                page_size
+            );
             return Err(RequestError::Unsupported);
         }
-        let mut slot_type = [0u8; 256];
-        let mut port_major = [0u8; 256];
-        let mut port_speeds = [0u32; 256];
-        let mut superspeeds = [0u16; 256];
-        let mut extended = ((hcc >> 16) as usize) * 4;
-        // Extended capabilities are forward-relative; reject malformed chains
-        // and do the BIOS/OS ownership handshake before resetting hardware.
-        for _ in 0..256 {
-            if extended == 0 {
-                break;
-            }
-            if extended + 16 > resource.bytes {
-                return Err(RequestError::Protocol);
-            }
-            let header = unsafe { read(base, extended) };
-            if header as u8 == 1 {
-                unsafe { write(base, extended, header | (1 << 24)) };
-                let mut owned = false;
-                for _ in 0..1000 {
-                    if unsafe { read(base, extended) } & (1 << 16) == 0 {
-                        owned = true;
-                        break;
-                    }
-                    crate::delay(timer, 1)?;
-                }
-                if !owned {
-                    return Err(RequestError::Transport);
-                }
-                // Disable legacy SMIs without acknowledging arbitrary RW1C bits.
-                let legacy = unsafe { read(base, extended + 4) };
-                unsafe { write(base, extended + 4, legacy & 0x000e_1fee) };
-            } else if header as u8 == 2 {
-                let compatible = unsafe { read(base, extended + 8) };
-                let first = (compatible & 0xff) as usize;
-                let count = ((compatible >> 8) & 0xff) as usize;
-                let ty = unsafe { read(base, extended + 12) } as u8 & 31;
-                // QEMU retains an empty USB3 capability with p3=0. It assigns
-                // no registers; ignore that entry while validating real ranges.
-                if count != 0 && (first == 0 || first + count > ports + 1) {
-                    return Err(RequestError::Protocol);
-                }
-                let major = (header >> 24) as u8;
-                let psi_count = (compatible >> 28) as usize;
-                if extended + 16 + psi_count * 4 > resource.bytes {
-                    return Err(RequestError::Protocol);
-                }
-                let mut speeds = 0;
-                let mut super_ids = 0;
-                if major == 2 && unsafe { read(base, extended + 4) } == 0x2042_5355 {
-                    if psi_count == 0 {
-                        speeds = protocol::DEFAULT_SPEEDS;
-                    } else {
-                        for index in 0..psi_count {
-                            protocol::add_psi(&mut speeds, unsafe {
-                                read(base, extended + 16 + index * 4)
-                            })
-                            .map_err(|_| RequestError::Protocol)?;
-                        }
-                    }
-                }
-                if major == 3 && unsafe { read(base, extended + 4) } == 0x2042_5355 {
-                    if psi_count == 0 {
-                        super_ids = 1 << 4;
-                    } else {
-                        for index in 0..psi_count {
-                            protocol::add_superspeed(&mut super_ids, unsafe {
-                                read(base, extended + 16 + index * 4)
-                            })
-                            .map_err(|_| RequestError::Protocol)?;
-                        }
-                    }
-                }
-                for port in first..first + count {
-                    if port_major[port] != 0 {
-                        return Err(RequestError::Protocol);
-                    }
-                    slot_type[port] = ty;
-                    port_major[port] = major;
-                    port_speeds[port] = speeds;
-                    superspeeds[port] = super_ids;
-                }
-            }
-            let next = ((header >> 8) & 0xff) as usize;
-            extended = if next == 0 { 0 } else { extended + next * 4 };
-        }
-        if extended != 0 {
-            return Err(RequestError::Protocol);
-        }
+        let extended::Ports {
+            slot_type,
+            port_major,
+            port_speeds,
+            superspeeds,
+        } = extended::configure(base, resource.bytes, hcc, ports, timer)?;
         let dma = Dma::allocate(SLOT_BASE + slots * SLOT_BYTES, address64)?;
         let scratch_count = (((hcs2 >> 21) & 31) << 5 | (hcs2 >> 27)) as usize;
         let scratch = if scratch_count == 0 {
@@ -162,6 +96,7 @@ impl Controller {
             borrowed_hid: 0,
             held_events: Vec::with_capacity(MAX_INTERFACES),
             dirty: true,
+            storage_changed: true,
             running: false,
         };
         controller.wait_register(USBSTS, 1 << 11, 0, 1000)?;
@@ -197,6 +132,9 @@ impl Controller {
         controller.wait_register(USBSTS, 1, 0, 1000)?;
         controller.running = true;
         for port in 1..=ports {
+            if controller.port_major[port] == 0 {
+                continue;
+            }
             let offset = PORTSC + (port - 1) * 16;
             let value = unsafe { read(op, offset) };
             unsafe { write(op, offset, port_controls(value) | PORT_POWER) };

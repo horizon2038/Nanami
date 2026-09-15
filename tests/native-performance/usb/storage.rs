@@ -14,6 +14,7 @@ pub enum RequestError {
 }
 #[derive(Default)]
 struct ClientFake {
+    connects: usize,
     decisions: VecDeque<Word>,
     roots: Vec<Word>,
     sleeps: usize,
@@ -21,6 +22,7 @@ struct ClientFake {
 thread_local! { static CLIENT: RefCell<ClientFake> = RefCell::new(ClientFake::default()); }
 pub fn connect_service_by_name(name: &str, slot: Word) -> Result<(), RequestError> {
     assert_eq!((name, slot), (device::DEVICE_MANAGER_SERVICE, 28));
+    CLIENT.with(|client| client.borrow_mut().connects += 1);
     Ok(())
 }
 pub fn yield_now() {
@@ -56,9 +58,10 @@ fn call_port(
     _: Word,
     length: u8,
 ) -> Result<(Word, Word, Word), RequestError> {
+    assert!(matches!(port, 25 | 28));
     assert_eq!(
-        (port, code, length),
-        (28, device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE, 2),
+        (code, length),
+        (device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE, 2),
         "request must transmit both its code and root count"
     );
     CLIENT.with(|client| {
@@ -307,6 +310,40 @@ fn single_driver_and_no_media_do_not_wait_for_nonexistent_drivers() {
 }
 
 #[test]
+fn empty_scan_does_not_finalize_root_selection() {
+    use device::*;
+    let mut selection = selection::Selection::new();
+    selection.pids = [5, 7];
+    assert_eq!(selection.report(5, 0), Ok(STORAGE_PENDING));
+    assert_eq!(selection.report(7, 0), Ok(STORAGE_NOT_SELECTED));
+    assert_eq!(selection.report(7, 1), Ok(STORAGE_SELECTED));
+    assert_eq!(selection.report(7, 1), Ok(STORAGE_SELECTED));
+}
+
+#[test]
+fn late_candidate_cannot_replace_a_selected_root() {
+    use device::*;
+    let mut selection = selection::Selection::new();
+    selection.pids = [5, 7];
+    assert_eq!(selection.report(7, 0), Ok(STORAGE_PENDING));
+    assert_eq!(selection.report(5, 1), Ok(STORAGE_SELECTED));
+    assert_eq!(selection.report(7, 1), Ok(STORAGE_NOT_SELECTED));
+    assert_eq!(selection.report(5, 1), Ok(STORAGE_SELECTED));
+}
+
+#[test]
+fn rediscovery_before_selection_still_rejects_duplicate_roots() {
+    use device::*;
+    let mut selection = selection::Selection::new();
+    selection.pids = [5, 7];
+    assert_eq!(selection.report(7, 0), Ok(STORAGE_PENDING));
+    assert_eq!(selection.report(7, 1), Ok(STORAGE_PENDING));
+    assert_eq!(selection.report(5, 1), Ok(STORAGE_AMBIGUOUS));
+    assert_eq!(selection.report(7, 1), Ok(STORAGE_AMBIGUOUS));
+    assert!(selection.report(7, 0).is_err());
+}
+
+#[test]
 fn root_client_sends_count_and_waits_without_busy_polling() {
     use device::*;
     CLIENT.with(|client| {
@@ -336,5 +373,23 @@ fn non_candidate_client_reports_once_and_candidate_timeout_is_bounded() {
     CLIENT.with(|client| {
         assert_eq!(client.borrow().roots.len(), 301);
         assert_eq!(client.borrow().sleeps, 300);
+    });
+}
+
+#[test]
+fn rediscovery_reuses_the_existing_manager_capability() {
+    use device::*;
+    CLIENT.with(|client| {
+        *client.borrow_mut() = ClientFake {
+            decisions: [STORAGE_NOT_SELECTED, STORAGE_SELECTED].into(),
+            ..ClientFake::default()
+        };
+    });
+    assert_eq!(select_storage_root_on_port(25, 0), Ok(false));
+    assert_eq!(select_storage_root_on_port(25, 1), Ok(true));
+    CLIENT.with(|client| {
+        let client = client.borrow();
+        assert_eq!(client.roots, [0, 1]);
+        assert_eq!(client.connects, 0);
     });
 }

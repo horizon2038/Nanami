@@ -1,4 +1,5 @@
 mod bulk;
+mod capabilities;
 mod dma;
 mod enumerate;
 mod init;
@@ -75,10 +76,15 @@ pub struct Controller {
     borrowed_hid: u32,
     held_events: Vec<Trb>,
     dirty: bool,
+    storage_changed: bool,
     running: bool,
 }
 
 impl Controller {
+    pub fn take_storage_change(&mut self) -> bool {
+        core::mem::take(&mut self.storage_changed)
+    }
+
     fn delay(&self, milliseconds: Word) -> Result<(), RequestError> {
         crate::delay(self.timer, milliseconds)
     }
@@ -89,12 +95,21 @@ impl Controller {
         value: u32,
         limit_ms: usize,
     ) -> Result<(), RequestError> {
+        let mut last = 0;
         for _ in 0..limit_ms {
-            if unsafe { read(self.op, offset) } & mask == value {
+            last = unsafe { read(self.op, offset) };
+            if last & mask == value {
                 return Ok(());
             }
             self.delay(1)?;
         }
+        libnanami::println!(
+            "[usb-server] xHCI timeout op+{:#x} value={:#010x} mask={:#010x} expected={:#010x}",
+            offset,
+            last,
+            mask,
+            value
+        );
         Err(RequestError::Transport)
     }
     fn doorbell(&self, slot: u8, dci: u8) {
@@ -213,6 +228,7 @@ impl Controller {
         }
     }
     fn fail(&mut self, input: &mut Input) {
+        self.storage_changed |= self.running;
         self.running = false;
         // Do not free or reuse DMA memory even if this controller cannot halt.
         unsafe { write(self.op, USBCMD, 0) };

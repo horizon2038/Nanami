@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "a9n-types"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f13feb37ee5cfc4b43d8bd78a4c1fcd2d8e9a4c653d971b54b2c6c886a34b4ff"
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -21,9 +27,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "nanami-gpt"
+version = "0.1.0"
+
+[[package]]
 name = "nanami-native-performance-tests"
 version = "0.1.0"
 dependencies = [
+ "a9n-types",
+ "nanami-gpt",
  "rlsf",
 ]
 

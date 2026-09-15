@@ -80,8 +80,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
     // Once controllers run, errors must not exit and release their DMA memory.
-    let mut storage =
-        storage::Storage::initialize(&mut controllers, &mut input, timer, discovery_failed);
+    let mut storage = storage::Storage::new(manager, discovery_failed);
     if let Err(error) = serve(&mut controllers, &mut input, &mut storage, timer) {
         libnanami::println!("[usb-server] service failed: {}; retaining DMA", error);
         loop {
@@ -98,7 +97,6 @@ fn serve(
     timer: Word,
 ) -> Result<(), RequestError> {
     libnanami::register_service_by_name("usb-service", 20)?;
-    storage.register()?;
     // Maintenance also recovers missed/shared INTx events. No hardware counter
     // is exposed to users; this uses the selected platform timer service.
     nanami_services::timer::timer_service_interval_on_notification_milliseconds(
@@ -118,6 +116,7 @@ fn serve(
             }
             controller.poll(input);
         }
+        storage.poll(controllers, input, timer)?;
         input.flush();
         if !input.connected() {
             // Also retry under sustained block traffic, without a rootfs boot

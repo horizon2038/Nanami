@@ -12,12 +12,24 @@ pub const STORAGE_NOT_SELECTED: Word = 2;
 pub const STORAGE_AMBIGUOUS: Word = 3;
 
 /// Report 0/1 roots, or 2 for ambiguity/failed discovery. A zero-root driver
-/// reports once and may continue serving another class (USB HID). A candidate
-/// waits for every boot-selected driver before publishing block-device.
+/// does not wait and may report again when its storage inventory changes. A
+/// candidate waits for every boot-selected driver before publishing block-device.
+/// Selection (including ambiguity) is final; late media never replaces a root.
 /// Slots 28/29 are reserved by participating drivers for manager/timer IPC.
+/// For repeated reports, use `select_storage_root_on_port` with an existing
+/// connection instead of trying to populate slot 28 again.
 pub fn select_storage_root(roots: Word) -> Result<bool, RequestError> {
     libnanami::connect_service_by_name(DEVICE_MANAGER_SERVICE, 28)?;
     let manager = libnanami::ipc::process_slot_descriptor(28);
+    select_storage_root_on_port(manager, roots)
+}
+
+/// Reuse an existing manager connection for change-driven storage discovery.
+/// Like `select_storage_root`, reserves slot 29 for a candidate's timer waits.
+pub fn select_storage_root_on_port(
+    manager: CapabilityDescriptor,
+    roots: Word,
+) -> Result<bool, RequestError> {
     let mut timer = None;
     let mut waits = 0;
     loop {

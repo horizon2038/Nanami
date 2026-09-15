@@ -28,6 +28,10 @@ name = "timers"
 path = "timer-tests.rs"
 
 [[test]]
+name = "ipc-notifications"
+path = "ipc/main.rs"
+
+[[test]]
 name = "storage"
 path = "storage/main.rs"
 
@@ -52,10 +56,16 @@ name = "usb-storage"
 path = "usb/storage.rs"
 
 [[test]]
+name = "usb-discovery"
+path = "usb-discovery/main.rs"
+
+[[test]]
 name = "physical-memory"
 path = "physical-memory-tests.rs"
 
 [dependencies]
+nanami-gpt = { path = "../../nanami/servers/libs/gpt" }
+a9n-types = "0.3.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 
 [workspace]

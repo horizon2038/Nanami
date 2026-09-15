@@ -13,6 +13,9 @@ pub struct Disk {
 
 impl Controller {
     pub fn storage_disks(&mut self, input: &mut Input) -> Result<Vec<Disk>, RequestError> {
+        if !self.running {
+            return Err(RequestError::Transport);
+        }
         let mut disks = Vec::new();
         for slot in 1..self.slots.len() {
             let Some(mut device) = self.borrow_device(slot as u8) else {

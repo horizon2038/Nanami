@@ -3,6 +3,7 @@ use a9n_abi::CapabilityDescriptor;
 
 use crate::{map_capability_error, RequestError, Word};
 
+use super::ports::{preserve_interrupted_notification, take_pending_notification};
 use super::tls::init_ipc_tls;
 use super::types::{ServiceEvent, ServiceRequest, HARDWARE_CONTEXT_WORDS};
 
@@ -90,6 +91,13 @@ pub fn service_receive_event(
 ) -> Result<ServiceEvent, RequestError> {
     init_ipc_tls()?;
 
+    if let Some(identifier) = take_pending_notification() {
+        return Ok(ServiceEvent::Notification {
+            identifier,
+            value: 0,
+        });
+    }
+
     let mut info = MessageInfo::normal(true, 0, 0);
     let mut identifier = 0;
     a9n_abi::arch::ipc_port::receive(port_descriptor, &mut info, &mut identifier)
@@ -129,11 +137,7 @@ pub fn service_reply_receive_event(
     ipc.configure_message(5, detail0);
     ipc.configure_message(6, detail1);
 
-    let mut info = MessageInfo::normal(true, 3, 0);
-    let mut identifier = 0;
-    a9n_abi::arch::ipc_port::reply_receive(port_descriptor, &mut info, &mut identifier)
-        .map_err(map_capability_error)?;
-    decode_service_event(info, identifier)
+    reply_receive_event(port_descriptor, MessageInfo::normal(true, 3, 0))
 }
 
 pub fn service_fault_continue_receive_event(
@@ -151,7 +155,32 @@ pub fn service_fault_continue_receive_event(
         ipc.configure_message(4 + index, value);
     }
 
-    let mut info = MessageInfo::normal(true, hardware_context.len() as u8, 0);
+    reply_receive_event(
+        port_descriptor,
+        MessageInfo::normal(true, hardware_context.len() as u8, 0),
+    )
+}
+
+#[inline(always)]
+fn reply_receive_event(
+    port_descriptor: CapabilityDescriptor,
+    mut info: MessageInfo,
+) -> Result<ServiceEvent, RequestError> {
+    if let Some(identifier) = take_pending_notification() {
+        // Call may have consumed a bound IRQ while retrying a synchronous RPC.
+        // Complete our outstanding reply, but do not block awaiting an IRQ
+        // which is already saved here (and may remain masked until handled).
+        if let Err(error) = a9n_abi::arch::ipc_port::reply(port_descriptor, info) {
+            preserve_interrupted_notification(identifier);
+            return Err(map_capability_error(error));
+        }
+        return Ok(ServiceEvent::Notification {
+            identifier,
+            value: 0,
+        });
+    }
+
+    // With no deferred notification, retain the combined Reply-Receive path.
     let mut identifier = 0;
     a9n_abi::arch::ipc_port::reply_receive(port_descriptor, &mut info, &mut identifier)
         .map_err(map_capability_error)?;

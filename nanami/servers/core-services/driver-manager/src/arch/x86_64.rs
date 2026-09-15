@@ -112,11 +112,14 @@ pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
     let descriptor = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
     let storage_image = if find_pci_class(descriptor, PCI_CLASS_AHCI, 0)?.is_some() {
         "./bin/ahci-server"
-    } else {
+    } else if find_pci_class(descriptor, 0x010000, 0)?.is_some() {
         libnanami::print!(
             "[driver-manager] no PCI AHCI controller; selecting virtio-blk fallback\n"
         );
         "./bin/virtio-blk-server"
+    } else {
+        libnanami::print!("[driver-manager] no PCI storage controller; probing USB storage\n");
+        return Ok(None);
     };
     Ok(Some(storage_image))
 }

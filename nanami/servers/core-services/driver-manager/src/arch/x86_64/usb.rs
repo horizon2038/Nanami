@@ -55,16 +55,6 @@ pub fn prepare(bdf: Word) -> Result<UsbControllerResource, RequestError> {
     if physical == 0 {
         return Err(RequestError::Unsupported);
     }
-    // Alpha currently materializes intervening MMIO capability chunks. A high
-    // PCI hole can exhaust that directory; do not attempt the mapping or move
-    // firmware-assigned BARs ourselves. Sparse high MMIO is separate work.
-    if physical >= 0x1_0000_0000 {
-        libnanami::println!(
-            "[driver-manager] USB BAR {:#x} exceeds current low-MMIO support",
-            physical
-        );
-        return Err(RequestError::Unsupported);
-    }
     let command = pci.read(4)? as u16;
     pci.write16(4, command & !6)?;
     // Probe BAR size with decoding disabled; always restore the BAR on errors.
@@ -86,9 +76,8 @@ pub fn prepare(bdf: Word) -> Result<UsbControllerResource, RequestError> {
     if bytes < 0x1000
         || bytes > 0x100000
         || !bytes.is_power_of_two()
-        || physical
-            .checked_add(bytes)
-            .is_none_or(|end| end > 0x1_0000_0000)
+        || physical & (bytes - 1) != 0
+        || physical.checked_add(bytes).is_none()
     {
         return Err(RequestError::Unsupported);
     }

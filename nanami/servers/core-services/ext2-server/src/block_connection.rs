@@ -2,7 +2,9 @@ use libnanami::{RequestError, Word, OS_RESPONSE_INVALID_ARGUMENT};
 
 use crate::{log_request_error, SLOT_BLOCK_DEVICE, SLOT_TIMER_SERVICE};
 
-const BLOCK_CONNECT_WAITS: usize = 64;
+// USB firmware handoff, enumeration and removable-media readiness precede
+// root publication. This remains a bounded, sleeping startup wait.
+const BLOCK_CONNECT_WAITS: usize = 600;
 const BLOCK_CONNECT_RETRY_MS: Word = 100;
 
 pub(super) fn connect_block_device() -> Result<Word, RequestError> {
@@ -31,8 +33,7 @@ pub(super) fn connect_block_device() -> Result<Word, RequestError> {
         if timer_port.is_none() {
             match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
                 Ok(()) => {
-                    timer_port =
-                        Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE));
+                    timer_port = Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE));
                 }
                 Err(RequestError::Status(OS_RESPONSE_INVALID_ARGUMENT)) => {}
                 Err(error) => {

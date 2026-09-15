@@ -42,12 +42,6 @@ impl Alpha {
             let Some(base_page) = memory.physical_page_index_from_address(split_start) else {
                 continue;
             };
-            if memory
-                .physical_frame_descriptor_from_index(base_page + ALPHA_HEAP_PAGES - 1)
-                .is_none()
-            {
-                continue;
-            }
             let usable_bytes = end - split_start;
 
             match selected {
@@ -66,20 +60,7 @@ impl Alpha {
             generic_idx, base_address, usable_bytes, ALPHA_HEAP_PAGES
         );
 
-        let mut i = 0usize;
-        while i < ALPHA_HEAP_PAGES {
-            if let Err(e) = memory.ensure_alpha_frame_at_physical_index(base_page + i) {
-                info!(
-                    "[heap.err] ensure frame idx={:>3} page={} frame_index={} err={:?}",
-                    generic_idx,
-                    i,
-                    base_page + i,
-                    e
-                );
-                return Err(e);
-            }
-            i += 1;
-        }
+        memory.prepare_bootstrap_frames(generic_idx, base_address, ALPHA_HEAP_PAGES)?;
 
         let mut j = 0usize;
         while j < ALPHA_HEAP_PAGES {

@@ -1,10 +1,14 @@
+mod bulk;
 mod dma;
 mod enumerate;
 mod init;
 mod protocol;
 pub mod registers;
 pub mod ring;
+mod storage;
 mod transfer;
+
+pub use storage::Disk;
 
 use crate::{
     input::Input,
@@ -22,7 +26,8 @@ use ring::{Consumer, Producer, Trb, IOC};
 
 const MAX_SLOTS: usize = 16;
 const MAX_INTERFACES: usize = 4;
-const SLOT_BYTES: usize = (4 + 2 * MAX_INTERFACES) * 4096;
+const BULK_BASE: usize = (4 + 2 * MAX_INTERFACES) * 4096;
+const SLOT_BYTES: usize = BULK_BASE + 0xc000;
 const SLOT_BASE: usize = 0x4000;
 
 struct Endpoint {
@@ -36,12 +41,14 @@ struct Endpoint {
     failed: bool,
 }
 struct Device {
+    generation: u64,
     port: u8,
     speed: u8,
     speed_class: u8,
     dma: Dma,
     control: Producer,
     endpoints: Vec<Endpoint>,
+    storage: Option<bulk::Storage>,
     vendor: u16,
     product: u16,
 }
@@ -62,13 +69,18 @@ pub struct Controller {
     slot_type: [u8; 256],
     port_major: [u8; 256],
     port_speeds: [u32; 256],
+    superspeeds: [u16; 256],
+    generation: u64,
+    borrowed_slot: Option<u8>,
+    borrowed_hid: u32,
+    held_events: Vec<Trb>,
     dirty: bool,
     running: bool,
 }
 
 impl Controller {
     fn delay(&self, milliseconds: Word) -> Result<(), RequestError> {
-        nanami_services::timer::timer_service_sleep_milliseconds(self.timer, milliseconds)
+        crate::delay(self.timer, milliseconds)
     }
     fn wait_register(
         &self,
@@ -98,6 +110,19 @@ impl Controller {
         Some(event)
     }
     fn dispatch(&mut self, event: Trb, input: &mut Input) {
+        // Synchronous storage/control temporarily borrows a composite device.
+        // Preserve its HID completions until the device is back in the table.
+        if event.kind() == 32 && self.borrowed_slot == Some(event.slot()) {
+            if self.borrowed_hid & (1 << event.endpoint()) == 0 {
+                return; // e.g. a bulk Stop Endpoint event during BOT recovery.
+            }
+            if self.held_events.len() < MAX_INTERFACES {
+                self.held_events.push(event);
+            } else {
+                self.fail(input);
+            }
+            return;
+        }
         match event.kind() {
             34 => self.dirty = true,
             32 => {
@@ -159,6 +184,32 @@ impl Controller {
             }
             37 => self.fail(input), // Host Controller Event (e.g. event-ring overrun).
             _ => {}
+        }
+    }
+    fn borrow_device(&mut self, slot: u8) -> Option<Device> {
+        let device = self.slots.get_mut(slot as usize)?.take()?;
+        self.borrowed_slot = Some(slot);
+        self.borrowed_hid = device
+            .endpoints
+            .iter()
+            .fold(0, |mask, endpoint| mask | (1 << endpoint.dci));
+        Some(device)
+    }
+
+    fn return_device(&mut self, slot: u8, mut device: Device, input: &mut Input) {
+        if !self.running {
+            for endpoint in &mut device.endpoints {
+                endpoint.keyboard.release(|event| input.emit(event));
+                endpoint.mouse.release(|event| input.emit(event));
+            }
+        }
+        self.slots[slot as usize] = Some(device);
+        self.borrowed_slot = None;
+        while !self.held_events.is_empty() {
+            let event = self.held_events.remove(0);
+            if self.running {
+                self.dispatch(event, input);
+            }
         }
     }
     fn fail(&mut self, input: &mut Input) {

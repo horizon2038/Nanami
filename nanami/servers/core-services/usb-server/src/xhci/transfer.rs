@@ -67,6 +67,11 @@ impl Controller {
                             return Err(RequestError::Protocol);
                         }
                         received = len - residual;
+                    } else if event.code() == 6 {
+                        // GET_MAX_LUN is explicitly allowed to stall. Restore
+                        // EP0's dequeue before any subsequent control request.
+                        self.reset_endpoint(slot, 1, &mut device.control, true, input)?;
+                        return Err(RequestError::Unsupported);
                     } else if event.code() != 1 {
                         libnanami::println!(
                             "[usb-server] control req={:#x} slot={} code={}",
@@ -86,7 +91,8 @@ impl Controller {
             }
             self.delay(1)?;
         }
-        // Caller must disable this slot before any further use of its DMA area.
+        // No further DMA-buffer access is safe after an uncompleted transfer.
+        self.fail(input);
         Err(RequestError::Transport)
     }
 
@@ -131,6 +137,8 @@ impl Controller {
             4,
             if kind == 4 {
                 8
+            } else if matches!(kind, 2 | 6) {
+                packet as u32 // Bulk has no periodic Max ESIT Payload.
             } else {
                 (packet as u32) << 16 | packet as u32
             },

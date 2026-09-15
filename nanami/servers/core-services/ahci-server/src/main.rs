@@ -120,8 +120,15 @@ struct AhciRuntime {
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     libnanami::print!("[ahci-server] panic\n");
-    let _ = libnanami::request_exit();
-    loop {}
+    retain_dma()
+}
+
+fn retain_dma() -> ! {
+    let notification =
+        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
+    loop {
+        let _ = libnanami::ipc::notification_wait(notification);
+    }
 }
 
 fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
@@ -285,14 +292,23 @@ fn is_active_sata_port(base: Word, port: usize, implemented: u32) -> bool {
     status & 0x0f == 3 && (status >> 8) & 0x0f == 1 && signature == SATA_SIGNATURE
 }
 
+fn stop_port(runtime: &AhciRuntime) -> Result<(), RequestError> {
+    let base = runtime.abar;
+    let command_offset = port_offset(runtime.port, PORT_CMD);
+    let mut command = unsafe { mmio_read32(base, command_offset) };
+    command &= !PORT_CMD_ST;
+    unsafe { mmio_write32(base, command_offset, command) };
+    wait_clear(base, command_offset, PORT_CMD_CR)?;
+    command = unsafe { mmio_read32(base, command_offset) } & !PORT_CMD_FRE;
+    unsafe { mmio_write32(base, command_offset, command) };
+    wait_clear(base, command_offset, PORT_CMD_FR)
+}
+
 fn configure_port(runtime: &AhciRuntime) -> Result<(), RequestError> {
+    stop_port(runtime)?;
     let base = runtime.abar;
     let port = runtime.port;
     let command_offset = port_offset(port, PORT_CMD);
-    let mut command = unsafe { mmio_read32(base, command_offset) };
-    command &= !(PORT_CMD_ST | PORT_CMD_FRE);
-    unsafe { mmio_write32(base, command_offset, command) };
-    wait_clear(base, command_offset, PORT_CMD_CR | PORT_CMD_FR)?;
 
     let command_list = runtime.dma_physical as u64 + DMA_COMMAND_LIST_OFFSET as u64;
     let received_fis = runtime.dma_physical as u64 + DMA_RECEIVED_FIS_OFFSET as u64;
@@ -314,7 +330,7 @@ fn configure_port(runtime: &AhciRuntime) -> Result<(), RequestError> {
         mmio_write32(base, HBA_IS, 1u32 << port);
     }
 
-    command = unsafe { mmio_read32(base, command_offset) } | PORT_CMD_FRE;
+    let mut command = unsafe { mmio_read32(base, command_offset) } | PORT_CMD_FRE;
     unsafe { mmio_write32(base, command_offset, command) };
     command |= PORT_CMD_ST;
     unsafe { mmio_write32(base, command_offset, command) };
@@ -476,7 +492,7 @@ fn find_root_partition(runtime: &AhciRuntime) -> Result<nanami_gpt::Partition, R
     };
     let header =
         nanami_gpt::parse_primary_header(&data[..SECTOR_BYTES], runtime.disk_capacity_sectors)
-            .map_err(|_| RequestError::Protocol)?;
+            .map_err(|_| RequestError::Unsupported)?;
     let entry_bytes = header
         .partition_entry_bytes()
         .map_err(|_| RequestError::Unsupported)?;
@@ -488,7 +504,10 @@ fn find_root_partition(runtime: &AhciRuntime) -> Result<nanami_gpt::Partition, R
             transfer_bytes,
         )
     };
-    nanami_gpt::find_nanami_root(header, data).map_err(|_| RequestError::Protocol)
+    nanami_gpt::find_nanami_root(header, data).map_err(|error| match error {
+        nanami_gpt::Error::Ambiguous => RequestError::Protocol,
+        _ => RequestError::Unsupported,
+    })
 }
 
 fn transfer(
@@ -666,16 +685,19 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
                 partition_start_sector: 0,
                 partition_sectors: 0,
             };
-            if configure_port(&runtime).is_err() {
-                continue;
-            }
-            runtime.disk_capacity_sectors = match identify(&runtime) {
-                Ok(sectors) => sectors,
-                Err(_) => continue,
-            };
-            let partition = match find_root_partition(&runtime) {
+            configure_port(&runtime)?;
+            let partition = (|| {
+                runtime.disk_capacity_sectors = identify(&runtime)?;
+                find_root_partition(&runtime)
+            })();
+            // The next port shares this command/FIS buffer. Stop both DMA
+            // engines even for a non-root disk before reusing it or yielding
+            // storage ownership to USB. A timeout must not return its pages.
+            stop_port(&runtime)?;
+            let partition = match partition {
                 Ok(partition) => partition,
-                Err(_) => continue,
+                Err(RequestError::Unsupported) => continue,
+                Err(error) => return Err(error),
             };
             runtime.partition_start_sector = partition.first_lba;
             runtime.partition_sectors = partition.sector_count;
@@ -688,7 +710,6 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
     }
 
     let (runtime, address) = selected.ok_or(RequestError::Unsupported)?;
-    configure_port(&runtime)?;
     libnanami::println!(
         "[ahci-server] root PCI {:02x}:{:02x}.{} abar={:#x} port={} LBA={} sectors={}",
         address.bus,
@@ -704,7 +725,34 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
 
 fn nanami_main() -> libnanami::NanamiResult {
     libnanami::ipc::init_ipc_tls()?;
-    let runtime = initialize()?;
+    if let Err(error) = serve() {
+        libnanami::println!(
+            "[ahci-server] stopped status={:#x}; DMA mappings retained",
+            error.0
+        );
+        retain_dma();
+    }
+    Ok(())
+}
+
+fn serve() -> libnanami::NanamiResult {
+    let runtime = match initialize() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            libnanami::println!("[ahci-server] root probe: {}", error);
+            let count = if matches!(error, RequestError::Unsupported) {
+                0
+            } else {
+                2
+            };
+            let _ = nanami_services::device::select_storage_root(count);
+            return Err(error.into());
+        }
+    };
+    if !nanami_services::device::select_storage_root(1)? {
+        return Err(RequestError::Unsupported.into());
+    }
+    configure_port(&runtime)?;
     nanami_services::registry::register_block_device()?;
     libnanami::print!("[ahci-server] service registered: block-device\n");
 

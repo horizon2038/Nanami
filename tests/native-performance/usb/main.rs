@@ -253,6 +253,36 @@ fn producer_requires_completion_before_reusing_dma() {
 }
 
 #[test]
+fn stopped_endpoint_ring_reset_clears_old_cycle_and_pending_state() {
+    let mut memory = page();
+    let mut producer = unsafe { Producer::new(0x10000, memory.0.as_mut_ptr() as usize) };
+    producer.submit(&[trb(123)]).unwrap();
+    // Models ownership after a successful Reset/Stop Endpoint command.
+    unsafe { producer.reset() };
+    assert!(memory.0.iter().all(|&entry| entry == Trb::default()));
+    assert_eq!(producer.submit(&[trb(456)]), Some(0x10000));
+    assert_eq!(memory.0[0].control & CYCLE, 1);
+    assert_eq!(memory.0[0].parameter, 456);
+}
+
+#[test]
+fn superspeed_psiv_is_separate_from_usb2_classes() {
+    let mut speeds = 0;
+    protocol::add_superspeed(&mut speeds, (5 << 16) | (3 << 4) | (1 << 8) | 4).unwrap();
+    // Asymmetric receive/transmit entries can share a PSIV.
+    for link in [2, 3] {
+        protocol::add_superspeed(
+            &mut speeds,
+            (10 << 16) | (3 << 4) | (1 << 8) | (link << 6) | 5,
+        )
+        .unwrap();
+    }
+    assert_eq!(speeds, (1 << 4) | (1 << 5));
+    assert!(protocol::add_superspeed(&mut speeds, (5 << 16) | (3 << 4) | 4).is_err());
+    assert!(protocol::add_superspeed(&mut speeds, (480 << 16) | (2 << 4) | (1 << 8) | 3).is_err());
+}
+
+#[test]
 fn producer_wraps_with_link_and_toggles_cycle() {
     let mut memory = page();
     let mut producer = unsafe { Producer::new(0x10000, memory.0.as_mut_ptr() as usize) };

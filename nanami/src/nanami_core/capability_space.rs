@@ -1,4 +1,5 @@
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
+use crate::nanami_core::memory::PHYSICAL_DIRECTORY_RADIX;
 use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use nun::{
     arch, AsCapabilityDescriptor, CapabilityDescriptor, CapabilityError, InitInfo, InitSlotOffset,
@@ -8,8 +9,6 @@ use nun::{
 const OLD_ROOT_RADIX: usize = 8;
 const NEW_ROOT_RADIX: usize = 12;
 const GENERIC_NODE_RADIX: usize = 7;
-const PHYSICAL_DIRECTORY_RADIX: usize = 10;
-const FRAME_POOL_DIRECTORY_RADIX: usize = 9;
 const KERNEL_OBJECT_POOL_RADIX: usize = 27;
 const FRAME_LEAF_POOL_RADIX: usize = 23;
 const NEW_ROOT_SLOT_CANDIDATES: [usize; 8] = [240, 241, 242, 243, 244, 245, 246, 247];
@@ -124,12 +123,7 @@ fn pick_kernel_backing_generic_index(
         .checked_add(1usize << FRAME_LEAF_POOL_RADIX)
         .and_then(|bytes| {
             bytes.checked_add(
-                2usize << kernel_object::node_memory_size_bits(PHYSICAL_DIRECTORY_RADIX),
-            )
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(
-                1usize << kernel_object::node_memory_size_bits(FRAME_POOL_DIRECTORY_RADIX),
+                1usize << kernel_object::node_memory_size_bits(PHYSICAL_DIRECTORY_RADIX),
             )
         })
         .ok_or(CapabilityError::InvalidArgument)?;

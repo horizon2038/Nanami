@@ -66,12 +66,21 @@ impl Controller {
         if status & 1 == 0 {
             return Ok(());
         }
-        if self.port_major[port as usize] != 2 {
-            // Initial class support is USB 1.x/2.0 boot HID on xHCI root ports.
-            return Err(RequestError::Unsupported);
+        match self.port_major[port as usize] {
+            2 => {
+                unsafe { write(self.op, offset, port_controls(status) | PORT_RESET) };
+                self.wait_register(offset, PORT_RESET, 0, 1000)?;
+            }
+            3 => {
+                // SuperSpeed performs link training automatically. Warm-reset
+                // only if the connected port has not reached Enabled/U0.
+                if status & 2 == 0 || status & (15 << 5) != 0 {
+                    unsafe { write(self.op, offset, port_controls(status) | (1 << 31)) };
+                    self.wait_register(offset, 1 << 31, 0, 1000)?;
+                }
+            }
+            _ => return Err(RequestError::Unsupported),
         }
-        unsafe { write(self.op, offset, port_controls(status) | PORT_RESET) };
-        self.wait_register(offset, PORT_RESET, 0, 1000)?;
         let status = unsafe { read(self.op, offset) };
         if status & 3 != 3 {
             return Err(RequestError::Transport);
@@ -85,10 +94,15 @@ impl Controller {
         };
         self.delay(10)?; // Reset recovery before the first control transaction.
         let speed = ((status >> 10) & 15) as u8;
-        let speed_class = protocol::classify(self.port_speeds[port as usize], speed);
+        let speed_class = if self.superspeeds[port as usize] & (1 << speed) != 0 {
+            4
+        } else {
+            protocol::classify(self.port_speeds[port as usize], speed)
+        };
         let packet = match speed_class {
             1 | 2 => 8,
             3 => 64,
+            4 => 512,
             _ => return Err(RequestError::Unsupported),
         };
         let event = self.command(
@@ -110,13 +124,19 @@ impl Controller {
             bytes: SLOT_BYTES,
         };
         dma.clear(); // Enable Slot/previous Disable Slot has returned ownership.
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(RequestError::Protocol)?;
         let mut device = Device {
+            generation: self.generation,
             port,
             speed,
             speed_class,
             dma,
             control: unsafe { Producer::new(dma.physical_at(0x2000), dma.virtual_at(0x2000)) },
             endpoints: Vec::new(),
+            storage: None,
             vendor: 0,
             product: 0,
         };
@@ -137,12 +157,13 @@ impl Controller {
             return Err(error);
         }
         libnanami::println!(
-            "[usb-server] device port={} slot={} vid={:04x} pid={:04x} boot-hid={}",
+            "[usb-server] device port={} slot={} vid={:04x} pid={:04x} boot-hid={} storage={}",
             port,
             slot,
             device.vendor,
             device.product,
-            device.endpoints.len()
+            device.endpoints.len(),
+            device.storage.is_some()
         );
         for endpoint in &mut device.endpoints {
             endpoint.pending = endpoint
@@ -222,6 +243,9 @@ impl Controller {
         if descriptor[0] != 18 || descriptor[1] != 1 || descriptor[4] == 9 {
             return Err(RequestError::Unsupported);
         }
+        if device.speed_class == 4 && descriptor[7] != 9 {
+            return Err(RequestError::Protocol);
+        }
         device.vendor = u16::from_le_bytes([descriptor[8], descriptor[9]]);
         device.product = u16::from_le_bytes([descriptor[10], descriptor[11]]);
         if self.control(slot, device, 0x80, 6, 0x200, 0, 9, input)? != 9 {
@@ -241,12 +265,14 @@ impl Controller {
         };
         let mut interfaces = Vec::new();
         let configuration_value = boot_interfaces(configuration, |interface| {
-            if interfaces.len() < MAX_INTERFACES {
+            if device.speed_class != 4 && interfaces.len() < MAX_INTERFACES {
                 interfaces.push(interface);
             }
         })
         .map_err(|_| RequestError::Protocol)?;
-        if interfaces.is_empty() {
+        let storage = crate::usb::mass_storage::interface(configuration, device.speed_class == 4)
+            .map_err(|_| RequestError::Protocol)?;
+        if interfaces.is_empty() && storage.is_none() {
             return Err(RequestError::Unsupported);
         }
         unsafe { core::ptr::write_bytes(device.dma.virtual_address as *mut u8, 0, 4096) };
@@ -301,6 +327,9 @@ impl Controller {
                 mouse: Mouse::new(),
                 failed: false,
             });
+        }
+        if let Some(interface) = storage {
+            self.configure_storage(device, interface, &mut flags, &mut highest)?;
         }
         self.set_context32(device, 0, 1, flags);
         self.set_context32(

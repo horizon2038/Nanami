@@ -172,18 +172,18 @@ fn missing_storage_times_out_after_actual_delays() {
             calls.sleeps,
             calls.elapsed_ms
         ),
-        (65, 1, 64, 6400)
+        (601, 1, 600, 60000)
     );
 }
 
 #[test]
 fn storage_is_checked_after_the_last_delay() {
     let (result, calls) = run(Fake {
-        block_after: 64,
+        block_after: 600,
         ..Fake::default()
     });
     assert_eq!(result, Ok(SLOT_BLOCK_DEVICE));
-    assert_eq!(calls.sleeps, 64);
+    assert_eq!(calls.sleeps, 600);
 }
 
 #[test]

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 libnanami = { path = "../../sdk/rust/libnanami" }
 nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-gpt = { path = "../../libs/gpt" }
 
 [profile.dev]
 panic = "abort"

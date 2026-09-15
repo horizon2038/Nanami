@@ -125,13 +125,18 @@ fn bar_probe_restores_address_and_disables_message_interrupts() {
 }
 
 #[test]
-fn high_mmio_is_declined_without_touching_pci_or_alpha() {
+fn high_mmio_preserves_the_firmware_assigned_64_bit_bar() {
     PCI.with(|pci| {
         *pci.borrow_mut() = FakePci::default();
         pci.borrow_mut().config[5] = 8;
     });
-    assert_eq!(usb::prepare(0x600).unwrap_err(), RequestError::Unsupported);
-    PCI.with(|pci| assert!(pci.borrow().writes.is_empty()));
+    let resource = usb::prepare(0x600).unwrap();
+    assert_eq!((resource.physical, resource.bytes), (0x8c1000000, 0x4000));
+    PCI.with(|pci| {
+        let pci = pci.borrow();
+        assert_eq!(pci.config[4], 0xc1000004);
+        assert_eq!(pci.config[5], 8);
+    });
 }
 
 #[test]

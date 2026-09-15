@@ -1,4 +1,12 @@
-use alloc::vec::Vec;
+use alloc::{collections::BTreeMap, vec::Vec};
+
+mod directory;
+mod frames;
+mod sources;
+
+use directory::{CapabilityDirectory, NodePool};
+use frames::FrameRange;
+use sources::PhysicalSource;
 
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
 use crate::nanami_core::physical_allocator::{
@@ -14,21 +22,17 @@ use nun::{
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 
-const PHYSICAL_DIRECTORY_RADIX: usize = 10;
-const PHYSICAL_DIRECTORY_SLOTS: usize = 1 << PHYSICAL_DIRECTORY_RADIX;
+// A materialized range contains at most 8 MiB. Neither the range index nor
+// its capability directory has a fixed entry count tied to installed RAM.
 const PHYSICAL_LEAF_RADIX: usize = 11;
-const PHYSICAL_LEAF_PAGES: usize = 1 << PHYSICAL_LEAF_RADIX;
 const PHYSICAL_CHUNK_RADIX: usize = PAGE_BITS + PHYSICAL_LEAF_RADIX;
 const PHYSICAL_CHUNK_SIZE: usize = 1 << PHYSICAL_CHUNK_RADIX;
-const FRAME_LEAF_POOL_RADIX: usize = PHYSICAL_CHUNK_RADIX;
-const FRAME_LEAF_NODE_MEMORY_RADIX: usize =
-    kernel_object::node_memory_size_bits(PHYSICAL_LEAF_RADIX);
-const FRAME_LEAVES_PER_POOL: usize = 1 << (FRAME_LEAF_POOL_RADIX - FRAME_LEAF_NODE_MEMORY_RADIX);
+pub(super) const FRAME_LEAF_POOL_RADIX: usize = PHYSICAL_CHUNK_RADIX;
+pub(super) const PHYSICAL_DIRECTORY_RADIX: usize = directory::DIRECTORY_RADIX;
 const GENERIC_NODE_RADIX: usize = 7;
 const PAGE_TABLE_POOL_RADIX: usize = 10;
 const PAGE_TABLE_POOL_SLOTS: usize = 1 << PAGE_TABLE_POOL_RADIX;
 const KERNEL_OBJECT_POOL_RADIX: usize = 27;
-const FRAME_POOL_DIRECTORY_RADIX: usize = 9;
 const PROCESS_ARENA_DIRECTORY_RADIX: usize = 12;
 const PROCESS_ARENA_DIRECTORY_SLOTS: usize = 1 << PROCESS_ARENA_DIRECTORY_RADIX;
 const PROCESS_ARENA_RADIX: usize = 21;
@@ -37,7 +41,6 @@ const PHYSICAL_GENERIC_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1024, 1025, 1026
 const KERNEL_OBJECT_POOL_SLOT_CANDIDATES: [usize; 4] = [1028, 1029, 1030, 1031];
 const INITIAL_FRAME_LEAF_POOL_SLOT_CANDIDATES: [usize; 4] = [1040, 1041, 1042, 1043];
 const PHYSICAL_FRAME_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1100, 1101, 1102, 1103];
-const FRAME_POOL_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1120, 1121, 1122, 1123];
 const PAGE_TABLE_POOL_SLOT_CANDIDATES: [usize; 4] = [1200, 1201, 1202, 1203];
 const PROCESS_ARENA_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1210, 1211, 1212, 1213];
 const INITIAL_GENERIC_CAPACITY: usize = 128;
@@ -46,12 +49,11 @@ pub struct MemoryManager {
     pub root_descriptor: CapabilityDescriptor,
     pub root_radix: usize,
     kernel_object_generic: CapabilityDescriptor,
-    physical_generic_directory: CapabilityDescriptor,
-    physical_frame_directory: CapabilityDescriptor,
-    initial_frame_leaf_pool: CapabilityDescriptor,
-    frame_pool_directory: CapabilityDescriptor,
-    frame_leaf_pool_count: usize,
-    next_frame_leaf_slot: usize,
+    capability_directory: CapabilityDirectory,
+    node_pool: NodePool,
+    bootstrap_frames: Option<FrameRange>,
+    physical_frames: BTreeMap<usize, FrameRange>,
+    physical_sources: BTreeMap<(usize, usize), PhysicalSource>,
     page_table_pool_node: CapabilityDescriptor,
     next_page_table_slot: usize,
     process_arena_directory: CapabilityDescriptor,
@@ -60,43 +62,10 @@ pub struct MemoryManager {
     initial_generics: [nun::GenericDescriptor; INITIAL_GENERIC_CAPACITY],
     initial_generic_count: usize,
     initial_generic_consumed_bytes: [usize; INITIAL_GENERIC_CAPACITY],
-    physical_chunks: [PhysicalChunk; PHYSICAL_DIRECTORY_SLOTS],
-    physical_chunk_count: usize,
-    physical_chunk_map: [PhysicalChunkMap; PHYSICAL_DIRECTORY_SLOTS],
-    physical_chunk_map_count: usize,
+    // Delegating a generic does not allocate its RAM. Keep the capability
+    // watermark separate from the boot reservations used by the buddy allocator.
+    initial_generic_delegated_bytes: [usize; INITIAL_GENERIC_CAPACITY],
 }
-
-#[derive(Clone, Copy)]
-struct PhysicalChunk {
-    physical_base_page: usize,
-    page_count: usize,
-    is_device: bool,
-    source_is_page_node: bool,
-    frame_leaf_ready: bool,
-    used_as_frame_pool: bool,
-}
-
-#[derive(Clone, Copy)]
-struct PhysicalChunkMap {
-    physical_base_page: usize,
-    page_count: usize,
-    chunk_index: usize,
-}
-
-const EMPTY_PHYSICAL_CHUNK: PhysicalChunk = PhysicalChunk {
-    physical_base_page: 0,
-    page_count: 0,
-    is_device: false,
-    source_is_page_node: false,
-    frame_leaf_ready: false,
-    used_as_frame_pool: false,
-};
-
-const EMPTY_PHYSICAL_CHUNK_MAP: PhysicalChunkMap = PhysicalChunkMap {
-    physical_base_page: 0,
-    page_count: 0,
-    chunk_index: 0,
-};
 
 impl MemoryManager {
     pub fn bootstrap(
@@ -108,7 +77,8 @@ impl MemoryManager {
         root_generic_consumed_bytes: usize,
     ) -> Result<Self, CapabilityError> {
         let mut initial_generic_consumed_bytes = [0usize; INITIAL_GENERIC_CAPACITY];
-        if root_generic_index >= init_info.generic_list_count as usize
+        if init_info.generic_list_count as usize > INITIAL_GENERIC_CAPACITY
+            || root_generic_index >= init_info.generic_list_count as usize
             || root_generic_index >= INITIAL_GENERIC_CAPACITY
         {
             return Err(CapabilityError::InvalidArgument);
@@ -151,34 +121,6 @@ impl MemoryManager {
             "physical generic directory={:#018x}",
             physical_generic_directory.descriptor
         );
-        crate::info!("memory: create physical frame directory");
-        let physical_frame_directory = create_root_node_from_initial_generic(
-            init_info,
-            root_descriptor,
-            root_radix,
-            bootstrap_generic_index,
-            PHYSICAL_DIRECTORY_RADIX,
-            &PHYSICAL_FRAME_DIRECTORY_SLOT_CANDIDATES,
-            &mut initial_generic_consumed_bytes,
-        )?;
-        crate::info!(
-            "physical frame directory={:#018x}",
-            physical_frame_directory.descriptor
-        );
-        crate::info!("memory: create frame pool directory");
-        let frame_pool_directory = create_root_node_from_initial_generic(
-            init_info,
-            root_descriptor,
-            root_radix,
-            bootstrap_generic_index,
-            FRAME_POOL_DIRECTORY_RADIX,
-            &FRAME_POOL_DIRECTORY_SLOT_CANDIDATES,
-            &mut initial_generic_consumed_bytes,
-        )?;
-        crate::info!(
-            "frame pool directory={:#018x}",
-            frame_pool_directory.descriptor
-        );
         crate::info!("memory: create page-table pool node");
         let page_table_pool_node = create_root_node(
             root_descriptor,
@@ -198,16 +140,15 @@ impl MemoryManager {
         )?;
         crate::info!("process arena directory={:#018x}", process_arena_directory);
 
-        let mut manager = Self {
+        Ok(Self {
             root_descriptor,
             root_radix,
             kernel_object_generic,
-            physical_generic_directory: physical_generic_directory.descriptor,
-            physical_frame_directory: physical_frame_directory.descriptor,
-            initial_frame_leaf_pool,
-            frame_pool_directory: frame_pool_directory.descriptor,
-            frame_leaf_pool_count: 1,
-            next_frame_leaf_slot: 0,
+            capability_directory: CapabilityDirectory::new(physical_generic_directory.descriptor),
+            node_pool: NodePool::new(initial_frame_leaf_pool),
+            bootstrap_frames: None,
+            physical_frames: BTreeMap::new(),
+            physical_sources: BTreeMap::new(),
             page_table_pool_node,
             next_page_table_slot: 0,
             process_arena_directory,
@@ -216,17 +157,8 @@ impl MemoryManager {
             initial_generics: init_info.generic_list,
             initial_generic_count: init_info.generic_list_count as usize,
             initial_generic_consumed_bytes,
-            physical_chunks: [EMPTY_PHYSICAL_CHUNK; PHYSICAL_DIRECTORY_SLOTS],
-            physical_chunk_count: 0,
-            physical_chunk_map: [EMPTY_PHYSICAL_CHUNK_MAP; PHYSICAL_DIRECTORY_SLOTS],
-            physical_chunk_map_count: 0,
-        };
-
-        crate::info!("memory: build hierarchical physical capability sources");
-        manager.split_all_initial_generics(init_info)?;
-        crate::info!("memory: split complete");
-
-        Ok(manager)
+            initial_generic_delegated_bytes: initial_generic_consumed_bytes,
+        })
     }
 
     pub fn physical_page_index_from_address(&self, physical_address: usize) -> Option<usize> {
@@ -237,16 +169,7 @@ impl MemoryManager {
         &self,
         frame_index: usize,
     ) -> Option<CapabilityDescriptor> {
-        let (chunk_index, page_offset) = self.physical_location(frame_index)?;
-        let chunk = self.physical_chunks.get(chunk_index)?;
-        if chunk.used_as_frame_pool {
-            return None;
-        }
-        Some(make_child_slot_descriptor(
-            self.physical_frame_leaf_descriptor(chunk_index),
-            PHYSICAL_LEAF_RADIX,
-            page_offset,
-        ))
+        self.frame_range(frame_index)?.descriptor(frame_index)
     }
 
     pub fn frame_descriptor_from_physical(
@@ -308,14 +231,6 @@ impl MemoryManager {
             }
             Err(e) => Err(e),
         }
-    }
-
-    pub fn frame_node_descriptor(&self) -> CapabilityDescriptor {
-        self.physical_frame_directory
-    }
-
-    pub fn frame_node_radix(&self) -> usize {
-        PHYSICAL_DIRECTORY_RADIX
     }
 
     pub fn root_radix(&self) -> usize {
@@ -431,6 +346,7 @@ impl MemoryManager {
             }
         }
 
+        self.initialize_physical_sources()?;
         self.physical_allocator = Some(allocator);
         Ok(())
     }
@@ -559,27 +475,6 @@ impl MemoryManager {
         ))
     }
 
-    pub fn ensure_alpha_frame_at_physical_index(
-        &mut self,
-        frame_index: usize,
-    ) -> Result<(), CapabilityError> {
-        let (chunk_index, _) = self
-            .physical_location(frame_index)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let chunk = self
-            .physical_chunks
-            .get(chunk_index)
-            .copied()
-            .ok_or(CapabilityError::InvalidArgument)?;
-        if chunk.used_as_frame_pool {
-            return Err(CapabilityError::InvalidArgument);
-        }
-        if chunk.frame_leaf_ready {
-            return Ok(());
-        }
-        self.materialize_physical_frame_leaf(chunk_index)
-    }
-
     pub fn ensure_alpha_frames_for_range_from_initial_generic(
         &mut self,
         physical_address: usize,
@@ -592,8 +487,16 @@ impl MemoryManager {
 
         let page_base = physical_address & !(PAGE_SIZE - 1);
         let offset = physical_address - page_base;
-        let total_span = offset + size_bytes;
-        let page_count = (total_span + PAGE_SIZE - 1) / PAGE_SIZE;
+        let total_span = offset
+            .checked_add(size_bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let page_count = total_span
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(CapabilityError::InvalidArgument)?
+            / PAGE_SIZE;
+        let requested_end = page_base
+            .checked_add(page_count * PAGE_SIZE)
+            .ok_or(CapabilityError::InvalidArgument)?;
 
         let mut selected: Option<(usize, usize)> = None;
         for pass_device_only in [prefer_device, false] {
@@ -607,7 +510,6 @@ impl MemoryManager {
                 let start = g.address as usize;
                 let size = 1usize << g.size_radix;
                 let end = start.saturating_add(size);
-                let requested_end = physical_address.saturating_add(size_bytes);
                 if physical_address >= start && requested_end <= end {
                     match selected {
                         None => selected = Some((i, size)),
@@ -623,182 +525,17 @@ impl MemoryManager {
         }
 
         let (generic_idx, _) = selected.ok_or(CapabilityError::InvalidArgument)?;
-        let g = self.initial_generics[generic_idx];
-        let generic_start = g.address as usize;
-        let generic_end = generic_start
-            .checked_add(1usize << g.size_radix)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let requested_end = page_base
-            .checked_add(page_count * PAGE_SIZE)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let consumed = self.initial_generic_consumed_bytes_for_index(generic_idx);
-        let conversion_start = checked_align_up(
-            generic_start
-                .checked_add(consumed)
-                .ok_or(CapabilityError::InvalidArgument)?,
-            PAGE_SIZE,
-        )
-        .ok_or(CapabilityError::InvalidArgument)?;
-
-        if requested_end > conversion_start {
-            let conversion_end = checked_align_up(requested_end, PHYSICAL_CHUNK_SIZE)
-                .unwrap_or(requested_end)
-                .min(generic_end);
-            self.install_physical_source_range(generic_idx, conversion_start, conversion_end)?;
-            self.initial_generic_consumed_bytes[generic_idx] = conversion_end - generic_start;
-        }
-
         let requested_base_page = page_base >> PAGE_BITS;
         for offset in 0..page_count {
+            if self.frame_range(requested_base_page + offset).is_none() {
+                self.materialize_frame_range(
+                    generic_idx,
+                    (requested_base_page + offset) << PAGE_BITS,
+                )?;
+            }
             self.ensure_alpha_frame_at_physical_index(requested_base_page + offset)?;
         }
         Ok((requested_base_page, 0, page_count))
-    }
-
-    fn split_all_initial_generics(&mut self, init_info: &InitInfo) -> Result<(), CapabilityError> {
-        let count = init_info.generic_list_count as usize;
-        crate::info!("generic_list_count={:>3}", count);
-
-        for i in 0..count {
-            let g = init_info.generic_list[i];
-            crate::info!(
-                "idx={:>3} addr={:#018x} size_radix={:>2} is_device={}",
-                i,
-                g.address as usize,
-                g.size_radix,
-                g.is_device
-            );
-
-            if g.is_device {
-                crate::info!("memory: idx={:>3} reason=device-generic", i);
-                continue;
-            }
-
-            if g.size_radix < PAGE_BITS as u8 {
-                crate::info!("memory: idx={:>3} reason=size<4KiB", i);
-                continue;
-            }
-
-            let start = g.address as usize;
-            let Some(size_bytes) = checked_pow2(g.size_radix as usize) else {
-                crate::info!("memory: idx={:>3} reason=size-overflow", i);
-                continue;
-            };
-            let Some(end) = start.checked_add(size_bytes) else {
-                crate::info!("memory: idx={:>3} reason=end-overflow", i);
-                continue;
-            };
-            let consumed_bytes = self
-                .initial_generic_consumed_bytes_for_index(i)
-                .min(size_bytes);
-            let raw_split_start = start.saturating_add(consumed_bytes);
-            let Some(split_start) = checked_align_up(raw_split_start, PAGE_SIZE) else {
-                crate::info!("memory: idx={:>3} reason=split-start-overflow", i);
-                continue;
-            };
-            if split_start >= end {
-                crate::info!(
-                    "memory: idx={:>3} reason=fully-consumed consumed_pages={:>6}",
-                    i,
-                    consumed_bytes >> PAGE_BITS
-                );
-                continue;
-            }
-            if consumed_bytes != 0 {
-                crate::info!(
-                    "memory: idx={:>3} split remainder consumed_pages={:>6}",
-                    i,
-                    consumed_bytes >> PAGE_BITS
-                );
-            }
-
-            self.install_physical_source_range(i, split_start, end)?;
-        }
-
-        crate::info!(
-            "memory: physical chunks={} capacity={} chunk_bytes={:#x}",
-            self.physical_chunk_count,
-            PHYSICAL_DIRECTORY_SLOTS,
-            PHYSICAL_CHUNK_SIZE
-        );
-
-        Ok(())
-    }
-
-    fn install_physical_source_range(
-        &mut self,
-        generic_index: usize,
-        start: usize,
-        end: usize,
-    ) -> Result<(), CapabilityError> {
-        if start >= end || start & (PAGE_SIZE - 1) != 0 || end & (PAGE_SIZE - 1) != 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let source_generic = self.generic_descriptor_from_index(generic_index);
-        let mut cursor = start;
-        while cursor < end {
-            if self.physical_chunk_count >= PHYSICAL_DIRECTORY_SLOTS {
-                return Err(CapabilityError::InvalidArgument);
-            }
-            let chunk_index = self.physical_chunk_count;
-            let remaining = end - cursor;
-            let full_chunk =
-                cursor & (PHYSICAL_CHUNK_SIZE - 1) == 0 && remaining >= PHYSICAL_CHUNK_SIZE;
-            let chunk_bytes = if full_chunk {
-                PHYSICAL_CHUNK_SIZE
-            } else {
-                let until_boundary = PHYSICAL_CHUNK_SIZE - (cursor & (PHYSICAL_CHUNK_SIZE - 1));
-                remaining.min(until_boundary)
-            };
-            let page_count = chunk_bytes >> PAGE_BITS;
-
-            if full_chunk {
-                arch::generic::convert(
-                    source_generic,
-                    CapabilityType::Generic,
-                    PHYSICAL_CHUNK_RADIX as Word,
-                    1,
-                    self.physical_generic_directory,
-                    chunk_index as Word,
-                )?;
-            } else {
-                arch::generic::convert(
-                    self.kernel_object_generic,
-                    CapabilityType::Node,
-                    PHYSICAL_LEAF_RADIX as Word,
-                    1,
-                    self.physical_generic_directory,
-                    chunk_index as Word,
-                )?;
-                let source_page_node = self.physical_source_descriptor(chunk_index);
-                arch::generic::convert(
-                    source_generic,
-                    CapabilityType::Generic,
-                    PAGE_BITS as Word,
-                    page_count as Word,
-                    source_page_node,
-                    0,
-                )?;
-            }
-
-            self.physical_chunks[chunk_index] = PhysicalChunk {
-                physical_base_page: cursor >> PAGE_BITS,
-                page_count,
-                is_device: self.initial_generics[generic_index].is_device,
-                source_is_page_node: !full_chunk,
-                frame_leaf_ready: false,
-                used_as_frame_pool: false,
-            };
-            self.physical_chunk_count += 1;
-            self.insert_physical_chunk_map(PhysicalChunkMap {
-                physical_base_page: cursor >> PAGE_BITS,
-                page_count,
-                chunk_index,
-            });
-            cursor += chunk_bytes;
-        }
-        Ok(())
     }
 
     fn ensure_page_tables(
@@ -1012,186 +749,6 @@ impl MemoryManager {
             .get(index)
             .copied()
             .unwrap_or(0)
-    }
-
-    fn physical_source_descriptor(&self, chunk_index: usize) -> CapabilityDescriptor {
-        make_child_slot_descriptor(
-            self.physical_generic_directory,
-            PHYSICAL_DIRECTORY_RADIX,
-            chunk_index,
-        )
-    }
-
-    fn physical_frame_leaf_descriptor(&self, chunk_index: usize) -> CapabilityDescriptor {
-        make_child_slot_descriptor(
-            self.physical_frame_directory,
-            PHYSICAL_DIRECTORY_RADIX,
-            chunk_index,
-        )
-    }
-
-    fn frame_leaf_pool_descriptor(&self, pool_index: usize) -> Option<CapabilityDescriptor> {
-        if pool_index == 0 {
-            return Some(self.initial_frame_leaf_pool);
-        }
-        let slot = pool_index - 1;
-        if slot >= (1 << FRAME_POOL_DIRECTORY_RADIX) {
-            return None;
-        }
-        Some(make_child_slot_descriptor(
-            self.frame_pool_directory,
-            FRAME_POOL_DIRECTORY_RADIX,
-            slot,
-        ))
-    }
-
-    fn insert_physical_chunk_map(&mut self, mapping: PhysicalChunkMap) {
-        let index = self.physical_chunk_map[..self.physical_chunk_map_count]
-            .partition_point(|entry| entry.physical_base_page < mapping.physical_base_page);
-        self.physical_chunk_map
-            .copy_within(index..self.physical_chunk_map_count, index + 1);
-        self.physical_chunk_map[index] = mapping;
-        self.physical_chunk_map_count += 1;
-    }
-
-    fn physical_location(&self, physical_page: usize) -> Option<(usize, usize)> {
-        let end = self.physical_chunk_map[..self.physical_chunk_map_count]
-            .partition_point(|entry| entry.physical_base_page <= physical_page);
-        if end == 0 {
-            return None;
-        }
-        let mapping = self.physical_chunk_map[end - 1];
-        let offset = physical_page.checked_sub(mapping.physical_base_page)?;
-        (offset < mapping.page_count).then_some((mapping.chunk_index, offset))
-    }
-
-    fn materialize_physical_frame_leaf(
-        &mut self,
-        chunk_index: usize,
-    ) -> Result<(), CapabilityError> {
-        let chunk = self
-            .physical_chunks
-            .get(chunk_index)
-            .copied()
-            .ok_or(CapabilityError::InvalidArgument)?;
-        if chunk.frame_leaf_ready {
-            return Ok(());
-        }
-        if chunk.used_as_frame_pool {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        self.ensure_frame_leaf_pool_capacity()?;
-        let pool_index = self.next_frame_leaf_slot / FRAME_LEAVES_PER_POOL;
-        let pool_slot = self.next_frame_leaf_slot % FRAME_LEAVES_PER_POOL;
-        let pool = self
-            .frame_leaf_pool_descriptor(pool_index)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        arch::generic::convert(
-            pool,
-            CapabilityType::Node,
-            PHYSICAL_LEAF_RADIX as Word,
-            1,
-            self.physical_frame_directory,
-            chunk_index as Word,
-        )?;
-        self.next_frame_leaf_slot += 1;
-
-        let frame_leaf = self.physical_frame_leaf_descriptor(chunk_index);
-        let source = self.physical_source_descriptor(chunk_index);
-        if chunk.source_is_page_node {
-            for page in 0..chunk.page_count {
-                let source_page = make_child_slot_descriptor(source, PHYSICAL_LEAF_RADIX, page);
-                arch::generic::convert(
-                    source_page,
-                    CapabilityType::Frame,
-                    PAGE_BITS as Word,
-                    1,
-                    frame_leaf,
-                    page as Word,
-                )?;
-            }
-        } else {
-            arch::generic::convert(
-                source,
-                CapabilityType::Frame,
-                PAGE_BITS as Word,
-                chunk.page_count as Word,
-                frame_leaf,
-                0,
-            )?;
-        }
-
-        self.physical_chunks[chunk_index].frame_leaf_ready = true;
-        crate::info!(
-            "memory: frame leaf ready chunk={} paddr={:#x} pages={} pool={} slot={}",
-            chunk_index,
-            chunk.physical_base_page << PAGE_BITS,
-            chunk.page_count,
-            pool_index,
-            pool_slot
-        );
-        Ok(())
-    }
-
-    fn ensure_frame_leaf_pool_capacity(&mut self) -> Result<(), CapabilityError> {
-        if self.next_frame_leaf_slot < self.frame_leaf_pool_count * FRAME_LEAVES_PER_POOL {
-            return Ok(());
-        }
-        self.allocate_frame_leaf_pool()
-    }
-
-    fn allocate_frame_leaf_pool(&mut self) -> Result<(), CapabilityError> {
-        if self.frame_leaf_pool_count - 1 >= (1 << FRAME_POOL_DIRECTORY_RADIX) {
-            return Err(CapabilityError::InvalidArgument);
-        }
-        let mut selected = None;
-        for (index, chunk) in self.physical_chunks[..self.physical_chunk_count]
-            .iter()
-            .enumerate()
-            .rev()
-        {
-            if chunk.is_device
-                || chunk.source_is_page_node
-                || chunk.frame_leaf_ready
-                || chunk.used_as_frame_pool
-                || chunk.page_count != PHYSICAL_LEAF_PAGES
-            {
-                continue;
-            }
-            let result = self
-                .physical_allocator
-                .as_mut()
-                .ok_or(CapabilityError::InvalidArgument)?
-                .allocate_at(
-                    chunk.physical_base_page << PAGE_BITS,
-                    PHYSICAL_CHUNK_SIZE,
-                    false,
-                );
-            if result.is_ok() {
-                selected = Some(index);
-                break;
-            }
-        }
-        let chunk_index = selected.ok_or(CapabilityError::InvalidArgument)?;
-        let pool_slot = self.frame_leaf_pool_count - 1;
-        arch::generic::convert(
-            self.physical_source_descriptor(chunk_index),
-            CapabilityType::Generic,
-            FRAME_LEAF_POOL_RADIX as Word,
-            1,
-            self.frame_pool_directory,
-            pool_slot as Word,
-        )?;
-        self.physical_chunks[chunk_index].used_as_frame_pool = true;
-        self.frame_leaf_pool_count += 1;
-        crate::info!(
-            "memory: frame leaf pool expanded pool={} chunk={} paddr={:#x}",
-            self.frame_leaf_pool_count - 1,
-            chunk_index,
-            self.physical_chunks[chunk_index].physical_base_page << PAGE_BITS
-        );
-        Ok(())
     }
 
     pub fn initial_generic_consumed_bytes_for_public(&self, index: usize) -> usize {

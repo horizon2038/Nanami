@@ -47,6 +47,14 @@ path = "usb/main.rs"
 name = "usb-pci"
 path = "usb/pci.rs"
 
+[[test]]
+name = "usb-storage"
+path = "usb/storage.rs"
+
+[[test]]
+name = "physical-memory"
+path = "physical-memory-tests.rs"
+
 [dependencies]
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 

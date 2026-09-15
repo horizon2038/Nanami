@@ -60,7 +60,7 @@ Drivers and subsystem servers are not linked into Alpha or the microkernel.
 
 - Capability-based process, memory, device, and service management
 - A user-space Device Driver Manager that selects platform drivers at boot
-- User-space drivers for AHCI, virtio block/network, HPET, PIT, PS/2, USB xHCI HID, RTC, and
+- User-space drivers for AHCI, virtio block/network, HPET, PIT, PS/2, USB xHCI HID/BOT, RTC, and
   the boot framebuffer
 - ext2 root filesystem with application and service manifests
 - IPv4 networking with DHCP, ARP, ICMP, UDP, DNS, and TCP support
@@ -214,7 +214,7 @@ Useful run-time options include:
 | `QEMU_ACCEL` | `auto` | QEMU accelerator, or `none` |
 | `QEMU_HPET` | `on` | x86_64 HPET exposure; use `off` to test the PIT fallback |
 | `USB_INPUT` | `off` | x86_64: `on` adds xHCI with a USB boot keyboard/mouse; PS/2 remains available |
-| `STORAGE_DEVICE` | `ahci` | x86_64 root disk controller: `ahci` or `virtio` |
+| `STORAGE_DEVICE` | `ahci` | x86_64 root disk controller: `ahci`, `virtio`, or `usb` (xHCI/BOT) |
 | `BLOCK_IMAGE` | `out/ext2.img` or `out/ext2-aarch64.img` | ext2 staging image; on x86_64 it is embedded in `spencer.img` |
 | `SIZE_MB` | `64` | Default root filesystem size |
 | `PCAP` | `out/net0.pcap` | Bridged network capture, or `none` |
@@ -233,32 +233,46 @@ USB_INPUT=on QEMU_HPET=on STORAGE_DEVICE=ahci make run
 Driver Manager discovers/configures PCI xHCI before starting hardware drivers;
 `usb-server` enumerates USB 1.x/2.0 HID Boot Protocol devices on root ports and
 forwards events to `input-server`. Multiple USB devices and PS/2 can coexist.
-The initial implementation excludes external hubs, EHCI/OHCI/UHCI, report-only
-HID/NKRO, wheel reports, keyboard LEDs, USB storage and AArch64 USB.
-USB support does not enable booting the root filesystem from a USB drive.
+USB 2.0/3.x SCSI Bulk-Only Transport storage is also supported. Enumeration and
+root discovery run before input-service, so the rootfs can live on the USB boot
+medium itself. To exercise that path in QEMU:
 
-The current USB profile requires a firmware-assigned controller BAR below
-4 GiB. `USB_INPUT=on` sets OVMF's `opt/ovmf/X-PciMmio64Mb=0` to avoid Alpha's
-existing sparse high-MMIO limitation. The driver refuses higher BARs without
-relocating them. Physical hardware is not yet validated; connect compatible
+```bash
+STORAGE_DEVICE=usb USB_INPUT=on QEMU_HPET=on make run
+```
+
+The implementation excludes external hubs, EHCI/OHCI/UHCI, report-only
+HID/NKRO, wheel reports, keyboard LEDs, UAS and AArch64 USB. Storage requires
+512-byte logical sectors and a valid Nanami GPT root partition.
+
+Nanami lazily creates physical frame ranges for both RAM and MMIO. It retains
+unused prefixes as large generics instead of materializing
+every intervening frame-capability chunk. Firmware-assigned 64-bit controller
+BARs are supported without relocation. The QEMU launcher retains its low-BAR
+firmware profile; the USB tests also cover default high BARs.
+Physical hardware is not yet validated; connect compatible
 devices directly to xHCI-controlled ports. See [USB validation and limits](tests/usb/README.md).
 
 ## Boot on x86_64 hardware
 
 `make image` produces the complete disk image at
 `spencer/out/x86_64-pc99-release/spencer.img`. Write that one image to a whole,
-dedicated SATA/AHCI disk, then select its UEFI boot entry. USB mass storage and
-NVMe are not storage backends yet: firmware may load the EFI partition from
-them, but Nanami cannot mount the root partition after handoff. The write
+dedicated SATA/AHCI disk or compatible USB memory connected directly to xHCI,
+then select its UEFI boot entry. Both the EFI partition and initial rootfs are
+in this image; no second disk is needed. NVMe and UAS are not storage backends
+yet. The write
 replaces the target disk's partition table and all existing contents, so
 identify the device by model and capacity and unmount its volumes before
 writing; do not use a system disk or a partition path. The firmware must support
 x86_64 UEFI, and Secure Boot must be disabled unless the EFI loader is signed.
 
-At runtime, the driver scans AHCI controllers and ports and accepts only a disk
-containing exactly one Nanami root partition. It exposes partition-relative I/O
-to ext2-server and refuses ambiguous multi-disk configurations instead of
-choosing an arbitrary writable disk.
+At runtime, the boot-selected PCI and USB storage drivers probe their supported
+disks read-only. Driver Manager permits block-device publication only after
+all probes finish and exactly one Nanami root is found across them. The service
+exposes only partition-relative I/O to ext2-server. This selects by the unique
+Nanami GPT partition type, not by a firmware boot-device identifier. Multiple
+Nanami roots are rejected; reconnecting USB storage does not retarget an
+already-mounted rootfs to the replacement device.
 
 Nanami reads the architecture name, platform name, and available core count
 from A9N v0.3.0's `init_info`; it does not probe PCB affinities to discover cores.

@@ -6,6 +6,7 @@ use libnanami::{RequestError, Word};
 
 #[path = "arch.rs"]
 mod arch;
+mod storage;
 
 const SERVICE_PORT_SLOT: Word = 20;
 
@@ -15,6 +16,7 @@ pub struct TimerSelection {
 }
 
 struct DriverState {
+    storage: storage::Selection,
     hpet_pid: Word,
     hpet_mmio_base: Word,
     usb_pid: Word,
@@ -35,8 +37,14 @@ fn spawn(image: &str) -> Result<Word, RequestError> {
     Ok(pid)
 }
 
-fn handle_request(request: ServiceRequest, state: &DriverState) -> (Word, Word, Word) {
+fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE => {
+            match state.storage.report(request.identifier, request.arg0) {
+                Ok(decision) => (libnanami::OS_RESPONSE_OK, decision, 0),
+                Err(()) => (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0),
+            }
+        }
         nanami_services::device::DEVICE_MANAGER_REQUEST_USB_CONTROLLER => {
             if state.usb_pid == 0 || request.identifier != state.usb_pid {
                 (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
@@ -89,6 +97,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     let storage_image = arch::select_storage_driver()?;
     let selected_timer = arch::select_timer_driver()?;
     let mut state = DriverState {
+        storage: storage::Selection::new(),
         hpet_pid: 0,
         hpet_mmio_base: selected_timer.hpet_mmio_base,
         usb_pid: 0,
@@ -112,7 +121,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
     if let Some(image) = storage_image {
-        let _ = spawn(image)?;
+        state.storage.pids[0] = spawn(image)?;
     }
 
     if let Some(image) = selected_timer.image {
@@ -124,7 +133,10 @@ fn nanami_main() -> libnanami::NanamiResult {
 
     if state.usb_count != 0 {
         match spawn("./bin/usb-server") {
-            Ok(pid) => state.usb_pid = pid,
+            Ok(pid) => {
+                state.usb_pid = pid;
+                state.storage.pids[1] = pid;
+            }
             Err(error) => libnanami::println!("[driver-manager] USB spawn failed: {}", error),
         }
     }
@@ -141,7 +153,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         };
         match event {
             ServiceEvent::Request(request) => {
-                reply = handle_request(request, &state);
+                reply = handle_request(request, &mut state);
                 has_reply = true;
             }
             ServiceEvent::Notification { .. } | ServiceEvent::Fault { .. } => {}

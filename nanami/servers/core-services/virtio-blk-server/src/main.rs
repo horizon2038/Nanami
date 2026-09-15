@@ -754,10 +754,7 @@ fn prepare_transport() -> Result<PreparedTransport, libnanami::NanamiError> {
     Err(libnanami::NanamiError::UNKNOWN)
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[virtio-blk] bootstrap start\n");
-
-    let service_port_desc = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+fn initialize_root() -> Result<(Word, BlockRuntime), libnanami::NanamiError> {
     let transport = prepare_transport()?;
 
     let (dma_paddr_base, mut runtime) = match init_virtio_blk_with_dma_base(
@@ -788,6 +785,23 @@ fn nanami_main() -> libnanami::NanamiResult {
             runtime.io_base,
         )
     })?;
+
+    Ok((dma_paddr_base, runtime))
+}
+
+fn nanami_main() -> libnanami::NanamiResult {
+    libnanami::print!("[virtio-blk] bootstrap start\n");
+    let service_port_desc = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let (dma_paddr_base, mut runtime) = match initialize_root() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let _ = nanami_services::device::select_storage_root(2);
+            return Err(error);
+        }
+    };
+    if !nanami_services::device::select_storage_root(1)? {
+        return Err(RequestError::Unsupported.into());
+    }
 
     nanami_services::registry::register_block_device().map_err(|e| {
         log_device_error(

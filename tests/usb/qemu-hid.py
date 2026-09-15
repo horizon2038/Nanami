@@ -10,38 +10,75 @@ import pathlib
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
 parser.add_argument('--smp', type=int, default=4)
+parser.add_argument('--memory', default='4G')
 parser.add_argument('--coexist-ps2', action='store_true')
 parser.add_argument('--stress', type=int, default=0, help='Number of modifier press/release pairs before typing')
-parser.add_argument('--high-mmio', action='store_true', help='Check high-BAR refusal and continued desktop boot')
+parser.add_argument('--high-mmio', action='store_true', help='Keep the firmware default high PCI BAR assignment')
+parser.add_argument('--usb-storage', action='store_true', help='Boot/rootfs on USB BOT, with AHCI present but no SATA media')
+parser.add_argument('--virtio-storage', action='store_true', help='Boot/rootfs on legacy virtio-blk instead of AHCI')
+parser.add_argument('--usb2', action='store_true', help='Make the storage connector USB2-only to test high-speed BOT')
+parser.add_argument('--duplicate-root', action='store_true', help='Attach another Nanami USB root and require fail-closed selection')
+parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug the USB root and check that I/O never binds the replacement')
+parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
 args = parser.parse_args()
+if args.usb_storage and args.virtio_storage:
+    parser.error('--usb-storage and --virtio-storage are mutually exclusive')
+if args.unplug_root and not args.usb_storage:
+    parser.error('--unplug-root requires --usb-storage')
+if args.empty_sata and not args.usb_storage:
+    parser.error('--empty-sata requires --usb-storage')
+if not args.image.is_file():
+    parser.error('--image must be a regular image file, not a physical device')
 repo = pathlib.Path(__file__).resolve().parents[2]
 logs = pathlib.Path(tempfile.mkdtemp(prefix='nanami-usb-test-'))
+base_image = logs / 'boot.img'
+# Keep a stable backing file even if another build replaces its output. APFS
+# clones share storage; other hosts use an ordinary private copy.
+if sys.platform == 'darwin':
+    subprocess.run(['cp', '-c', str(args.image.resolve()), str(base_image)], check=True)
+else:
+    shutil.copyfile(args.image, base_image)
 firmware = repo / 'spencer/a9nloader-rs/tools'
 shutil.copyfile(firmware / 'OVMF_VARS.fd', logs / 'OVMF_VARS.fd')
 serial = logs / 'serial.log'
 qmp_path = logs / 'qmp.sock'
 command = [
-    'qemu-system-x86_64', '-machine', f'hpet=on,i8042={"on" if args.coexist_ps2 or args.high_mmio else "off"}',
-    '-cpu', 'max', '-smp', str(args.smp), '-m', '4G', '-display', 'none',
+    'qemu-system-x86_64', '-machine', f'hpet=on,i8042={"on" if args.coexist_ps2 else "off"}',
+    '-cpu', 'max', '-smp', str(args.smp), '-m', args.memory, '-display', 'none',
     *([] if args.high_mmio else ['-fw_cfg', 'name=opt/ovmf/X-PciMmio64Mb,string=0']),
     '-serial', f'file:{serial}', '-qmp', f'unix:{qmp_path},server=on,wait=off',
     '-netdev', 'user,id=net0,restrict=on',
     '-device', 'virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on',
-    '-device', 'qemu-xhci,id=xhci,addr=6,msi=off,msix=off',
+    '-device', 'qemu-xhci,id=xhci,addr=6,msi=off,msix=off' + (',p3=0' if args.usb2 else ''),
     '-device', 'usb-kbd,id=usb-kbd,bus=xhci.0,port=1',
     '-device', 'usb-mouse,id=usb-mouse,bus=xhci.0,port=2',
     '-drive', f'if=pflash,format=raw,readonly=on,file={firmware / "OVMF_CODE.fd"}',
     '-drive', f'if=pflash,format=raw,file={logs / "OVMF_VARS.fd"}',
-    '-device', 'ich9-ahci,id=ahci,addr=3',
-    '-drive', f'if=none,id=disk,format=raw,snapshot=on,file={args.image.resolve()}',
-    '-device', 'ide-hd,drive=disk,bus=ahci.0,bootindex=1', '--no-reboot', '--no-shutdown',
+    *([] if args.virtio_storage else ['-device', 'ich9-ahci,id=ahci,addr=3']),
+    '-drive', f'if=none,id=disk,format=raw,snapshot=on,file={base_image}',
+    '-device', ('usb-storage,id=usb-root,drive=disk,bus=xhci.0,port=3,bootindex=1' if args.usb_storage
+                else 'virtio-blk-pci,drive=disk,addr=3,bootindex=1,disable-legacy=off,disable-modern=on'
+                if args.virtio_storage else 'ide-hd,drive=disk,bus=ahci.0,bootindex=1'),
+    '--no-reboot', '--no-shutdown',
 ]
+if args.duplicate_root:
+    command += [
+        '-drive', f'if=none,id=duplicate,format=raw,snapshot=on,file={base_image}',
+        '-device', 'usb-storage,id=duplicate-root,drive=duplicate,bus=xhci.0,port=4',
+    ]
+if args.empty_sata:
+    subprocess.run(['qemu-img', 'create', '-q', '-f', 'raw', str(logs / 'non-root.img'), '1M'], check=True)
+    command += [
+        '-drive', f'if=none,id=non-root,format=raw,snapshot=on,file={logs / "non-root.img"}',
+        '-device', 'ide-hd,drive=non-root,bus=ahci.0',
+    ]
 
 print(f'Logs: {logs}', flush=True)
 with (logs / 'qemu.log').open('w') as diagnostics:
@@ -80,17 +117,30 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                     return
                 time.sleep(0.2)
             qmp('screendump', {'filename': str(logs / 'timeout.ppm')})
-            raise RuntimeError('Guest timed out; inspect serial.log')
+            diagnostics = {}
+            for command in ['info registers -a', 'info irq', 'info usb']:
+                diagnostics[command] = qmp('human-monitor-command', {'command-line': command})
+            (logs / 'timeout-monitor.json').write_text(json.dumps(diagnostics, indent=2))
+            raise RuntimeError('Guest timed out; inspect serial.log and timeout-monitor.json')
 
         qmp('qmp_capabilities')
-        if args.high_mmio:
-            wait_for(lambda s: 'exceeds current low-MMIO support' in s
-                     and 'font init end' in s and '[              honoka] online' in s)
-            assert 'usb-server] xHCI ports=' not in serial.read_text()
-            print('PASS: high BAR refused; storage, Shell and desktop still booted', flush=True)
+        if args.duplicate_root:
+            wait_for(lambda s: 'root probe/selection failed:' in s and 'usb-server] online controllers=' in s)
+            log = serial.read_text(errors='replace')
+            assert 'service registered: block-device' not in log
+            assert 'service registered: vfs-service' not in log
+            print('PASS: ambiguous root disks were rejected before block-device publication', flush=True)
             raise SystemExit(0)
         wait_for(lambda s: 'usb-server] online controllers=' in s
                  and s.count('boot-hid=1') >= 2 and 'font init end' in s and '[              honoka] online' in s)
+        if args.usb_storage:
+            log = serial.read_text(errors='replace')
+            assert 'usb-server] service registered: block-device' in log
+            assert 'ahci-server] service registered: block-device' not in log
+            if args.empty_sata:
+                assert all(record['stats']['wr_bytes'] == 0 for record in qmp('query-blockstats')
+                           if record.get('device') == 'non-root'), 'Probe wrote to the non-root disk'
+            print('USB BOT rootfs mounted; AHCI did not claim an empty controller', flush=True)
         print('USB keyboard/mouse enumerated; desktop ready', flush=True)
         time.sleep(5)
         for _ in range(args.stress):
@@ -102,14 +152,56 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         # no i8042 controller, so a PS/2 driver cannot make this test pass.
         def type_text(text):
             for char in text:
-                key = {'-': 'minus', '\n': 'ret'}.get(char, char)
+                key = {'-': 'minus', '\n': 'ret', ' ': 'spc'}.get(char, char)
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': key}], 'hold-time': 50})
                 time.sleep(0.8)
+
+        if args.usb_storage:
+            def root_written_bytes():
+                records = qmp('query-blockstats')
+                return sum(record['stats']['wr_bytes'] for record in records
+                           if record.get('device') == 'disk' or record.get('qdev', '').endswith('/usb-root'))
+
+            before = root_written_bytes()
+            type_text('mkdir usbcheck\n')
+            deadline = time.monotonic() + 20
+            while root_written_bytes() <= before and time.monotonic() < deadline:
+                time.sleep(0.2)
+            assert root_written_bytes() > before, 'No filesystem writes reached the USB snapshot'
+            print('Filesystem mkdir reached USB WRITE commands (snapshot only)', flush=True)
 
         type_text('http-server\n')
         qmp('screendump', {'filename': str(logs / 'after-keyboard.ppm')})
         wait_for(lambda s: 'tcp listen port=80' in s)
         print('USB keyboard launched HTTP', flush=True)
+        if args.unplug_root:
+            qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'f12'}], 'hold-time': 100})
+            time.sleep(2)
+            qmp('device_del', {'id': 'usb-root'})
+            wait_for(lambda s: 'usb-server] detached port=' in s)
+            # QEMU removes the legacy drive backend with the USB device.
+            # Supply a fresh overlay, never reopen a writable host base image.
+            replacement = logs / 'replacement.qcow2'
+            subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw',
+                            '-b', str(base_image), str(replacement)], check=True)
+            qmp('blockdev-add', {'driver': 'qcow2', 'node-name': 'replacement',
+                                'file': {'driver': 'file', 'filename': str(replacement)}})
+            qmp('device_add', {'driver': 'usb-storage', 'id': 'usb-root-new', 'drive': 'replacement',
+                               'bus': 'xhci.0', 'port': '3'})
+            wait_for(lambda s: s.count('storage=true') >= 2)
+            def replacement_reads():
+                nodes = [record for record in qmp('query-blockstats', {'query-nodes': True})
+                         if record.get('node-name') == 'replacement']
+                assert len(nodes) == 1
+                return nodes[0]['stats']['rd_bytes']
+
+            before = replacement_reads()
+            type_text('eg-test\n')  # An executable not loaded during startup/HTTP.
+            wait_for(lambda s: 'root device detached; I/O disabled' in s)
+            after = replacement_reads()
+            assert before == after, 'Old root handle accessed the replugged disk'
+            print('PASS: unplug/replug did not redirect rootfs I/O to the replacement device', flush=True)
+            raise SystemExit(0)
         time.sleep(2)
         qmp('screendump', {'filename': str(logs / 'before-mouse.ppm')})
         qmp('input-send-event', {'events': [
@@ -188,3 +280,4 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         except subprocess.TimeoutExpired:
             process.terminate()
             process.wait(timeout=5)
+        base_image.unlink()

@@ -33,6 +33,7 @@ const MAX_EXEC_CLIENTS: usize = 16;
 const MAX_EXEC_CHILDREN: usize = 64;
 const CONNECT_RETRIES: usize = 500;
 const CONNECT_RETRY_DELAY_MS: Word = 10;
+const ROOTFS_CONNECT_RETRIES: usize = 60_000 / CONNECT_RETRY_DELAY_MS;
 const SYSTEM_LIST_PATH: &[u8] = b"/nanami/system-list";
 const SESSION_LIST_PATH: &[u8] = b"/nanami/session-list";
 #[cfg(target_arch = "x86_64")]
@@ -243,7 +244,9 @@ fn connect_vfs_service() -> Result<(), RequestError> {
             Ok(()) => return Ok(()),
             Err(error) => {
                 tries += 1;
-                if tries >= CONNECT_RETRIES {
+                // USB root discovery can outlive the ordinary service retry
+                // budget. Match ext2's bounded startup wait for this dependency.
+                if tries >= ROOTFS_CONNECT_RETRIES {
                     return Err(error);
                 }
                 retry_delay(timer_port);

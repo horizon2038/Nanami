@@ -35,6 +35,7 @@ impl Controller {
         let mut slot_type = [0u8; 256];
         let mut port_major = [0u8; 256];
         let mut port_speeds = [0u32; 256];
+        let mut superspeeds = [0u16; 256];
         let mut extended = ((hcc >> 16) as usize) * 4;
         // Extended capabilities are forward-relative; reject malformed chains
         // and do the BIOS/OS ownership handshake before resetting hardware.
@@ -54,7 +55,7 @@ impl Controller {
                         owned = true;
                         break;
                     }
-                    nanami_services::timer::timer_service_sleep_milliseconds(timer, 1)?;
+                    crate::delay(timer, 1)?;
                 }
                 if !owned {
                     return Err(RequestError::Transport);
@@ -67,7 +68,9 @@ impl Controller {
                 let first = (compatible & 0xff) as usize;
                 let count = ((compatible >> 8) & 0xff) as usize;
                 let ty = unsafe { read(base, extended + 12) } as u8 & 31;
-                if first == 0 || count == 0 || first + count > ports + 1 {
+                // QEMU retains an empty USB3 capability with p3=0. It assigns
+                // no registers; ignore that entry while validating real ranges.
+                if count != 0 && (first == 0 || first + count > ports + 1) {
                     return Err(RequestError::Protocol);
                 }
                 let major = (header >> 24) as u8;
@@ -76,12 +79,25 @@ impl Controller {
                     return Err(RequestError::Protocol);
                 }
                 let mut speeds = 0;
+                let mut super_ids = 0;
                 if major == 2 && unsafe { read(base, extended + 4) } == 0x2042_5355 {
                     if psi_count == 0 {
                         speeds = protocol::DEFAULT_SPEEDS;
                     } else {
                         for index in 0..psi_count {
                             protocol::add_psi(&mut speeds, unsafe {
+                                read(base, extended + 16 + index * 4)
+                            })
+                            .map_err(|_| RequestError::Protocol)?;
+                        }
+                    }
+                }
+                if major == 3 && unsafe { read(base, extended + 4) } == 0x2042_5355 {
+                    if psi_count == 0 {
+                        super_ids = 1 << 4;
+                    } else {
+                        for index in 0..psi_count {
+                            protocol::add_superspeed(&mut super_ids, unsafe {
                                 read(base, extended + 16 + index * 4)
                             })
                             .map_err(|_| RequestError::Protocol)?;
@@ -95,6 +111,7 @@ impl Controller {
                     slot_type[port] = ty;
                     port_major[port] = major;
                     port_speeds[port] = speeds;
+                    superspeeds[port] = super_ids;
                 }
             }
             let next = ((header >> 8) & 0xff) as usize;
@@ -139,6 +156,11 @@ impl Controller {
             slot_type,
             port_major,
             port_speeds,
+            superspeeds,
+            generation: 0,
+            borrowed_slot: None,
+            borrowed_hid: 0,
+            held_events: Vec::with_capacity(MAX_INTERFACES),
             dirty: true,
             running: false,
         };

@@ -25,3 +25,16 @@ pub fn add_psi(speeds: &mut u32, psi: u32) -> Result<(), ()> {
     *speeds |= class << (id * 2);
     Ok(())
 }
+
+/// USB 3 PSIVs can describe either symmetric or paired asymmetric links.
+/// Keep their IDs separate from the USB 2 speed classes used by EP0/HID.
+pub fn add_superspeed(speeds: &mut u16, psi: u32) -> Result<(), ()> {
+    let id = psi & 15;
+    let link_type = (psi >> 6) & 3;
+    let rate = (psi >> 16) as u64 * [1, 1000, 1_000_000, 1_000_000_000][((psi >> 4) & 3) as usize];
+    if id == 0 || link_type == 1 || psi & (1 << 8) == 0 || rate < 5_000_000_000 {
+        return Err(());
+    }
+    *speeds |= 1 << id;
+    Ok(())
+}

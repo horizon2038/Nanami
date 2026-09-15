@@ -93,6 +93,15 @@ impl Producer {
     pub fn complete(&mut self) {
         self.pending = false;
     }
+
+    /// Only after Reset/Stop Endpoint has returned DMA ownership. The caller
+    /// must Set TR Dequeue Pointer to physical | 1 before ringing the doorbell.
+    pub unsafe fn reset(&mut self) {
+        unsafe { ptr::write_bytes(self.virtual_address as *mut u8, 0, 4096) };
+        self.enqueue = 0;
+        self.cycle = true;
+        self.pending = false;
+    }
 }
 
 pub struct Consumer {

@@ -274,8 +274,14 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
         -device "virtio-blk-pci,drive=nanami-disk,addr=3,bootindex=1,disable-legacy=off,disable-modern=on"
       )
       ;;
+    usb)
+      storage_args=(
+        -drive "if=none,id=nanami-disk,format=raw,file=$IMG"
+        -device "usb-storage,id=usb-root,drive=nanami-disk,bus=xhci.0,port=3,bootindex=1"
+      )
+      ;;
     *)
-      echo "[nanami-run] STORAGE_DEVICE must be ahci or virtio" >&2
+      echo "[nanami-run] STORAGE_DEVICE must be ahci, virtio or usb" >&2
       exit 1
       ;;
   esac
@@ -292,10 +298,14 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
     --no-reboot
     --no-shutdown
   )
-  if [ "$USB_INPUT" = "on" ]; then
+  if [ "$USB_INPUT" = "on" ] || [ "$STORAGE_DEVICE" = "usb" ]; then
     args+=(
       -fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=0"
       -device "qemu-xhci,id=xhci,addr=6,msi=off,msix=off"
+    )
+  fi
+  if [ "$USB_INPUT" = "on" ]; then
+    args+=(
       -device "usb-kbd,id=usb-kbd,bus=xhci.0,port=1"
       -device "usb-mouse,id=usb-mouse,bus=xhci.0,port=2"
     )

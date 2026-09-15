@@ -19,6 +19,26 @@ path = "alpha-alter-tests.rs"
 name = "posix-io"
 path = "posix-io/main.rs"
 
+[[test]]
+name = "core-process"
+path = "core-process-tests.rs"
+
+[[test]]
+name = "timers"
+path = "timer-tests.rs"
+
+[[test]]
+name = "storage"
+path = "storage/main.rs"
+
+[[test]]
+name = "input-distribution"
+path = "input-distribution-tests.rs"
+
+[[test]]
+name = "network"
+path = "network/main.rs"
+
 [dependencies]
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 

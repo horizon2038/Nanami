@@ -179,6 +179,7 @@ fn verify_writev() {
         }
     }
     let _ = linux_close(fd as usize);
+    verify_overwrite(path, &mut source, &mut output);
     let _ = linux_unlink(path.as_ptr());
     let prefix = b"Linux writev ";
     let suffix = b"smoke test passed!\n";
@@ -200,6 +201,62 @@ fn verify_writev() {
     {
         linux_exit_group(92);
     }
+}
+
+fn verify_overwrite(path: &[u8], source: &mut [u8], output: &mut [u8]) {
+    // Reuse the existing 280-KiB allocation. Large writes exercise contiguous
+    // batches across both indirect levels, then a partial overwrite checks RMW.
+    for (i, byte) in source.iter_mut().enumerate() {
+        *byte = (i.wrapping_mul(13).wrapping_add(91) >> 2) as u8;
+    }
+    let fd = linux_open(path.as_ptr(), 1);
+    if fd < 0 {
+        linux_exit_group(98);
+    }
+    let total = 70 * 4096;
+    let mut offset = 0;
+    while offset < total {
+        let count = (total - offset).min(65536);
+        if linux_write(fd as usize, source.as_ptr(), count) != count as isize {
+            linux_exit_group(99);
+        }
+        offset += count;
+    }
+    let _ = linux_close(fd as usize);
+    let fd = linux_open(path.as_ptr(), 1);
+    if fd < 0 || linux_write(fd as usize, b"hdr".as_ptr(), 3) != 3 {
+        linux_exit_group(100);
+    }
+    let _ = linux_close(fd as usize);
+    let fd = linux_open(path.as_ptr(), 0);
+    if fd < 0 {
+        linux_exit_group(101);
+    }
+    offset = 0;
+    while offset < total {
+        let count = (total - offset).min(65536);
+        let iov = [LinuxIoVec {
+            base: output.as_mut_ptr(),
+            len: count,
+        }];
+        if linux_readv(fd as usize, iov.as_ptr(), 1) != count as isize {
+            linux_exit_group(102);
+        }
+        let unchanged = if offset == 0 {
+            if output[..3] != *b"hdr" {
+                linux_exit_group(103);
+            }
+            3
+        } else {
+            0
+        };
+        if output[unchanged..count] != source[unchanged..count] {
+            linux_exit_group(104);
+        }
+        offset += count;
+    }
+    let _ = linux_close(fd as usize);
+    println("Linux batched overwrite smoke test passed!\n");
 }
 
 fn verify_nanosleep() {

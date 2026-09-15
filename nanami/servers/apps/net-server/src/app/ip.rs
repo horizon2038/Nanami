@@ -38,8 +38,6 @@ pub(crate) fn process_ipv4(runtime: &mut NetRuntime, stats: &mut NetStats, frame
         frame[ETH_HDR_LEN + 19],
     ];
 
-    update_arp(runtime, src_ip, src_mac);
-
     // During DHCP bootstrap, server may unicast DHCPACK to yiaddr before
     // runtime.ip is updated. Handle DHCP prior to generic dst-ip filtering.
     if runtime.dhcp_waiting && proto == 17 {
@@ -64,6 +62,12 @@ pub(crate) fn process_ipv4(runtime: &mut NetRuntime, stats: &mut NetStats, frame
     let is_broadcast = dst_ip == [255, 255, 255, 255];
     if dst_ip != runtime.ip && !is_broadcast {
         return;
+    }
+
+    // Unrelated multicast/broadcast traffic must not displace TCP peers.
+    // A routed peer's Ethernet source identifies the next hop, not the peer.
+    if dst_ip == runtime.ip && src_ip[0] != 0 && src_ip[0] < 224 {
+        update_arp(runtime, next_hop_ip(runtime, src_ip), src_mac);
     }
 
     if proto == 1 {

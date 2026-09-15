@@ -236,13 +236,13 @@ impl Alpha {
 
         let memory = &mut self.memory;
         let processes = &mut self.processes;
+        let vm = processes
+            .vm_space_mut(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         let mut j = 0usize;
         while j < page_count {
             let frame = process_frame_descriptor(root_node, start_slot + j);
             let va = base_va + j * PAGE_SIZE;
-            let vm = processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
             memory.map_frame(address_space, frame, va, vm)?;
             j += 1;
         }

@@ -36,7 +36,8 @@ pub(super) fn map_network_error(error: RequestError) -> i32 {
         RequestError::InvalidArgument
         | RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
         RequestError::Status(libnanami::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
-        RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION) => EAGAIN,
+        RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)
+        | RequestError::Status(nanami_services::net::NET_SERVICE_RESPONSE_WOULD_BLOCK) => EAGAIN,
         _ => ENETDOWN,
     }
 }

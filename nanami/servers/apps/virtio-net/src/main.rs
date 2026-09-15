@@ -12,6 +12,16 @@ use libnanami::{self, RequestError, Word};
 mod arch;
 #[path = "app/pci.rs"]
 mod pci;
+#[path = "app/rx_backlog.rs"]
+mod rx_backlog;
+#[path = "app/rx_batch.rs"]
+mod rx_batch;
+#[path = "app/rx_softq.rs"]
+mod rx_softq;
+#[path = "app/tx_queue.rs"]
+mod tx_queue;
+#[path = "app/virtqueue.rs"]
+mod virtqueue;
 #[path = "app/util.rs"]
 mod util;
 
@@ -19,7 +29,11 @@ use pci::{
     configure_pci_command_for_intx, disable_pci_msi_capabilities, resolve_irq_number,
     scan_virtio_net,
 };
+use rx_backlog::drain_rx_to_softq;
+use rx_softq::{softq_is_empty, softq_pop_len, softq_pop_to_shared};
+use tx_queue::{copy_from_shared_and_submit, submit_tx, TxQueue, TX_BUFFER_COUNT};
 use util::{fail_device, log_request_error};
+use virtqueue::*;
 
 const SLOT_IO_PCI_CFG: Word = 16;
 const SLOT_IO_VIRTIO: Word = 17;
@@ -47,16 +61,15 @@ const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FAILED: u8 = 128;
 
-const NET_MAX_PACKET_BYTES: usize = 1536;
+const NET_MAX_PACKET_BYTES: usize = nanami_services::net::NET_DEVICE_RX_FRAME_MAX;
 const QUEUE_MEM_BYTES: usize = 16384;
-const VIRTIO_QUEUE_ALIGN: usize = 4096;
 const QUEUE_RX_INDEX: u16 = 0;
 const QUEUE_TX_INDEX: u16 = 1;
 const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 const VIRTIO_NET_HDR_LEN: usize = 10;
 const RX_SNAPSHOT_CAP: usize = 64;
-const RX_BUFFER_COUNT: usize = 8;
+const RX_BUFFER_COUNT: usize = 64;
 const RX_SOFTQ_CAP: usize = 64;
 const RX_POLL_BURST: usize = 16;
 const ENABLE_IRQ_EVENT_LOG: bool = false;
@@ -73,9 +86,10 @@ struct NetRuntime {
     link_up: bool,
     irq_enabled: bool,
     rx_queue_size: u16,
+    rx_buffer_count: usize,
     tx_queue_size: u16,
     rx_used_idx: u16,
-    tx_used_idx: u16,
+    tx_queue: TxQueue,
     rx_pending_len: usize,
     rx_packet_len: usize,
     rx_queue_vaddr: usize,
@@ -88,31 +102,16 @@ struct NetRuntime {
     mac_addr: [u8; 6],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtqDesc {
-    addr: u64,
-    len: u32,
-    flags: u16,
-    next: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtqUsedElem {
-    id: u32,
-    len: u32,
-}
-
 const DMA_QUEUE0_OFFSET: usize = 0;
 const DMA_QUEUE1_OFFSET: usize = DMA_QUEUE0_OFFSET + QUEUE_MEM_BYTES;
 const DMA_RX_HDR_OFFSET: usize = DMA_QUEUE1_OFFSET + QUEUE_MEM_BYTES;
 const DMA_RX_HDR_BYTES: usize = RX_BUFFER_COUNT * VIRTIO_NET_HDR_LEN;
 const DMA_TX_HDR_OFFSET: usize = DMA_RX_HDR_OFFSET + DMA_RX_HDR_BYTES;
-const DMA_RX_BUF_OFFSET: usize = DMA_TX_HDR_OFFSET + VIRTIO_NET_HDR_LEN;
+const DMA_RX_BUF_OFFSET: usize = DMA_TX_HDR_OFFSET + TX_BUFFER_COUNT * VIRTIO_NET_HDR_LEN;
 const DMA_RX_BUF_BYTES: usize = RX_BUFFER_COUNT * NET_MAX_PACKET_BYTES;
 const DMA_TX_BUF_OFFSET: usize = DMA_RX_BUF_OFFSET + DMA_RX_BUF_BYTES;
-const DMA_TOTAL_BYTES: usize = 0xC000;
+const DMA_TOTAL_BYTES: usize =
+    (DMA_TX_BUF_OFFSET + TX_BUFFER_COUNT * NET_MAX_PACKET_BYTES + 4095) & !4095;
 
 #[derive(Clone, Copy)]
 struct VirtioPciDevice {
@@ -182,54 +181,6 @@ fn vio_write(
     libnanami::io::io_write(io_desc, io_base + offset, width, value)
 }
 
-fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
-}
-
-fn used_offset(queue_size: u16) -> usize {
-    let q = queue_size as usize;
-    let avail_bytes = 2 + 2 + q * 2 + 2;
-    align_up(
-        q * core::mem::size_of::<VirtqDesc>() + avail_bytes,
-        VIRTIO_QUEUE_ALIGN,
-    )
-}
-
-fn total_queue_bytes(queue_size: u16) -> usize {
-    let q = queue_size as usize;
-    used_offset(queue_size) + (2 + 2 + q * core::mem::size_of::<VirtqUsedElem>() + 2)
-}
-
-unsafe fn desc_ptr(base: *mut u8) -> *mut VirtqDesc {
-    base as *mut VirtqDesc
-}
-
-unsafe fn avail_idx_ptr(base: *mut u8, queue_size: u16) -> *mut u16 {
-    let _ = queue_size;
-    base.add(core::mem::size_of::<VirtqDesc>() * queue_size as usize + 2) as *mut u16
-}
-
-unsafe fn avail_flags_ptr(base: *mut u8, queue_size: u16) -> *mut u16 {
-    let _ = queue_size;
-    base.add(core::mem::size_of::<VirtqDesc>() * queue_size as usize) as *mut u16
-}
-
-unsafe fn avail_ring_ptr(base: *mut u8, queue_size: u16) -> *mut u16 {
-    base.add(core::mem::size_of::<VirtqDesc>() * queue_size as usize + 4) as *mut u16
-}
-
-unsafe fn used_idx_ptr(base: *mut u8, queue_size: u16) -> *mut u16 {
-    base.add(used_offset(queue_size) + 2) as *mut u16
-}
-
-unsafe fn used_flags_ptr(base: *mut u8, queue_size: u16) -> *mut u16 {
-    base.add(used_offset(queue_size)) as *mut u16
-}
-
-unsafe fn used_ring_ptr(base: *mut u8, queue_size: u16) -> *mut VirtqUsedElem {
-    base.add(used_offset(queue_size) + 4) as *mut VirtqUsedElem
-}
-
 fn notify_queue(io_desc: Word, io_base: Word, queue_index: u16) -> Result<(), RequestError> {
     vio_write(
         io_desc,
@@ -276,7 +227,7 @@ fn init_virtio_legacy_queues(
     if rx_qsize == 0 || tx_qsize == 0 {
         return Err(RequestError::Unsupported);
     }
-    if rx_qsize < (RX_BUFFER_COUNT as u16 * 2) || tx_qsize < 2 {
+    if rx_qsize < 2 || tx_qsize < 2 {
         return Err(RequestError::Unsupported);
     }
     if total_queue_bytes(rx_qsize) > QUEUE_MEM_BYTES
@@ -318,7 +269,8 @@ fn init_virtio_legacy_queues(
     unsafe {
         let d = desc_ptr(rx_base);
         let mut i = 0usize;
-        while i < RX_BUFFER_COUNT {
+        let rx_count = min(RX_BUFFER_COUNT, rx_qsize as usize / 2);
+        while i < rx_count {
             let head = i * 2;
             let hdr_paddr = rx_hdr_paddr_base + i * VIRTIO_NET_HDR_LEN;
             let buf_paddr = rx_buf_paddr_base + i * NET_MAX_PACKET_BYTES;
@@ -338,7 +290,8 @@ fn init_virtio_legacy_queues(
         }
         *avail_flags_ptr(rx_base, rx_qsize) = 0;
         *used_flags_ptr(rx_base, rx_qsize) = 0;
-        *avail_idx_ptr(rx_base, rx_qsize) = RX_BUFFER_COUNT as u16;
+        fence(Ordering::Release);
+        *avail_idx_ptr(rx_base, rx_qsize) = rx_count as u16;
     }
     fence(Ordering::SeqCst);
     notify_queue(io_desc, io_base, QUEUE_RX_INDEX)?;
@@ -356,15 +309,20 @@ fn init_virtio_legacy_queues(
     vio_write(io_desc, io_base, VIRTIO_PCI_QUEUE_ADDRESS, 4, tx_pfn)?;
     unsafe {
         let d = desc_ptr(tx_base);
-        (*d.add(0)).addr = tx_hdr_paddr as u64;
-        (*d.add(0)).len = VIRTIO_NET_HDR_LEN as u32;
-        (*d.add(0)).flags = DESC_F_NEXT;
-        (*d.add(0)).next = 1;
-        (*d.add(1)).addr = tx_buf_paddr as u64;
-        (*d.add(1)).len = 0;
-        (*d.add(1)).flags = 0;
-        (*d.add(1)).next = 0;
-        *avail_flags_ptr(tx_base, tx_qsize) = 0;
+        for slot in 0..min(TX_BUFFER_COUNT, tx_qsize as usize / 2) {
+            let head = slot * 2;
+            (*d.add(head)).addr = (tx_hdr_paddr + slot * VIRTIO_NET_HDR_LEN) as u64;
+            (*d.add(head)).len = VIRTIO_NET_HDR_LEN as u32;
+            (*d.add(head)).flags = DESC_F_NEXT;
+            (*d.add(head)).next = (head + 1) as u16;
+            (*d.add(head + 1)).addr = (tx_buf_paddr + slot * NET_MAX_PACKET_BYTES) as u64;
+            (*d.add(head + 1)).len = 0;
+            (*d.add(head + 1)).flags = 0;
+            (*d.add(head + 1)).next = 0;
+        }
+        // Completion is reclaimed on the next submission; TX-only interrupts
+        // do not provide useful work for the client.
+        *avail_flags_ptr(tx_base, tx_qsize) = 1; // VIRTQ_AVAIL_F_NO_INTERRUPT
         *used_flags_ptr(tx_base, tx_qsize) = 0;
     }
 
@@ -431,6 +389,7 @@ fn take_rx_chain(runtime: &mut NetRuntime) -> Option<(usize, usize)> {
         if used_idx == runtime.rx_used_idx {
             return None;
         }
+        fence(Ordering::Acquire);
         let elem = ptr::read_volatile(
             used_ring_ptr(base, runtime.rx_queue_size)
                 .add((runtime.rx_used_idx as usize) % runtime.rx_queue_size as usize),
@@ -438,7 +397,7 @@ fn take_rx_chain(runtime: &mut NetRuntime) -> Option<(usize, usize)> {
         runtime.rx_used_idx = runtime.rx_used_idx.wrapping_add(1);
         let head = elem.id as usize;
         let chain = head / 2;
-        if chain >= RX_BUFFER_COUNT {
+        if head & 1 != 0 || chain >= runtime.rx_buffer_count {
             return None;
         }
 
@@ -478,104 +437,6 @@ fn recycle_rx_chain(runtime: &mut NetRuntime, chain: usize) {
     }
 }
 
-fn softq_is_empty() -> bool {
-    unsafe { RX_SOFTQ_COUNT == 0 }
-}
-
-fn softq_push_from_rx_buffer(runtime: &NetRuntime, chain: usize, packet_len: usize) {
-    if packet_len == 0 {
-        return;
-    }
-    unsafe {
-        if RX_SOFTQ_COUNT == RX_SOFTQ_CAP {
-            RX_SOFTQ_HEAD = (RX_SOFTQ_HEAD + 1) % RX_SOFTQ_CAP;
-            RX_SOFTQ_COUNT -= 1;
-        }
-        let slot = RX_SOFTQ_TAIL;
-        let dst = (ptr::addr_of_mut!(RX_SOFTQ_DATA) as *mut u8).add(slot * NET_MAX_PACKET_BYTES);
-        let src = rx_buffer_vaddr(runtime, chain) as *const u8;
-        ptr::copy_nonoverlapping(src, dst, packet_len);
-        RX_SOFTQ_LEN[slot] = packet_len;
-        RX_SOFTQ_TAIL = (RX_SOFTQ_TAIL + 1) % RX_SOFTQ_CAP;
-        RX_SOFTQ_COUNT += 1;
-    }
-}
-
-fn drain_rx_to_softq(runtime: &mut NetRuntime, burst: usize) -> usize {
-    let mut drained = 0usize;
-    while drained < burst {
-        let Some((chain, packet_len)) = take_rx_chain(runtime) else {
-            break;
-        };
-        softq_push_from_rx_buffer(runtime, chain, packet_len);
-        recycle_rx_chain(runtime, chain);
-        drained += 1;
-
-        if ENABLE_IRQ_RX_PACKET_DEBUG && runtime.rx_pending_len > 0 {
-            libnanami::print!("[virtio-net][irq.dbg] rx#");
-            libnanami::print!("{}", drained);
-            libnanami::print!(" bytes=");
-            libnanami::print!("{}", runtime.rx_pending_len);
-            libnanami::print!(" head=");
-            let mut i = 0usize;
-            let snap_len = unsafe { RX_SNAPSHOT_LEN };
-            while i < min(snap_len, 16) {
-                if i != 0 {
-                    libnanami::debug::print_char(' ');
-                }
-                let b = unsafe { ptr::read((ptr::addr_of!(RX_SNAPSHOT) as *const u8).add(i)) };
-                libnanami::print!("{:#x}", b);
-                i += 1;
-            }
-            libnanami::print!("\n");
-        }
-    }
-    if drained != 0 {
-        let _ = notify_queue(runtime.io_desc, runtime.io_base, QUEUE_RX_INDEX);
-    }
-    drained
-}
-
-fn softq_pop_len(requested_len: usize) -> usize {
-    unsafe {
-        if RX_SOFTQ_COUNT == 0 {
-            return 0;
-        }
-        let slot = RX_SOFTQ_HEAD;
-        let n = min(RX_SOFTQ_LEN[slot], requested_len);
-        RX_SOFTQ_LEN[slot] = 0;
-        RX_SOFTQ_HEAD = (RX_SOFTQ_HEAD + 1) % RX_SOFTQ_CAP;
-        RX_SOFTQ_COUNT -= 1;
-        n
-    }
-}
-
-fn softq_pop_to_shared(
-    runtime: &NetRuntime,
-    shared_offset: usize,
-    requested_len: usize,
-) -> Result<usize, RequestError> {
-    if runtime.shared_vaddr == 0 || runtime.shared_size == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    unsafe {
-        if RX_SOFTQ_COUNT == 0 {
-            return Ok(0);
-        }
-        let slot = RX_SOFTQ_HEAD;
-        let n = min(RX_SOFTQ_LEN[slot], requested_len);
-        if shared_offset >= runtime.shared_size || shared_offset + n > runtime.shared_size {
-            return Err(RequestError::InvalidArgument);
-        }
-        let src = (ptr::addr_of!(RX_SOFTQ_DATA) as *const u8).add(slot * NET_MAX_PACKET_BYTES);
-        let dst = (runtime.shared_vaddr + shared_offset) as *mut u8;
-        ptr::copy_nonoverlapping(src, dst, n);
-        RX_SOFTQ_LEN[slot] = 0;
-        RX_SOFTQ_HEAD = (RX_SOFTQ_HEAD + 1) % RX_SOFTQ_CAP;
-        RX_SOFTQ_COUNT -= 1;
-        Ok(n)
-    }
-}
 
 fn recv_direct_to_shared(
     runtime: &mut NetRuntime,
@@ -610,82 +471,6 @@ fn recv_direct_to_shared(
     result.map(Some)
 }
 
-fn submit_tx_prepared(runtime: &mut NetRuntime, payload_len: usize) -> Result<usize, RequestError> {
-    unsafe {
-        let d = desc_ptr(runtime.tx_queue_vaddr as *mut u8);
-        (*d.add(1)).len = payload_len as u32;
-
-        let base = runtime.tx_queue_vaddr as *mut u8;
-        let avail_idx = ptr::read_volatile(avail_idx_ptr(base, runtime.tx_queue_size));
-        ptr::write_volatile(
-            avail_ring_ptr(base, runtime.tx_queue_size)
-                .add((avail_idx as usize) % runtime.tx_queue_size as usize),
-            0,
-        );
-        ptr::write_volatile(
-            avail_idx_ptr(base, runtime.tx_queue_size),
-            avail_idx.wrapping_add(1),
-        );
-        fence(Ordering::SeqCst);
-    }
-
-    notify_queue(runtime.io_desc, runtime.io_base, QUEUE_TX_INDEX)?;
-
-    let mut spin = 0usize;
-    while spin < 5_000_000 {
-        unsafe {
-            let base = runtime.tx_queue_vaddr as *mut u8;
-            let used_idx = ptr::read_volatile(used_idx_ptr(base, runtime.tx_queue_size));
-            if used_idx != runtime.tx_used_idx {
-                runtime.tx_used_idx = runtime.tx_used_idx.wrapping_add(1);
-                return Ok(payload_len);
-            }
-        }
-        core::hint::spin_loop();
-        spin += 1;
-    }
-    Err(RequestError::Transport)
-}
-
-fn submit_tx_frame(runtime: &mut NetRuntime, frame: &[u8]) -> Result<usize, RequestError> {
-    let payload_len = min(frame.len(), NET_MAX_PACKET_BYTES);
-    unsafe {
-        let tx_buf = runtime.tx_buf_vaddr as *mut u8;
-        if payload_len > 0 {
-            ptr::copy_nonoverlapping(frame.as_ptr(), tx_buf, payload_len);
-        }
-    }
-    submit_tx_prepared(runtime, payload_len)
-}
-
-fn submit_tx(runtime: &mut NetRuntime, requested_len: usize) -> Result<usize, RequestError> {
-    let payload_len = min(requested_len, NET_MAX_PACKET_BYTES);
-    let zero = [0u8; NET_MAX_PACKET_BYTES];
-    submit_tx_frame(runtime, &zero[..payload_len])
-}
-
-fn copy_from_shared_and_submit(
-    runtime: &mut NetRuntime,
-    shared_offset: usize,
-    requested_len: usize,
-) -> Result<usize, RequestError> {
-    if runtime.shared_vaddr == 0 || runtime.shared_size == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    let payload_len = min(requested_len, NET_MAX_PACKET_BYTES);
-    if payload_len == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    if shared_offset >= runtime.shared_size || shared_offset + payload_len > runtime.shared_size {
-        return Err(RequestError::InvalidArgument);
-    }
-    unsafe {
-        let src = (runtime.shared_vaddr + shared_offset) as *const u8;
-        let dst = runtime.tx_buf_vaddr as *mut u8;
-        ptr::copy_nonoverlapping(src, dst, payload_len);
-    }
-    submit_tx_prepared(runtime, payload_len)
-}
 
 fn read_device_mac(io_desc: Word, io_base: Word) -> Result<[u8; 6], RequestError> {
     let mut mac = [0u8; 6];
@@ -761,7 +546,21 @@ fn handle_net_request(
                 (libnanami::OS_RESPONSE_OK, n, 0)
             }
         }
+        nanami_services::net::NET_DEVICE_REQUEST_RECV_BATCH => {
+            if !runtime.queue_ready || !runtime.link_up {
+                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            }
+            match rx_batch::recv_batch_to_shared(runtime, request.arg0, request.arg1) {
+                Ok(count) => (libnanami::OS_RESPONSE_OK, count, 0),
+                Err(_) => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+            }
+        }
         nanami_services::net::NET_DEVICE_REQUEST_CONTROL => match request.arg0 {
+            nanami_services::net::NET_DEVICE_CONTROL_GET_FEATURES => (
+                libnanami::OS_RESPONSE_OK,
+                nanami_services::net::NET_DEVICE_FEATURE_RECV_BATCH,
+                0,
+            ),
             nanami_services::net::NET_DEVICE_CONTROL_LINK_UP => match set_link_state(runtime, true)
             {
                 Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
@@ -1076,9 +875,10 @@ fn nanami_main() -> libnanami::NanamiResult {
         link_up: true,
         irq_enabled,
         rx_queue_size: queue_init.rx_qsize,
+        rx_buffer_count: min(RX_BUFFER_COUNT, queue_init.rx_qsize as usize / 2),
         tx_queue_size: queue_init.tx_qsize,
         rx_used_idx: 0,
-        tx_used_idx: 0,
+        tx_queue: TxQueue::new(queue_init.tx_qsize),
         rx_pending_len: 0,
         rx_packet_len: 0,
         rx_queue_vaddr: queue_init.rx_queue_vaddr,

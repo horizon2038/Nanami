@@ -10,6 +10,10 @@ use net_wire::{checksum16, ipv4_checksum, read_u16_be, read_u32_be, write_u16_be
 
 #[path = "app/arp.rs"]
 mod arp;
+#[path = "app/arp_cache.rs"]
+mod arp_cache;
+#[path = "app/backend.rs"]
+mod backend;
 #[path = "app/dhcp.rs"]
 mod dhcp;
 #[path = "app/dns.rs"]
@@ -22,6 +26,16 @@ mod icmp;
 mod ip;
 #[path = "app/tcp.rs"]
 mod tcp;
+#[path = "app/tcp_index.rs"]
+mod tcp_index;
+#[path = "app/tcp_send.rs"]
+mod tcp_send;
+#[path = "app/tcp_state.rs"]
+mod tcp_state;
+#[path = "app/tcp_rx.rs"]
+mod tcp_rx;
+#[path = "app/tcp_wire.rs"]
+mod tcp_wire;
 #[path = "app/udp.rs"]
 mod udp;
 #[path = "app/util.rs"]
@@ -29,11 +43,17 @@ mod util;
 
 use arp::arp_lookup;
 use arp::emit_arp_request;
+use arp_cache::ArpCache;
+use backend::{pump_backend, pump_backend_with_budget};
 use dhcp::dhcp_bootstrap;
 use dns::handle_dns_query_request;
 use ethernet::process_ethernet_frame;
 use icmp::{emit_icmp_echo_from_session, handle_icmp_recv_request};
-use tcp::emit_tcp_segment;
+use tcp_index::{active_tcp_connection_index, TcpIndex};
+use tcp_rx::{handle_tcp_recv_request, TcpRxBuffer, TcpRxQueue};
+use tcp_send::handle_tcp_send_request;
+use tcp_state::*;
+use tcp_wire::emit_tcp_segment;
 use udp::{emit_udp_from_session, handle_udp_recv_request};
 use util::{log_request_error, map_request_error_to_status};
 
@@ -59,14 +79,12 @@ const BACKEND_TX_OFFSET: Word = 0x1000;
 const CLIENT_DEFAULT_SHM_BYTES: Word = 0x4000;
 const ETH_HDR_LEN: usize = 14;
 const IPV4_HDR_LEN: usize = 20;
-const TCP_HDR_LEN: usize = 20;
 const UDP_HDR_LEN: usize = 8;
 const UDP_PAYLOAD_MAX: usize = 1472;
 const UDP_RX_META_LEN: usize = 16;
-const TCP_PAYLOAD_MAX: usize = 1460;
-const TCP_RX_META_LEN: usize = 12;
-const TCP_MAX_CONNECTIONS: usize = 128;
-const TCP_RX_QUEUE_CAP: usize = 32;
+// The service loop is the sole owner; keep packet storage off the user stack.
+static mut TCP_RX_BUFFERS: [TcpRxBuffer; TCP_MAX_CONNECTIONS] =
+    [const { TcpRxBuffer::EMPTY }; TCP_MAX_CONNECTIONS];
 const UDP_RX_QUEUE_CAP: usize = 8;
 const ICMP_PAYLOAD_MAX: usize = 1480;
 const ICMP_RX_META_LEN: usize = 8;
@@ -75,19 +93,6 @@ const CLIENT_SESSION_MAX: usize = 4;
 const CLIENT_BIND_MAX: usize = 16;
 const RAW_RX_MAX_BYTES: usize = 1536;
 const RAW_RX_QUEUE_CAP: usize = 4;
-const TCP_STATE_CLOSED: u8 = 0;
-const TCP_STATE_SYN_RECEIVED: u8 = 1;
-const TCP_STATE_ESTABLISHED: u8 = 2;
-const TCP_STATE_FIN_WAIT1: u8 = 3;
-const TCP_STATE_FIN_WAIT2: u8 = 4;
-const TCP_STATE_CLOSE_WAIT: u8 = 5;
-const TCP_STATE_LAST_ACK: u8 = 6;
-const TCP_STATE_SYN_SENT: u8 = 7;
-const TCP_FLAG_FIN: u8 = 0x01;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_FLAG_RST: u8 = 0x04;
-const TCP_FLAG_ACK: u8 = 0x10;
-const TCP_WINDOW_DEFAULT: u16 = 0xffff;
 const DNS_QUERY_TIMEOUT_MS: Word = 1200;
 const REQUEST_PUMP_BURST: usize = 64;
 const BACKEND_PUMP_DEFAULT_BURST: usize = 128;
@@ -118,41 +123,6 @@ impl NetStats {
             tcp_rx: 0,
         }
     }
-}
-
-#[derive(Clone, Copy)]
-struct TcpConnection {
-    active: bool,
-    owner_id: Word,
-    connection_id: Word,
-    accepted: bool,
-    eof_pending: bool,
-    state: u8,
-    peer_ip: [u8; 4],
-    peer_port: u16,
-    local_port: u16,
-    snd_iss: u32,
-    snd_nxt: u32,
-    snd_una: u32,
-    rcv_nxt: u32,
-}
-
-impl TcpConnection {
-    const EMPTY: Self = Self {
-        active: false,
-        owner_id: 0,
-        connection_id: 0,
-        accepted: false,
-        eof_pending: false,
-        state: TCP_STATE_CLOSED,
-        peer_ip: [0; 4],
-        peer_port: 0,
-        local_port: 0,
-        snd_iss: 0,
-        snd_nxt: 0,
-        snd_una: 0,
-        rcv_nxt: 0,
-    };
 }
 
 #[derive(Clone, Copy)]
@@ -364,101 +334,6 @@ impl UdpRxQueue {
 }
 
 #[derive(Clone, Copy)]
-struct TcpRxEntry {
-    used: bool,
-    owner_id: Word,
-    connection_id: Word,
-    src_ip: [u8; 4],
-    src_port: u16,
-    len: usize,
-    payload: [u8; TCP_PAYLOAD_MAX],
-}
-
-impl TcpRxEntry {
-    const EMPTY: Self = Self {
-        used: false,
-        owner_id: 0,
-        connection_id: 0,
-        src_ip: [0; 4],
-        src_port: 0,
-        len: 0,
-        payload: [0; TCP_PAYLOAD_MAX],
-    };
-}
-
-#[derive(Clone, Copy)]
-struct TcpRxQueue {
-    entries: [TcpRxEntry; TCP_RX_QUEUE_CAP],
-    head: usize,
-    tail: usize,
-    count: usize,
-}
-
-impl TcpRxQueue {
-    const fn new() -> Self {
-        Self {
-            entries: [TcpRxEntry::EMPTY; TCP_RX_QUEUE_CAP],
-            head: 0,
-            tail: 0,
-            count: 0,
-        }
-    }
-
-    fn push(&mut self, mut entry: TcpRxEntry) -> bool {
-        if self.count == self.entries.len() {
-            return false;
-        }
-        entry.used = true;
-        self.entries[self.tail] = entry;
-        self.tail = (self.tail + 1) % self.entries.len();
-        self.count += 1;
-        true
-    }
-
-    fn pop_for(&mut self, owner_id: Word, connection_id: Word) -> Option<TcpRxEntry> {
-        let pending = self.count;
-        let mut checked = 0usize;
-        while checked < pending {
-            let e = self.pop_front()?;
-            if e.owner_id == owner_id && (connection_id == 0 || e.connection_id == connection_id) {
-                return Some(e);
-            }
-            let _ = self.push(e);
-            checked += 1;
-        }
-        None
-    }
-
-    fn pop_front(&mut self) -> Option<TcpRxEntry> {
-        if self.count == 0 {
-            return None;
-        }
-        let entry = self.entries[self.head];
-        self.entries[self.head] = TcpRxEntry::EMPTY;
-        self.head = (self.head + 1) % self.entries.len();
-        self.count -= 1;
-        if entry.used {
-            Some(entry)
-        } else {
-            None
-        }
-    }
-
-    fn remove_owner(&mut self, owner_id: Word) {
-        let pending = self.count;
-        let mut checked = 0usize;
-        while checked < pending {
-            if let Some(entry) = self.pop_front() {
-                if entry.owner_id != owner_id {
-                    let _ = self.push(entry);
-                }
-            }
-            checked += 1;
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 struct RawRxEntry {
     used: bool,
     owner_id: Word,
@@ -549,32 +424,18 @@ impl RawRxQueue {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ArpCache {
-    valid: bool,
-    ip: [u8; 4],
-    mac: [u8; 6],
-}
-
-impl ArpCache {
-    const EMPTY: Self = Self {
-        valid: false,
-        ip: [0; 4],
-        mac: [0; 6],
-    };
-}
-
 struct NetRuntime {
     net_device_port: Word,
     timer_port: Option<Word>,
     backend_shm_local: Word,
+    backend_rx_batch: bool,
     mac: [u8; 6],
     ip: [u8; 4],
     gateway_ip: [u8; 4],
     dns_ip: [u8; 4],
     arp: ArpCache,
     tcp_connections: [TcpConnection; TCP_MAX_CONNECTIONS],
-    next_tcp_connection_id: Word,
+    tcp_index: TcpIndex,
     sessions: [ClientSession; CLIENT_SESSION_MAX],
     udp_rx: UdpRxQueue,
     icmp_rx: IcmpRxQueue,
@@ -630,11 +491,11 @@ fn cleanup_client_session(runtime: &mut NetRuntime, index: usize) {
 
     runtime.udp_rx.remove_owner(session.caller_id);
     runtime.icmp_rx.remove_owner(session.caller_id);
-    runtime.tcp_rx.remove_owner(session.caller_id);
     runtime.raw_rx.remove_owner(session.caller_id);
-    for connection in runtime.tcp_connections.iter_mut() {
+    for index in 0..runtime.tcp_connections.len() {
+        let connection = &runtime.tcp_connections[index];
         if connection.active && connection.owner_id == session.caller_id {
-            *connection = TcpConnection::EMPTY;
+            tcp::tcp_reset(runtime, index);
         }
     }
     if session.shm_local != 0 && session.shm_size != 0 {
@@ -722,53 +583,6 @@ fn next_hop_ip(runtime: &NetRuntime, destination: [u8; 4]) -> [u8; 4] {
     }
 }
 
-fn pump_backend(runtime: &mut NetRuntime, stats: &mut NetStats) -> Word {
-    pump_backend_with_budget(runtime, stats, BACKEND_PUMP_DEFAULT_BURST)
-}
-
-fn pump_backend_with_budget(
-    runtime: &mut NetRuntime,
-    stats: &mut NetStats,
-    max_frames: usize,
-) -> Word {
-    let mut processed = 0usize;
-    while processed < max_frames {
-        let received = match nanami_services::net::net_device_recv(
-            runtime.net_device_port,
-            BACKEND_RX_OFFSET,
-            1536,
-        ) {
-            Ok(n) => n as usize,
-            Err(_) => break,
-        };
-        if received == 0 {
-            break;
-        }
-
-        unsafe {
-            let frame = core::slice::from_raw_parts(
-                get_backend_shm_ptr(runtime, BACKEND_RX_OFFSET) as *const u8,
-                received,
-            );
-            let sessions = runtime.sessions;
-            for session in sessions {
-                if session.active && session.raw_rx_enabled {
-                    runtime.raw_rx.push(session.caller_id, frame);
-                }
-            }
-            process_ethernet_frame(runtime, stats, frame);
-        }
-
-        stats.rx_packets = stats.rx_packets.wrapping_add(1);
-        stats.rx_bytes = stats.rx_bytes.wrapping_add(received as Word);
-        processed += 1;
-    }
-
-    if processed != 0 {
-        notify_client_sessions(runtime);
-    }
-    processed as Word
-}
 
 fn notify_client_sessions(runtime: &NetRuntime) {
     for session in runtime.sessions {
@@ -778,227 +592,6 @@ fn notify_client_sessions(runtime: &NetRuntime) {
     }
 }
 
-fn handle_tcp_recv_request(
-    runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
-) -> (Word, Word, Word) {
-    let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    };
-
-    let entry = runtime.tcp_rx.pop_for(request.identifier, request.arg3);
-    let Some(entry) = entry else {
-        let mut index = 0usize;
-        while index < runtime.tcp_connections.len() {
-            let conn = runtime.tcp_connections[index];
-            if conn.active
-                && conn.owner_id == request.identifier
-                && conn.eof_pending
-                && (request.arg3 == 0 || conn.connection_id == request.arg3)
-            {
-                runtime.tcp_connections[index].eof_pending = false;
-                return (libnanami::OS_RESPONSE_OK, 0, conn.connection_id);
-            }
-            index += 1;
-        }
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
-    };
-
-    let meta_offset = request.arg0;
-    let payload_offset = request.arg1;
-    let max_len = request.arg2 as usize;
-    let copy_len = min(entry.len, max_len);
-    if meta_offset + TCP_RX_META_LEN as Word > session.shm_size
-        || payload_offset + copy_len as Word > session.shm_size
-    {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
-    }
-
-    unsafe {
-        let meta = (session.shm_local + meta_offset) as *mut u8;
-        let payload = (session.shm_local + payload_offset) as *mut u8;
-
-        write_u32_be(
-            core::slice::from_raw_parts_mut(meta, 4),
-            ((entry.src_ip[0] as u32) << 24)
-                | ((entry.src_ip[1] as u32) << 16)
-                | ((entry.src_ip[2] as u32) << 8)
-                | (entry.src_ip[3] as u32),
-        );
-        write_u16_be(
-            core::slice::from_raw_parts_mut(meta.add(4), 2),
-            entry.src_port,
-        );
-        write_u16_be(
-            core::slice::from_raw_parts_mut(meta.add(6), 2),
-            copy_len as u16,
-        );
-        write_u32_be(
-            core::slice::from_raw_parts_mut(meta.add(8), 4),
-            entry.connection_id as u32,
-        );
-        ptr::copy_nonoverlapping(entry.payload.as_ptr(), payload, copy_len);
-    }
-
-    (
-        libnanami::OS_RESPONSE_OK,
-        copy_len as Word,
-        entry.connection_id,
-    )
-}
-
-fn active_tcp_connection_index(
-    runtime: &NetRuntime,
-    owner_id: Word,
-    connection_id: Word,
-) -> Option<usize> {
-    if connection_id == 0 {
-        let mut index = 0usize;
-        while index < runtime.tcp_connections.len() {
-            if runtime.tcp_connections[index].active
-                && runtime.tcp_connections[index].owner_id == owner_id
-            {
-                return Some(index);
-            }
-            index += 1;
-        }
-        return None;
-    }
-    let index = (connection_id - 1) as usize;
-    if index < runtime.tcp_connections.len()
-        && runtime.tcp_connections[index].active
-        && runtime.tcp_connections[index].owner_id == owner_id
-        && runtime.tcp_connections[index].connection_id == connection_id
-    {
-        return Some(index);
-    }
-    let mut index = 0usize;
-    while index < runtime.tcp_connections.len() {
-        let conn = runtime.tcp_connections[index];
-        if conn.active && conn.owner_id == owner_id && conn.connection_id == connection_id {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn handle_tcp_send_request(
-    runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
-    stats: &mut NetStats,
-) -> (Word, Word, Word) {
-    let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
-    };
-    let Some(connection_index) =
-        active_tcp_connection_index(runtime, request.identifier, request.arg3)
-    else {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
-    };
-
-    let payload_offset = request.arg0;
-    let payload_len = request.arg1 as usize;
-    let flags = (request.arg2 & 0xff) as u8;
-    if payload_offset + payload_len as Word > session.shm_size {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
-    }
-
-    let peer_ip = runtime.tcp_connections[connection_index].peer_ip;
-    let next_hop = next_hop_ip(runtime, peer_ip);
-    let dst_mac = if let Some(mac) = arp_lookup(runtime, next_hop) {
-        mac
-    } else {
-        let _ = emit_arp_request(runtime, next_hop);
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
-    };
-
-    let mut total_payload_sent = 0usize;
-    let mut current_offset = payload_offset;
-    let mut remaining = payload_len;
-
-    if remaining == 0 {
-        let conn = runtime.tcp_connections[connection_index];
-        match emit_tcp_segment(
-            runtime,
-            dst_mac,
-            conn.peer_ip,
-            conn.local_port,
-            conn.peer_port,
-            conn.snd_nxt,
-            conn.rcv_nxt,
-            flags,
-            &[],
-        ) {
-            Ok(_) => {
-                if (flags & TCP_FLAG_FIN) != 0 {
-                    let conn = &mut runtime.tcp_connections[connection_index];
-                    conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                    conn.state = if conn.state == TCP_STATE_CLOSE_WAIT {
-                        TCP_STATE_LAST_ACK
-                    } else {
-                        TCP_STATE_FIN_WAIT1
-                    };
-                }
-                stats.tcp_tx = stats.tcp_tx.wrapping_add(1);
-                return (libnanami::OS_RESPONSE_OK, 0, 0);
-            }
-            Err(e) => return (map_request_error_to_status(e), 0, 0),
-        }
-    }
-
-    while remaining > 0 {
-        let chunk = min(remaining, TCP_PAYLOAD_MAX);
-        let mut seg_flags = flags;
-        if remaining > chunk {
-            seg_flags &= !TCP_FLAG_FIN;
-        }
-        let conn = runtime.tcp_connections[connection_index];
-
-        let send_result = unsafe {
-            let src = (session.shm_local + current_offset) as *const u8;
-            let payload = core::slice::from_raw_parts(src, chunk);
-            emit_tcp_segment(
-                runtime,
-                dst_mac,
-                conn.peer_ip,
-                conn.local_port,
-                conn.peer_port,
-                conn.snd_nxt,
-                conn.rcv_nxt,
-                seg_flags,
-                payload,
-            )
-        };
-        match send_result {
-            Ok(_) => {
-                let conn = &mut runtime.tcp_connections[connection_index];
-                conn.snd_nxt = conn.snd_nxt.wrapping_add(chunk as u32);
-                if (seg_flags & TCP_FLAG_FIN) != 0 {
-                    conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                    conn.state = if conn.state == TCP_STATE_CLOSE_WAIT {
-                        TCP_STATE_LAST_ACK
-                    } else {
-                        TCP_STATE_FIN_WAIT1
-                    };
-                }
-                stats.tcp_tx = stats.tcp_tx.wrapping_add(1);
-                total_payload_sent += chunk;
-                current_offset += chunk as Word;
-                remaining -= chunk;
-            }
-            Err(e) => {
-                return (
-                    map_request_error_to_status(e),
-                    total_payload_sent as Word,
-                    0,
-                )
-            }
-        }
-    }
-
-    (libnanami::OS_RESPONSE_OK, total_payload_sent as Word, 0)
-}
 
 fn handle_tcp_accept_request(
     runtime: &mut NetRuntime,
@@ -1071,7 +664,7 @@ fn handle_tcp_connect_request(
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
-    for conn in runtime.tcp_connections {
+    for conn in &runtime.tcp_connections {
         if conn.active
             && conn.owner_id == request.identifier
             && conn.local_port == local_port
@@ -1095,9 +688,11 @@ fn handle_tcp_connect_request(
     let Some(index) = tcp::allocate_tcp_connection(runtime) else {
         return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
-    let connection_id = runtime.next_tcp_connection_id;
-    runtime.next_tcp_connection_id = runtime.next_tcp_connection_id.wrapping_add(1).max(1);
     let iss = 0x414c_5445u32.wrapping_add((index as u32) << 12);
+    tcp::tcp_reset(runtime, index);
+    let connection_id = runtime
+        .tcp_index
+        .insert(index, peer_ip, peer_port, local_port);
     runtime.tcp_connections[index] = TcpConnection {
         active: true,
         owner_id: request.identifier,
@@ -1122,6 +717,7 @@ fn handle_tcp_connect_request(
         iss,
         0,
         TCP_FLAG_SYN,
+        runtime.tcp_rx.window(index),
         &[],
     ) {
         Ok(_) => {
@@ -1129,7 +725,7 @@ fn handle_tcp_connect_request(
             (libnanami::OS_RESPONSE_OK, 0, 0)
         }
         Err(error) => {
-            runtime.tcp_connections[index] = TcpConnection::EMPTY;
+            tcp::tcp_reset(runtime, index);
             (map_request_error_to_status(error), 0, 0)
         }
     }
@@ -1420,7 +1016,7 @@ fn handle_network_request(
             if runtime.tcp_rx.count == 0 {
                 let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
             }
-            handle_tcp_recv_request(runtime, request)
+            handle_tcp_recv_request(runtime, request, stats)
         }
         nanami_services::net::NET_SERVICE_REQUEST_TCP_SEND => {
             handle_tcp_send_request(runtime, request, stats)
@@ -1585,21 +1181,32 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
+    let backend_rx_batch = matches!(
+        nanami_services::net::net_device_control_ex(
+            net_device_port,
+            nanami_services::net::NET_DEVICE_CONTROL_GET_FEATURES,
+            0,
+            0,
+        ),
+        Ok((libnanami::OS_RESPONSE_OK, features, _))
+            if features & nanami_services::net::NET_DEVICE_FEATURE_RECV_BATCH != 0
+    );
     let mut runtime = NetRuntime {
         net_device_port,
         timer_port,
         backend_shm_local: backend_local_vaddr,
+        backend_rx_batch,
         mac,
         ip: [10, 0, 2, 15],
         gateway_ip: [10, 0, 2, 2],
         dns_ip: [10, 0, 2, 3],
         arp: ArpCache::EMPTY,
         tcp_connections: [TcpConnection::EMPTY; TCP_MAX_CONNECTIONS],
-        next_tcp_connection_id: 1,
+        tcp_index: TcpIndex::EMPTY,
         sessions: [ClientSession::EMPTY; CLIENT_SESSION_MAX],
         udp_rx: UdpRxQueue::new(),
         icmp_rx: IcmpRxQueue::new(),
-        tcp_rx: TcpRxQueue::new(),
+        tcp_rx: TcpRxQueue::new(unsafe { &mut *core::ptr::addr_of_mut!(TCP_RX_BUFFERS) }),
         raw_rx: RawRxQueue::new(),
         dhcp_waiting: false,
         dhcp_xid: 0,

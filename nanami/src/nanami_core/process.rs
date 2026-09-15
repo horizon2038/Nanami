@@ -79,6 +79,7 @@ pub struct ProcessManager {
     next_affinity: Word,
     root_slot_limit: usize,
     reserved_root_slots: &'static [usize],
+    // Keep PID tables sorted: request-time lookups need no scan or auxiliary cache.
     entries: Vec<ProcessEntry>,
     used_root_slots: Vec<usize>,
     vm_spaces: Vec<ProcessVmSpace>,
@@ -140,7 +141,10 @@ impl ProcessManager {
         online_core_count: Word,
     ) -> Result<Self, CapabilityError> {
         if !(1..=A9N_CPU_COUNT_MAX).contains(&online_core_count) {
-            crate::error!("[smp.err] invalid init_info.core_count={}", online_core_count);
+            crate::error!(
+                "[smp.err] invalid init_info.core_count={}",
+                online_core_count
+            );
             return Err(CapabilityError::InvalidArgument);
         }
         crate::info!("process: ProcessManager::new_alpha");
@@ -229,25 +233,26 @@ impl ProcessManager {
     }
 
     pub fn vm_space_mut(&mut self, pid: usize) -> Option<&mut VmSpace> {
-        for vm in self.vm_spaces.iter_mut() {
-            if vm.pid == pid {
-                return Some(vm.space.as_mut());
-            }
-        }
-        None
+        let index = self
+            .vm_spaces
+            .binary_search_by_key(&pid, |vm| vm.pid)
+            .ok()?;
+        Some(self.vm_spaces[index].space.as_mut())
     }
 
     pub fn ensure_vm_space_for_pid(&mut self, pid: usize) -> Result<(), CapabilityError> {
         if pid == 0 {
             return Ok(());
         }
-        if self.vm_space_mut(pid).is_some() {
-            return Ok(());
+        if let Err(index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
+            self.vm_spaces.insert(
+                index,
+                ProcessVmSpace {
+                    pid,
+                    space: Box::new(VmSpace::new()),
+                },
+            );
         }
-        self.vm_spaces.push(ProcessVmSpace {
-            pid,
-            space: Box::new(VmSpace::new()),
-        });
         Ok(())
     }
 
@@ -255,9 +260,11 @@ impl ProcessManager {
         if pid == 0 {
             return Some(&mut self.alpha_entry);
         }
-        self.entries
-            .iter_mut()
-            .find(|entry| entry.used && entry.pid == pid)
+        let index = self
+            .entries
+            .binary_search_by_key(&pid, |entry| entry.pid)
+            .ok()?;
+        self.entries.get_mut(index).filter(|entry| entry.used)
     }
 
     pub fn has_frame_chunk(&self, pid: usize, chunk_index: usize) -> bool {
@@ -463,8 +470,8 @@ impl ProcessManager {
         entry.exit_code = 0;
 
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
-        if let Some(vm) = self.vm_spaces.iter_mut().find(|vm| vm.pid == pid) {
-            vm.space = Box::new(VmSpace::new());
+        if let Some(vm) = self.vm_space_mut(pid) {
+            *vm = VmSpace::new();
         }
 
         let mut allocations = Vec::new();
@@ -576,12 +583,10 @@ impl ProcessManager {
             return Ok(());
         }
 
-        if let Some(existing) = self.entry_mut_by_pid(pid) {
-            *existing = entry;
-            return Ok(());
+        match self.entries.binary_search_by_key(&pid, |entry| entry.pid) {
+            Ok(index) => self.entries[index] = entry,
+            Err(index) => self.entries.insert(index, entry),
         }
-
-        self.entries.push(entry);
         Ok(())
     }
 
@@ -614,8 +619,8 @@ impl ProcessManager {
 
     pub fn discard_process_artifacts(&mut self, pid: usize, root_slot: usize) {
         self.release_process_slot_reservation(root_slot);
-        if let Some(vm_index) = self.vm_spaces.iter().position(|vm| vm.pid == pid) {
-            self.vm_spaces.swap_remove(vm_index);
+        if let Ok(vm_index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
+            self.vm_spaces.remove(vm_index);
         }
         self.frame_chunks.retain(|chunk| chunk.pid != pid);
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
@@ -632,12 +637,11 @@ impl ProcessManager {
         if pid == 0 && self.alpha_entry.used {
             return Some(self.alpha_entry);
         }
-        for entry in self.entries.iter() {
-            if entry.used && entry.pid == pid {
-                return Some(*entry);
-            }
-        }
-        None
+        let index = self
+            .entries
+            .binary_search_by_key(&pid, |entry| entry.pid)
+            .ok()?;
+        self.entries.get(index).filter(|entry| entry.used).copied()
     }
 
     pub fn statistics(&self) -> ProcessStatistics {
@@ -679,18 +683,17 @@ impl ProcessManager {
         if pid == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
-        let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.used && entry.pid == pid)
-        else {
+        let Ok(index) = self.entries.binary_search_by_key(&pid, |entry| entry.pid) else {
             return Err(CapabilityError::InvalidArgument);
         };
+        if !self.entries[index].used {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if !self.entries[index].exited {
             return Err(CapabilityError::IllegalOperation);
         }
         let root_slot = self.entries[index].root_slot;
-        self.entries.swap_remove(index);
+        self.entries.remove(index);
 
         if release_root_slot {
             if let Some(slot_index) = self
@@ -701,8 +704,8 @@ impl ProcessManager {
                 self.used_root_slots.swap_remove(slot_index);
             }
         }
-        if let Some(vm_index) = self.vm_spaces.iter().position(|vm| vm.pid == pid) {
-            self.vm_spaces.swap_remove(vm_index);
+        if let Ok(vm_index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
+            self.vm_spaces.remove(vm_index);
         }
         self.frame_chunks.retain(|chunk| chunk.pid != pid);
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);

@@ -14,6 +14,12 @@ The Alpha mapping and Alter vectored-I/O follow-up is documented in
 The module split and POSIX delegated-write follow-up is documented in
 [Alter / POSIX I/O](posix-io.md).
 
+The lookup, timer, storage and input follow-up is documented in
+[Core and server hot-path review](core-servers.md).
+
+The HTTP ARP, TCP receive-flow-control, and NIC backlog regression tests are documented in
+[HTTP / network regressions](../network/README.md).
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

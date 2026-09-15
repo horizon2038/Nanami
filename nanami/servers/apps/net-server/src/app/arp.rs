@@ -71,21 +71,17 @@ pub(crate) fn emit_gratuitous_arp_reply(runtime: &NetRuntime) -> Result<(), Requ
 }
 
 pub(crate) fn arp_lookup(runtime: &NetRuntime, ip: [u8; 4]) -> Option<[u8; 6]> {
-    if runtime.arp.valid && runtime.arp.ip == ip {
-        Some(runtime.arp.mac)
-    } else {
-        None
-    }
+    runtime.arp.lookup(ip)
 }
 
 pub(crate) fn update_arp(runtime: &mut NetRuntime, ip: [u8; 4], mac: [u8; 6]) {
-    runtime.arp.valid = true;
-    runtime.arp.ip = ip;
-    runtime.arp.mac = mac;
+    if ip[0] != 0 && ip[0] < 224 && mac != [0; 6] && mac[0] & 1 == 0 {
+        runtime.arp.update(ip, mac);
+    }
 }
 
 pub(crate) fn process_arp(runtime: &mut NetRuntime, frame: &[u8]) {
-    if frame.len() < 42 {
+    if frame.len() < 42 || frame[14..20] != [0, 1, 0x08, 0, 6, 4] {
         return;
     }
     let oper = read_u16_be(&frame[20..22]);
@@ -95,12 +91,13 @@ pub(crate) fn process_arp(runtime: &mut NetRuntime, frame: &[u8]) {
     let sender_ip = [frame[28], frame[29], frame[30], frame[31]];
     let target_ip = [frame[38], frame[39], frame[40], frame[41]];
 
-    if oper == 2 {
+    if oper == 2 && (target_ip == runtime.ip || arp_lookup(runtime, sender_ip).is_some()) {
         update_arp(runtime, sender_ip, sender_mac);
         return;
     }
 
     if oper == 1 && target_ip == runtime.ip {
+        update_arp(runtime, sender_ip, sender_mac);
         let _ = emit_arp_reply(runtime, sender_mac, sender_ip);
     }
 }

@@ -5,6 +5,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{self, RequestError, Word};
 
+mod state;
+use state::*;
+
+mod distribution;
+use distribution::*;
+
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_NOTIFICATION: Word = libnanami::PROCESS_SLOT_NOTIFICATION;
 const SLOT_SUBSCRIBER_NOTIFICATION_BASE: Word = 32;
@@ -17,136 +23,6 @@ const SHARED_QUEUE_CAPACITY: usize = nanami_services::input::INPUT_EVENT_QUEUE_C
 const INPUT_NOTIFICATION_IDENTIFIER: Word = nanami_services::input::INPUT_NOTIFICATION_IDENTIFIER;
 const INPUT_DRIVER_NOTIFICATION_IDENTIFIER: Word =
     nanami_services::input::INPUT_DRIVER_NOTIFICATION_IDENTIFIER;
-
-#[derive(Clone, Copy)]
-struct EventQueue {
-    values: [Word; EVENT_QUEUE_CAPACITY],
-    head: usize,
-    tail: usize,
-    count: usize,
-}
-
-impl EventQueue {
-    const fn new() -> Self {
-        Self {
-            values: [0; EVENT_QUEUE_CAPACITY],
-            head: 0,
-            tail: 0,
-            count: 0,
-        }
-    }
-
-    fn push(&mut self, value: Word) {
-        if self.count == EVENT_QUEUE_CAPACITY {
-            self.head = (self.head + 1) % EVENT_QUEUE_CAPACITY;
-            self.count -= 1;
-        }
-        self.values[self.tail] = value;
-        self.tail = (self.tail + 1) % EVENT_QUEUE_CAPACITY;
-        self.count += 1;
-    }
-
-    fn push_with_event_kind(&mut self, event_kind: Word, value: Word) {
-        if event_kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE && self.count > 0 {
-            let last_index = if self.tail == 0 {
-                EVENT_QUEUE_CAPACITY - 1
-            } else {
-                self.tail - 1
-            };
-            let last_kind = self.values[last_index] & 0xff;
-            if last_kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE {
-                // Coalesce mouse move events to keep latest pointer position delta.
-                self.values[last_index] = value;
-                return;
-            }
-        }
-        self.push(value);
-    }
-
-    fn pop(&mut self) -> Option<Word> {
-        if self.count == 0 {
-            return None;
-        }
-        let value = self.values[self.head];
-        self.head = (self.head + 1) % EVENT_QUEUE_CAPACITY;
-        self.count -= 1;
-        Some(value)
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Subscriber {
-    used: bool,
-    pid: Word,
-    event_mask: Word,
-    notification_descriptor: Word,
-    shared_queue_local: Word,
-    shared_queue_peer: Word,
-    shared_queue_bytes: Word,
-    shared_mouse_since_notify: usize,
-    queue: EventQueue,
-}
-
-impl Subscriber {
-    const EMPTY: Self = Self {
-        used: false,
-        pid: 0,
-        event_mask: 0,
-        notification_descriptor: 0,
-        shared_queue_local: 0,
-        shared_queue_peer: 0,
-        shared_queue_bytes: 0,
-        shared_mouse_since_notify: 0,
-        queue: EventQueue::new(),
-    };
-}
-
-#[derive(Clone, Copy)]
-struct DriverQueue {
-    used: bool,
-    pid: Word,
-    local_vaddr: Word,
-    peer_vaddr: Word,
-    bytes: Word,
-}
-
-impl DriverQueue {
-    const EMPTY: Self = Self {
-        used: false,
-        pid: 0,
-        local_vaddr: 0,
-        peer_vaddr: 0,
-        bytes: 0,
-    };
-}
-
-struct InputState {
-    subscribers: [Subscriber; MAX_SUBSCRIBERS],
-    driver_queues: [DriverQueue; MAX_DRIVER_QUEUES],
-    keyboard_driver_attached: bool,
-    keyboard_driver_pid: Word,
-    mouse_driver_attached: bool,
-    mouse_driver_pid: Word,
-    sequence: Word,
-    published_count: usize,
-    delivered_count: usize,
-}
-
-impl InputState {
-    const fn new() -> Self {
-        Self {
-            subscribers: [Subscriber::EMPTY; MAX_SUBSCRIBERS],
-            driver_queues: [DriverQueue::EMPTY; MAX_DRIVER_QUEUES],
-            keyboard_driver_attached: false,
-            keyboard_driver_pid: 0,
-            mouse_driver_attached: false,
-            mouse_driver_pid: 0,
-            sequence: 0,
-            published_count: 0,
-            delivered_count: 0,
-        }
-    }
-}
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -480,89 +356,6 @@ fn is_authorized_event_from_pid(pid: Word, event_kind: Word, state: &InputState)
             state.mouse_driver_attached && pid == state.mouse_driver_pid
         }
         _ => false,
-    }
-}
-
-fn drain_driver_queues(state: &mut InputState) -> usize {
-    let mut delivered_total = 0usize;
-    let mut i = 0usize;
-    while i < MAX_DRIVER_QUEUES {
-        if state.driver_queues[i].used {
-            let pid = state.driver_queues[i].pid;
-            let queue = state.driver_queues[i].local_vaddr;
-            let mut budget = 0usize;
-            while budget < 512 {
-                let packed = match pop_shared_event(queue) {
-                    Some(value) => value,
-                    None => break,
-                };
-                let event_kind = packed & 0xff;
-                if is_authorized_event_from_pid(pid, event_kind, state) {
-                    delivered_total =
-                        delivered_total.wrapping_add(distribute_event(state, event_kind, packed));
-                    state.published_count = state.published_count.wrapping_add(1);
-                }
-                budget += 1;
-            }
-        }
-        i += 1;
-    }
-    delivered_total
-}
-
-fn distribute_event(state: &mut InputState, event_kind: Word, packed: Word) -> usize {
-    let required_mask = mask_for_event_kind(event_kind);
-    let mut delivered = 0usize;
-    let mut i = 0usize;
-    while i < MAX_SUBSCRIBERS {
-        if state.subscribers[i].used && (state.subscribers[i].event_mask & required_mask) != 0 {
-            let should_notify = if state.subscribers[i].shared_queue_local != 0 {
-                distribute_shared_event(&mut state.subscribers[i], event_kind, packed)
-            } else {
-                distribute_local_event(&mut state.subscribers[i], event_kind, packed)
-            };
-            if should_notify && state.subscribers[i].notification_descriptor != 0 {
-                let _ = libnanami::ipc::notification_notify(
-                    state.subscribers[i].notification_descriptor,
-                );
-            }
-            delivered += 1;
-            state.delivered_count = state.delivered_count.wrapping_add(1);
-        }
-        i += 1;
-    }
-    delivered
-}
-
-fn distribute_local_event(subscriber: &mut Subscriber, event_kind: Word, packed: Word) -> bool {
-    let was_empty = subscriber.queue.count == 0;
-    subscriber.queue.push_with_event_kind(event_kind, packed);
-    event_kind != nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE || was_empty
-}
-
-fn distribute_shared_event(subscriber: &mut Subscriber, event_kind: Word, packed: Word) -> bool {
-    push_shared_event_with_kind(subscriber.shared_queue_local, event_kind, packed);
-
-    if event_kind != nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE {
-        subscriber.shared_mouse_since_notify = 0;
-        return true;
-    }
-
-    subscriber.shared_mouse_since_notify = subscriber.shared_mouse_since_notify.wrapping_add(1);
-    true
-}
-
-fn mask_for_event_kind(event_kind: Word) -> Word {
-    match event_kind {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => {
-            nanami_services::input::INPUT_SUBSCRIBE_KEYBOARD
-        }
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
-            nanami_services::input::INPUT_SUBSCRIBE_MOUSE
-        }
-        _ => 0,
     }
 }
 

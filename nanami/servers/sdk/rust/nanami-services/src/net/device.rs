@@ -46,6 +46,26 @@ pub fn net_device_recv(
     Ok(detail0)
 }
 
+pub fn net_device_recv_batch(
+    device_port: CapabilityDescriptor,
+    buffer_offset: Word,
+    slots: Word,
+) -> Result<Word, RequestError> {
+    let (status, count, _) = call_port(
+        device_port,
+        super::constants::NET_DEVICE_REQUEST_RECV_BATCH,
+        buffer_offset,
+        slots,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(count)
+}
+
 pub fn net_device_control(
     device_port: CapabilityDescriptor,
     control_code: Word,

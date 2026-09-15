@@ -60,7 +60,7 @@ Drivers and subsystem servers are not linked into Alpha or the microkernel.
 
 - Capability-based process, memory, device, and service management
 - A user-space Device Driver Manager that selects platform drivers at boot
-- User-space drivers for AHCI, virtio block/network, HPET, PIT, PS/2, RTC, and
+- User-space drivers for AHCI, virtio block/network, HPET, PIT, PS/2, USB xHCI HID, RTC, and
   the boot framebuffer
 - ext2 root filesystem with application and service manifests
 - IPv4 networking with DHCP, ARP, ICMP, UDP, DNS, and TCP support
@@ -213,6 +213,7 @@ Useful run-time options include:
 | `QEMU_SMP` | `4` | Guest CPU count (1–64) |
 | `QEMU_ACCEL` | `auto` | QEMU accelerator, or `none` |
 | `QEMU_HPET` | `on` | x86_64 HPET exposure; use `off` to test the PIT fallback |
+| `USB_INPUT` | `off` | x86_64: `on` adds xHCI with a USB boot keyboard/mouse; PS/2 remains available |
 | `STORAGE_DEVICE` | `ahci` | x86_64 root disk controller: `ahci` or `virtio` |
 | `BLOCK_IMAGE` | `out/ext2.img` or `out/ext2-aarch64.img` | ext2 staging image; on x86_64 it is embedded in `spencer.img` |
 | `SIZE_MB` | `64` | Default root filesystem size |
@@ -222,6 +223,25 @@ With user networking, guest TCP port 80 is forwarded to
 `127.0.0.1:1234` by default. This can be changed with `HOSTFWD_HTTP`.
 `QEMU_ACCEL=auto` uses KVM on Linux when available, HVF on Intel macOS, and
 software emulation for x86_64 guests on Apple Silicon.
+
+To use an emulated USB keyboard and mouse:
+
+```bash
+USB_INPUT=on QEMU_HPET=on STORAGE_DEVICE=ahci make run
+```
+
+Driver Manager discovers/configures PCI xHCI before starting hardware drivers;
+`usb-server` enumerates USB 1.x/2.0 HID Boot Protocol devices on root ports and
+forwards events to `input-server`. Multiple USB devices and PS/2 can coexist.
+The initial implementation excludes external hubs, EHCI/OHCI/UHCI, report-only
+HID/NKRO, wheel reports, keyboard LEDs, USB storage and AArch64 USB.
+USB support does not enable booting the root filesystem from a USB drive.
+
+The current USB profile requires a firmware-assigned controller BAR below
+4 GiB. `USB_INPUT=on` sets OVMF's `opt/ovmf/X-PciMmio64Mb=0` to avoid Alpha's
+existing sparse high-MMIO limitation. The driver refuses higher BARs without
+relocating them. Physical hardware is not yet validated; connect compatible
+devices directly to xHCI-controlled ports. See [USB validation and limits](tests/usb/README.md).
 
 ## Boot on x86_64 hardware
 

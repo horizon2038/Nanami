@@ -7,8 +7,8 @@ pub(super) fn drain_driver_queues(state: &mut InputState) -> usize {
     let mut notifications = 0;
     let mut i = 0usize;
     while i < MAX_DRIVER_QUEUES {
-        if state.driver_queues[i].used {
-            let pid = state.driver_queues[i].pid;
+        if state.driver_queues[i].used && state.driver_queues[i].local_vaddr != 0 {
+            let mask = state.driver_queues[i].event_mask;
             let queue = state.driver_queues[i].local_vaddr;
             let mut budget = 0usize;
             while budget < 512 {
@@ -17,7 +17,7 @@ pub(super) fn drain_driver_queues(state: &mut InputState) -> usize {
                     None => break,
                 };
                 let event_kind = packed & 0xff;
-                if is_authorized_event_from_pid(pid, event_kind, state) {
+                if mask & mask_for_event_kind(event_kind) != 0 {
                     let (delivered, pending) = enqueue_event(state, event_kind, packed);
                     delivered_total = delivered_total.wrapping_add(delivered);
                     notifications |= pending;

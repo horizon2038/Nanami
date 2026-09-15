@@ -2,6 +2,16 @@ use libnanami::RequestError;
 
 use super::super::TimerSelection;
 
+pub fn usb_controller(_index: usize) -> Result<Option<libnanami::Word>, RequestError> {
+    Ok(None) // PCI host resource discovery for this platform is deferred.
+}
+
+pub fn prepare_usb_controller(
+    _: usize,
+) -> Result<nanami_services::device::UsbControllerResource, RequestError> {
+    Err(RequestError::Unsupported)
+}
+
 pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
     Ok(Some("./bin/virtio-blk-server"))
 }

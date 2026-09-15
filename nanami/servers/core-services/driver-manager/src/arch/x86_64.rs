@@ -4,14 +4,16 @@ use super::super::TimerSelection;
 
 #[path = "x86_64/acpi.rs"]
 mod acpi;
+#[path = "x86_64/usb.rs"]
+mod usb;
+pub use usb::prepare as prepare_usb_controller;
 
 const SLOT_PCI_CONFIG: Word = 16;
 const PCI_CONFIG_ADDRESS: Word = 0x0cf8;
 const PCI_CONFIG_DATA: Word = 0x0cfc;
 
-const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
-const PCI_SUBCLASS_SATA: u8 = 0x06;
-const PCI_PROG_IF_AHCI: u8 = 0x01;
+const PCI_CLASS_AHCI: u32 = 0x010601;
+const PCI_CLASS_XHCI: u32 = 0x0c0330;
 
 fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     0x8000_0000
@@ -37,7 +39,11 @@ fn read_config32(
     Ok(libnanami::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
 }
 
-fn has_ahci_controller(descriptor: Word) -> Result<bool, RequestError> {
+fn find_pci_class(
+    descriptor: Word,
+    wanted: u32,
+    mut index: usize,
+) -> Result<Option<Word>, RequestError> {
     let mut pending_buses = [0u8; 256];
     let mut seen_buses = [false; 256];
     let mut head = 0usize;
@@ -68,17 +74,20 @@ fn has_ahci_controller(descriptor: Word) -> Result<bool, RequestError> {
                 };
                 if (id as u16) != 0xffff {
                     let class = read_config32(descriptor, bus, device, function, 0x08)?;
-                    if (class >> 24) as u8 == PCI_CLASS_MASS_STORAGE
-                        && (class >> 16) as u8 == PCI_SUBCLASS_SATA
-                        && (class >> 8) as u8 == PCI_PROG_IF_AHCI
-                    {
-                        libnanami::println!(
-                            "[driver-manager] PCI AHCI at {:02x}:{:02x}.{}",
-                            bus,
-                            device,
-                            function
-                        );
-                        return Ok(true);
+                    if class >> 8 == wanted {
+                        if index == 0 {
+                            libnanami::println!(
+                                "[driver-manager] PCI class={:06x} at {:02x}:{:02x}.{}",
+                                wanted,
+                                bus,
+                                device,
+                                function
+                            );
+                            return Ok(Some(
+                                (bus as Word) << 16 | (device as Word) << 8 | function as Word,
+                            ));
+                        }
+                        index -= 1;
                     }
                     if (class >> 24) as u8 == 0x06 && (class >> 16) as u8 == 0x04 {
                         let buses = read_config32(descriptor, bus, device, function, 0x18)?;
@@ -95,13 +104,13 @@ fn has_ahci_controller(descriptor: Word) -> Result<bool, RequestError> {
             device += 1;
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
     libnanami::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
     let descriptor = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
-    let storage_image = if has_ahci_controller(descriptor)? {
+    let storage_image = if find_pci_class(descriptor, PCI_CLASS_AHCI, 0)?.is_some() {
         "./bin/ahci-server"
     } else {
         libnanami::print!(
@@ -110,6 +119,11 @@ pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
         "./bin/virtio-blk-server"
     };
     Ok(Some(storage_image))
+}
+
+pub fn usb_controller(index: usize) -> Result<Option<Word>, RequestError> {
+    let descriptor = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
+    find_pci_class(descriptor, PCI_CLASS_XHCI, index)
 }
 
 pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {

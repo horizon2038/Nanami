@@ -331,7 +331,7 @@ pub(super) fn process_priority_for_image(image_name: &str) -> Word {
         // Timer must preempt clients promptly; animation and network timeouts depend on it.
         "timer-server" | "hpet-server" => PROCESS_PRIORITY_TIMER_SERVER,
         // Input pipeline must stay above the compositor and every input consumer.
-        "input-server" | "ps2-server" => PROCESS_PRIORITY_INPUT_SERVER,
+        "input-server" | "ps2-server" | "usb-server" => PROCESS_PRIORITY_INPUT_SERVER,
         // GUI servers are above GUI clients, but below timer/input IRQ-facing services.
         "fb-server" | "honoka" => PROCESS_PRIORITY_GUI_SERVER,
         // Background servers stay above clients, but below the GUI critical path.

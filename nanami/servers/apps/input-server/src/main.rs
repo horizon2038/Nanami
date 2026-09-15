@@ -11,6 +11,9 @@ use state::*;
 mod distribution;
 use distribution::*;
 
+mod drivers;
+use drivers::*;
+
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_NOTIFICATION: Word = libnanami::PROCESS_SLOT_NOTIFICATION;
 const SLOT_SUBSCRIBER_NOTIFICATION_BASE: Word = 32;
@@ -237,25 +240,20 @@ fn handle_request(request: ServiceRequest, state: &mut InputState) -> (Word, Wor
                 (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
             }
         }
-        nanami_services::input::INPUT_SERVICE_REQUEST_ATTACH_DRIVER => match request.arg0 {
-            nanami_services::input::INPUT_DRIVER_KEYBOARD => {
-                state.keyboard_driver_attached = true;
-                state.keyboard_driver_pid = request.identifier;
-                libnanami::print!("[input-server] keyboard driver attached pid=");
-                libnanami::print!("{}", request.identifier);
-                libnanami::print!("\n");
-                (libnanami::OS_RESPONSE_OK, 0, 0)
+        nanami_services::input::INPUT_SERVICE_REQUEST_ATTACH_DRIVER => {
+            if driver_mask(request.arg0) == 0 || request.identifier == 0 {
+                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
-            nanami_services::input::INPUT_DRIVER_MOUSE => {
-                state.mouse_driver_attached = true;
-                state.mouse_driver_pid = request.identifier;
-                libnanami::print!("[input-server] mouse driver attached pid=");
-                libnanami::print!("{}", request.identifier);
-                libnanami::print!("\n");
-                (libnanami::OS_RESPONSE_OK, 0, 0)
+            if register_driver(state, request.identifier, request.arg0).is_none() {
+                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
-            _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-        },
+            libnanami::println!(
+                "[input-server] driver attached pid={} kind={}",
+                request.identifier,
+                request.arg0
+            );
+            (libnanami::OS_RESPONSE_OK, 0, 0)
+        }
         nanami_services::input::INPUT_SERVICE_REQUEST_ATTACH_DRIVER_SHARED => {
             if request.arg0 != nanami_services::input::INPUT_DRIVER_KEYBOARD
                 && request.arg0 != nanami_services::input::INPUT_DRIVER_MOUSE
@@ -283,15 +281,11 @@ fn handle_request(request: ServiceRequest, state: &mut InputState) -> (Word, Wor
             }
         }
         nanami_services::input::INPUT_SERVICE_REQUEST_PUBLISH_EVENT => {
-            if !is_authorized_driver(request, state) {
+            if !is_authorized_event_from_pid(request.identifier, request.arg0, state) {
                 libnanami::print!("[input-server] publish denied id=");
                 libnanami::print!("{}", request.identifier);
                 libnanami::print!(" kind=");
                 libnanami::print!("{}", request.arg0);
-                libnanami::print!(" kpid=");
-                libnanami::print!("{}", state.keyboard_driver_pid);
-                libnanami::print!(" mpid=");
-                libnanami::print!("{}", state.mouse_driver_pid);
                 libnanami::print!("\n");
                 return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
@@ -328,34 +322,6 @@ fn handle_request(request: ServiceRequest, state: &mut InputState) -> (Word, Wor
             (libnanami::OS_RESPONSE_OK, 0, 0)
         }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    }
-}
-
-fn is_authorized_driver(request: ServiceRequest, state: &InputState) -> bool {
-    match request.arg0 {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => {
-            state.keyboard_driver_attached && request.identifier == state.keyboard_driver_pid
-        }
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
-            state.mouse_driver_attached && request.identifier == state.mouse_driver_pid
-        }
-        _ => false,
-    }
-}
-
-fn is_authorized_event_from_pid(pid: Word, event_kind: Word, state: &InputState) -> bool {
-    match event_kind {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => {
-            state.keyboard_driver_attached && pid == state.keyboard_driver_pid
-        }
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
-            state.mouse_driver_attached && pid == state.mouse_driver_pid
-        }
-        _ => false,
     }
 }
 
@@ -397,38 +363,27 @@ fn find_or_alloc_subscriber(state: &mut InputState, pid: Word) -> Option<usize> 
 }
 
 fn find_or_attach_driver_queue(state: &mut InputState, pid: Word) -> Option<usize> {
-    let mut i = 0usize;
-    while i < MAX_DRIVER_QUEUES {
-        if state.driver_queues[i].used && state.driver_queues[i].pid == pid {
-            return Some(i);
-        }
-        i += 1;
+    let index = state
+        .driver_queues
+        .iter()
+        .position(|driver| driver.used && driver.pid == pid)?;
+    if state.driver_queues[index].local_vaddr != 0 {
+        return Some(index);
     }
-
-    i = 0;
-    while i < MAX_DRIVER_QUEUES {
-        if !state.driver_queues[i].used {
-            match attach_shared_event_queue(pid) {
-                Ok((local_vaddr, peer_vaddr, size_bytes)) => {
-                    init_shared_event_queue(local_vaddr);
-                    state.driver_queues[i] = DriverQueue {
-                        used: true,
-                        pid,
-                        local_vaddr,
-                        peer_vaddr,
-                        bytes: size_bytes,
-                    };
-                    return Some(i);
-                }
-                Err(e) => {
-                    log_request_error("[input-server] driver queue attach failed: ", e);
-                    return None;
-                }
-            }
+    match attach_shared_event_queue(pid) {
+        Ok((local_vaddr, peer_vaddr, size_bytes)) => {
+            init_shared_event_queue(local_vaddr);
+            let driver = &mut state.driver_queues[index];
+            driver.local_vaddr = local_vaddr;
+            driver.peer_vaddr = peer_vaddr;
+            driver.bytes = size_bytes;
+            Some(index)
         }
-        i += 1;
+        Err(e) => {
+            log_request_error("[input-server] driver queue attach failed: ", e);
+            None
+        }
     }
-    None
 }
 
 fn attach_shared_event_queue(pid: Word) -> Result<(Word, Word, Word), RequestError> {

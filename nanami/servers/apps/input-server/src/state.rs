@@ -87,6 +87,7 @@ impl Subscriber {
 pub(super) struct DriverQueue {
     pub(super) used: bool,
     pub(super) pid: Word,
+    pub(super) event_mask: Word,
     pub(super) local_vaddr: Word,
     pub(super) peer_vaddr: Word,
     pub(super) bytes: Word,
@@ -96,6 +97,7 @@ impl DriverQueue {
     pub(super) const EMPTY: Self = Self {
         used: false,
         pid: 0,
+        event_mask: 0,
         local_vaddr: 0,
         peer_vaddr: 0,
         bytes: 0,
@@ -105,10 +107,6 @@ impl DriverQueue {
 pub(super) struct InputState {
     pub(super) subscribers: [Subscriber; MAX_SUBSCRIBERS],
     pub(super) driver_queues: [DriverQueue; MAX_DRIVER_QUEUES],
-    pub(super) keyboard_driver_attached: bool,
-    pub(super) keyboard_driver_pid: Word,
-    pub(super) mouse_driver_attached: bool,
-    pub(super) mouse_driver_pid: Word,
     pub(super) sequence: Word,
     pub(super) published_count: usize,
     pub(super) delivered_count: usize,
@@ -119,10 +117,6 @@ impl InputState {
         Self {
             subscribers: [Subscriber::EMPTY; MAX_SUBSCRIBERS],
             driver_queues: [DriverQueue::EMPTY; MAX_DRIVER_QUEUES],
-            keyboard_driver_attached: false,
-            keyboard_driver_pid: 0,
-            mouse_driver_attached: false,
-            mouse_driver_pid: 0,
             sequence: 0,
             published_count: 0,
             delivered_count: 0,

@@ -10,6 +10,8 @@ const MAX_SUBSCRIBERS: usize = 32;
 const MAX_DRIVER_QUEUES: usize = 4;
 const EVENT_QUEUE_CAPACITY: usize = 64;
 pub mod input {
+    pub const INPUT_DRIVER_KEYBOARD: usize = 1;
+    pub const INPUT_DRIVER_MOUSE: usize = 2;
     pub const INPUT_EVENT_KIND_KEY: usize = 1;
     pub const INPUT_EVENT_KIND_MOUSE_MOVE: usize = 2;
     pub const INPUT_EVENT_KIND_MOUSE_BUTTON: usize = 3;
@@ -52,15 +54,15 @@ fn push_shared_event_with_kind(queue: Word, _kind: Word, packed: Word) {
         }
     });
 }
-fn is_authorized_event_from_pid(pid: Word, kind: Word, _state: &InputState) -> bool {
-    pid == 11 && kind == INPUT_EVENT_KIND_KEY || pid == 22 && kind != INPUT_EVENT_KIND_KEY
-}
 #[path = "../../nanami/servers/apps/input-server/src/state.rs"]
 mod state;
 use state::*;
 #[path = "../../nanami/servers/apps/input-server/src/distribution.rs"]
 mod distribution;
 use distribution::*;
+#[path = "../../nanami/servers/apps/input-server/src/drivers.rs"]
+mod drivers;
+use drivers::*;
 
 fn setup() -> InputState {
     FAKE.with(|fake| *fake.borrow_mut() = Fake::default());
@@ -68,6 +70,7 @@ fn setup() -> InputState {
     state.driver_queues[0] = DriverQueue {
         used: true,
         pid: 11,
+        event_mask: INPUT_SUBSCRIBE_KEYBOARD,
         local_vaddr: 1,
         peer_vaddr: 0,
         bytes: 4096,
@@ -75,6 +78,7 @@ fn setup() -> InputState {
     state.driver_queues[1] = DriverQueue {
         used: true,
         pid: 22,
+        event_mask: INPUT_SUBSCRIBE_MOUSE,
         local_vaddr: 2,
         peer_vaddr: 0,
         bytes: 4096,
@@ -103,6 +107,63 @@ fn driver(queue: Word, events: &[Word]) {
             .or_default()
             .extend(events)
     });
+}
+
+#[test]
+fn ps2_registration_does_not_replace_usb_input() {
+    let mut state = InputState::new();
+    assert_eq!(
+        register_driver(&mut state, 7, INPUT_DRIVER_KEYBOARD),
+        Some(0)
+    );
+    assert_eq!(register_driver(&mut state, 7, INPUT_DRIVER_MOUSE), Some(0));
+    assert_eq!(
+        register_driver(&mut state, 9, INPUT_DRIVER_KEYBOARD),
+        Some(1)
+    );
+    assert_eq!(register_driver(&mut state, 9, INPUT_DRIVER_MOUSE), Some(1));
+    for pid in [7, 9] {
+        for kind in [
+            INPUT_EVENT_KIND_KEY,
+            INPUT_EVENT_KIND_MOUSE_MOVE,
+            INPUT_EVENT_KIND_MOUSE_BUTTON,
+        ] {
+            assert!(is_authorized_event_from_pid(pid, kind, &state));
+        }
+        assert!(!is_authorized_event_from_pid(pid, 255, &state));
+    }
+    assert!(!is_authorized_event_from_pid(
+        99,
+        INPUT_EVENT_KIND_KEY,
+        &state
+    ));
+}
+
+#[test]
+fn registrations_are_bounded_idempotent_and_kind_specific() {
+    let mut state = InputState::new();
+    assert_eq!(register_driver(&mut state, 0, INPUT_DRIVER_KEYBOARD), None);
+    assert_eq!(register_driver(&mut state, 7, 99), None);
+    for index in 0..MAX_DRIVER_QUEUES {
+        assert_eq!(
+            register_driver(&mut state, index + 1, INPUT_DRIVER_KEYBOARD),
+            Some(index)
+        );
+    }
+    assert_eq!(register_driver(&mut state, 99, INPUT_DRIVER_MOUSE), None);
+    assert_eq!(register_driver(&mut state, 1, INPUT_DRIVER_MOUSE), Some(0));
+    assert!(is_authorized_event_from_pid(
+        1,
+        INPUT_EVENT_KIND_MOUSE_BUTTON,
+        &state
+    ));
+    assert!(!is_authorized_event_from_pid(
+        2,
+        INPUT_EVENT_KIND_MOUSE_BUTTON,
+        &state
+    ));
+    // Registering before attaching shared memory must not dereference address 0.
+    assert_eq!(drain_driver_queues(&mut state), 0);
 }
 
 #[test]

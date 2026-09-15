@@ -39,6 +39,14 @@ path = "input-distribution-tests.rs"
 name = "network"
 path = "network/main.rs"
 
+[[test]]
+name = "usb"
+path = "usb/main.rs"
+
+[[test]]
+name = "usb-pci"
+path = "usb/pci.rs"
+
 [dependencies]
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 

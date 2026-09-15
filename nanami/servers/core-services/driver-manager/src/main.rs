@@ -17,6 +17,9 @@ pub struct TimerSelection {
 struct DriverState {
     hpet_pid: Word,
     hpet_mmio_base: Word,
+    usb_pid: Word,
+    usb_controllers: [Option<nanami_services::device::UsbControllerResource>; 4],
+    usb_count: usize,
 }
 
 #[panic_handler]
@@ -34,6 +37,20 @@ fn spawn(image: &str) -> Result<Word, RequestError> {
 
 fn handle_request(request: ServiceRequest, state: &DriverState) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_CONTROLLER => {
+            if state.usb_pid == 0 || request.identifier != state.usb_pid {
+                (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+            } else if request.arg0 < state.usb_count {
+                let resource = state.usb_controllers[request.arg0].unwrap();
+                (
+                    libnanami::OS_RESPONSE_OK,
+                    resource.physical,
+                    resource.bytes | resource.irq.unwrap_or(0),
+                )
+            } else {
+                (libnanami::OS_RESPONSE_OK, 0, 0)
+            }
+        }
         nanami_services::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE
             if request.identifier == state.hpet_pid
                 && state.hpet_pid != 0
@@ -57,7 +74,9 @@ fn nanami_main() -> libnanami::NanamiResult {
         platform.platform_name(),
         platform.core_count
     );
-    if let Err(error) = arch::validate_platform(platform.architecture_name(), platform.platform_name()) {
+    if let Err(error) =
+        arch::validate_platform(platform.architecture_name(), platform.platform_name())
+    {
         libnanami::print!("[driver-manager] no drivers for this architecture/platform\n");
         return Err(error.into());
     }
@@ -66,15 +85,35 @@ fn nanami_main() -> libnanami::NanamiResult {
         SERVICE_PORT_SLOT,
     )?;
 
-    if let Some(image) = arch::select_storage_driver()? {
-        let _ = spawn(image)?;
-    }
-
+    // Finish PCI discovery before launching any driver that configures PCI.
+    let storage_image = arch::select_storage_driver()?;
     let selected_timer = arch::select_timer_driver()?;
     let mut state = DriverState {
         hpet_pid: 0,
         hpet_mmio_base: selected_timer.hpet_mmio_base,
+        usb_pid: 0,
+        usb_controllers: [None; 4],
+        usb_count: 0,
     };
+    for index in 0..state.usb_controllers.len() {
+        let Some(address) = arch::usb_controller(index)? else {
+            break;
+        };
+        match arch::prepare_usb_controller(address) {
+            Ok(resource) => {
+                state.usb_controllers[state.usb_count] = Some(resource);
+                state.usb_count += 1;
+            }
+            Err(error) => libnanami::println!(
+                "[driver-manager] USB PCI {:06x} skipped: {}",
+                address,
+                error
+            ),
+        }
+    }
+    if let Some(image) = storage_image {
+        let _ = spawn(image)?;
+    }
 
     if let Some(image) = selected_timer.image {
         let pid = spawn(image)?;
@@ -83,6 +122,12 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
+    if state.usb_count != 0 {
+        match spawn("./bin/usb-server") {
+            Ok(pid) => state.usb_pid = pid,
+            Err(error) => libnanami::println!("[driver-manager] USB spawn failed: {}", error),
+        }
+    }
     libnanami::print!("[driver-manager] ready\n");
     let port = libnanami::ipc::process_slot_descriptor(SERVICE_PORT_SLOT);
     let mut reply = (libnanami::OS_RESPONSE_OK, 0, 0);

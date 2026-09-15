@@ -42,6 +42,7 @@ QEMU_CPU="${QEMU_CPU:-$DEFAULT_CPU}"
 QEMU_SMP="${QEMU_SMP:-4}"
 QEMU_ACCEL="${QEMU_ACCEL:-auto}"
 QEMU_HPET="${QEMU_HPET:-on}"
+USB_INPUT="${USB_INPUT:-off}"
 NET_MODE="${NET_MODE:-}"
 NET_DEVICE="${NET_DEVICE:-virtio}"
 BLOCK_IMAGE="${BLOCK_IMAGE:-}"
@@ -110,6 +111,14 @@ case "$QEMU_HPET" in
   on|off) ;;
   *)
     echo "[nanami-run] QEMU_HPET must be on or off" >&2
+    exit 1
+    ;;
+esac
+
+case "$USB_INPUT/$TARGET_ARCH" in
+  off/*|on/x86_64) ;;
+  *)
+    echo "[nanami-run] USB_INPUT must be off or on (x86_64 xHCI only)" >&2
     exit 1
     ;;
 esac
@@ -283,6 +292,14 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
     --no-reboot
     --no-shutdown
   )
+  if [ "$USB_INPUT" = "on" ]; then
+    args+=(
+      -fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=0"
+      -device "qemu-xhci,id=xhci,addr=6,msi=off,msix=off"
+      -device "usb-kbd,id=usb-kbd,bus=xhci.0,port=1"
+      -device "usb-mouse,id=usb-mouse,bus=xhci.0,port=2"
+    )
+  fi
 else
   UBOOT="$OUT_DIR/u-boot/u-boot.bin"
   if [ ! -f "$UBOOT" ]; then

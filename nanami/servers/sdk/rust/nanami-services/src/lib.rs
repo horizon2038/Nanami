@@ -11,6 +11,7 @@ pub mod registry;
 pub mod rtc;
 pub mod terminal;
 pub mod timer;
+pub mod usb;
 pub mod vfs;
 
 use a9n_abi::CapabilityDescriptor;

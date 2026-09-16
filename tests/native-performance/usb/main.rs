@@ -1,4 +1,17 @@
 #![allow(dead_code)]
+extern crate alloc;
+extern crate self as libnanami;
+pub use std::println;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestError {
+    Unsupported,
+    Transport,
+    Protocol,
+}
+mod usb {
+    pub(crate) use crate::hid;
+}
 
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/capabilities.rs"]
 mod capabilities;
@@ -7,7 +20,11 @@ mod capability_tests;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/descriptors.rs"]
 mod descriptors;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/hid.rs"]
-mod hid;
+pub(crate) mod hid;
+#[path = "hid-negotiation.rs"]
+mod hid_negotiation;
+#[path = "hid-reports.rs"]
+mod hid_reports;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/protocol.rs"]
 mod protocol;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/registers.rs"]

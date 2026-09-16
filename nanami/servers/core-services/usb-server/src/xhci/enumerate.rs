@@ -360,12 +360,7 @@ impl Controller {
             input,
         )?;
         self.control(slot, device, 0, 9, configuration_value as u16, 0, 0, input)?;
-        for interface in interfaces {
-            self.control(slot, device, 0x21, 11, 0, interface.number as u16, 0, input)?; // Boot Protocol
-            if interface.protocol == 1 {
-                self.control(slot, device, 0x21, 10, 0, interface.number as u16, 0, input)?;
-            }
-        }
+        self.configure_hid(slot, device, input)?;
         Ok(())
     }
 }

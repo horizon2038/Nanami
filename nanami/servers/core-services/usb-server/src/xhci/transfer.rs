@@ -68,8 +68,8 @@ impl Controller {
                         }
                         received = len - residual;
                     } else if event.code() == 6 {
-                        // GET_MAX_LUN is explicitly allowed to stall. Restore
-                        // EP0's dequeue before any subsequent control request.
+                        // Optional requests (e.g. GET_MAX_LUN) may stall. Restore
+                        // EP0's dequeue before a fallback or subsequent request.
                         self.reset_endpoint(slot, 1, &mut device.control, true, input)?;
                         return Err(RequestError::Unsupported);
                     } else if event.code() != 1 {

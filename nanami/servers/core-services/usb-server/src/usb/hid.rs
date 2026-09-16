@@ -1,6 +1,15 @@
-//! Boot-protocol reports translated to the existing input-service key codes.
+//! HID reports translated to the existing input-service event codes.
 //! State is per interface; detach synthesizes releases instead of leaving keys
-//! or buttons stuck. Report-mode/NKRO-only devices are deliberately not guessed.
+//! or buttons stuck. Mouse report layouts are compiled once at enumeration.
+#[path = "hid/descriptor.rs"]
+mod descriptor;
+#[path = "hid/mouse.rs"]
+mod mouse;
+#[path = "hid/report.rs"]
+mod report;
+pub use mouse::Mouse;
+pub use report::MouseReport;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
     pub kind: usize,
@@ -68,45 +77,6 @@ impl Keyboard {
     }
     pub fn release(&mut self, emit: impl FnMut(Event)) {
         self.report(&[0; 8], emit);
-    }
-}
-
-pub struct Mouse {
-    buttons: u8,
-}
-impl Mouse {
-    pub const fn new() -> Self {
-        Self { buttons: 0 }
-    }
-    pub fn report(&mut self, data: &[u8], mut emit: impl FnMut(Event)) {
-        if data.len() < 3 {
-            return;
-        }
-        let buttons = data[0] & 7;
-        for bit in 0..3 {
-            if (buttons ^ self.buttons) & (1 << bit) != 0 {
-                emit(Event {
-                    kind: 2,
-                    code: bit + 1,
-                    x: ((buttons >> bit) & 1) as i16,
-                    y: 0,
-                });
-            }
-        }
-        let x = data[1] as i8 as i16;
-        let y = data[2] as i8 as i16;
-        if x != 0 || y != 0 {
-            emit(Event {
-                kind: 3,
-                code: 0,
-                x,
-                y,
-            });
-        }
-        self.buttons = buttons;
-    }
-    pub fn release(&mut self, emit: impl FnMut(Event)) {
-        self.report(&[0; 3], emit);
     }
 }
 

@@ -16,6 +16,7 @@ import tempfile
 import time
 from late_root import boot_without_root
 from bash_input import exercise as exercise_bash_input, run_doom_first
+from wheel import exercise as exercise_wheel
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
@@ -26,6 +27,7 @@ parser.add_argument('--hpet', choices=('on', 'off'), default='on')
 parser.add_argument('--bash-smoke', action='store_true', help='Exercise interactive bash forks instead of HTTP/hotplug (requires bash and busybox in rootfs)')
 parser.add_argument('--bash-input-stress', type=int, default=0, help='Exercise this many untraced bash input/edit/write cycles (requires --bash-smoke --usb-storage)')
 parser.add_argument('--doom-first', action='store_true', help='Launch graphics Doom and request normal quit before --bash-input-stress')
+parser.add_argument('--wheel-smoke', action='store_true', help='Verify USB wheel-up/down scroll Shell and restore its text pixels')
 parser.add_argument('--no-network', action='store_true', help='Omit the virtual NIC (requires --bash-smoke)')
 parser.add_argument('--stress', type=int, default=0, help='Number of modifier press/release pairs before typing')
 parser.add_argument('--mouse-stress', type=int, default=0, help='Inject sustained relative motion before the normal liveness checks')
@@ -39,6 +41,8 @@ parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug th
 parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
 parser.add_argument('--late-root', action='store_true', help='Boot firmware/initramfs from a private rootless SATA clone, then attach USB root after usb-server is online')
 args = parser.parse_args()
+if args.wheel_smoke and args.drag_stress:
+    parser.error('--wheel-smoke requires the initial Shell position (no --drag-stress)')
 if args.doom_first and not args.bash_input_stress:
     parser.error('--doom-first requires --bash-input-stress')
 if args.bash_input_stress < 0 or (args.bash_input_stress and not (args.bash_smoke and args.usb_storage)):
@@ -252,6 +256,9 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                 time.sleep(0.2)
             assert root_written_bytes() > before, 'No filesystem writes reached the USB snapshot'
             print('Filesystem mkdir reached USB WRITE commands (snapshot only)', flush=True)
+
+        if args.wheel_smoke:
+            exercise_wheel(qmp, type_text, logs)
 
         if args.bash_input_stress:
             if args.doom_first:

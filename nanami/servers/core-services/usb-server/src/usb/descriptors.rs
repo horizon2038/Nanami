@@ -8,6 +8,7 @@ pub struct BootInterface {
     pub endpoint: u8,
     pub packet_size: u16,
     pub interval: u8,
+    pub report_length: u16,
 }
 
 pub fn boot_interfaces(data: &[u8], mut found: impl FnMut(BootInterface)) -> Result<u8, ()> {
@@ -35,16 +36,34 @@ pub fn boot_interfaces(data: &[u8], mut found: impl FnMut(BootInterface)) -> Res
                     return Err(());
                 }
                 interface = if d[3] == 0 && d[5] == 3 && d[6] == 1 && matches!(d[7], 1 | 2) {
-                    Some((d[2], d[7]))
+                    Some((d[2], d[7], 0))
                 } else {
                     None
                 };
+            }
+            0x21 => {
+                if let Some((_, _, report_length)) = interface.as_mut() {
+                    if len < 6 || d[5] == 0 || len != 6 + d[5] as usize * 3 {
+                        return Err(());
+                    }
+                    for entry in d[6..].chunks_exact(3) {
+                        if entry[0] == 0x22 {
+                            if *report_length != 0 {
+                                return Err(());
+                            }
+                            *report_length = u16::from_le_bytes([entry[1], entry[2]]);
+                            if *report_length == 0 {
+                                return Err(());
+                            }
+                        }
+                    }
+                }
             }
             5 => {
                 if len < 7 {
                     return Err(());
                 }
-                if let Some((number, protocol)) = interface {
+                if let Some((number, protocol, report_length)) = interface {
                     let packet_size = u16::from_le_bytes([d[4], d[5]]);
                     let minimum = if protocol == 1 { 8 } else { 3 };
                     if d[2] & 0x80 != 0
@@ -61,6 +80,7 @@ pub fn boot_interfaces(data: &[u8], mut found: impl FnMut(BootInterface)) -> Res
                             endpoint: d[2],
                             packet_size,
                             interval: d[6],
+                            report_length,
                         });
                         interface = None;
                     }

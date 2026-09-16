@@ -1,7 +1,8 @@
 # USB input and root storage
 
 On x86_64, usb-server supports directly attached USB 1.x/2.0 HID Boot Protocol
-keyboards/three-button mice and USB 2.0/3.x SCSI Bulk-Only Transport storage.
+keyboards, boot-capable relative mice with descriptor-based vertical wheel
+support, and USB 2.0/3.x SCSI Bulk-Only Transport storage.
 Composite interfaces are parsed independently. Limits are four controllers,
 sixteen slots per controller and four HID interfaces per device.
 
@@ -68,9 +69,50 @@ See [physical capability management](../../nanami/src/nanami_core/memory/README.
   Driver failure paths retain DMA rather than exiting with a live controller.
 
 Not implemented: external/integrated hubs, EHCI/OHCI/UHCI, UAS, non-512-byte
-storage sectors, report-only/NKRO/vendor or SuperSpeed HID, wheels/extra buttons,
+storage sectors, report-only/NKRO/vendor or SuperSpeed HID, horizontal wheels,
+buttons beyond the first three, high-resolution wheel multiplier negotiation,
 keyboard LEDs, suspend/resume, PCI hotplug, MSI/MSI-X delivery or AArch64 USB.
 Attach test devices directly to xHCI root ports.
+
+## USB mouse wheel
+
+Boot mouse decoding is deliberately limited to buttons and X/Y: the fourth
+byte is not a portable wheel field. For boot-capable mice, the driver now reads
+the interface's HID Report Descriptor and selects Report Protocol only after
+validating a usable relative mouse layout containing a vertical Wheel usage.
+The parser and decoder are separate modules; enumeration compiles the layout
+once, and report decoding does not allocate or reparse descriptors.
+
+Layouts support report IDs, signed bit fields (including unaligned 12-bit and
+16-bit axes), usage lists/ranges, global Push/Pop and separate Input offsets
+from Output/Feature data. Only fields in a Mouse application collection emit
+events. Short packets, unknown report IDs and out-of-range values are ignored
+without releasing held buttons. Detach releases buttons independently of the
+report format. The event remains kind 4 with positive values scrolling up,
+using the existing input-service, Honoka and Shell paths.
+
+Descriptors are bounded to the 4-KiB control buffer and Input reports to the
+endpoint's packet size. Unsupported/malformed layouts, short descriptor reads
+and recovered control STALLs fall back to the original Boot Protocol. A fatal
+transport failure does not trigger another request on uncertain EP0/DMA state.
+Keyboard protocol selection is unchanged. Absolute pointers, usage delimiters,
+long items and duplicate button usages across report IDs are not accepted as
+relative mouse layouts.
+
+Successful wheel setup logs `mouse interface=... protocol=report wheel=true`.
+Fallback logs `protocol=boot wheel=false (report unavailable)`; movement and
+the first three buttons retain their boot decoding.
+
+Run `--wheel-smoke` with the existing QEMU harness to fill Shell scrollback,
+position the pointer over it and inject wheel-up/down. It checks that text
+pixels change on wheel-up and are restored exactly on wheel-down. For example:
+
+```sh
+python3 tests/usb/qemu-hid.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --usb-storage --coexist-ps2 --hpet off --bash-smoke --no-network \
+  --bash-input-stress 4 --wheel-smoke
+```
 
 The user's updated xHCI 1.1 hardware log reaches USB rootfs and Honoka startup
 with 34 scratchpads, 32-byte contexts and explicit USB2/USB3 PSI definitions.
@@ -190,6 +232,23 @@ only. Logs/screenshots/firmware variables are kept in the printed temporary
 directory. There is no real-device passthrough, LAN traffic or port forwarding.
 
 ### Validation (2026-09-16)
+
+USB mouse wheel:
+
+- The pre-fix image failed the QEMU wheel-up scroll assertion. The fixed image
+  selects Report Protocol and passes up/down pixel comparisons using USB3 root,
+  PIT, 4 CPUs / 4 GiB and PS/2 present, without a NIC. Four untraced bash
+  edit/write rounds, a native Shell write after exit and subsequent cursor/clock
+  updates also passed.
+- All 219 release host tests pass (five timings ignored). The 56 USB tests also
+  pass AddressSanitizer, including descriptor mutations, numbered/packed/wide
+  reports, both wheel directions, detach and the production HID negotiation
+  code with mocked EP0 transport. Fallback and fatal-error behavior are tested
+  separately; no physical control-transfer errors were injected.
+- The reported mouse is Logitech `046d:c085`. Its live Report Descriptor has
+  not been captured; the wide/numbered host fixtures are synthetic, not a claim
+  of validation on that hardware. The x86_64 image was rebuilt with the user's
+  extra Linux/FreeBSD binaries. Kernel, Loader and register writeback are unchanged.
 
 Pending kernel notification at plain Receive:
 
@@ -339,5 +398,7 @@ not establish sustained physical-hardware stability.
 
 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf),
 [USB HID 1.12](https://www.usb.org/sites/default/files/hid1_12.pdf),
+[HID 1.11, sections 6.2.2, 7.2.6 and B.2](https://www.usb.org/sites/default/files/hid1_11.pdf),
+[HID Usage Tables, Generic Desktop Wheel](https://www.usb.org/sites/default/files/hut1_5.pdf),
 [USB Mass Storage Bulk-Only Transport](https://www.usb.org/sites/default/files/usbmassbulk_10.pdf),
 [USB UFI commands](https://www.usb.org/sites/default/files/usbmass-ufi10.pdf).

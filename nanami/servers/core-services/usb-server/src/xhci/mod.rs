@@ -2,6 +2,7 @@ mod bulk;
 mod capabilities;
 mod dma;
 mod enumerate;
+mod hid;
 mod init;
 mod protocol;
 pub mod registers;

@@ -39,6 +39,10 @@ const RING_BYTES: usize = 4096;
 mod background;
 #[path = "../../nanami/servers/apps/honoka/src/app/framebuffer.rs"]
 mod framebuffer;
+#[path = "../../nanami/servers/apps/honoka/src/app/motion_damage.rs"]
+mod motion_damage;
+#[path = "motion-tests.rs"]
+mod motion_tests;
 #[path = "../../nanami/servers/apps/terminal-service/src/ring.rs"]
 mod ring;
 #[path = "../../nanami/servers/apps/shell/src/scrollback.rs"]

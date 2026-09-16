@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from late_root import boot_without_root
+from bash_input import exercise as exercise_bash_input, run_doom_first
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
@@ -23,8 +24,12 @@ parser.add_argument('--memory', default='4G')
 parser.add_argument('--coexist-ps2', action='store_true')
 parser.add_argument('--hpet', choices=('on', 'off'), default='on')
 parser.add_argument('--bash-smoke', action='store_true', help='Exercise interactive bash forks instead of HTTP/hotplug (requires bash and busybox in rootfs)')
+parser.add_argument('--bash-input-stress', type=int, default=0, help='Exercise this many untraced bash input/edit/write cycles (requires --bash-smoke --usb-storage)')
+parser.add_argument('--doom-first', action='store_true', help='Launch graphics Doom and request normal quit before --bash-input-stress')
 parser.add_argument('--no-network', action='store_true', help='Omit the virtual NIC (requires --bash-smoke)')
 parser.add_argument('--stress', type=int, default=0, help='Number of modifier press/release pairs before typing')
+parser.add_argument('--mouse-stress', type=int, default=0, help='Inject sustained relative motion before the normal liveness checks')
+parser.add_argument('--drag-stress', action='store_true', help='Run the mouse stress while dragging Shell by its title bar')
 parser.add_argument('--high-mmio', action='store_true', help='Keep the firmware default high PCI BAR assignment')
 parser.add_argument('--usb-storage', action='store_true', help='Boot/rootfs on USB BOT, with AHCI present but no SATA media')
 parser.add_argument('--virtio-storage', action='store_true', help='Boot/rootfs on legacy virtio-blk instead of AHCI')
@@ -34,6 +39,12 @@ parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug th
 parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
 parser.add_argument('--late-root', action='store_true', help='Boot firmware/initramfs from a private rootless SATA clone, then attach USB root after usb-server is online')
 args = parser.parse_args()
+if args.doom_first and not args.bash_input_stress:
+    parser.error('--doom-first requires --bash-input-stress')
+if args.bash_input_stress < 0 or (args.bash_input_stress and not (args.bash_smoke and args.usb_storage)):
+    parser.error('--bash-input-stress requires a positive count, --bash-smoke and --usb-storage')
+if args.drag_stress and args.mouse_stress <= 0:
+    parser.error('--drag-stress requires --mouse-stress')
 if args.no_network and not args.bash_smoke:
     parser.error('--no-network requires --bash-smoke; the default test launches HTTP')
 if args.bash_smoke and (args.unplug_root or args.duplicate_root):
@@ -85,6 +96,8 @@ command = [
                 if args.virtio_storage else 'ide-hd,drive=disk,bus=ahci.0,bootindex=1'),
     '--no-reboot', '--no-shutdown',
 ]
+if args.mouse_stress:
+    command += ['-trace', f'enable=usb_xhci_xfer_success,file={logs / "usb-transfers.log"}']
 if args.duplicate_root:
     command += [
         '-drive', f'if=none,id=duplicate,format=raw,snapshot=on,file={base_image}',
@@ -183,6 +196,36 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         print('USB keyboard/mouse enumerated; desktop ready', flush=True)
         print('Active pointers: ' + json.dumps(qmp('query-mice')), flush=True)
         time.sleep(5)
+        if args.mouse_stress:
+            qmp('screendump', {'filename': str(logs / 'before-stress.ppm')})
+            _, dimensions, _, _ = (logs / 'before-stress.ppm').read_bytes().split(b'\n', 3)
+            width, height = map(int, dimensions.split())
+            qmp('input-send-event', {'events': [
+                {'type': 'rel', 'data': {'axis': 'x', 'value': 300 - width * 3 // 4}},
+                {'type': 'rel', 'data': {'axis': 'y', 'value': (90 if args.drag_stress else 200) - height // 2}},
+            ]})
+            time.sleep(2)
+            if args.drag_stress:
+                qmp('input-send-event', {'events': [{'type': 'btn', 'data': {'down': True, 'button': 'left'}}]})
+                time.sleep(0.1)
+            for index in range(args.mouse_stress):
+                side = (index // 32) % 4
+                qmp('input-send-event', {'events': [{'type': 'rel', 'data': {
+                    'axis': 'x' if side % 2 == 0 else 'y',
+                    'value': 4 if side < 2 else -4,
+                }}]})
+                time.sleep(0.005)
+            if args.drag_stress:
+                qmp('input-send-event', {'events': [{'type': 'btn', 'data': {'down': False, 'button': 'left'}}]})
+                time.sleep(1)
+            # Restore a known position even if overload/clipping dropped deltas.
+            for x, y in [(-width * 2, -height * 2), (width * 3 // 4, height // 2)]:
+                qmp('input-send-event', {'events': [
+                    {'type': 'rel', 'data': {'axis': 'x', 'value': x}},
+                    {'type': 'rel', 'data': {'axis': 'y', 'value': y}},
+                ]})
+                time.sleep(2)
+            print(f'Injected {args.mouse_stress} mouse motions; checking keyboard, storage and clock next', flush=True)
         for _ in range(args.stress):
             for down in (True, False):
                 qmp('input-send-event', {'events': [{'type': 'key', 'data': {
@@ -210,7 +253,12 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             assert root_written_bytes() > before, 'No filesystem writes reached the USB snapshot'
             print('Filesystem mkdir reached USB WRITE commands (snapshot only)', flush=True)
 
-        if args.bash_smoke:
+        if args.bash_input_stress:
+            if args.doom_first:
+                run_doom_first(qmp, type_text, wait_for, logs)
+            exercise_bash_input(qmp, type_text, wait_for, serial, root_written_bytes, args.bash_input_stress)
+            qmp('screendump', {'filename': str(logs / 'after-bash.png'), 'format': 'png'})
+        elif args.bash_smoke:
             type_text('alter -t /alter/linux/bin/bash\n')
             wait_for(lambda s: re.search(r'managed rootfs process image=bash pid=(\d+)', s))
             bash_pid = re.search(r'managed rootfs process image=bash pid=(\d+)', serial.read_text(errors='replace'))[1]
@@ -328,6 +376,22 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             raise RuntimeError('Replugged USB mouse did not close Shell')
         print('PASS: keyboard launched HTTP before/after hotplug; cursor moved; replugged mouse clicked close; detach released Shift'
               + ('; PS/2 keyboard also worked with USB unplugged' if args.coexist_ps2 else ' (PS/2 disabled)'), flush=True)
+    except Exception:
+        # Assertions outside wait_for (e.g. input delivered but no disk write)
+        # need the same stopped-CPU evidence as boot timeouts.
+        if stream is not None and process.poll() is None:
+            try:
+                qmp('stop')
+                qmp('screendump', {'filename': str(logs / 'failure.png'), 'format': 'png'})
+                state = {}
+                for monitor in ['info registers -a', 'info irq', 'info usb', 'info mice', 'info pic']:
+                    state[monitor] = qmp('human-monitor-command', {'command-line': monitor})
+                for cpu in range(args.smp):
+                    state[f'cpu {cpu} lapic'] = qmp('human-monitor-command', {'command-line': 'info lapic', 'cpu-index': cpu})
+                (logs / 'failure-monitor.json').write_text(json.dumps(state, indent=2))
+            except Exception as diagnostic_error:
+                print(f'Could not capture failure state: {diagnostic_error}', file=sys.stderr)
+        raise
     finally:
         if stream is not None:
             try:

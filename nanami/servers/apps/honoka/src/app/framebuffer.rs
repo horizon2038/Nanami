@@ -150,15 +150,10 @@ impl Framebuffer {
                 .saturating_add((x0 as usize).saturating_mul(4));
             if offset.saturating_add(row_pixels.saturating_mul(4)) <= self.bytes as usize {
                 let row_base = (self.vaddr as usize).saturating_add(offset);
-                let mut i = 0usize;
-                while i < row_pixels {
-                    unsafe {
-                        core::ptr::write_volatile(
-                            row_base.saturating_add(i.saturating_mul(4)) as *mut u32,
-                            color,
-                        );
-                    }
-                    i += 1;
+                // This is compositor-owned RAM, not the hardware aperture.
+                // Publication to fb-server is ordered by present().
+                unsafe {
+                    core::slice::from_raw_parts_mut(row_base as *mut u32, row_pixels).fill(color);
                 }
             }
             py += 1;
@@ -317,7 +312,7 @@ impl Framebuffer {
         // Safety: offset is bounds-checked against the framebuffer mapping size.
         let ptr = (self.vaddr as usize).saturating_add(offset) as *mut u32;
         unsafe {
-            core::ptr::write_volatile(ptr, color);
+            ptr.write(color);
         }
     }
 
@@ -333,8 +328,8 @@ impl Framebuffer {
             return;
         };
         unsafe {
-            let background = core::ptr::read_volatile(ptr);
-            core::ptr::write_volatile(ptr, self.blend_color(background, color, alpha));
+            let background = ptr.read();
+            ptr.write(self.blend_color(background, color, alpha));
         }
     }
 

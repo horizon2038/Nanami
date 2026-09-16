@@ -8,6 +8,7 @@ use crate::constants::{
 use crate::font::TextRenderer;
 use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
 use crate::input::InputEvent;
+use crate::motion_damage::MotionDamage;
 
 const MAX_DIRTY_RECTS: usize = 256;
 const MAX_INDIVIDUAL_DIRTY_RECTS: usize = 64;
@@ -118,6 +119,8 @@ pub struct Compositor {
     theme: Theme,
     dirty_rects: [Rect; MAX_DIRTY_RECTS],
     dirty_count: usize,
+    cursor_damage: MotionDamage,
+    outline_damage: MotionDamage,
     focused_window_id: Word,
     clock_text: [u8; CLOCK_TEXT_BYTES],
     clock_len: usize,
@@ -162,6 +165,8 @@ impl Compositor {
             theme,
             dirty_rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
             dirty_count: 0,
+            cursor_damage: MotionDamage::default(),
+            outline_damage: MotionDamage::default(),
             focused_window_id: 0,
             clock_text: *b"--:--:--",
             clock_len: CLOCK_TEXT_BYTES,
@@ -176,6 +181,7 @@ impl Compositor {
     }
 
     pub fn render_if_needed(&mut self) -> bool {
+        self.flush_motion_damage();
         if self.dirty_count == 0 {
             return false;
         }
@@ -212,6 +218,11 @@ impl Compositor {
     }
 
     pub fn process_input(&mut self, event: InputEvent) -> bool {
+        if !matches!(event, InputEvent::MouseMove { .. }) {
+            // A click/key can end a drag, raise a window or change focus. Keep
+            // those transitions in order without drawing intermediate motion.
+            self.flush_motion_damage();
+        }
         match event {
             InputEvent::MouseMove { dx, dy } => self.move_cursor(dx, dy),
             InputEvent::MouseButton { code, pressed } => self.set_mouse_button(code, pressed),
@@ -222,7 +233,7 @@ impl Compositor {
     }
 
     pub fn has_pending_render(&self) -> bool {
-        self.dirty_count != 0
+        self.dirty_count != 0 || self.cursor_damage.is_pending()
     }
 
     pub fn set_clock(&mut self, hour: u8, minute: u8, second: u8) {
@@ -613,25 +624,36 @@ impl Compositor {
         self.cursor_x = clamp_i32(self.cursor_x.saturating_add(dx), 0, max_x);
         self.cursor_y = clamp_i32(self.cursor_y.saturating_add(dy), 0, max_y);
 
+        let new_cursor = self.cursor_rect();
+        if old_cursor.x == new_cursor.x && old_cursor.y == new_cursor.y {
+            return false;
+        }
+        self.cursor_damage.update(old_cursor, new_cursor);
+
         if let Some(index) = self.dragging_window {
-            let new_cursor = self.cursor_rect();
             let old_preview = self.drag_preview_rect(index);
             self.drag_preview_x = self.cursor_x.saturating_sub(self.drag_origin_x);
             self.drag_preview_y = self.cursor_y.saturating_sub(self.drag_origin_y);
             let new_preview = self.drag_preview_rect(index);
-            self.mark_dirty_outline(old_preview, DRAG_OUTLINE_THICKNESS + 1);
-            self.mark_dirty_outline(new_preview, DRAG_OUTLINE_THICKNESS + 1);
-            self.mark_dirty(old_cursor);
-            self.mark_dirty(new_cursor);
+            self.outline_damage.update(old_preview, new_preview);
         } else {
-            self.mark_dirty(old_cursor);
-            self.mark_dirty(self.cursor_rect());
             if let Some(index) = self.find_window_content_at(self.cursor_x, self.cursor_y) {
                 self.deliver_client_mouse_position(index);
             }
         }
 
         true
+    }
+
+    fn flush_motion_damage(&mut self) {
+        if let Some((before, after)) = self.outline_damage.take() {
+            self.mark_dirty_outline(before, DRAG_OUTLINE_THICKNESS + 1);
+            self.mark_dirty_outline(after, DRAG_OUTLINE_THICKNESS + 1);
+        }
+        if let Some((before, after)) = self.cursor_damage.take() {
+            self.mark_dirty(before);
+            self.mark_dirty(after);
+        }
     }
 
     fn set_mouse_button(&mut self, code: Word, pressed: bool) -> bool {

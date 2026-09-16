@@ -18,6 +18,8 @@ pub mod framebuffer;
 pub mod input;
 #[path = "app/logging.rs"]
 pub mod logging;
+#[path = "app/motion_damage.rs"]
+mod motion_damage;
 #[path = "app/server.rs"]
 pub mod server;
 #[path = "app/services.rs"]

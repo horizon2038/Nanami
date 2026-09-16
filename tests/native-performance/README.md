@@ -26,6 +26,9 @@ The deferred-notification service receive regressions are documented in
 USB root discovery and late-attachment regressions are documented in
 [USB input and root storage](../usb/README.md).
 
+Cursor/drag damage and compositor RAM writes are documented in
+[Motion rendering](motion.md).
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

@@ -12,6 +12,10 @@ name = "hotpaths"
 path = "hotpath-tests.rs"
 
 [[test]]
+name = "honoka-motion"
+path = "honoka-motion/main.rs"
+
+[[test]]
 name = "alpha-alter"
 path = "alpha-alter-tests.rs"
 

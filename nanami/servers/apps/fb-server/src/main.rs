@@ -1,6 +1,12 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+mod damage;
+mod presentation;
+mod profile;
+use presentation::present_shared_framebuffer;
+
 use core::sync::atomic::{fence, Ordering};
 use libnanami::ipc::{ServiceEvent, ServiceRequest};
 use libnanami::{self, RequestError, Word};
@@ -45,6 +51,8 @@ struct DisplayState {
     screen: ScreenInfo,
     hardware_vaddr: Word,
     shared: SharedFramebuffer,
+    shadow: Option<damage::Shadow>,
+    profile: profile::Profile,
 }
 
 #[panic_handler]
@@ -135,7 +143,8 @@ fn nanami_main() -> libnanami::NanamiResult {
     let framebuffer_bytes = fb_size;
     let stride_bytes = normalize_stride_bytes(fb_stride, fb_width, fb_bpp)
         .ok_or(libnanami::NanamiError::INVALID_ARGUMENT)?;
-    if stride_bytes.saturating_mul(fb_height) > framebuffer_bytes {
+    let visible_bytes = stride_bytes.checked_mul(fb_height);
+    if visible_bytes.is_none_or(|bytes| bytes > framebuffer_bytes) {
         return Err(log_error(
             "[fb-server] framebuffer stride exceeds mapped region: ",
             RequestError::InvalidArgument,
@@ -186,7 +195,21 @@ fn nanami_main() -> libnanami::NanamiResult {
         screen: screen_info,
         hardware_vaddr: mapped_fb,
         shared: SharedFramebuffer::EMPTY,
+        shadow: if option_env!("NANAMI_FB_CACHE") == Some("0") {
+            None
+        } else {
+            damage::Shadow::new(visible_bytes.unwrap())
+        },
+        profile: profile::Profile::new(),
     };
+    libnanami::println!(
+        "[fb-server] unchanged-pixel cache bytes={:#x}",
+        if display.shadow.is_some() {
+            visible_bytes.unwrap()
+        } else {
+            0
+        }
+    );
 
     loop {
         let used_reply_receive = has_pending_reply;
@@ -301,89 +324,18 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
             }
         }
         nanami_services::gfx::DISPLAY_SERVICE_REQUEST_PRESENT => {
-            match present_shared_framebuffer(
-                display,
-                request.identifier,
-                request.arg0,
-                request.arg1,
-            ) {
-                Ok(pixels) => (libnanami::OS_RESPONSE_OK, pixels, 0),
+            let before = display.profile.now();
+            let result =
+                present_shared_framebuffer(display, request.identifier, request.arg0, request.arg1);
+            match result {
+                Ok((pixels, written)) => {
+                    display.profile.record(before, pixels, written);
+                    (libnanami::OS_RESPONSE_OK, pixels, 0)
+                }
                 Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    }
-}
-
-fn present_shared_framebuffer(
-    display: &DisplayState,
-    owner_pid: Word,
-    position: Word,
-    size: Word,
-) -> Result<Word, RequestError> {
-    let shared = display.shared;
-    if owner_pid == 0 || shared.owner_pid != owner_pid || shared.local_vaddr == 0 {
-        return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_PERMISSION_DENIED,
-        ));
-    }
-
-    let x = (position & 0xffff_ffff) as usize;
-    let y = ((position >> 32) & 0xffff_ffff) as usize;
-    let width = (size & 0xffff_ffff) as usize;
-    let height = ((size >> 32) & 0xffff_ffff) as usize;
-    if width == 0
-        || height == 0
-        || x >= display.screen.width as usize
-        || y >= display.screen.height as usize
-    {
-        return Err(RequestError::InvalidArgument);
-    }
-
-    let width = width.min(display.screen.width as usize - x);
-    let height = height.min(display.screen.height as usize - y);
-    let row_bytes = width.saturating_mul(4);
-    let stride = display.screen.stride as usize;
-    fence(Ordering::Acquire);
-
-    if x == 0 && row_bytes == stride {
-        let offset = y.saturating_mul(stride);
-        let bytes = row_bytes.saturating_mul(height);
-        if offset.saturating_add(bytes) > shared.bytes as usize {
-            return Err(RequestError::InvalidArgument);
-        }
-        copy_to_hardware(
-            shared.local_vaddr.saturating_add(offset),
-            display.hardware_vaddr.saturating_add(offset),
-            bytes,
-        );
-        fence(Ordering::Release);
-        return Ok(width.saturating_mul(height) as Word);
-    }
-
-    let mut row = 0usize;
-    while row < height {
-        let offset = y
-            .saturating_add(row)
-            .saturating_mul(stride)
-            .saturating_add(x.saturating_mul(4));
-        if offset.saturating_add(row_bytes) > shared.bytes as usize {
-            return Err(RequestError::InvalidArgument);
-        }
-        copy_to_hardware(
-            shared.local_vaddr.saturating_add(offset),
-            display.hardware_vaddr.saturating_add(offset),
-            row_bytes,
-        );
-        row += 1;
-    }
-    fence(Ordering::Release);
-    Ok(width.saturating_mul(height) as Word)
-}
-
-fn copy_to_hardware(source: Word, destination: Word, bytes: usize) {
-    unsafe {
-        core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes);
     }
 }
 

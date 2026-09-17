@@ -2,6 +2,7 @@ use core::ptr;
 
 pub const USBCMD: usize = 0;
 pub const USBSTS: usize = 4;
+pub const MFINDEX: usize = 0;
 pub const PORTSC: usize = 0x400;
 pub const PORT_CHANGE: u32 = 0x7f << 17;
 pub const PORT_POWER: u32 = 1 << 9;

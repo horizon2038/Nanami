@@ -62,7 +62,15 @@ impl AcpiMapper {
         if self.mapped_count == self.pages.len() {
             return Err(RequestError::Unsupported);
         }
-        let (_, virtual_address) = libnanami::request_mmio(physical_address, PAGE_SIZE)?;
+        let (_, virtual_address) = libnanami::request_mmio(physical_address, PAGE_SIZE)
+            .inspect_err(|error| {
+                libnanami::println!(
+                    "[driver-manager] ACPI map failed page={:#x} bytes={:#x}: {}",
+                    physical_address,
+                    PAGE_SIZE,
+                    error
+                );
+            })?;
         self.pages[self.mapped_count] = MappedPage {
             physical: physical_address,
             virtual_address,

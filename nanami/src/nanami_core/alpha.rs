@@ -1,7 +1,9 @@
 mod boot;
 mod control_requests;
 mod memory_requests;
+mod mmio;
 mod process_requests;
+mod shared_memory;
 mod support;
 
 #[cfg(target_arch = "x86_64")]

@@ -50,6 +50,7 @@ struct Call {
 struct Backend {
     calls: Vec<Call>,
     result: Option<Result<Word, RequestError>>,
+    sync_error: Option<RequestError>,
     size: Word,
     stats: usize,
 }
@@ -87,7 +88,17 @@ pub fn call_port(
             | posix::POSIX_REQUEST_PWRITE
             | posix::POSIX_REQUEST_PWRITE_DIRECT
     );
-    assert_eq!(words, if positioned { 5 } else { 4 });
+    let synchronize = matches!(code, posix::POSIX_REQUEST_FSYNC | posix::POSIX_REQUEST_SYNC);
+    assert_eq!(
+        words,
+        if synchronize {
+            2
+        } else if positioned {
+            5
+        } else {
+            4
+        }
+    );
     record(Call {
         code,
         handle: fd,
@@ -104,6 +115,8 @@ pub mod abi {
 }
 mod alter;
 mod ext2;
+#[path = "linux-sync.rs"]
+mod linux_sync;
 pub mod posix;
 mod server;
 pub mod vfs;

@@ -394,6 +394,71 @@ Earlier USB-storage/physical-memory change (before this parser change):
 A9N and Loader source code is unchanged. The historical QEMU checks above do
 not establish sustained physical-hardware stability.
 
+## Storage completion and Doom saves
+
+Bulk transfers actively poll completion for at most one USB frame, using the
+xHCI MFINDEX counter (125-us units, 14-bit wrap), then fall back to the existing
+timer wait. A batch limit also handles a stopped counter. This avoids rounding
+short CBW/data/CSW waits up to the PIT fallback's 100-Hz timer tick on IRQ-less hardware.
+Mandatory reset/debounce delays are unchanged. The subsequent writeback change
+below replaces per-write SYNCHRONIZE CACHE with explicit durability barriers.
+
+New ext2 data blocks are initialized with their payload in one write instead
+of a separate zero write followed by an overwrite. Partial writes still zero
+untouched bytes; indirect pointers are published after data initialization.
+Host `storage` tests include the production allocator at direct, single- and
+double-indirect boundaries, failed initialization and directory zeroing.
+Host `usb` tests cover completion polling expiry, wrap and a stopped counter.
+
+With Doom, its WAD, bash and busybox included in the image:
+
+```sh
+python3 tests/usb/qemu-hid.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --smp 4 --usb-storage --coexist-ps2 --hpet off --bash-smoke --no-network \
+  --bash-input-stress 1 --doom-first --doom-save
+```
+
+`--doom-save` starts a new game, saves slot 1, records QEMU block write/flush
+counts in `doom-save.json`, and loads the slot before normal Doom quit. Review
+`doom-after-save.png`, `doom-load-menu.png` and `doom-after-load.png` for game
+save/load success; disk activity alone is not a success check. The reported
+write interval is a host-observed disk-activity interval, not guest syscall
+latency. These snapshot tests do not measure physical USB flash performance.
+Repeat with `--smp 1 --usb2` for single-core/high-speed storage coverage.
+
+In the four-CPU/PIT/USB3 fixture on 2026-09-16, saving E1M1 reduced writes
+and flushes from 199 each to 174 each; reads remained 250. The save message,
+named load slot and return to gameplay were checked in the screenshots.
+Both versions already completed their observed write interval in about
+0.23 seconds in QEMU. This confirms reduced write amplification, not a measured
+fix for the reported 15-second physical-device pause.
+The one-CPU/HPET/USB2 fixture also saved and loaded successfully (174 writes
+and flushes). Both updated fixtures passed subsequent untraced bash input,
+filesystem writes, cursor movement and desktop clock updates. Host tests passed
+228 cases in debug and release with `--test-threads=1`; the four affected test
+suites passed 102 cases under AddressSanitizer.
+
+## Dirty writeback and fsync
+
+See [the writeback design and regression tests](../native-performance/writeback.md).
+Normal file writes now enter bounded dirty buffers. `fsync` or `O_SYNC` waits for
+the storage FLUSH; otherwise ext2 schedules one-shot background writeback.
+Consequently, Doom's save-complete message can precede durable storage completion.
+The older 174-WRITE/174-FLUSH figures above describe the pre-writeback version.
+
+With writeback, the four-CPU/PIT/USB3 E1M1 save on 2026-09-16 issued 8 WRITE,
+2 FLUSH and 5 READ operations (32 KiB written, 5 KiB read), versus 174/174/250
+before writeback. The observed disk activity occurred about 1.05 seconds after
+requesting save, including the intentional one-second delay; this is not the
+duration of the save syscall. The saved message and successful load were checked
+in screenshots, followed by bash input/writes, cursor and clock liveness checks.
+
+`--writeback-smoke` runs the dedicated Linux syscall/pressure fixture, retains a
+private disk clone and records block statistics. `check_writeback.py` verifies
+its contents offline after QEMU exits. Unlike the default snapshot tests, this
+mode intentionally retains `boot.img` in the printed temporary log directory.
+
 ## References
 
 [Intel xHCI 1.2b](https://cdrdv2-public.intel.com/625472/625472_xHCI_Rev1_2b.pdf),

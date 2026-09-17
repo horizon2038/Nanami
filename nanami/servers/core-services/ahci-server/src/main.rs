@@ -115,6 +115,7 @@ struct AhciRuntime {
     disk_capacity_sectors: u64,
     partition_start_sector: u64,
     partition_sectors: u64,
+    flush_command: u8,
 }
 
 #[panic_handler]
@@ -428,10 +429,20 @@ fn submit(runtime: &AhciRuntime) -> Result<(), RequestError> {
     }
 }
 
-fn identify(runtime: &AhciRuntime) -> Result<u64, RequestError> {
+fn identify(runtime: &mut AhciRuntime) -> Result<u64, RequestError> {
     prepare_command(runtime, ATA_IDENTIFY_DEVICE, 0, 0, SECTOR_BYTES, false)?;
     submit(runtime)?;
     let words = (runtime.dma_virtual as usize + DMA_DATA_OFFSET) as *const u16;
+    let commands = unsafe { ptr::read_unaligned(words.add(83)) };
+    runtime.flush_command = if commands & 0xc000 != 0x4000 {
+        0
+    } else if commands & (1 << 13) != 0 {
+        0xea // FLUSH CACHE EXT
+    } else if commands & (1 << 12) != 0 {
+        0xe7 // FLUSH CACHE
+    } else {
+        0
+    };
     let lba48_supported = unsafe { ptr::read_unaligned(words.add(83)) } & (1 << 10) != 0;
     let sectors = if lba48_supported {
         let w100 = unsafe { ptr::read_unaligned(words.add(100)) } as u64;
@@ -636,6 +647,21 @@ fn handle_request(
         nanami_services::block::BLOCK_DEVICE_REQUEST_WRITE => {
             handle_transfer(request, session, runtime, true)
         }
+        nanami_services::block::BLOCK_DEVICE_REQUEST_FLUSH => {
+            if !session.active || session.pid != request.identifier {
+                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            }
+            let result = if runtime.flush_command == 0 {
+                Err(RequestError::Unsupported)
+            } else {
+                prepare_command(runtime, runtime.flush_command, 0, 0, 0, false)
+                    .and_then(|()| submit(runtime))
+            };
+            match result {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(error) => (status(error), 0, 0),
+            }
+        }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
@@ -684,10 +710,11 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
                 disk_capacity_sectors: 0,
                 partition_start_sector: 0,
                 partition_sectors: 0,
+                flush_command: 0,
             };
             configure_port(&runtime)?;
             let partition = (|| {
-                runtime.disk_capacity_sectors = identify(&runtime)?;
+                runtime.disk_capacity_sectors = identify(&mut runtime)?;
                 find_root_partition(&runtime)
             })();
             // The next port shares this command/FIS buffer. Stop both DMA

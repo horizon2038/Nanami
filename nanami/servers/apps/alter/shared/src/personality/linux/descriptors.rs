@@ -6,7 +6,7 @@ use super::{
     ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX, LINUX_F_DUPFD, LINUX_F_DUPFD_CLOEXEC,
     LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD, LINUX_F_SETFL, LINUX_O_APPEND, LINUX_O_CLOEXEC,
     LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_LARGEFILE, LINUX_O_NONBLOCK, LINUX_O_TRUNC,
-    LINUX_SOCK_NONBLOCK,
+    LINUX_SOCK_NONBLOCK, LINUX_O_DSYNC, LINUX_O_SYNC,
 };
 
 pub(super) fn sys_open(
@@ -302,6 +302,9 @@ pub(super) fn translate_open_flags(flags: Word) -> Word {
     }
     if flags & LINUX_O_NONBLOCK != 0 {
         out |= posix::POSIX_O_NONBLOCK;
+    }
+    if flags & (LINUX_O_SYNC | LINUX_O_DSYNC) != 0 {
+        out |= posix::POSIX_O_SYNC;
     }
     out
 }

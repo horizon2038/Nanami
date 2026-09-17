@@ -55,6 +55,8 @@ const DESC_F_WRITE: u16 = 2;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
+const VIRTIO_BLK_T_FLUSH: u32 = 4;
+const VIRTIO_BLK_F_FLUSH: Word = 1 << 9;
 const VIRTIO_BLK_STATUS_OK: u8 = 0;
 const VIRTIO_SECTOR_BYTES: usize = 512;
 const BLOCK_SIZE: usize = nanami_services::block::BLOCK_DEVICE_BLOCK_SIZE as usize;
@@ -136,6 +138,7 @@ struct BlockRuntime {
     disk_capacity_sectors: u64,
     partition_start_sector: u64,
     partition_sectors: u64,
+    flush_supported: bool,
 }
 
 #[panic_handler]
@@ -232,7 +235,7 @@ fn submit_blk_request_dma(
     bytes: usize,
 ) -> Result<(), RequestError> {
     let sector_count = (bytes / VIRTIO_SECTOR_BYTES) as u64;
-    if bytes == 0
+    if (bytes == 0 && request_type != VIRTIO_BLK_T_FLUSH)
         || bytes > MAX_TRANSFER_BYTES
         || bytes % VIRTIO_SECTOR_BYTES != 0
         || sector
@@ -262,7 +265,7 @@ fn submit_blk_request_dma(
         (*desc.add(0)).addr = header_paddr as u64;
         (*desc.add(0)).len = core::mem::size_of::<VirtioBlkReqHeader>() as u32;
         (*desc.add(0)).flags = DESC_F_NEXT;
-        (*desc.add(0)).next = 1;
+        (*desc.add(0)).next = if request_type == VIRTIO_BLK_T_FLUSH { 2 } else { 1 };
 
         (*desc.add(1)).addr = data_paddr as u64;
         (*desc.add(1)).len = bytes as u32;
@@ -559,6 +562,22 @@ fn handle_request(
         }
         nanami_services::block::BLOCK_DEVICE_REQUEST_WRITE => {
             handle_write(request, session, runtime, dma_paddr_base)
+        }
+        nanami_services::block::BLOCK_DEVICE_REQUEST_FLUSH => {
+            if !session.active || session.pid != request.identifier {
+                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            }
+            // Neither FLUSH nor CONFIG_WCE negotiated means writethrough in
+            // the virtio specification. Otherwise await an actual FLUSH request.
+            let result = if runtime.flush_supported {
+                submit_blk_request_dma(runtime, dma_paddr_base, VIRTIO_BLK_T_FLUSH, 0, 0)
+            } else {
+                Ok(())
+            };
+            match result {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(error) => (map_request_error_to_status(error), 0, 0),
+            }
         }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
@@ -906,17 +925,18 @@ fn init_virtio_blk_with_dma_base(
     vio_write(io_desc, io_base, REG_DEVICE_STATUS, 1, base_status as Word)?;
 
     #[cfg(target_arch = "x86_64")]
-    {
-        let _features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
-        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, 0)?;
-    }
+    let flush_supported = {
+        let features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, features & VIRTIO_BLK_F_FLUSH)?;
+        features & VIRTIO_BLK_F_FLUSH != 0
+    };
     #[cfg(target_arch = "aarch64")]
-    {
+    let flush_supported = {
         // Virtio MMIO v2 requires negotiation of VIRTIO_F_VERSION_1 (bit 32).
         vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 0)?;
-        let _low_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
+        let low_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
         vio_write(io_desc, io_base, REG_DRIVER_FEATURES_SELECT, 4, 0)?;
-        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, 0)?;
+        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, low_features & VIRTIO_BLK_F_FLUSH)?;
 
         vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 1)?;
         let high_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
@@ -931,7 +951,8 @@ fn init_virtio_blk_with_dma_base(
         if (read_device_status(io_desc, io_base)? & VIRTIO_STATUS_FEATURES_OK) == 0 {
             return Err(RequestError::Unsupported);
         }
-    }
+        low_features & VIRTIO_BLK_F_FLUSH != 0
+    };
     let capacity_sectors = read_capacity_sectors(io_desc, io_base)?;
 
     vio_write(io_desc, io_base, REG_QUEUE_SELECT, 2, QUEUE_INDEX as Word)?;
@@ -1012,6 +1033,7 @@ fn init_virtio_blk_with_dma_base(
             disk_capacity_sectors: capacity_sectors,
             partition_start_sector: 0,
             partition_sectors: capacity_sectors,
+            flush_supported,
         },
     ))
 }

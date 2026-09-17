@@ -27,6 +27,12 @@ parser.add_argument('--hpet', choices=('on', 'off'), default='on')
 parser.add_argument('--bash-smoke', action='store_true', help='Exercise interactive bash forks instead of HTTP/hotplug (requires bash and busybox in rootfs)')
 parser.add_argument('--bash-input-stress', type=int, default=0, help='Exercise this many untraced bash input/edit/write cycles (requires --bash-smoke --usb-storage)')
 parser.add_argument('--doom-first', action='store_true', help='Launch graphics Doom and request normal quit before --bash-input-stress')
+parser.add_argument('--doom-fb-size', help='Request a WIDTHxHEIGHT fbdev canvas for --doom-first')
+parser.add_argument('--framebuffer-smoke', action='store_true', help='Run fb-size-test for default, custom, odd and clamped dimensions, then exit')
+parser.add_argument('--framebuffer-case', choices=('all', 'default', 'clamped', 'stress'), default='all', help='Isolate a framebuffer case; clamped checks mapping/remapping only, stress repeats 128 mappings')
+parser.add_argument('--doom-save', action='store_true', help='Save/load a Doom game and record USB write/flush counts (requires --doom-first)')
+parser.add_argument('--writeback-smoke', action='store_true', help='Run writeback-test then retain a private disk for offline persistence checks (requires --bash-smoke)')
+parser.add_argument('--timer-smoke', action='store_true', help='Run timer-test (clock, short sleep and concurrent sleepers); may precede --writeback-smoke')
 parser.add_argument('--wheel-smoke', action='store_true', help='Verify USB wheel-up/down scroll Shell and restore its text pixels')
 parser.add_argument('--no-network', action='store_true', help='Omit the virtual NIC (requires --bash-smoke)')
 parser.add_argument('--stress', type=int, default=0, help='Number of modifier press/release pairs before typing')
@@ -41,10 +47,22 @@ parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug th
 parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
 parser.add_argument('--late-root', action='store_true', help='Boot firmware/initramfs from a private rootless SATA clone, then attach USB root after usb-server is online')
 args = parser.parse_args()
+if args.doom_fb_size and (not args.doom_first or not re.fullmatch(r'[1-9][0-9]*x[1-9][0-9]*', args.doom_fb_size)):
+    parser.error('--doom-fb-size requires --doom-first and WIDTHxHEIGHT')
+if args.framebuffer_smoke and (not args.bash_smoke or args.late_root or args.duplicate_root or args.unplug_root):
+    parser.error('--framebuffer-smoke requires --bash-smoke and a stable root')
+if args.framebuffer_case != 'all' and not args.framebuffer_smoke:
+    parser.error('--framebuffer-case requires --framebuffer-smoke')
+if args.timer_smoke and (not args.bash_smoke or args.late_root or args.duplicate_root or args.unplug_root):
+    parser.error('--timer-smoke requires --bash-smoke and a stable root')
+if args.writeback_smoke and (not args.bash_smoke or args.late_root or args.duplicate_root or args.unplug_root):
+    parser.error('--writeback-smoke requires --bash-smoke and a stable root')
 if args.wheel_smoke and args.drag_stress:
     parser.error('--wheel-smoke requires the initial Shell position (no --drag-stress)')
 if args.doom_first and not args.bash_input_stress:
     parser.error('--doom-first requires --bash-input-stress')
+if args.doom_save and not args.doom_first:
+    parser.error('--doom-save requires --doom-first')
 if args.bash_input_stress < 0 or (args.bash_input_stress and not (args.bash_smoke and args.usb_storage)):
     parser.error('--bash-input-stress requires a positive count, --bash-smoke and --usb-storage')
 if args.drag_stress and args.mouse_stress <= 0:
@@ -92,7 +110,7 @@ command = [
     '-drive', f'if=pflash,format=raw,readonly=on,file={firmware / "OVMF_CODE.fd"}',
     '-drive', f'if=pflash,format=raw,file={logs / "OVMF_VARS.fd"}',
     *([] if args.virtio_storage else ['-device', 'ich9-ahci,id=ahci,addr=3']),
-    '-drive', f'if=none,id=disk,format=raw,snapshot=on,file={base_image}',
+    '-drive', f'if=none,id=disk,format=raw,cache=writeback,snapshot={"off" if args.writeback_smoke else "on"},file={base_image}',
     *(['-drive', f'if=none,id=boot-only,format=raw,snapshot=on,file={logs / "boot-only.img"}'] if args.late_root else []),
     '-device', ('ide-hd,drive=boot-only,bus=ahci.0,bootindex=1' if args.late_root
                 else 'usb-storage,id=usb-root,drive=disk,bus=xhci.0,port=3,bootindex=1' if args.usb_storage
@@ -243,6 +261,43 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': key}], 'hold-time': 50})
                 time.sleep(0.8)
 
+        if args.writeback_smoke or args.timer_smoke or args.framebuffer_smoke:
+            # boot.img is a disposable private clone, never the user's image.
+            # Font initialization can precede USB input attachment, especially
+            # with one CPU and fast storage. Shell creates terminals lazily;
+            # wait for the actual input connection, not terminal creation.
+            wait_for(lambda s: 'usb-server] input attached' in s)
+            time.sleep(5)
+
+            if args.framebuffer_smoke:
+                from framebuffer import exercise as exercise_framebuffer
+                exercise_framebuffer(qmp, type_text, wait_for, serial, logs, args.framebuffer_case)
+                raise SystemExit(0)
+
+            def run_fixture(name):
+                type_text(f'alter -t /alter/linux/bin/{name}-test\n')
+                pattern = rf'managed rootfs process image={name}-test pid=(\d+)'
+                wait_for(lambda s: re.search(pattern, s))
+                pid = re.search(pattern, serial.read_text(errors='replace'))[1]
+                exit_pattern = r'exit pid=' + pid + r' syscall=\d+ status=(\d+)\b'
+                wait_for(lambda s: re.search(exit_pattern, s), timeout=180)
+                status = re.search(exit_pattern, serial.read_text(errors='replace'))[1]
+                assert status == '0', f'{name} fixture failed at stage {status}'
+
+            if args.timer_smoke:
+                run_fixture('timer')
+                print('PASS: monotonic clock, 1ms/100ms nanosleep, concurrent sleepers and invalid timespecs', flush=True)
+                if not args.writeback_smoke:
+                    raise SystemExit(0)
+                time.sleep(2)
+            run_fixture('writeback')
+            log = serial.read_text(errors='replace')
+            assert 'writeback failed' not in log and 'writeback timer failed' not in log
+            qmp('stop')
+            (logs / 'writeback-stats.json').write_text(json.dumps(qmp('query-blockstats'), indent=2))
+            print('PASS: fsync/fdatasync/syncfs/sync, dup, O_SYNC, read-your-writes and cache pressure; disk retained for offline verification', flush=True)
+            raise SystemExit(0)
+
         if args.usb_storage:
             def root_written_bytes():
                 records = qmp('query-blockstats')
@@ -262,7 +317,7 @@ with (logs / 'qemu.log').open('w') as diagnostics:
 
         if args.bash_input_stress:
             if args.doom_first:
-                run_doom_first(qmp, type_text, wait_for, logs)
+                run_doom_first(qmp, type_text, wait_for, logs, save=args.doom_save, fb_size=args.doom_fb_size)
             exercise_bash_input(qmp, type_text, wait_for, serial, root_written_bytes, args.bash_input_stress)
             qmp('screendump', {'filename': str(logs / 'after-bash.png'), 'format': 'png'})
         elif args.bash_smoke:
@@ -413,4 +468,5 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         except subprocess.TimeoutExpired:
             process.terminate()
             process.wait(timeout=5)
-        base_image.unlink()
+        if not args.writeback_smoke:
+            base_image.unlink()

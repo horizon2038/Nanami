@@ -3,6 +3,12 @@
 
 use libnanami::Word;
 
+mod cli;
+#[path = "../shared/src/common/framebuffer_size.rs"]
+mod framebuffer_size;
+use cli::{parse_cli, AlterOs, Launch};
+use framebuffer_size::ALTER_LAUNCH_FLAG_FB_SIZE;
+
 const SLOT_ALTER_SERVICE: Word = 28;
 const SLOT_TERMINAL_SERVICE: Word = 29;
 const SLOT_TIMER_SERVICE: Word = 30;
@@ -16,7 +22,6 @@ const ALTER_LAUNCH_FLAG_STRACE: Word = 1 << 0;
 const ALTER_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << 1;
 const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 const ALTER_SHM_BYTES: Word = 0x4000;
-const ALTER_LAUNCH_MAX_ARGS: usize = 8;
 const ALTER_LAUNCH_MAX_ENVS: usize = 8;
 const ALTER_ENV: [&[u8]; 4] = [
     b"PATH=/bin:/usr/bin",
@@ -41,15 +46,18 @@ fn nanami_main() -> libnanami::NanamiResult {
         let _ = terminal.connect(terminal_id);
     }
 
-    let launch = match parse_cli() {
+    let launch = match parse_cli(libnanami::process_argc(), libnanami::process_arg) {
         Ok(launch) => launch,
         Err(()) => {
             terminal.write_line(
-                b"usage: alter [-t] [-d] [-g|--graphics] [-os linux|freebsd] <binary> [args]",
+                b"usage: alter [-t] [-d] [-g [--fb-size WIDTHxHEIGHT]] [-os linux|freebsd] <binary> [args]",
             );
             return Ok(());
         }
     };
+    if launch.diagnostics {
+        log_cli(libnanami::process_argc(), launch.first_arg, launch.os);
+    }
 
     let mut alter = match AlterClient::connect(launch.os.service_name()) {
         Ok(client) => client,
@@ -77,6 +85,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     if launch.graphics {
         flags |= ALTER_LAUNCH_FLAG_GRAPHICS;
     }
+    if launch.framebuffer_size.is_some() {
+        flags |= ALTER_LAUNCH_FLAG_FB_SIZE;
+    }
     let (status, pid, _) = match libnanami::call_service_port(
         alter.port,
         ALTER_REQUEST_SPAWN_LINUX,
@@ -99,99 +110,6 @@ fn nanami_main() -> libnanami::NanamiResult {
 
     wait_child(pid, alter.port, &mut terminal);
     Ok(())
-}
-
-struct Launch {
-    trace: bool,
-    diagnostics: bool,
-    graphics: bool,
-    os: AlterOs,
-    first_arg: usize,
-    argc: usize,
-}
-
-#[derive(Clone, Copy)]
-enum AlterOs {
-    Linux,
-    FreeBsd,
-}
-
-impl AlterOs {
-    fn service_name(self) -> &'static str {
-        match self {
-            Self::Linux => "alter-linux",
-            Self::FreeBsd => "alter-freebsd",
-        }
-    }
-
-    fn unavailable_message(self) -> &'static [u8] {
-        match self {
-            Self::Linux => b"alter: alter-linux unavailable",
-            Self::FreeBsd => b"alter: alter-freebsd unavailable",
-        }
-    }
-}
-
-fn parse_cli() -> Result<Launch, ()> {
-    let argc = libnanami::process_argc();
-    if argc < 2 {
-        return Err(());
-    }
-
-    let mut index = 1usize;
-    let mut trace = false;
-    let mut diagnostics = false;
-    let mut graphics = false;
-    let mut os = AlterOs::Linux;
-    while index < argc {
-        let arg = libnanami::process_arg(index).ok_or(())?;
-        if bytes_eq(arg, b"-t") || bytes_eq(arg, b"--strace") {
-            trace = true;
-            index += 1;
-        } else if bytes_eq(arg, b"-d") || bytes_eq(arg, b"--diagnostics") {
-            diagnostics = true;
-            index += 1;
-        } else if bytes_eq(arg, b"-g") || bytes_eq(arg, b"--graphics") {
-            graphics = true;
-            index += 1;
-        } else if bytes_eq(arg, b"-os") {
-            let os_name = libnanami::process_arg(index + 1).ok_or(())?;
-            if bytes_eq(os_name, b"linux") {
-                os = AlterOs::Linux;
-            } else if bytes_eq(os_name, b"freebsd") {
-                os = AlterOs::FreeBsd;
-            } else {
-                return Err(());
-            }
-            index += 2;
-        } else {
-            break;
-        }
-    }
-    if index + 1 < argc {
-        let arg = libnanami::process_arg(index).ok_or(())?;
-        if bytes_eq(arg, b"linux") {
-            os = AlterOs::Linux;
-            index += 1;
-        } else if bytes_eq(arg, b"freebsd") {
-            os = AlterOs::FreeBsd;
-            index += 1;
-        }
-    }
-    if index >= argc || argc - index > ALTER_LAUNCH_MAX_ARGS {
-        return Err(());
-    }
-    if diagnostics {
-        log_cli(argc, index, os);
-    }
-    Ok(Launch {
-        trace,
-        diagnostics,
-        graphics,
-        os,
-        first_arg: index,
-        argc: argc - index,
-    })
 }
 
 fn log_cli(argc: usize, first_arg: usize, os: AlterOs) {
@@ -246,9 +164,15 @@ impl AlterClient {
         if ALTER_ENV.len() > ALTER_LAUNCH_MAX_ENVS {
             return None;
         }
-        let mut cursor = 16usize;
+        let mut cursor = if launch.framebuffer_size.is_some() { 24 } else { 16 };
+        if self.shm_size < cursor {
+            return None;
+        }
         write_shm_word(self.shm, 0, launch.argc as Word);
         write_shm_word(self.shm, 8, ALTER_ENV.len() as Word);
+        if let Some(size) = launch.framebuffer_size {
+            write_shm_word(self.shm, 16, size.packed());
+        }
         let mut i = 0usize;
         while i < launch.argc {
             let arg = libnanami::process_arg(launch.first_arg + i)?;
@@ -435,10 +359,6 @@ fn write_shm_word(base: Word, offset: usize, value: Word) {
     unsafe {
         core::ptr::write_unaligned((base as usize + offset) as *mut Word, value);
     }
-}
-
-fn bytes_eq(left: &[u8], right: &[u8]) -> bool {
-    left == right
 }
 
 fn append_bytes(dst: &mut [u8], mut pos: usize, src: &[u8]) -> usize {

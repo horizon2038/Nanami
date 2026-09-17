@@ -8,10 +8,12 @@ use crate::loader::{load_cached_fork_linux_elf_image, map_request_error_to_statu
 use crate::personality;
 use crate::process::{read_register_value, write_exec_registers, REG_PC, REG_RSP};
 use crate::state::{OsPersonality, ReplyAction, Runtime};
+use super::framebuffer_size::{FramebufferSize, ALTER_LAUNCH_FLAG_FB_SIZE};
 
 pub struct LaunchInfo {
     pub image_name: [u8; ALTER_IMAGE_NAME_MAX],
     pub image_name_len: usize,
+    framebuffer_size: FramebufferSize,
     argc: usize,
     envc: usize,
     argv_offsets: [usize; ALTER_LAUNCH_MAX_ARGS],
@@ -24,6 +26,7 @@ impl LaunchInfo {
     const EMPTY: Self = Self {
         image_name: [0; ALTER_IMAGE_NAME_MAX],
         image_name_len: 0,
+        framebuffer_size: FramebufferSize::DEFAULT,
         argc: 0,
         envc: 0,
         argv_offsets: [0; ALTER_LAUNCH_MAX_ARGS],
@@ -37,7 +40,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
     if runtime.client_shm == 0 {
         return ReplyAction::Reply(libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    let Some(info) = parse_launch_info(runtime, request.arg0 as usize, request.arg1 as usize)
+    let Some(info) = parse_launch_info(runtime, request.arg0 as usize, request.arg1 as usize, request.arg3)
     else {
         return ReplyAction::Reply(libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
@@ -110,7 +113,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
             let _ = runtime.set_diagnostics_enabled(pid, diagnostics);
-            let _ = runtime.set_graphics_enabled(pid, graphics);
+            let _ = runtime.configure_graphics(pid, graphics, info.framebuffer_size);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
                 libnanami::println!(
@@ -235,7 +238,7 @@ fn spawn_rootfs_linux_image(
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
             let _ = runtime.set_diagnostics_enabled(pid, diagnostics);
-            let _ = runtime.set_graphics_enabled(pid, graphics);
+            let _ = runtime.configure_graphics(pid, graphics, info.framebuffer_size);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
                 libnanami::println!(
@@ -299,8 +302,14 @@ fn ensure_terminal_client(runtime: &mut Runtime, _terminal_id: Word) -> Result<(
     Ok(())
 }
 
-fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize) -> Option<LaunchInfo> {
-    if len < 16 || offset.checked_add(len)? > runtime.client_shm_size as usize {
+fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize, flags: Word) -> Option<LaunchInfo> {
+    // Legacy callers keep the 16-byte argc/envc header. The optional third
+    // word carries width/height, not guest argv or environment variables.
+    let has_size = flags & ALTER_LAUNCH_FLAG_FB_SIZE != 0;
+    let header_bytes = if has_size { 24 } else { 16 };
+    if len < header_bytes || offset.checked_add(len)? > runtime.client_shm_size as usize
+        || (has_size && flags & ALTER_LAUNCH_FLAG_GRAPHICS == 0)
+    {
         return None;
     }
     let argc = read_client_word(runtime, offset)? as usize;
@@ -310,9 +319,12 @@ fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize) -> Option<Lau
     }
 
     let mut info = LaunchInfo::EMPTY;
+    if has_size {
+        info.framebuffer_size = FramebufferSize::from_packed(read_client_word(runtime, offset + 16)?)?;
+    }
     info.argc = argc;
     info.envc = envc;
-    let mut cursor = offset + 16;
+    let mut cursor = offset + header_bytes;
     let end = offset + len;
     let mut index = 0usize;
     while index < argc {

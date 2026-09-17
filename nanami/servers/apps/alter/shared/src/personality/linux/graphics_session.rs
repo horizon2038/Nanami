@@ -1,8 +1,9 @@
 use super::{
-    honoka, input, map_request_error, Runtime, Word, ALTER_FB_BYTES, ALTER_FB_HEIGHT,
-    ALTER_FB_WIDTH, EINVAL, ENODEV, ENOENT, ENOMEM, ESRCH, SLOT_HONOKA_PRESENT_NOTIFICATION_BASE,
+    honoka, input, map_request_error, Runtime, Word,
+    EINVAL, EIO, ENODEV, ENOENT, ENOMEM, ESRCH, SLOT_HONOKA_PRESENT_NOTIFICATION_BASE,
     SLOT_HONOKA_SERVICE, SLOT_INPUT_SERVICE,
 };
+use crate::common::framebuffer_size::FramebufferSize;
 
 pub(super) fn graphics_enabled(runtime: &Runtime, pid: Word) -> bool {
     runtime
@@ -73,15 +74,26 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
     }
     let honoka_pid = runtime.honoka_pid;
     let port = runtime.honoka_port;
+    let requested = runtime.managed_process(pid).ok_or(ESRCH)?.framebuffer_size;
     let window = honoka::honoka_create_window_with_title(
         port,
         80 + (index as Word * 32),
         80 + (index as Word * 32),
-        ALTER_FB_WIDTH,
-        ALTER_FB_HEIGHT,
+        requested.width,
+        requested.height,
         b"Alter/Linux fb0",
     )
     .map_err(map_request_error)?;
+    let size = match honoka::honoka_get_window_content_size(port, window)
+        .map_err(map_request_error)
+        .and_then(|(width, height)| FramebufferSize::new(width, height).ok_or(EIO))
+    {
+        Ok(size) => size,
+        Err(error) => {
+            let _ = honoka::honoka_destroy_window(port, window);
+            return Err(error);
+        }
+    };
     let present_slot = SLOT_HONOKA_PRESENT_NOTIFICATION_BASE + index as Word;
     if let Err(error) = libnanami::request_notification_port_copy(
         honoka_pid,
@@ -111,11 +123,11 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
         honoka_port: port,
         present_notification,
         window_id: window,
-        width: ALTER_FB_WIDTH,
-        height: ALTER_FB_HEIGHT,
+        width: size.width,
+        height: size.height,
         damage_queue: 0,
         framebuffer: 0,
-        framebuffer_bytes: ALTER_FB_BYTES,
+        framebuffer_bytes: size.bytes(),
         input_queue,
         keyboard_events: [0; crate::state::ALTER_EVDEV_QUEUE_CAPACITY],
         keyboard_head: 0,

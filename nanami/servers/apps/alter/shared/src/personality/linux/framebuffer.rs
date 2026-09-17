@@ -1,11 +1,12 @@
 use super::{
-    align_up_word, ensure_clock_timer, honoka, map_request_error, write_target_memory, write_u32,
-    write_u64, LinuxFile, Runtime, Word, ALTER_FB_BYTES, ALTER_FB_HEIGHT, ALTER_FB_STRIDE,
-    ALTER_FB_WIDTH, EACCES, EBADF, EFAULT, EINVAL, EIO, ENODEV, ENOMEM, ENOTTY,
+    align_up_word, arm_clock_timer, honoka, map_request_error, refresh_clock, write_target_memory,
+    LinuxFile, Runtime, Word, EACCES, EBADF, EFAULT, EINVAL, EIO, ENODEV, ENOMEM, ENOTTY,
     LINUX_DIRECT_COPY_CHUNK, LINUX_FBIOGET_FSCREENINFO, LINUX_FBIOGET_VSCREENINFO,
     LINUX_FBIOPAN_DISPLAY, LINUX_FBIOPUT_VSCREENINFO, LINUX_FB_FIX_SCREENINFO_BYTES,
     LINUX_FB_VAR_SCREENINFO_BYTES, LINUX_PAGE_SIZE, LINUX_PROT_READ, LINUX_PROT_WRITE,
 };
+use super::framebuffer_info::{write_fb_fix_screeninfo, write_fb_var_screeninfo};
+use crate::common::framebuffer_size::FramebufferSize;
 
 pub(super) fn sys_framebuffer_read(
     runtime: &mut Runtime,
@@ -110,20 +111,26 @@ pub(super) fn ensure_framebuffer_mapping(
             Err(EACCES)
         };
     }
-    ensure_clock_timer(runtime)?;
+    refresh_clock(runtime)?;
     let (shared, bytes) = honoka::honoka_attach_logical_framebuffer_to_process(
         session.honoka_port,
         session.window_id,
         pid,
     )
     .map_err(map_request_error)?;
-    if bytes == 0 {
+    if bytes != session.framebuffer_bytes || shared == 0 {
+        if shared != 0 && bytes != 0 {
+            let _ = libnanami::request_process_mapping_release(pid, shared, bytes);
+        }
+        let _ = honoka::honoka_detach_logical_framebuffer(session.honoka_port, session.window_id);
         return Err(EIO);
     }
     let framebuffer = shared;
     let framebuffer_bytes = bytes;
     let mapped = align_up_word(framebuffer_bytes, LINUX_PAGE_SIZE);
     if !runtime.add_mapping(pid, framebuffer, mapped, prot) {
+        let _ = libnanami::request_process_mapping_release(pid, shared, bytes);
+        let _ = honoka::honoka_detach_logical_framebuffer(session.honoka_port, session.window_id);
         return Err(ENOMEM);
     }
     let index = id.checked_sub(1).ok_or(ENODEV)? as usize;
@@ -133,6 +140,7 @@ pub(super) fn ensure_framebuffer_mapping(
     runtime.graphics[index].guest_pid = pid;
     runtime.graphics[index].guest_framebuffer = framebuffer;
     runtime.graphics[index].guest_framebuffer_bytes = framebuffer_bytes;
+    arm_clock_timer(runtime)?;
     Ok(framebuffer)
 }
 
@@ -179,12 +187,14 @@ pub(super) fn sys_framebuffer_ioctl(
     request: Word,
     argument: Word,
 ) -> Result<Word, i32> {
+    let session = graphics_session(runtime, file.resource)?;
+    let size = FramebufferSize { width: session.width, height: session.height };
     match request {
         LINUX_FBIOGET_FSCREENINFO => {
             if argument == 0 {
                 return Err(EFAULT);
             }
-            write_fb_fix_screeninfo(runtime.posix_shm);
+            write_fb_fix_screeninfo(runtime.posix_shm, size);
             write_target_memory(runtime, pid, argument, LINUX_FB_FIX_SCREENINFO_BYTES)?;
             Ok(0)
         }
@@ -192,7 +202,7 @@ pub(super) fn sys_framebuffer_ioctl(
             if argument == 0 {
                 return Err(EFAULT);
             }
-            write_fb_var_screeninfo(runtime.posix_shm);
+            write_fb_var_screeninfo(runtime.posix_shm, size);
             write_target_memory(runtime, pid, argument, LINUX_FB_VAR_SCREENINFO_BYTES)?;
             Ok(0)
         }
@@ -204,38 +214,5 @@ pub(super) fn sys_framebuffer_ioctl(
             Ok(0)
         }
         _ => Err(ENOTTY),
-    }
-}
-
-pub(super) fn write_fb_fix_screeninfo(base: Word) {
-    unsafe {
-        ::core::ptr::write_bytes(base as *mut u8, 0, LINUX_FB_FIX_SCREENINFO_BYTES as usize);
-        let id = b"Nanami Honoka fb";
-        ::core::ptr::copy_nonoverlapping(id.as_ptr(), base as *mut u8, id.len());
-        write_u64(base + 16, 0);
-        write_u32(base + 24, ALTER_FB_BYTES as u32);
-        write_u32(base + 28, 0);
-        write_u32(base + 32, 0);
-        write_u32(base + 36, 2);
-        write_u32(base + 48, ALTER_FB_STRIDE as u32);
-    }
-}
-
-pub(super) fn write_fb_var_screeninfo(base: Word) {
-    unsafe {
-        ::core::ptr::write_bytes(base as *mut u8, 0, LINUX_FB_VAR_SCREENINFO_BYTES as usize);
-        write_u32(base, ALTER_FB_WIDTH as u32);
-        write_u32(base + 4, ALTER_FB_HEIGHT as u32);
-        write_u32(base + 8, ALTER_FB_WIDTH as u32);
-        write_u32(base + 12, ALTER_FB_HEIGHT as u32);
-        write_u32(base + 24, 32);
-        write_u32(base + 32, 16);
-        write_u32(base + 36, 8);
-        write_u32(base + 44, 8);
-        write_u32(base + 48, 8);
-        write_u32(base + 56, 0);
-        write_u32(base + 60, 8);
-        write_u32(base + 68, 24);
-        write_u32(base + 72, 8);
     }
 }

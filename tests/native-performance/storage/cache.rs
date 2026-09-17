@@ -18,25 +18,18 @@ fn each_block_in_a_batch_gets_its_own_cache_contents() {
 }
 
 #[test]
-fn short_or_failed_write_invalidates_affected_cache_and_is_not_retried() {
+fn short_or_failed_write_retains_dirty_data_and_is_not_retried() {
     for result in [Ok(BLOCK_SIZE), Err(RequestError::Transport)] {
         let mut runtime = runtime(vec![]);
-        for block in [100, 101, 105] {
-            read_block(&mut runtime, block).unwrap();
-        }
         FAKE.with(|fake| fake.borrow_mut().write_result = Some(result));
         runtime.scratch[..2 * BLOCK_SIZE].fill(0x32);
-        assert!(write_blocks(&mut runtime, 100, 2).is_err());
-        assert!(runtime
-            .block_cache
-            .iter()
-            .any(|c| c.valid && c.block == 105));
-        assert!(!runtime
-            .block_cache
-            .iter()
-            .any(|c| c.valid && (100..102).contains(&c.block)));
-        read_block(&mut runtime, 100).unwrap();
-        assert!(runtime.scratch[..BLOCK_SIZE].iter().all(|b| *b == 0x32));
+        write_blocks(&mut runtime, 100, 2).unwrap();
+        assert!(flush_blocks(&mut runtime).is_err());
+        assert!(runtime.block_cache.is_dirty());
+        assert!(flush_blocks(&mut runtime).is_err());
+        assert!(write_block(&mut runtime, 105).is_err());
+        read_blocks(&mut runtime, 100, 2).unwrap();
+        assert!(runtime.scratch[..2 * BLOCK_SIZE].iter().all(|b| *b == 0x32));
         FAKE.with(|fake| assert_eq!(fake.borrow().writes.len(), 1));
     }
 }
@@ -49,6 +42,7 @@ fn zeroing_never_reads_disk_and_rejects_invalid_targets() {
         zero_block(&mut runtime, 1024),
         Err(RequestError::InvalidArgument)
     );
+    flush_blocks(&mut runtime).unwrap();
     FAKE.with(|fake| {
         let fake = fake.borrow();
         assert!(fake.reads.is_empty());

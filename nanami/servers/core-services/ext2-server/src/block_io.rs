@@ -1,9 +1,7 @@
 use super::*;
 
 pub(super) fn zero_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
-    if block >= runtime.block_count || runtime.block_size as Word > runtime.block_shm_size {
-        return Err(RequestError::InvalidArgument);
-    }
+    validate_run(runtime, block, 1)?;
     unsafe {
         ptr::write_bytes(runtime.block_shm as *mut u8, 0, runtime.block_size);
     }
@@ -11,12 +9,7 @@ pub(super) fn zero_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), 
 }
 
 pub(super) fn read_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
-    if load_cached_block(runtime, block) {
-        return Ok(());
-    }
-    read_blocks_uncached(runtime, block, 1)?;
-    store_cached_block(runtime, block, 0);
-    Ok(())
+    read_blocks(runtime, block, 1)
 }
 
 pub(super) fn read_blocks(
@@ -24,72 +17,97 @@ pub(super) fn read_blocks(
     block: usize,
     count: usize,
 ) -> Result<(), RequestError> {
-    if count == 1 {
-        return read_block(runtime, block);
+    validate_run(runtime, block, count)?;
+    let mut offset = 0;
+    while offset < count {
+        let target = unsafe {
+            core::slice::from_raw_parts_mut(
+                (runtime.block_shm + offset * runtime.block_size) as *mut u8,
+                runtime.block_size,
+            )
+        };
+        if runtime.block_cache.load(block + offset, target) {
+            offset += 1;
+            continue;
+        }
+        let first = offset;
+        offset += 1;
+        while offset < count && !runtime.block_cache.contains(block + offset) {
+            offset += 1;
+        }
+        read_blocks_uncached(
+            runtime,
+            block + first,
+            offset - first,
+            first * runtime.block_size,
+        )?;
+        for index in first..offset {
+            let source = unsafe {
+                core::slice::from_raw_parts(
+                    (runtime.block_shm + index * runtime.block_size) as *const u8,
+                    runtime.block_size,
+                )
+            };
+            runtime.block_cache.store(block + index, source, None);
+        }
     }
-    read_blocks_uncached(runtime, block, count)
+    Ok(())
 }
 
-pub(super) fn read_blocks_uncached(
-    runtime: &mut Ext2Runtime,
-    block: usize,
-    count: usize,
-) -> Result<(), RequestError> {
-    let bytes = count
-        .checked_mul(runtime.block_size)
-        .ok_or(RequestError::InvalidArgument)?;
-    let end = block
-        .checked_add(count)
-        .ok_or(RequestError::InvalidArgument)?;
+fn validate_run(runtime: &Ext2Runtime, block: usize, count: usize) -> Result<(), RequestError> {
     if count == 0
-        || block >= runtime.block_count
-        || end > runtime.block_count
-        || bytes as Word > runtime.block_shm_size
+        || block
+            .checked_add(count)
+            .is_none_or(|end| end > runtime.block_count)
+        || count
+            .checked_mul(runtime.block_size)
+            .is_none_or(|bytes| bytes > runtime.block_shm_size)
     {
         return Err(RequestError::InvalidArgument);
     }
-    let mut attempt = 0usize;
+    Ok(())
+}
+
+fn read_blocks_uncached(
+    runtime: &Ext2Runtime,
+    block: usize,
+    count: usize,
+    offset: usize,
+) -> Result<(), RequestError> {
+    let mut attempt = 0;
     let read = loop {
-        match nanami_services::block::block_device_read(
-            runtime.block_port,
-            block as Word,
-            count as Word,
-            BLOCK_BUFFER_OFFSET,
-        ) {
+        match nanami_services::block::block_device_read(runtime.block_port, block, count, offset) {
             Ok(read) => break read,
             Err(error)
-                if attempt + 1 < BLOCK_READ_RETRY_LIMIT && is_retryable_block_read_error(error) =>
+                if attempt + 1 < BLOCK_READ_RETRY_LIMIT
+                    && matches!(
+                        error,
+                        RequestError::Transport
+                            | RequestError::Protocol
+                            | RequestError::Status(libnanami::OS_RESPONSE_FATAL)
+                    ) =>
             {
                 attempt += 1;
-                libnanami::print!("[ext2-server] retry block read attempt=");
-                libnanami::print!("{}", attempt + 1);
-                libnanami::print!(" block=");
-                libnanami::print!("{}", block);
-                libnanami::print!(" count=");
-                libnanami::print!("{}", count);
-                libnanami::print!("\n");
+                libnanami::print!(
+                    "[ext2-server] retry block read attempt={} block={} count={}\n",
+                    attempt + 1,
+                    block,
+                    count
+                );
                 libnanami::yield_now();
             }
             Err(error) => return Err(error),
         }
     };
-    if read as usize != bytes {
-        return Err(RequestError::Protocol);
+    if read == count * runtime.block_size {
+        Ok(())
+    } else {
+        Err(RequestError::Protocol)
     }
-    Ok(())
-}
-
-fn is_retryable_block_read_error(error: RequestError) -> bool {
-    matches!(
-        error,
-        RequestError::Transport
-            | RequestError::Protocol
-            | RequestError::Status(libnanami::OS_RESPONSE_FATAL)
-    )
 }
 
 pub(super) fn write_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
-    write_blocks(runtime, block, 1)
+    cache_write(runtime, block, 1, block_cache::BlockKind::Metadata)
 }
 
 pub(super) fn write_blocks(
@@ -97,87 +115,37 @@ pub(super) fn write_blocks(
     block: usize,
     count: usize,
 ) -> Result<(), RequestError> {
-    let bytes = count
-        .checked_mul(runtime.block_size)
-        .ok_or(RequestError::InvalidArgument)?;
-    let end = block
-        .checked_add(count)
-        .ok_or(RequestError::InvalidArgument)?;
-    if count == 0 || end > runtime.block_count || bytes > runtime.block_shm_size {
-        return Err(RequestError::InvalidArgument);
-    }
-    let written = nanami_services::block::block_device_write(
-        runtime.block_port,
-        block as Word,
-        count as Word,
-        BLOCK_BUFFER_OFFSET,
-    );
-    match written {
-        Ok(n) if n == bytes => {
-            for offset in 0..count {
-                store_cached_block(runtime, block + offset, offset * runtime.block_size);
-            }
-            Ok(())
-        }
-        result => {
-            // A failed/short write may have changed a prefix on disk. Do not retain
-            // stale cached blocks, and never replay the request through another path.
-            for entry in &mut runtime.block_cache {
-                if entry.valid && (block..end).contains(&entry.block) {
-                    entry.valid = false;
-                }
-            }
-            result.and(Err(RequestError::Protocol))
-        }
-    }
+    cache_write(runtime, block, count, block_cache::BlockKind::Data)
 }
 
-fn load_cached_block(runtime: &mut Ext2Runtime, block: usize) -> bool {
-    if runtime.block_size > EXT2_BLOCK_CACHE_BYTES {
-        return false;
+fn cache_write(
+    runtime: &mut Ext2Runtime,
+    block: usize,
+    count: usize,
+    kind: block_cache::BlockKind,
+) -> Result<(), RequestError> {
+    validate_run(runtime, block, count)?;
+    runtime.block_cache.check_writable()?;
+    if !runtime.block_cache.has_room_for(block, count) {
+        flush_blocks(runtime)?;
     }
-    let mut i = 0usize;
-    while i < runtime.block_cache.len() {
-        let entry = &runtime.block_cache[i];
-        if entry.valid && entry.block == block {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    entry.data.as_ptr(),
-                    runtime.block_shm as *mut u8,
-                    runtime.block_size,
-                );
-            }
-            return true;
-        }
-        i += 1;
+    for offset in 0..count {
+        let source = unsafe {
+            core::slice::from_raw_parts(
+                (runtime.block_shm + offset * runtime.block_size) as *const u8,
+                runtime.block_size,
+            )
+        };
+        runtime
+            .block_cache
+            .store(block + offset, source, Some(kind));
     }
-    false
+    Ok(())
 }
 
-fn store_cached_block(runtime: &mut Ext2Runtime, block: usize, buffer_offset: usize) {
-    if runtime.block_size > EXT2_BLOCK_CACHE_BYTES {
-        return;
-    }
-    let mut index = runtime.block_cache_next;
-    let mut i = 0usize;
-    while i < runtime.block_cache.len() {
-        if runtime.block_cache[i].valid && runtime.block_cache[i].block == block {
-            index = i;
-            break;
-        }
-        i += 1;
-    }
-    if i == runtime.block_cache.len() {
-        runtime.block_cache_next = (runtime.block_cache_next + 1) % runtime.block_cache.len();
-    }
-    let entry = &mut runtime.block_cache[index];
-    entry.valid = true;
-    entry.block = block;
-    unsafe {
-        ptr::copy_nonoverlapping(
-            (runtime.block_shm + buffer_offset) as *const u8,
-            entry.data.as_mut_ptr(),
-            runtime.block_size,
-        );
-    }
+pub(super) fn flush_blocks(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
+    let scratch = unsafe {
+        core::slice::from_raw_parts_mut(runtime.block_shm as *mut u8, runtime.block_shm_size)
+    };
+    runtime.block_cache.flush(runtime.block_port, scratch)
 }

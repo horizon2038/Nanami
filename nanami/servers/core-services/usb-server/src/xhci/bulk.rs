@@ -154,8 +154,10 @@ impl Controller {
                 control: (1 << 10) | IOC | (1 << 2),
             }])
             .ok_or(RequestError::Protocol)?;
+        let mut poll = poll::CompletionPoll::new(unsafe { read(self.runtime, MFINDEX) });
         self.doorbell(slot, endpoint.dci());
-        for _ in 0..5000 {
+        let mut waits = 0;
+        loop {
             for _ in 0..ring::ENTRIES {
                 let Some(event) = self.event() else {
                     core::hint::spin_loop();
@@ -190,10 +192,19 @@ impl Controller {
                     return Err(RequestError::Transport);
                 }
             }
+            // Most BOT stages finish well before the timer's next tick. Do not
+            // turn each CBW/data/CSW into a 10-ms sleep, even without an IRQ.
+            if poll.keep_polling(unsafe { read(self.runtime, MFINDEX) }) {
+                continue;
+            }
+            if waits == 5000 {
+                break;
+            }
             if let Err(error) = self.delay(1) {
                 self.fail(input);
                 return Err(error);
             }
+            waits += 1;
         }
         // A timeout is not completion. Stop the controller and retain its DMA;
         // never copy from/reuse a buffer that hardware may still be accessing.

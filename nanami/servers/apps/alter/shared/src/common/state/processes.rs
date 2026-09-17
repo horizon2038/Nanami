@@ -82,6 +82,7 @@ impl Runtime {
                     trace_enabled: false,
                     diagnostics_enabled: false,
                     graphics_enabled: false,
+                    framebuffer_size: FramebufferSize::DEFAULT,
                     graphics_session: 0,
                     exited: false,
                     exit_status: 0,
@@ -114,7 +115,7 @@ impl Runtime {
                     device_read_len: 0,
                     device_read_context: LinuxSyscallContext::EMPTY,
                     sleep_waiting: false,
-                    sleep_ticks_remaining: 0,
+                    sleep_deadline: 0,
                     sleep_context: LinuxSyscallContext::EMPTY,
                     mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
                 };
@@ -210,7 +211,7 @@ impl Runtime {
         process.device_read_len = 0;
         process.device_read_context = LinuxSyscallContext::EMPTY;
         process.sleep_waiting = false;
-        process.sleep_ticks_remaining = 0;
+        process.sleep_deadline = 0;
         process.sleep_context = LinuxSyscallContext::EMPTY;
         process.mappings = [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX];
         true
@@ -403,11 +404,12 @@ impl Runtime {
         true
     }
 
-    pub fn set_graphics_enabled(&mut self, pid: Word, enabled: bool) -> bool {
+    pub fn configure_graphics(&mut self, pid: Word, enabled: bool, size: FramebufferSize) -> bool {
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
         };
         process.graphics_enabled = enabled;
+        process.framebuffer_size = size;
         true
     }
 

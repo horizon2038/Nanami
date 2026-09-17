@@ -6,6 +6,7 @@ pub const TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS: Word = 0x4001;
 pub const TIMER_SERVICE_REQUEST_SLEEP_ASYNC_MILLISECONDS: Word = 0x4002;
 pub const TIMER_SERVICE_REQUEST_INTERVAL_MILLISECONDS: Word = 0x4003;
 pub const TIMER_SERVICE_REQUEST_MONOTONIC_TICKS: Word = 0x4004;
+pub const TIMER_SERVICE_REQUEST_ALARM_TICKS: Word = 0x4005;
 pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: Word =
     1usize << (core::mem::size_of::<Word>() * 8 - 1);
 
@@ -138,6 +139,30 @@ pub fn timer_service_monotonic_ticks(
         return Err(RequestError::Status(status));
     }
     Ok((ticks, tick_hz))
+}
+
+/// Replace this notification's absolute one-shot alarm, or cancel it with None.
+/// Deadlines use the units returned by `timer_service_monotonic_ticks`.
+/// Independent sleep/interval requests are not affected. A notification that
+/// has already been delivered cannot be recalled; callers must check the clock.
+pub fn timer_service_set_alarm_ticks(
+    timer_service_port: CapabilityDescriptor,
+    notification_slot: Word,
+    deadline: Option<Word>,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        timer_service_port,
+        TIMER_SERVICE_REQUEST_ALARM_TICKS,
+        deadline.unwrap_or(0),
+        notification_slot,
+        deadline.is_some() as Word,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }
 
 pub fn timer_service_sleep_async_seconds(

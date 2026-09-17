@@ -4,7 +4,8 @@ use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
 use super::constants::{
     BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY, BLOCK_DEVICE_CONTROL_GET_INFO,
-    BLOCK_DEVICE_REQUEST_CONTROL, BLOCK_DEVICE_REQUEST_READ, BLOCK_DEVICE_REQUEST_WRITE,
+    BLOCK_DEVICE_REQUEST_CONTROL, BLOCK_DEVICE_REQUEST_FLUSH, BLOCK_DEVICE_REQUEST_READ,
+    BLOCK_DEVICE_REQUEST_WRITE,
 };
 
 pub fn block_device_attach_shared_memory(
@@ -82,4 +83,12 @@ pub fn block_device_write(
         return Err(RequestError::Status(status));
     }
     Ok(bytes)
+}
+
+pub fn block_device_flush(service_port: CapabilityDescriptor) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(service_port, BLOCK_DEVICE_REQUEST_FLUSH, 0, 0, 0, 0, 1)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }

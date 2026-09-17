@@ -20,6 +20,8 @@ pub mod input;
 pub mod logging;
 #[path = "app/motion_damage.rs"]
 mod motion_damage;
+#[path = "app/profile.rs"]
+mod profile;
 #[path = "app/server.rs"]
 pub mod server;
 #[path = "app/services.rs"]
@@ -107,6 +109,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         ports.exec,
         ports.exec_shm,
         ports.exec_shm_size,
+        ports.timer,
         &theme_data[..theme_len],
     )
     .ok_or_else(|| {

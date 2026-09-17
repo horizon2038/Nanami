@@ -104,7 +104,7 @@ fn log_request_error(_message: &str, _error: RequestError) {}
 #[path = "../../nanami/servers/core-services/ext2-server/src/block_connection.rs"]
 mod block_connection;
 
-fn run(fake: Fake) -> (Result<Word, RequestError>, Fake) {
+fn run(fake: Fake) -> (Result<(Word, Option<Word>), RequestError>, Fake) {
     FAKE.with(|state| *state.borrow_mut() = fake);
     let result = block_connection::connect_block_device();
     (result, FAKE.with(|state| state.borrow().clone()))
@@ -113,7 +113,7 @@ fn run(fake: Fake) -> (Result<Word, RequestError>, Fake) {
 #[test]
 fn ready_storage_does_not_require_a_timer() {
     let (result, calls) = run(Fake::default());
-    assert_eq!(result, Ok(SLOT_BLOCK_DEVICE));
+    assert_eq!(result.as_ref().map(|v| v.0), Ok(SLOT_BLOCK_DEVICE));
     assert_eq!(
         (
             calls.block_calls,
@@ -132,7 +132,7 @@ fn timer_registering_after_more_than_64_yields_is_rediscovered() {
         timer_after: 128,
         ..Fake::default()
     });
-    assert_eq!(result, Ok(SLOT_BLOCK_DEVICE));
+    assert_eq!(result.as_ref().map(|v| v.0), Ok(SLOT_BLOCK_DEVICE));
     assert_eq!(
         (
             calls.timer_calls,
@@ -151,7 +151,7 @@ fn storage_can_register_without_any_timer_after_more_than_64_yields() {
         timer_after: usize::MAX,
         ..Fake::default()
     });
-    assert_eq!(result, Ok(SLOT_BLOCK_DEVICE));
+    assert_eq!(result.as_ref().map(|v| v.0), Ok(SLOT_BLOCK_DEVICE));
     assert_eq!((calls.yields, calls.sleeps), (100, 0));
 }
 
@@ -182,7 +182,7 @@ fn storage_is_checked_after_the_last_delay() {
         block_after: 600,
         ..Fake::default()
     });
-    assert_eq!(result, Ok(SLOT_BLOCK_DEVICE));
+    assert_eq!(result.as_ref().map(|v| v.0), Ok(SLOT_BLOCK_DEVICE));
     assert_eq!(calls.sleeps, 600);
 }
 

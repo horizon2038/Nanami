@@ -1,9 +1,9 @@
 use super::{
-    align_up_word, arch, graphics_enabled, is_at_fdcwd, is_linux_virtual_path,
+    align_up_word, arch, ensure_graphics_session, graphics_enabled, graphics_session, is_at_fdcwd, is_linux_virtual_path,
     map_path_request_error, map_request_error, path_is_absolute, posix, read_c_string,
     resolve_current_shm_path, resolve_path, translate_guest_path_for_vfs, virtual_fs,
     write_target_memory, write_u16, write_u32, write_u64, LinuxFile, LinuxFileKind, Runtime,
-    VirtualNode, Word, ALTER_FB_BYTES, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, EOPNOTSUPP, ESRCH,
+    VirtualNode, Word, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, EOPNOTSUPP, ESRCH,
     LINUX_AT_EMPTY_PATH, LINUX_STATX_BASIC_STATS, LINUX_STATX_SIZE, LINUX_S_IFIFO, LINUX_S_IFSOCK,
     POSIX_FILE_TYPE_PIPE, POSIX_FILE_TYPE_SOCKET, STAT_SIZE,
 };
@@ -187,7 +187,7 @@ pub(super) fn sys_fstat(
 }
 
 pub(super) fn virtual_node_stat(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     pid: Word,
     file: LinuxFile,
 ) -> Result<(Word, Word, Word, Word, Word), i32> {
@@ -200,7 +200,7 @@ pub(super) fn virtual_node_stat(
 }
 
 pub(super) fn virtual_node_stat_from_node(
-    runtime: &Runtime,
+    runtime: &mut Runtime,
     pid: Word,
     node: VirtualNode,
 ) -> Result<(Word, Word, Word, Word, Word), i32> {
@@ -211,10 +211,8 @@ pub(super) fn virtual_node_stat_from_node(
         VirtualNode::DevKeyboard => (0, 13, 64),
         VirtualNode::DevMouse => (0, 13, 65),
         VirtualNode::DevFramebuffer => {
-            if !graphics_enabled(runtime, pid) {
-                return Err(ENOENT);
-            }
-            (ALTER_FB_BYTES, 29, 0)
+            let session = ensure_graphics_session(runtime, pid)?;
+            (graphics_session(runtime, session)?.framebuffer_bytes, 29, 0)
         }
         VirtualNode::ProcSelfExe => runtime
             .managed_process(pid)

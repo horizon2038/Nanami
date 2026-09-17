@@ -27,6 +27,10 @@ mod hid_negotiation;
 mod hid_reports;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/protocol.rs"]
 mod protocol;
+#[path = "../../../nanami/servers/core-services/usb-server/src/xhci/poll.rs"]
+mod poll;
+#[path = "completion-poll.rs"]
+mod completion_poll;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/registers.rs"]
 mod registers;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/ring.rs"]

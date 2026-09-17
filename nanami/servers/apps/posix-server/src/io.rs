@@ -259,6 +259,11 @@ fn handle_write_with_mode(
             };
             match write {
                 Ok(bytes) => {
+                    if entry.status_flags & POSIX_O_SYNC != 0 {
+                        if let Err(error) = nanami_services::vfs::vfs_fsync(runtime.vfs_port, entry.vfs_handle) {
+                            return (map_request_error_to_status(error), 0, 0);
+                        }
+                    }
                     if !positioned {
                         runtime.open_files[open_index].offset = file_offset.saturating_add(bytes);
                     }

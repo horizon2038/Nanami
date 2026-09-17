@@ -57,9 +57,16 @@ use virtual_files::*;
 mod descriptors;
 use descriptors::*;
 
+#[path = "linux/sync.rs"]
+mod sync;
+use sync::*;
+
 #[path = "linux/graphics_session.rs"]
 mod graphics_session;
 use graphics_session::*;
+
+#[path = "linux/framebuffer_info.rs"]
+mod framebuffer_info;
 
 #[path = "linux/fork.rs"]
 mod fork;
@@ -96,6 +103,9 @@ use readiness::*;
 #[path = "linux/clocks.rs"]
 mod clocks;
 use clocks::*;
+#[path = "linux/clock_events.rs"]
+mod clock_events;
+use clock_events::arm_clock_timer;
 
 #[path = "linux/tracing.rs"]
 mod tracing;
@@ -245,6 +255,8 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_CLOSE => sys_close(runtime, native_pid, context.args[0]),
+        SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => sys_fsync(runtime, native_pid, context.args[0]),
+        SYS_SYNC => sys_sync(runtime),
         SYS_DUP => sys_dup(runtime, native_pid, context.args[0]),
         SYS_DUP2 => sys_dup2(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP3 => sys_dup3(
@@ -663,7 +675,7 @@ pub fn dispatch_syscall(
     action
 }
 
-pub use clocks::handle_timer_notification;
+pub use clock_events::handle_timer_notification;
 pub use descriptors::close_process_files;
 pub use input_device::wake_device_readers;
 pub use network_wait::wake_network_waiters;

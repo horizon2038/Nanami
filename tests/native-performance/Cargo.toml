@@ -40,6 +40,14 @@ name = "core-process"
 path = "core-process-tests.rs"
 
 [[test]]
+name = "system-version"
+path = "system-version.rs"
+
+[[test]]
+name = "honoka-info-panel"
+path = "honoka-info-panel.rs"
+
+[[test]]
 name = "timers"
 path = "timer-tests.rs"
 
@@ -101,6 +109,7 @@ a9n-types = "0.3.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 
 [dev-dependencies]
+fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
 uefi = { version = "=0.35.0", default-features = false }
 
 [workspace]

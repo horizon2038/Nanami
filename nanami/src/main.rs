@@ -23,6 +23,7 @@ fn main(init_info: &InitInfo) {
     crate::force_info!(r#"|_| \_|\__,_|_| |_|\__,_|_| |_| |_|_|"#);
     crate::force_info!("");
 
+    crate::force_info!("Nanami v{}", env!("CARGO_PKG_VERSION"));
     crate::force_info!(
         "Kernel: A9N v{}.{}.{}-{}+{}",
         init_info.kernel_major_version,

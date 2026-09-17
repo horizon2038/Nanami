@@ -8,6 +8,7 @@ use crate::constants::{
 use crate::font::TextRenderer;
 use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
 use crate::input::InputEvent;
+use crate::info_panel::InfoPanel;
 use crate::motion_damage::MotionDamage;
 use crate::profile::Profile;
 
@@ -108,6 +109,7 @@ pub struct Compositor {
     framebuffer: Framebuffer,
     profile: Profile,
     background: Option<BackgroundCache>,
+    info_panel: InfoPanel,
     windows: [Window; MAX_WINDOWS],
     next_window_id: Word,
     cursor_x: i32,
@@ -141,18 +143,22 @@ impl Compositor {
         exec_shm_size: Word,
         timer_port: Word,
         theme_data: &[u8],
+        desktop_info: [alloc::string::String; 4],
     ) -> Option<Self> {
         let screen = framebuffer.screen();
         let theme = parse_theme(&framebuffer, theme_data)?;
+        let info_panel = InfoPanel::new(screen, &text, desktop_info);
         let background = BackgroundCache::new(screen, |canvas| {
             let full = Rect::new(0, 0, screen.width as i32, screen.height as i32);
             draw_background(canvas, screen, theme, full);
             draw_menu_bar(canvas, screen, theme, full);
+            info_panel.draw(canvas, &text, full);
         });
         let mut this = Self {
             framebuffer,
             profile: Profile::new(timer_port),
             background,
+            info_panel,
             windows: [Window::EMPTY; MAX_WINDOWS],
             next_window_id: 1,
             // The wallpaper logo occupies the exact screen center and is almost the same color as
@@ -812,6 +818,7 @@ impl Compositor {
             } else {
                 draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
                 draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+                self.info_panel.draw(&self.framebuffer, &self.text, dirty);
             }
             draw_clock(
                 &self.framebuffer,

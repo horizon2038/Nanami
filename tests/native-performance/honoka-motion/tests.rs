@@ -21,7 +21,15 @@ fn setup() -> (Compositor, Vec<u32>) {
             .ok()
             .unwrap();
     let theme = include_bytes!("../../../nanami/servers/apps/honoka/assets/themes/default.theme");
-    let mut compositor = Compositor::new(fb, font::TextRenderer, 0, 0, 0, 0, theme).unwrap();
+    let fields = [
+        "Kernel Version: A9N v0.3.4",
+        "Nanami Version: 0.1.0",
+        "Architecture: x86_64",
+        "Platform: pc99",
+    ]
+    .map(String::from);
+    let mut compositor =
+        Compositor::new(fb, font::TextRenderer, 0, 0, 0, 0, theme, fields).unwrap();
     compositor.create_window(18, 80, 80, 400, 300).unwrap();
     compositor.render_if_needed();
     PRESENTED.with(|rects| rects.borrow_mut().clear());

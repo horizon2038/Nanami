@@ -16,6 +16,8 @@ pub mod font;
 pub mod framebuffer;
 #[path = "app/input.rs"]
 pub mod input;
+#[path = "app/info_panel.rs"]
+pub mod info_panel;
 #[path = "app/logging.rs"]
 pub mod logging;
 #[path = "app/motion_damage.rs"]
@@ -111,6 +113,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         ports.exec_shm_size,
         ports.timer,
         &theme_data[..theme_len],
+        services::load_desktop_info(),
     )
     .ok_or_else(|| {
         libnanami::print!("[honoka] invalid theme file\n");

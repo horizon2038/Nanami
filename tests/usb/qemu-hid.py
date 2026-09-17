@@ -29,6 +29,7 @@ parser.add_argument('--bash-input-stress', type=int, default=0, help='Exercise t
 parser.add_argument('--doom-first', action='store_true', help='Launch graphics Doom and request normal quit before --bash-input-stress')
 parser.add_argument('--doom-fb-size', help='Request a WIDTHxHEIGHT fbdev canvas for --doom-first')
 parser.add_argument('--framebuffer-smoke', action='store_true', help='Run fb-size-test for default, custom, odd and clamped dimensions, then exit')
+parser.add_argument('--desktop-info-smoke', action='store_true', help='Capture the desktop system-info panel after boot, then exit')
 parser.add_argument('--framebuffer-case', choices=('all', 'default', 'clamped', 'stress'), default='all', help='Isolate a framebuffer case; clamped checks mapping/remapping only, stress repeats 128 mappings')
 parser.add_argument('--doom-save', action='store_true', help='Save/load a Doom game and record USB write/flush counts (requires --doom-first)')
 parser.add_argument('--writeback-smoke', action='store_true', help='Run writeback-test then retain a private disk for offline persistence checks (requires --bash-smoke)')
@@ -218,6 +219,13 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         print('USB keyboard/mouse enumerated; desktop ready', flush=True)
         print('Active pointers: ' + json.dumps(qmp('query-mice')), flush=True)
         time.sleep(5)
+        if args.desktop_info_smoke:
+            log = serial.read_text(errors='replace')
+            for field in ('kernel version', 'Nanami version', 'platform info'):
+                assert f'[honoka] {field} unavailable:' not in log, f'{field} query failed'
+            qmp('screendump', {'filename': str(logs / 'desktop-info.png'), 'format': 'png'})
+            print('PASS: desktop booted with runtime version/platform queries; inspect desktop-info.png', flush=True)
+            raise SystemExit(0)
         if args.mouse_stress:
             qmp('screendump', {'filename': str(logs / 'before-stress.ppm')})
             _, dimensions, _, _ = (logs / 'before-stress.ppm').read_bytes().split(b'\n', 3)

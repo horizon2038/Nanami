@@ -37,6 +37,8 @@ mod constants;
 mod framebuffer;
 #[path = "../../../nanami/servers/apps/honoka/src/app/input.rs"]
 mod input_events;
+#[path = "../../../nanami/servers/apps/honoka/src/app/info_panel.rs"]
+mod info_panel;
 #[path = "../../../nanami/servers/apps/honoka/src/app/motion_damage.rs"]
 mod motion_damage;
 #[path = "../../../nanami/servers/apps/honoka/src/app/profile.rs"]

@@ -103,6 +103,18 @@ impl TextRenderer {
         }
     }
 
+    pub fn text_width(&self, text: &[u8]) -> i32 {
+        text.iter().fold(0i32, |width, &ch| {
+            let advance = if self.use_fontdue {
+                self.cached_glyph(ch)
+                    .map_or(0, |glyph| glyph.advance as i32)
+            } else {
+                FALLBACK_GLYPH_WIDTH
+            };
+            width.saturating_add(advance)
+        })
+    }
+
     fn cached_glyph(&self, ch: u8) -> Option<&CachedGlyph> {
         if !(FIRST as u8..(FIRST + COUNT) as u8).contains(&ch) {
             return None;

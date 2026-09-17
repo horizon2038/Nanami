@@ -272,3 +272,38 @@ fn connect_timer_service() -> Word {
         }
     }
 }
+
+/// Query the running OS once. In particular, Honoka's own Cargo version is not
+/// the Nanami version. An unavailable field must not prevent desktop startup.
+pub fn load_desktop_info() -> [alloc::string::String; 4] {
+    use alloc::format;
+    let mut buffer = [0; 256];
+    let kernel = match libnanami::request_kernel_version(&mut buffer) {
+        Ok(version) => format!("Kernel Version: A9N v{}", version),
+        Err(error) => {
+            libnanami::println!("[honoka] kernel version unavailable: {}", error);
+            format!("Kernel Version: unavailable")
+        }
+    };
+    let nanami = match libnanami::request_nanami_version(&mut buffer) {
+        Ok(version) => format!("Nanami Version: {}", version),
+        Err(error) => {
+            libnanami::println!("[honoka] Nanami version unavailable: {}", error);
+            format!("Nanami Version: unavailable")
+        }
+    };
+    let (architecture, platform) = match libnanami::request_nanami_info_platform() {
+        Ok(info) => (
+            format!("Architecture: {}", info.architecture_name()),
+            format!("Platform: {}", info.platform_name()),
+        ),
+        Err(error) => {
+            libnanami::println!("[honoka] platform info unavailable: {}", error);
+            (
+                format!("Architecture: unavailable"),
+                format!("Platform: unavailable"),
+            )
+        }
+    };
+    [kernel, nanami, architecture, platform]
+}

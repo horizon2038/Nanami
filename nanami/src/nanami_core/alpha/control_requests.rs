@@ -66,6 +66,12 @@ impl Alpha {
             NANAMI_INFO_PLATFORM_NAME => {
                 encode_info_name_chunk(&self.platform_name, request.arg1)
             }
+            NANAMI_INFO_KERNEL_VERSION => {
+                version_info::encode_chunk(&self.kernel_version, request.arg1)
+            }
+            NANAMI_INFO_OS_VERSION => {
+                version_info::encode_chunk(env!("CARGO_PKG_VERSION"), request.arg1)
+            }
             _ => Err(CapabilityError::InvalidArgument),
         }
     }

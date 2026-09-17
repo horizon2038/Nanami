@@ -87,13 +87,28 @@ pub(super) fn write_file(
         let mut n = min(len - copied, runtime.block_size - block_offset);
         let existing = get_data_block(runtime, *inode, logical_block)
             .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-        let physical_block = if existing != 0 {
-            existing as usize
-        } else {
+        if existing == 0 {
+            ensure_data_block_with(runtime, inode, logical_block, |runtime, block| {
+                // Initialize new blocks with their payload in one cached write.
+                // Partial writes must still zero all previously unallocated bytes.
+                unsafe {
+                    if n != runtime.block_size {
+                        ptr::write_bytes(runtime.block_shm as *mut u8, 0, runtime.block_size);
+                    }
+                    ptr::copy_nonoverlapping(
+                        (session.shm_local as usize + input_offset + copied) as *const u8,
+                        (runtime.block_shm as usize + block_offset) as *mut u8,
+                        n,
+                    );
+                }
+                write_blocks(runtime, block, 1)
+            })
+            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
             inode_dirty = true;
-            ensure_data_block(runtime, inode, logical_block)
-                .map_err(|_| libnanami::OS_RESPONSE_FATAL)? as usize
-        };
+            copied += n;
+            continue;
+        }
+        let physical_block = existing as usize;
         let mut run_blocks = 1usize;
         if block_offset == 0 && n == runtime.block_size {
             // Look ahead only through already allocated, physically contiguous blocks.

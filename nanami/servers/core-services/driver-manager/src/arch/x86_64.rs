@@ -141,10 +141,13 @@ pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {
             );
             address
         }
-        Ok(None) => 0,
+        Ok(None) => {
+            libnanami::print!("[driver-manager] ACPI HPET not found; selecting PIT fallback\n");
+            0
+        }
         Err(error) => {
             libnanami::println!(
-                "[driver-manager] ACPI scan failed at RSDP {:#x}: {}; selecting PIT fallback",
+                "[driver-manager] ACPI scan failed (RSDP {:#x}): {}; selecting PIT fallback",
                 rsdp,
                 error
             );
@@ -155,7 +158,6 @@ pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {
     let timer_image = if hpet_mmio_base != 0 {
         "./bin/hpet-server"
     } else {
-        libnanami::print!("[driver-manager] no ACPI HPET; selecting PIT fallback\n");
         "./bin/timer-server"
     };
 

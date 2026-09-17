@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn schedule_timer(
     state: &mut TimerState,
-    timer_resource: Word,
+    timer: &mut arch::PreparedTimer,
     irq_desc: Word,
     requester_pid: Word,
     source_notification_slot: Word,
@@ -22,7 +22,7 @@ pub(super) fn schedule_timer(
     if wait_ticks == 0 {
         return libnanami::ipc::notification_notify(descriptor);
     }
-    ensure_timer_started(state, timer_resource, irq_desc)?;
+    refresh_clock(state, timer, irq_desc)?;
     let interval_ticks = if interval_ms == 0 {
         0
     } else {
@@ -31,40 +31,71 @@ pub(super) fn schedule_timer(
     let target_tick = state.ticks.saturating_add(wait_ticks);
     state.schedule_count = state.schedule_count.wrapping_add(1);
 
-    let mut i = 0usize;
-    while i < MAX_PENDING_ASYNC_TIMERS {
-        if !state.pending_timers[i].used {
-            state.pending_timers[i] = PendingAsyncTimer {
-                used: true,
-                target_tick,
-                interval_ticks,
-                notification_descriptor: descriptor,
-            };
-            state.next_deadline = Some(
-                state
-                    .next_deadline
-                    .map_or(target_tick, |next| next.min(target_tick)),
-            );
-            return Ok(());
-        }
-        i += 1;
+    if state.pending_timers.push(PendingAsyncTimer {
+        target_tick,
+        interval_ticks,
+        notification_descriptor: descriptor,
+        alarm: false,
+    }) {
+        Ok(())
+    } else {
+        Err(RequestError::Unsupported)
     }
-
-    Err(RequestError::Unsupported)
 }
 
-pub(super) fn ensure_timer_started(
+pub(super) fn refresh_clock(
     state: &mut TimerState,
-    timer_resource: Word,
+    timer: &mut arch::PreparedTimer,
     irq_desc: Word,
 ) -> Result<(), RequestError> {
-    if state.timer_started {
-        return Ok(());
+    if !state.timer_started {
+        timer.start()?;
+        libnanami::ipc::interrupt_ack(irq_desc)?;
+        state.timer_started = true;
     }
-    arch::start(timer_resource)?;
-    libnanami::ipc::interrupt_ack(irq_desc)?;
-    state.timer_started = true;
+    state.ticks = timer.now();
     Ok(())
+}
+
+// One replaceable absolute alarm per client notification. Existing sleep and
+// interval requests remain independent, including on the same notification.
+pub(super) fn set_alarm(
+    state: &mut TimerState,
+    timer: &mut arch::PreparedTimer,
+    irq_desc: Word,
+    requester_pid: Word,
+    source_slot: Word,
+    deadline: Option<u64>,
+) -> Result<(), RequestError> {
+    if requester_pid == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let source_slot = if source_slot == 0 {
+        libnanami::PROCESS_SLOT_NOTIFICATION
+    } else {
+        source_slot
+    };
+    let descriptor = ensure_client_notification_descriptor(state, requester_pid, source_slot)?;
+    if deadline.is_some() {
+        refresh_clock(state, timer, irq_desc)?;
+    }
+    state.pending_timers.remove_alarm(descriptor);
+    let Some(target_tick) = deadline else {
+        return Ok(());
+    };
+    if target_tick <= state.ticks {
+        return libnanami::ipc::notification_notify(descriptor);
+    }
+    if state.pending_timers.push(PendingAsyncTimer {
+        target_tick,
+        interval_ticks: 0,
+        notification_descriptor: descriptor,
+        alarm: true,
+    }) {
+        Ok(())
+    } else {
+        Err(RequestError::Unsupported)
+    }
 }
 
 fn ensure_client_notification_descriptor(
@@ -112,78 +143,26 @@ fn ensure_client_notification_descriptor(
 }
 
 pub(super) fn fire_expired_async_timers(state: &mut TimerState) {
-    if state
-        .next_deadline
-        .is_none_or(|deadline| state.ticks < deadline)
-    {
-        return;
-    }
-    state.next_deadline = None;
-    let mut expired = [0; MAX_PENDING_ASYNC_TIMERS];
-    let mut expired_count = 0usize;
-
-    let mut i = 0usize;
-    while i < MAX_PENDING_ASYNC_TIMERS {
-        let timer = state.pending_timers[i];
-        if timer.used && state.ticks >= timer.target_tick {
-            if timer.interval_ticks == 0 {
-                state.pending_timers[i].used = false;
-            } else {
-                // Skip missed periods without a loop, preserving the original phase.
-                // At u64::MAX no future tick is representable; fire once and retire.
-                let delay =
-                    timer.interval_ticks - (state.ticks - timer.target_tick) % timer.interval_ticks;
-                let next_tick = state.ticks.saturating_add(delay);
-                if next_tick > state.ticks {
-                    state.pending_timers[i].target_tick = next_tick;
-                } else {
-                    state.pending_timers[i].used = false;
-                }
+    while let Some(mut timer) = state.pending_timers.pop_due(state.ticks) {
+        if timer.interval_ticks != 0 {
+            // Preserve phase; coalesce missed periods into one notification.
+            let delay =
+                timer.interval_ticks - (state.ticks - timer.target_tick) % timer.interval_ticks;
+            timer.target_tick = state.ticks.saturating_add(delay);
+            if timer.target_tick > state.ticks {
+                state.pending_timers.push(timer);
             }
-            if expired_count < MAX_PENDING_ASYNC_TIMERS {
-                expired[expired_count] = timer.notification_descriptor;
-                expired_count += 1;
-            }
-            state.fire_count = state.fire_count.wrapping_add(1);
         }
-        if state.pending_timers[i].used {
-            let deadline = state.pending_timers[i].target_tick;
-            state.next_deadline = Some(
-                state
-                    .next_deadline
-                    .map_or(deadline, |next| next.min(deadline)),
-            );
-        }
-        i += 1;
-    }
-
-    let mut j = 0usize;
-    while j < expired_count {
-        if let Err(e) = libnanami::ipc::notification_notify(expired[j]) {
+        state.fire_count = state.fire_count.wrapping_add(1);
+        if let Err(e) = libnanami::ipc::notification_notify(timer.notification_descriptor) {
             log_request_error("[timer-server] async notify failed: ", e);
-            retire_notification_descriptor(state, expired[j]);
+            retire_notification_descriptor(state, timer.notification_descriptor);
         }
-        j += 1;
     }
 }
 
 fn retire_notification_descriptor(state: &mut TimerState, descriptor: Word) {
-    state.next_deadline = None;
-    let mut i = 0usize;
-    while i < MAX_PENDING_ASYNC_TIMERS {
-        if state.pending_timers[i].notification_descriptor == descriptor {
-            state.pending_timers[i] = PendingAsyncTimer::EMPTY;
-        }
-        if state.pending_timers[i].used {
-            let deadline = state.pending_timers[i].target_tick;
-            state.next_deadline = Some(
-                state
-                    .next_deadline
-                    .map_or(deadline, |next| next.min(deadline)),
-            );
-        }
-        i += 1;
-    }
+    state.pending_timers.retire(descriptor);
 
     let mut j = 0usize;
     while j < MAX_CLIENT_NOTIFICATIONS {
@@ -195,5 +174,7 @@ fn retire_notification_descriptor(state: &mut TimerState, descriptor: Word) {
 }
 
 fn milliseconds_to_ticks(wait_ms: u64) -> u64 {
-    wait_ms.saturating_mul(arch::TICK_HZ).saturating_add(999) / 1000
+    (u128::from(wait_ms) * u128::from(arch::TICK_HZ))
+        .div_ceil(1000)
+        .min(u64::MAX as u128) as u64
 }

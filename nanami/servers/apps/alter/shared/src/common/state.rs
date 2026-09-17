@@ -18,6 +18,7 @@ use crate::abi::{
 };
 use crate::elf::ElfMetadata;
 use crate::process::LinuxSyscallContext;
+use super::framebuffer_size::FramebufferSize;
 
 pub const LINUX_FD_MAX: usize = 64;
 pub const LINUX_CWD_MAX: usize = 128;
@@ -261,6 +262,7 @@ pub struct ManagedProcess {
     pub trace_enabled: bool,
     pub diagnostics_enabled: bool,
     pub graphics_enabled: bool,
+    pub framebuffer_size: FramebufferSize,
     pub graphics_session: Word,
     pub exited: bool,
     pub exit_status: Word,
@@ -293,7 +295,7 @@ pub struct ManagedProcess {
     pub device_read_len: Word,
     pub device_read_context: LinuxSyscallContext,
     pub sleep_waiting: bool,
-    pub sleep_ticks_remaining: Word,
+    pub sleep_deadline: Word,
     pub sleep_context: LinuxSyscallContext,
     pub mappings: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
 }
@@ -318,6 +320,7 @@ impl ManagedProcess {
         trace_enabled: false,
         diagnostics_enabled: false,
         graphics_enabled: false,
+        framebuffer_size: FramebufferSize::DEFAULT,
         graphics_session: 0,
         exited: false,
         exit_status: 0,
@@ -350,7 +353,7 @@ impl ManagedProcess {
         device_read_len: 0,
         device_read_context: LinuxSyscallContext::EMPTY,
         sleep_waiting: false,
-        sleep_ticks_remaining: 0,
+        sleep_deadline: 0,
         sleep_context: LinuxSyscallContext::EMPTY,
         mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
     };
@@ -423,7 +426,8 @@ pub struct Runtime {
     pub terminal_shm_size: Word,
     pub terminal_input_notification_id: Word,
     pub timer_port: Word,
-    pub clock_timer_armed: bool,
+    pub clock_deadline: Option<Word>,
+    pub framebuffer_deadline: Option<Word>,
     pub monotonic_ticks: Word,
     pub monotonic_tick_hz: Word,
     pub network_port: Word,
@@ -485,7 +489,8 @@ impl Runtime {
             terminal_shm_size,
             terminal_input_notification_id: 0,
             timer_port: 0,
-            clock_timer_armed: false,
+            clock_deadline: None,
+            framebuffer_deadline: None,
             monotonic_ticks: 0,
             monotonic_tick_hz: 0,
             network_port: 0,

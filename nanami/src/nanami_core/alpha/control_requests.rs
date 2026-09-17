@@ -66,6 +66,12 @@ impl Alpha {
             NANAMI_INFO_PLATFORM_NAME => {
                 encode_info_name_chunk(&self.platform_name, request.arg1)
             }
+            NANAMI_INFO_KERNEL_VERSION => {
+                version_info::encode_chunk(&self.kernel_version, request.arg1)
+            }
+            NANAMI_INFO_OS_VERSION => {
+                version_info::encode_chunk(env!("CARGO_PKG_VERSION"), request.arg1)
+            }
             _ => Err(CapabilityError::InvalidArgument),
         }
     }
@@ -441,84 +447,6 @@ impl Alpha {
             pid, peer_pid, mapped_size, page_base, peer_va
         );
         Ok((0, peer_va))
-    }
-
-    pub(super) fn handle_mmio_request(
-        &mut self,
-        request: OsRequestEvent,
-    ) -> Result<(usize, usize), CapabilityError> {
-        let pid = request.identifier;
-        if pid == 0 {
-            return Err(CapabilityError::PermissionDenied);
-        }
-        let physical_address = request.arg0;
-        let size_bytes = request.arg1;
-        if size_bytes == 0 || (physical_address & (PAGE_SIZE - 1)) != 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let mapped_size = align_up(size_bytes, PAGE_SIZE);
-        let page_count = mapped_size / PAGE_SIZE;
-        let (root_node, address_space, base_va, start_slot) = self.processes.reserve_process_heap(
-            pid,
-            page_count,
-            PAGE_SIZE,
-            PROCESS_FRAME_TOTAL_PAGES,
-        )?;
-        let base_page = self
-            .memory
-            .allocate_physical_at(physical_address, mapped_size, true)?;
-        let base_paddr = base_page * PAGE_SIZE;
-        if base_paddr != physical_address {
-            return Err(CapabilityError::InvalidArgument);
-        }
-        let (converted_base_index, skip_pages, converted_page_count) = self
-            .memory
-            .ensure_alpha_frames_for_range_from_initial_generic(
-                physical_address,
-                mapped_size,
-                true,
-            )?;
-        if converted_page_count != page_count {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
-        let mut i = 0usize;
-        while i < page_count {
-            let source_frame = self
-                .memory
-                .physical_frame_descriptor_from_index(converted_base_index + skip_pages + i)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            arch::node::copy(
-                process_frame_chunk_descriptor(
-                    root_node,
-                    (start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
-                ),
-                ((start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                source_frame,
-            )?;
-            i += 1;
-        }
-
-        let memory = &mut self.memory;
-        let processes = &mut self.processes;
-        let mut j = 0usize;
-        while j < page_count {
-            let frame = process_frame_descriptor(root_node, start_slot + j);
-            let va = base_va + j * PAGE_SIZE;
-            let vm = processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            memory.map_frame(address_space, frame, va, vm)?;
-            j += 1;
-        }
-
-        info!(
-            "[mmio] granted pid={:>3} size={:#x} paddr={:#018x} vaddr={:#018x}",
-            pid, mapped_size, physical_address, base_va
-        );
-        Ok((physical_address, base_va))
     }
 
     pub(super) fn handle_io_port_control_request(

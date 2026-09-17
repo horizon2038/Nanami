@@ -18,7 +18,7 @@ pub(crate) fn alloc_open_file_and_fd(
         return (libnanami::OS_RESPONSE_FATAL, 0, 0);
     };
     runtime.open_files[open_index].status_flags =
-        status_flags & (POSIX_O_APPEND | POSIX_O_NONBLOCK);
+        status_flags & (POSIX_O_APPEND | POSIX_O_NONBLOCK | POSIX_O_SYNC);
     match alloc_fd(&mut runtime.sessions[session_index], open_index) {
         (libnanami::OS_RESPONSE_OK, fd, detail) => (libnanami::OS_RESPONSE_OK, fd, detail),
         _ => {
@@ -133,7 +133,9 @@ pub(crate) fn handle_fcntl(
                 return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
             }
             if request.arg1 == POSIX_F_SETFL {
-                runtime.open_files[open_index].status_flags = request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK);
+                runtime.open_files[open_index].status_flags =
+                    (runtime.open_files[open_index].status_flags & POSIX_O_SYNC)
+                    | (request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK));
                 (libnanami::OS_RESPONSE_OK, 0, 0)
             } else {
                 (libnanami::OS_RESPONSE_OK, runtime.open_files[open_index].status_flags, 0)

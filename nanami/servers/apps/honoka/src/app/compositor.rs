@@ -8,7 +8,9 @@ use crate::constants::{
 use crate::font::TextRenderer;
 use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
 use crate::input::InputEvent;
+use crate::info_panel::InfoPanel;
 use crate::motion_damage::MotionDamage;
+use crate::profile::Profile;
 
 const MAX_DIRTY_RECTS: usize = 256;
 const MAX_INDIVIDUAL_DIRTY_RECTS: usize = 64;
@@ -105,7 +107,9 @@ impl Window {
 
 pub struct Compositor {
     framebuffer: Framebuffer,
+    profile: Profile,
     background: Option<BackgroundCache>,
+    info_panel: InfoPanel,
     windows: [Window; MAX_WINDOWS],
     next_window_id: Word,
     cursor_x: i32,
@@ -137,18 +141,24 @@ impl Compositor {
         exec_port: Word,
         exec_shm: Word,
         exec_shm_size: Word,
+        timer_port: Word,
         theme_data: &[u8],
+        desktop_info: [alloc::string::String; 4],
     ) -> Option<Self> {
         let screen = framebuffer.screen();
         let theme = parse_theme(&framebuffer, theme_data)?;
+        let info_panel = InfoPanel::new(screen, &text, desktop_info);
         let background = BackgroundCache::new(screen, |canvas| {
             let full = Rect::new(0, 0, screen.width as i32, screen.height as i32);
             draw_background(canvas, screen, theme, full);
             draw_menu_bar(canvas, screen, theme, full);
+            info_panel.draw(canvas, &text, full);
         });
         let mut this = Self {
             framebuffer,
+            profile: Profile::new(timer_port),
             background,
+            info_panel,
             windows: [Window::EMPTY; MAX_WINDOWS],
             next_window_id: 1,
             // The wallpaper logo occupies the exact screen center and is almost the same color as
@@ -186,7 +196,7 @@ impl Compositor {
             return false;
         }
 
-        let count = self.dirty_count;
+        let mut count = self.dirty_count;
         self.dirty_count = 0;
 
         if count > MAX_INDIVIDUAL_DIRTY_RECTS {
@@ -196,16 +206,18 @@ impl Compositor {
                 rect = union_rect(rect, self.dirty_rects[i]);
                 i += 1;
             }
-            self.render_and_present(rect);
-            return false;
+            self.dirty_rects[0] = rect;
+            count = 1;
         }
 
+        let before = self.profile.now();
         let mut i = 0usize;
         while i < count {
             self.render_rect(self.dirty_rects[i]);
             i += 1;
         }
 
+        let composited = self.profile.now();
         i = 0;
         while i < count {
             if let Err(error) = self.framebuffer.present(self.dirty_rects[i]) {
@@ -213,6 +225,7 @@ impl Compositor {
             }
             i += 1;
         }
+        self.profile.record(before, composited, count);
 
         false
     }
@@ -805,6 +818,7 @@ impl Compositor {
             } else {
                 draw_background(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
                 draw_menu_bar(&self.framebuffer, self.framebuffer.screen(), theme, dirty);
+                self.info_panel.draw(&self.framebuffer, &self.text, dirty);
             }
             draw_clock(
                 &self.framebuffer,
@@ -867,13 +881,6 @@ impl Compositor {
             }
         }
         0
-    }
-
-    fn render_and_present(&self, dirty: Rect) {
-        self.render_rect(dirty);
-        if let Err(error) = self.framebuffer.present(dirty) {
-            libnanami::println!("[honoka] display present failed: {}", error);
-        }
     }
 
     fn mark_dirty(&mut self, rect: Rect) {

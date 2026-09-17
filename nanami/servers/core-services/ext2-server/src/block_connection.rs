@@ -7,14 +7,19 @@ use crate::{log_request_error, SLOT_BLOCK_DEVICE, SLOT_TIMER_SERVICE};
 const BLOCK_CONNECT_WAITS: usize = 600;
 const BLOCK_CONNECT_RETRY_MS: Word = 100;
 
-pub(super) fn connect_block_device() -> Result<Word, RequestError> {
+pub(super) fn connect_block_device() -> Result<(Word, Option<Word>), RequestError> {
     let mut timer_port = None;
     let mut completed_waits = 0;
     let mut logged_wait = false;
     loop {
         // Storage may become available before the platform timer does.
         match nanami_services::registry::connect_block_device_with_pid(SLOT_BLOCK_DEVICE) {
-            Ok(_) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE)),
+            Ok(_) => {
+                return Ok((
+                    libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE),
+                    timer_port,
+                ))
+            }
             Err(error) => {
                 if !logged_wait {
                     log_request_error("[ext2-server] waiting block-device: ", error);

@@ -4,6 +4,7 @@ mod dma;
 mod enumerate;
 mod hid;
 mod init;
+mod poll;
 mod protocol;
 pub mod registers;
 pub mod ring;
@@ -57,6 +58,7 @@ struct Device {
 
 pub struct Controller {
     op: usize,
+    runtime: usize,
     interrupter: usize,
     doorbells: usize,
     pub irq: Option<Word>,

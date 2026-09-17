@@ -1,9 +1,8 @@
 use super::{
-    map_request_error, present_mapped_framebuffers, read_target_memory, record_syscall_result,
-    write_target_memory, write_u64, EmulationAction, LinuxSyscallContext, Runtime, Word,
-    ALTER_FB_PRESENT_HZ, ALTER_SLEEP_TICK_HZ, ALTER_SLEEP_TICK_MILLISECONDS,
-    ALTER_SLEEP_TICK_NANOSECONDS, EFAULT, EINVAL, EIO, ESRCH, LINUX_CPU_MASK_BYTES,
-    LINUX_ITIMERVAL_BYTES, LINUX_ITIMER_PROF, LINUX_PAGE_SIZE, LINUX_TIMESPEC_BYTES, SYS_NANOSLEEP,
+    arm_clock_timer, map_request_error, read_target_memory, write_target_memory, write_u64,
+    EmulationAction, LinuxSyscallContext, Runtime, Word, EFAULT, EINVAL, EIO, ESRCH,
+    LINUX_CPU_MASK_BYTES, LINUX_ITIMERVAL_BYTES, LINUX_ITIMER_PROF, LINUX_PAGE_SIZE,
+    LINUX_TIMESPEC_BYTES,
 };
 
 pub(super) fn sys_gettimeofday(
@@ -82,13 +81,14 @@ pub(super) fn sys_clock_gettime(
         0..=9 | 11 => {}
         _ => return Err(EINVAL),
     }
-    ensure_clock_timer(runtime)?;
+    refresh_clock(runtime)?;
     let tick_hz = runtime.monotonic_tick_hz;
     if tick_hz == 0 {
         return Err(EIO);
     }
     let seconds = runtime.monotonic_ticks / tick_hz;
-    let nanoseconds = (runtime.monotonic_ticks % tick_hz).saturating_mul(1_000_000_000 / tick_hz);
+    let nanoseconds =
+        ((runtime.monotonic_ticks % tick_hz) as u128 * 1_000_000_000 / tick_hz as u128) as Word;
     unsafe {
         write_u64(runtime.posix_shm, seconds);
         write_u64(runtime.posix_shm + 8, nanoseconds);
@@ -116,105 +116,41 @@ pub(super) fn sys_nanosleep_action(
         return EmulationAction::Return(-(EINVAL as isize));
     }
 
-    let ticks = (seconds as Word)
-        .saturating_mul(ALTER_SLEEP_TICK_HZ)
-        .saturating_add(
-            (nanoseconds as Word).saturating_add(ALTER_SLEEP_TICK_NANOSECONDS - 1)
-                / ALTER_SLEEP_TICK_NANOSECONDS,
-        );
-    if ticks == 0 {
+    if seconds == 0 && nanoseconds == 0 {
         return EmulationAction::Return(0);
     }
-    if let Err(errno) = ensure_clock_timer(runtime) {
+    if let Err(errno) = refresh_clock(runtime) {
         return EmulationAction::Return(-(errno as isize));
     }
 
+    let hz = runtime.monotonic_tick_hz as u128;
+    let ticks = (seconds as u128 * hz + (nanoseconds as u128 * hz).div_ceil(1_000_000_000))
+        .min(Word::MAX as u128) as Word;
+    let deadline = runtime.monotonic_ticks.saturating_add(ticks);
     let Some(process) = runtime.managed_process_mut(pid) else {
         return EmulationAction::Return(-(ESRCH as isize));
     };
     process.sleep_waiting = true;
-    process.sleep_ticks_remaining = ticks;
+    process.sleep_deadline = deadline;
     process.sleep_context = context;
+    if let Err(errno) = arm_clock_timer(runtime) {
+        let process = runtime.managed_process_mut(pid).unwrap();
+        process.sleep_waiting = false;
+        process.sleep_deadline = 0;
+        process.sleep_context = LinuxSyscallContext::EMPTY;
+        return EmulationAction::Return(-(errno as isize));
+    }
     EmulationAction::Park
 }
 
-pub(super) fn ensure_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
-    if runtime.clock_timer_armed {
-        return Ok(());
-    }
+pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
     let (ticks, tick_hz) =
         nanami_services::timer::timer_service_monotonic_ticks(runtime.timer_port)
             .map_err(map_request_error)?;
     if tick_hz == 0 {
         return Err(EIO);
     }
-    nanami_services::timer::timer_service_interval_on_notification_milliseconds(
-        runtime.timer_port,
-        ALTER_SLEEP_TICK_MILLISECONDS,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
-    )
-    .map_err(map_request_error)?;
     runtime.monotonic_ticks = ticks;
     runtime.monotonic_tick_hz = tick_hz;
-    runtime.clock_timer_armed = true;
     Ok(())
-}
-
-pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
-    if (identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) == 0
-        || !runtime.clock_timer_armed
-    {
-        return;
-    }
-    let previous_ticks = runtime.monotonic_ticks;
-    let elapsed_ticks =
-        match nanami_services::timer::timer_service_monotonic_ticks(runtime.timer_port) {
-            Ok((ticks, tick_hz)) if tick_hz != 0 => {
-                runtime.monotonic_ticks = ticks;
-                runtime.monotonic_tick_hz = tick_hz;
-                ticks.saturating_sub(previous_ticks).max(1)
-            }
-            _ => {
-                runtime.monotonic_ticks = runtime.monotonic_ticks.saturating_add(1);
-                1
-            }
-        };
-
-    let tick_hz = runtime.monotonic_tick_hz;
-    if tick_hz != 0
-        && previous_ticks.saturating_mul(ALTER_FB_PRESENT_HZ) / tick_hz
-            != runtime.monotonic_ticks.saturating_mul(ALTER_FB_PRESENT_HZ) / tick_hz
-    {
-        present_mapped_framebuffers(runtime);
-    }
-
-    let mut index = 0usize;
-    while index < runtime.managed.len() {
-        let process = runtime.managed[index];
-        if process.pid == 0 || !process.sleep_waiting {
-            index += 1;
-            continue;
-        }
-        if process.sleep_ticks_remaining > elapsed_ticks {
-            runtime.managed[index].sleep_ticks_remaining -= elapsed_ticks;
-            index += 1;
-            continue;
-        }
-
-        runtime.managed[index].sleep_waiting = false;
-        runtime.managed[index].sleep_ticks_remaining = 0;
-        runtime.managed[index].sleep_context = LinuxSyscallContext::EMPTY;
-        record_syscall_result(runtime, process.pid, SYS_NANOSLEEP, 0);
-        if crate::process::write_personality_syscall_return(
-            process.pcb,
-            process.sleep_context,
-            0,
-            process.personality,
-        )
-        .is_ok()
-        {
-            let _ = a9n_abi::arch::process_control_block::resume(process.pcb);
-        }
-        index += 1;
-    }
 }

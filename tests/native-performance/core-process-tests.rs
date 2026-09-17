@@ -41,6 +41,12 @@ pub mod nanami_core {
 use nanami_core::process::ProcessManager;
 use vm_space::VmTracker;
 
+#[path = "shared-memory-reservations.rs"]
+mod shared_memory_reservations;
+
+#[path = "shared-memory-lifecycle.rs"]
+mod shared_memory_lifecycle;
+
 fn manager() -> ProcessManager {
     ProcessManager::new_alpha(1, 2, 3, 4096, &[], 4).unwrap()
 }

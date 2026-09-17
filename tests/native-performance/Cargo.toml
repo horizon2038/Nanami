@@ -12,8 +12,20 @@ name = "hotpaths"
 path = "hotpath-tests.rs"
 
 [[test]]
+name = "framebuffer"
+path = "framebuffer-tests.rs"
+
+[[test]]
 name = "honoka-motion"
 path = "honoka-motion/main.rs"
+
+[[test]]
+name = "graphics-profile"
+path = "graphics-profile.rs"
+
+[[test]]
+name = "alter-framebuffer"
+path = "alter-framebuffer.rs"
 
 [[test]]
 name = "alpha-alter"
@@ -28,8 +40,24 @@ name = "core-process"
 path = "core-process-tests.rs"
 
 [[test]]
+name = "system-version"
+path = "system-version.rs"
+
+[[test]]
+name = "honoka-info-panel"
+path = "honoka-info-panel.rs"
+
+[[test]]
 name = "timers"
 path = "timer-tests.rs"
+
+[[test]]
+name = "hpet"
+path = "hpet-tests.rs"
+
+[[test]]
+name = "linux-clocks"
+path = "linux-clocks.rs"
 
 [[test]]
 name = "ipc-notifications"
@@ -67,9 +95,21 @@ path = "usb-discovery/main.rs"
 name = "physical-memory"
 path = "physical-memory-tests.rs"
 
+[[test]]
+name = "acpi"
+path = "acpi-tests.rs"
+
+[[test]]
+name = "mmio-requests"
+path = "mmio-requests.rs"
+
 [dependencies]
 nanami-gpt = { path = "../../nanami/servers/libs/gpt" }
 a9n-types = "0.3.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
+
+[dev-dependencies]
+fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
+uefi = { version = "=0.35.0", default-features = false }
 
 [workspace]

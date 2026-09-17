@@ -76,6 +76,7 @@ impl Controller {
         table.resize_with(slots + 1, || None);
         let mut controller = Self {
             op,
+            runtime: base + runtime,
             interrupter: base + runtime + 0x20,
             doorbells: base + doorbells,
             irq: None,

@@ -19,29 +19,28 @@ impl ClientNotificationEntry {
 
 #[derive(Clone, Copy)]
 pub(super) struct PendingAsyncTimer {
-    pub(super) used: bool,
     pub(super) target_tick: u64,
     pub(super) interval_ticks: u64,
     pub(super) notification_descriptor: Word,
+    pub(super) alarm: bool,
 }
 
 impl PendingAsyncTimer {
     pub(super) const EMPTY: Self = Self {
-        used: false,
         target_tick: 0,
         interval_ticks: 0,
         notification_descriptor: 0,
+        alarm: false,
     };
 }
 
 pub(super) struct TimerState {
     pub(super) ticks: u64,
     pub(super) timer_started: bool,
-    pub(super) next_deadline: Option<u64>,
     pub(super) schedule_count: usize,
     pub(super) fire_count: usize,
     pub(super) client_notifications: [ClientNotificationEntry; MAX_CLIENT_NOTIFICATIONS],
-    pub(super) pending_timers: [PendingAsyncTimer; MAX_PENDING_ASYNC_TIMERS],
+    pub(super) pending_timers: super::deadlines::Deadlines,
 }
 
 impl TimerState {
@@ -49,11 +48,10 @@ impl TimerState {
         Self {
             ticks: 0,
             timer_started: false,
-            next_deadline: None,
             schedule_count: 0,
             fire_count: 0,
             client_notifications: [ClientNotificationEntry::EMPTY; MAX_CLIENT_NOTIFICATIONS],
-            pending_timers: [PendingAsyncTimer::EMPTY; MAX_PENDING_ASYNC_TIMERS],
+            pending_timers: super::deadlines::Deadlines::new(),
         }
     }
 }

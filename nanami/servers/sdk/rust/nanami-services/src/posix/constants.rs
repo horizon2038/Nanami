@@ -58,6 +58,8 @@ pub const POSIX_REQUEST_PWRITE: Word = 0xa134;
 pub const POSIX_REQUEST_PREAD_DIRECT: Word = 0xa135;
 pub const POSIX_REQUEST_WRITE_DIRECT: Word = 0xa136;
 pub const POSIX_REQUEST_PWRITE_DIRECT: Word = 0xa137;
+pub const POSIX_REQUEST_FSYNC: Word = 0xa138;
+pub const POSIX_REQUEST_SYNC: Word = 0xa139;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;
@@ -73,6 +75,7 @@ pub const POSIX_O_TRUNC: Word = 1 << 1;
 pub const POSIX_O_DIRECTORY: Word = 1 << 2;
 pub const POSIX_O_APPEND: Word = 1 << 3;
 pub const POSIX_O_NONBLOCK: Word = 1 << 4;
+pub const POSIX_O_SYNC: Word = 1 << 5;
 
 pub const POSIX_SEEK_SET: Word = 0;
 pub const POSIX_SEEK_CUR: Word = 1;

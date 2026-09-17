@@ -1,11 +1,18 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+mod block_cache;
+mod writeback;
+
 mod data_io;
 use data_io::*;
 
 mod block_io;
 use block_io::*;
+
+mod block_allocation;
+use block_allocation::*;
 
 mod file_io;
 use file_io::*;
@@ -22,7 +29,6 @@ const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
 const BLOCK_SHM_BYTES: Word = 0x4000;
-const BLOCK_BUFFER_OFFSET: Word = 0;
 const BLOCK_READ_RETRY_LIMIT: usize = 4;
 const MAX_SESSIONS: usize = 16;
 const MAX_DELEGATED_SESSIONS: usize = 16;
@@ -38,8 +44,8 @@ const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
 const EXT2_SINGLE_INDIRECT_INDEX: usize = 12;
 const EXT2_DOUBLE_INDIRECT_INDEX: usize = 13;
 const EXT2_INODE_BLOCK_POINTERS: usize = 15;
-const EXT2_BLOCK_CACHE_ENTRIES: usize = 8;
-const EXT2_BLOCK_CACHE_BYTES: usize = 4096;
+// Payload budget, independent of filesystem block size; allocated on the heap.
+const EXT2_BLOCK_CACHE_BUDGET: usize = 1024 * 1024;
 const EXT2_INODE_CACHE_ENTRIES: usize = 64;
 const EXT2_DENTRY_CACHE_ENTRIES: usize = 128;
 const EXT2_FT_REG_FILE: u8 = 1;
@@ -143,13 +149,6 @@ struct Ext2DirectoryEntry {
 }
 
 #[derive(Clone, Copy)]
-struct CachedBlock {
-    valid: bool,
-    block: usize,
-    data: [u8; EXT2_BLOCK_CACHE_BYTES],
-}
-
-#[derive(Clone, Copy)]
 struct CachedInode {
     valid: bool,
     inode_no: u32,
@@ -188,14 +187,6 @@ impl CachedDentry {
     };
 }
 
-impl CachedBlock {
-    const EMPTY: Self = Self {
-        valid: false,
-        block: 0,
-        data: [0; EXT2_BLOCK_CACHE_BYTES],
-    };
-}
-
 struct Ext2Runtime {
     block_port: Word,
     block_shm: Word,
@@ -208,8 +199,8 @@ struct Ext2Runtime {
     sessions: [ClientSession; MAX_SESSIONS],
     delegated_sessions: [DelegatedSession; MAX_DELEGATED_SESSIONS],
     handles: [FileHandle; MAX_HANDLES],
-    block_cache: [CachedBlock; EXT2_BLOCK_CACHE_ENTRIES],
-    block_cache_next: usize,
+    block_cache: block_cache::BlockCache,
+    writeback: writeback::Writeback,
     inode_cache: [CachedInode; EXT2_INODE_CACHE_ENTRIES],
     inode_cache_next: usize,
     dentry_cache: [CachedDentry; EXT2_DENTRY_CACHE_ENTRIES],
@@ -224,13 +215,19 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[ext2-server] bootstrap\n");
-    let block_port = connect_block_device()
+    let (block_port, timer_port) = connect_block_device()
         .map_err(|e| log_error("[ext2-server] block-device unavailable: ", e))?;
     let (block_shm, block_shm_size) =
         nanami_services::block::block_device_attach_shared_memory(block_port, BLOCK_SHM_BYTES)
             .map_err(|e| log_error("[ext2-server] block shm attach failed: ", e))?;
     let (block_size, block_count) = nanami_services::block::block_device_info(block_port)
         .map_err(|e| log_error("[ext2-server] block info failed: ", e))?;
+    if block_size == 0 || block_size > block_shm_size || block_shm_size > EXT2_BLOCK_CACHE_BUDGET {
+        return Err(log_error(
+            "[ext2-server] invalid block geometry: ",
+            RequestError::Protocol,
+        ));
+    }
 
     let mut runtime = Ext2Runtime {
         block_port,
@@ -249,14 +246,16 @@ fn nanami_main() -> libnanami::NanamiResult {
         sessions: [ClientSession::EMPTY; MAX_SESSIONS],
         delegated_sessions: [DelegatedSession::EMPTY; MAX_DELEGATED_SESSIONS],
         handles: [FileHandle::EMPTY; MAX_HANDLES],
-        block_cache: [CachedBlock::EMPTY; EXT2_BLOCK_CACHE_ENTRIES],
-        block_cache_next: 0,
+        block_cache: block_cache::BlockCache::new(block_size, EXT2_BLOCK_CACHE_BUDGET, block_shm_size),
+        writeback: writeback::Writeback::new(timer_port),
         inode_cache: [CachedInode::EMPTY; EXT2_INODE_CACHE_ENTRIES],
         inode_cache_next: 0,
         dentry_cache: [CachedDentry::EMPTY; EXT2_DENTRY_CACHE_ENTRIES],
         dentry_cache_next: 0,
     };
     mount_ext2(&mut runtime).map_err(|e| log_error("[ext2-server] mount failed: ", e))?;
+    writeback::initialize(&mut runtime)
+        .map_err(|e| log_error("[ext2-server] writeback init failed: ", e))?;
 
     nanami_services::registry::register_vfs_service()
         .map_err(|e| log_error("[ext2-server] register failed: ", e))?;
@@ -290,9 +289,17 @@ fn nanami_main() -> libnanami::NanamiResult {
         match event {
             ServiceEvent::Request(request) => {
                 pending = handle_request(request, &mut runtime);
+                if let Err(error) = writeback::after_request(&mut runtime) {
+                    pending = (map_request_error_to_status(error), 0, 0);
+                }
                 has_reply = true;
             }
-            ServiceEvent::Notification { .. } => {}
+            ServiceEvent::Notification { .. } => {
+                runtime.writeback.armed = false;
+                if let Err(error) = flush_blocks(&mut runtime) {
+                    log_request_error("[ext2-server] writeback failed (writes disabled): ", error);
+                }
+            }
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
@@ -304,7 +311,25 @@ fn nanami_main() -> libnanami::NanamiResult {
 }
 
 fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    if matches!(
+        request.code,
+        nanami_services::vfs::VFS_REQUEST_OPEN_COMPOUND
+            | nanami_services::vfs::VFS_REQUEST_CREATE
+            | nanami_services::vfs::VFS_REQUEST_MKDIR
+            | nanami_services::vfs::VFS_REQUEST_WRITE
+            | nanami_services::vfs::VFS_REQUEST_WRITE_DELEGATED
+            | nanami_services::vfs::VFS_REQUEST_REMOVE
+            | nanami_services::vfs::VFS_REQUEST_LINK
+            | nanami_services::vfs::VFS_REQUEST_RENAME
+    ) {
+        if let Err(error) = runtime.block_cache.check_writable() {
+            return (map_request_error_to_status(error), 0, 0);
+        }
+    }
     match request.code {
+        nanami_services::vfs::VFS_REQUEST_FSYNC | nanami_services::vfs::VFS_REQUEST_SYNC => {
+            writeback::handle_sync(request, runtime)
+        }
         nanami_services::vfs::VFS_REQUEST_CONTROL => handle_control(request, runtime),
         nanami_services::vfs::VFS_REQUEST_OPEN => handle_open(request, runtime),
         nanami_services::vfs::VFS_REQUEST_OPEN_COMPOUND => handle_open_compound(request, runtime),
@@ -944,77 +969,6 @@ fn get_data_block(
     }
     read_block(runtime, indirect_block as usize)?;
     Ok(r32(runtime.block_shm as usize + second_index * 4))
-}
-
-fn ensure_data_block(
-    runtime: &mut Ext2Runtime,
-    inode: &mut Ext2Inode,
-    logical_block: usize,
-) -> Result<u32, RequestError> {
-    if logical_block < EXT2_MAX_DIRECT_BLOCKS {
-        if inode.block[logical_block] == 0 {
-            inode.block[logical_block] = alloc_block(runtime)? as u32;
-            zero_block(runtime, inode.block[logical_block] as usize)?;
-        }
-        return Ok(inode.block[logical_block]);
-    }
-    let indirect_index = logical_block - EXT2_MAX_DIRECT_BLOCKS;
-    let entries = indirect_entries_per_block(runtime);
-    if indirect_index < entries {
-        if inode.block[EXT2_SINGLE_INDIRECT_INDEX] == 0 {
-            inode.block[EXT2_SINGLE_INDIRECT_INDEX] = alloc_block(runtime)? as u32;
-            zero_block(runtime, inode.block[EXT2_SINGLE_INDIRECT_INDEX] as usize)?;
-        }
-        let indirect_block = inode.block[EXT2_SINGLE_INDIRECT_INDEX] as usize;
-        read_block(runtime, indirect_block)?;
-        let entry_addr = runtime.block_shm as usize + indirect_index * 4;
-        let mut block = r32(entry_addr);
-        if block == 0 {
-            block = alloc_block(runtime)? as u32;
-            // Allocation uses block_shm for bitmap and free-count metadata.
-            read_block(runtime, indirect_block)?;
-            w32_mem(entry_addr, block);
-            write_block(runtime, indirect_block)?;
-            zero_block(runtime, block as usize)?;
-        }
-        return Ok(block);
-    }
-
-    let double_index = indirect_index - entries;
-    if double_index >= entries * entries {
-        return Err(RequestError::Unsupported);
-    }
-    if inode.block[EXT2_DOUBLE_INDIRECT_INDEX] == 0 {
-        inode.block[EXT2_DOUBLE_INDIRECT_INDEX] = alloc_block(runtime)? as u32;
-        zero_block(runtime, inode.block[EXT2_DOUBLE_INDIRECT_INDEX] as usize)?;
-    }
-    let double_block = inode.block[EXT2_DOUBLE_INDIRECT_INDEX] as usize;
-    let first_index = double_index / entries;
-    let second_index = double_index % entries;
-
-    read_block(runtime, double_block)?;
-    let first_entry_addr = runtime.block_shm as usize + first_index * 4;
-    let mut indirect_block = r32(first_entry_addr);
-    if indirect_block == 0 {
-        indirect_block = alloc_block(runtime)? as u32;
-        read_block(runtime, double_block)?;
-        w32_mem(first_entry_addr, indirect_block);
-        write_block(runtime, double_block)?;
-        zero_block(runtime, indirect_block as usize)?;
-    }
-
-    let indirect_block = indirect_block as usize;
-    read_block(runtime, indirect_block)?;
-    let entry_addr = runtime.block_shm as usize + second_index * 4;
-    let mut block = r32(entry_addr);
-    if block == 0 {
-        block = alloc_block(runtime)? as u32;
-        read_block(runtime, indirect_block)?;
-        w32_mem(entry_addr, block);
-        write_block(runtime, indirect_block)?;
-        zero_block(runtime, block as usize)?;
-    }
-    Ok(block)
 }
 
 fn lookup_path(

@@ -1,7 +1,7 @@
 use super::{
     align_up_word, copy_same_process_range, honoka, map_request_error, posix,
     present_graphics_session, sys_framebuffer_mmap, write_target_memory_from, LinuxFile,
-    LinuxFileKind, Runtime, Word, ALTER_FB_BYTES, EACCES, EBADF, EINVAL, EIO, ENODEV, ENOMEM,
+    LinuxFileKind, Runtime, Word, EACCES, EBADF, EINVAL, EIO, ENODEV, ENOMEM,
     EOPNOTSUPP, ESRCH, LINUX_MADV_COLD, LINUX_MADV_DODUMP, LINUX_MADV_DONTDUMP,
     LINUX_MADV_DONTNEED, LINUX_MADV_FREE, LINUX_MADV_HUGEPAGE, LINUX_MADV_MERGEABLE,
     LINUX_MADV_NOHUGEPAGE, LINUX_MADV_NORMAL, LINUX_MADV_PAGEOUT, LINUX_MADV_POPULATE_READ,
@@ -261,7 +261,6 @@ pub(super) fn sys_munmap(
         runtime.graphics[index].guest_framebuffer = 0;
         runtime.graphics[index].guest_framebuffer_bytes = 0;
         runtime.graphics[index].framebuffer = 0;
-        runtime.graphics[index].framebuffer_bytes = ALTER_FB_BYTES;
     }
     Ok(0)
 }

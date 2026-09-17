@@ -37,8 +37,17 @@ mod constants;
 mod framebuffer;
 #[path = "../../../nanami/servers/apps/honoka/src/app/input.rs"]
 mod input_events;
+#[path = "../../../nanami/servers/apps/honoka/src/app/info_panel.rs"]
+mod info_panel;
 #[path = "../../../nanami/servers/apps/honoka/src/app/motion_damage.rs"]
 mod motion_damage;
+#[path = "../../../nanami/servers/apps/honoka/src/app/profile.rs"]
+mod profile;
+pub mod timer {
+    pub fn timer_service_monotonic_ticks(_: usize) -> Result<(usize, usize), super::RequestError> {
+        panic!("compositor pixel tests must not query a clock");
+    }
+}
 mod input_api {
     pub mod constants {
         include!("../../../nanami/servers/sdk/rust/nanami-services/src/input/constants.rs");

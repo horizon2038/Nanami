@@ -102,6 +102,14 @@ fn handle_request(request: ServiceRequest, session: &mut ClientSession) -> (Word
         nanami_services::block::BLOCK_DEVICE_REQUEST_CONTROL => handle_control(request, session),
         nanami_services::block::BLOCK_DEVICE_REQUEST_READ => handle_read(request, session),
         nanami_services::block::BLOCK_DEVICE_REQUEST_WRITE => handle_write(request, session),
+        nanami_services::block::BLOCK_DEVICE_REQUEST_FLUSH => {
+            if !session.active || session.pid != request.identifier {
+                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            }
+            // RAM is this device's backing store: writes already reach it.
+            // Like any ramdisk, its contents do not survive a power cycle.
+            (libnanami::OS_RESPONSE_OK, 0, 0)
+        }
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }

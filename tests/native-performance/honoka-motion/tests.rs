@@ -21,7 +21,15 @@ fn setup() -> (Compositor, Vec<u32>) {
             .ok()
             .unwrap();
     let theme = include_bytes!("../../../nanami/servers/apps/honoka/assets/themes/default.theme");
-    let mut compositor = Compositor::new(fb, font::TextRenderer, 0, 0, 0, theme).unwrap();
+    let fields = [
+        "Kernel Version: A9N v0.3.4",
+        "Nanami Version: 0.1.0",
+        "Architecture: x86_64",
+        "Platform: pc99",
+    ]
+    .map(String::from);
+    let mut compositor =
+        Compositor::new(fb, font::TextRenderer, 0, 0, 0, 0, theme, fields).unwrap();
     compositor.create_window(18, 80, 80, 400, 300).unwrap();
     compositor.render_if_needed();
     PRESENTED.with(|rects| rects.borrow_mut().clear());
@@ -111,4 +119,24 @@ fn click_between_moves_preserves_transition_damage() {
         ],
         false,
     );
+}
+
+#[test]
+fn many_dirty_rectangles_merge_and_keep_sequential_pixels() {
+    let (mut batched, pixels) = setup();
+    let (mut reference, expected) = setup();
+    for second in 0..100 {
+        batched.process_input(move_by(-2, 1));
+        reference.process_input(move_by(-2, 1));
+        batched.set_clock(1, 2, second);
+        reference.set_clock(1, 2, second);
+        reference.render_if_needed();
+    }
+    PRESENTED.with(|rects| rects.borrow_mut().clear());
+    batched.render_if_needed();
+    assert_eq!(pixels, expected);
+    assert!(!batched.has_pending_render());
+    PRESENTED.with(|rects| assert_eq!(rects.borrow().len(), 1));
+    batched.render_if_needed();
+    PRESENTED.with(|rects| assert_eq!(rects.borrow().len(), 1));
 }

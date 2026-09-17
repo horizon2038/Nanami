@@ -4,11 +4,15 @@ import struct
 import time
 
 
-def run_doom_first(qmp, type_text, wait_for, logs):
-    type_text('alter -g /alter/linux/bin/doomgeneric-fbdev -iwad /bin/doom1.wad\n')
+def run_doom_first(qmp, type_text, wait_for, logs, save=False, fb_size=None):
+    options = f'--fb-size {fb_size} ' if fb_size else ''
+    type_text(f'alter -g {options}/alter/linux/bin/doomgeneric-fbdev -iwad /bin/doom1.wad\n')
     wait_for(lambda text: 'managed rootfs process image=doomgeneric-fbdev ' in text)
     time.sleep(10)
     qmp('screendump', {'filename': str(logs / 'doom-running.png'), 'format': 'png'})
+    if save:
+        from doom_save import exercise
+        exercise(qmp, logs)
     # Doom's normal quit confirmation, rather than destroying the process from
     # the test harness. The subsequent bash launch must succeed via Shell.
     qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'f10'}], 'hold-time': 100})
@@ -19,6 +23,12 @@ def run_doom_first(qmp, type_text, wait_for, logs):
     # Destroying the focused Doom window leaves no keyboard focus. Click Shell
     # before typing, then restore the cursor for the later motion assertions.
     width, height = struct.unpack('>II', (logs / 'after-doom.png').read_bytes()[16:24])
+    focus_shell(qmp, width, height)
+    print('Requested normal Doom quit; checking subsequent untraced bash input', flush=True)
+
+
+def focus_shell(qmp, width, height):
+    """Click Shell after a graphics client exits; restore the known cursor position."""
     dx, dy = 300 - width * 3 // 4, 200 - height // 2
     for x, y in [(dx, dy), (-dx, -dy)]:
         qmp('input-send-event', {'events': [
@@ -31,7 +41,6 @@ def run_doom_first(qmp, type_text, wait_for, logs):
                 qmp('input-send-event', {'events': [{'type': 'btn', 'data': {
                     'down': down, 'button': 'left'}}]})
                 time.sleep(0.3)
-    print('Requested normal Doom quit; checking subsequent untraced bash input', flush=True)
 
 
 def exercise(qmp, type_text, wait_for, serial, written_bytes, rounds):

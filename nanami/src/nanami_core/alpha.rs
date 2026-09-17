@@ -1,8 +1,11 @@
 mod boot;
 mod control_requests;
 mod memory_requests;
+mod mmio;
 mod process_requests;
+mod shared_memory;
 mod support;
+mod version_info;
 
 #[cfg(target_arch = "x86_64")]
 #[path = "alpha/arch/x86_64.rs"]
@@ -95,6 +98,8 @@ const NANAMI_INFO_PROCESS: usize = 2;
 const NANAMI_INFO_SMP: usize = 3;
 const NANAMI_INFO_ARCHITECTURE_NAME: usize = 4;
 const NANAMI_INFO_PLATFORM_NAME: usize = 5;
+const NANAMI_INFO_KERNEL_VERSION: usize = 6;
+const NANAMI_INFO_OS_VERSION: usize = 7;
 static mut PROCESS_MEMORY_IMAGE_BUFFER: [u8; PROCESS_SPAWN_MEMORY_MAX_BYTES] =
     [0; PROCESS_SPAWN_MEMORY_MAX_BYTES];
 const ALPHA_RUNTIME_STACK_NODE_SLOT: usize = 1300;
@@ -150,6 +155,7 @@ pub struct Alpha {
     driver_manager_pid: usize,
     architecture_name: [u8; 32],
     platform_name: [u8; 32],
+    kernel_version: alloc::string::String,
     platform_rsdp_address: usize,
     runtime_stack_top: usize,
 }
@@ -319,6 +325,7 @@ impl Alpha {
             driver_manager_pid: 0,
             architecture_name: init_info.architecture_name,
             platform_name: init_info.platform_name,
+            kernel_version: version_info::kernel_version(init_info),
             platform_rsdp_address: init_info.arch_info[0],
             runtime_stack_top: 0,
         })

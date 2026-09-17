@@ -3,6 +3,30 @@ use super::*;
 mod constants;
 pub use constants::*;
 
+pub fn vfs_fsync(_port: Word, handle: Word) -> Result<(), RequestError> {
+    record(Call {
+        code: VFS_REQUEST_FSYNC,
+        handle,
+        offset: 0,
+        len: 0,
+        delegate: 0,
+        buffer: 0,
+    })
+    .and_then(|_| BACKEND.with(|backend| backend.borrow().sync_error.map_or(Ok(()), Err)))
+}
+
+pub fn vfs_sync(_port: Word) -> Result<(), RequestError> {
+    record(Call {
+        code: VFS_REQUEST_SYNC,
+        handle: 0,
+        offset: 0,
+        len: 0,
+        delegate: 0,
+        buffer: 0,
+    })
+    .map(|_| ())
+}
+
 pub fn vfs_write_delegated(
     _port: Word,
     handle: Word,

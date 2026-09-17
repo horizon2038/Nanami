@@ -1,10 +1,12 @@
 use libnanami::{RequestError, Word};
 
 pub const TICK_HZ: u64 = 100;
+pub const MODE: &str = "pit-periodic-fallback";
 
 pub struct PreparedTimer {
     pub resource: Word,
     pub irq_number: Word,
+    ticks: u64,
 }
 
 const PIT_PORT_COUNTER0: Word = 0x40;
@@ -17,6 +19,7 @@ pub fn prepare(timer_resource_slot: Word) -> Result<PreparedTimer, RequestError>
     Ok(PreparedTimer {
         resource: libnanami::ipc::process_slot_descriptor(timer_resource_slot),
         irq_number: 0,
+        ticks: 0,
     })
 }
 
@@ -51,6 +54,18 @@ pub fn start(timer_resource: Word) -> Result<(), RequestError> {
     Ok(())
 }
 
-pub fn rearm() -> Result<(), RequestError> {
-    Ok(())
+impl PreparedTimer {
+    pub fn start(&mut self) -> Result<(), RequestError> {
+        start(self.resource)
+    }
+    pub fn now(&mut self) -> u64 {
+        self.ticks
+    }
+    pub fn on_interrupt(&mut self) {
+        self.ticks = self.ticks.saturating_add(1);
+    }
+    // Without an independent clocksource PIT must keep counting periodic ticks.
+    pub fn arm(&mut self, _deadline: Option<u64>) -> Result<(), RequestError> {
+        Ok(())
+    }
 }

@@ -291,121 +291,6 @@ impl Alpha {
         }
     }
 
-    pub(super) fn handle_shared_memory_request(
-        &mut self,
-        request: OsRequestEvent,
-    ) -> Result<(usize, usize), CapabilityError> {
-        let pid = request.identifier;
-        if pid == 0 {
-            return Err(CapabilityError::PermissionDenied);
-        }
-
-        let peer_pid = request.arg0;
-        let size_bytes = request.arg1;
-        if peer_pid == 0 || peer_pid == pid || size_bytes == 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let mapped_size = align_up(size_bytes, PAGE_SIZE);
-        let page_count = mapped_size / PAGE_SIZE;
-        if page_count == 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        if self.processes.find_entry_by_pid(pid).is_none()
-            || self.processes.find_entry_by_pid(peer_pid).is_none()
-        {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let (caller_root, caller_as, caller_va, caller_start_slot) = self
-            .processes
-            .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
-        let (peer_root, peer_as, peer_va, peer_start_slot) = self.processes.reserve_process_heap(
-            peer_pid,
-            page_count,
-            PAGE_SIZE,
-            PROCESS_FRAME_TOTAL_PAGES,
-        )?;
-
-        let base_page = self.memory.allocate_physical_any(mapped_size)?;
-        let base_paddr = base_page * PAGE_SIZE;
-        self.processes.register_physical_allocation(
-            pid,
-            caller_va,
-            caller_start_slot,
-            base_page,
-            page_count,
-        )?;
-        self.processes.register_physical_allocation(
-            peer_pid,
-            peer_va,
-            peer_start_slot,
-            base_page,
-            page_count,
-        )?;
-
-        self.ensure_process_frame_chunks(pid, caller_root, caller_start_slot, page_count)?;
-        self.ensure_process_frame_chunks(peer_pid, peer_root, peer_start_slot, page_count)?;
-
-        let mut i = 0usize;
-        while i < page_count {
-            let frame_index = base_page + i;
-            // Convert Generic->Frame only once per physical frame, then fan-out copy to both processes.
-            // Calling ensure twice for the same frame causes kernel-side "out of memory" noise
-            // because each 4KiB generic is single-shot allocatable.
-            self.memory
-                .ensure_alpha_frame_at_physical_index(frame_index)?;
-            let source_frame = self
-                .memory
-                .physical_frame_descriptor_from_index(frame_index)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            arch::node::copy(
-                process_frame_chunk_descriptor(
-                    caller_root,
-                    (caller_start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
-                ),
-                ((caller_start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                source_frame,
-            )?;
-            arch::node::copy(
-                process_frame_chunk_descriptor(
-                    peer_root,
-                    (peer_start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
-                ),
-                ((peer_start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                source_frame,
-            )?;
-            i += 1;
-        }
-
-        let memory = &mut self.memory;
-        let processes = &mut self.processes;
-        let mut j = 0usize;
-        while j < page_count {
-            let caller_frame = process_frame_descriptor(caller_root, caller_start_slot + j);
-            let caller_page_va = caller_va + j * PAGE_SIZE;
-            let caller_vm = processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            memory.map_frame(caller_as, caller_frame, caller_page_va, caller_vm)?;
-
-            let peer_frame = process_frame_descriptor(peer_root, peer_start_slot + j);
-            let peer_page_va = peer_va + j * PAGE_SIZE;
-            let peer_vm = processes
-                .vm_space_mut(peer_pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            memory.map_frame(peer_as, peer_frame, peer_page_va, peer_vm)?;
-            j += 1;
-        }
-
-        info!(
-            "[shm] granted pid={:>3}<->pid={:>3} size={:#x} paddr={:#018x} local={:#018x} peer={:#018x}",
-            pid, peer_pid, mapped_size, base_paddr, caller_va, peer_va
-        );
-        Ok((caller_va, peer_va))
-    }
-
     pub(super) fn handle_mapping_release_request(
         &mut self,
         request: OsRequestEvent,
@@ -448,6 +333,12 @@ impl Alpha {
         let exact_allocation = self
             .processes
             .find_active_physical_allocation_reference(target_pid, base_va, page_count);
+        if let Some(reservation) = self
+            .processes
+            .shared_memory_reservation(target_pid, base_va, page_count)
+        {
+            return self.release_shared_memory(entry, reservation);
+        }
 
         let mut i = 0usize;
         while i < page_count {

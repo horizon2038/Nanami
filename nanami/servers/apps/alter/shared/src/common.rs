@@ -8,6 +8,8 @@ pub mod dynamic;
 pub mod elf;
 #[path = "common/fault.rs"]
 pub mod fault;
+#[path = "common/framebuffer_size.rs"]
+pub mod framebuffer_size;
 #[path = "common/launch.rs"]
 pub mod launch;
 #[path = "common/loader.rs"]

@@ -1,4 +1,9 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
+
+#[path = "process/shared_memory.rs"]
+mod shared_memory;
+pub use shared_memory::SharedMemoryReservation;
+use shared_memory::SharedMemorySpace;
 
 use crate::nanami_core::elf_loader::ElfImage;
 use crate::nanami_core::vm_space::{BootstrapVmSpace, VmSpace};
@@ -86,6 +91,7 @@ pub struct ProcessManager {
     frame_chunks: Vec<ProcessFrameChunk>,
     physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
     deferred_physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
+    shared_memory: BTreeMap<usize, SharedMemorySpace>,
     lazy_mappings: Vec<ProcessLazyMappingEntry>,
 }
 
@@ -185,6 +191,7 @@ impl ProcessManager {
             frame_chunks: Vec::new(),
             physical_allocations: Vec::new(),
             deferred_physical_allocations: Vec::new(),
+            shared_memory: BTreeMap::new(),
             lazy_mappings: Vec::new(),
         })
     }
@@ -382,6 +389,7 @@ impl ProcessManager {
     }
 
     pub fn drop_physical_allocations_for_pid(&mut self, pid: usize) {
+        self.shared_memory.remove(&pid);
         self.physical_allocations.retain(|entry| entry.pid != pid);
         self.deferred_physical_allocations
             .retain(|entry| entry.pid != pid);
@@ -470,6 +478,7 @@ impl ProcessManager {
         entry.exit_code = 0;
 
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        self.shared_memory.remove(&pid);
         if let Some(vm) = self.vm_space_mut(pid) {
             *vm = VmSpace::new();
         }
@@ -851,6 +860,12 @@ impl ProcessManager {
         if base_va == 0 || page_count == 0 || page_size == 0 || (base_va & (page_size - 1)) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
+        let bytes = page_count
+            .checked_mul(page_size)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        base_va
+            .checked_add(bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
 
         if let Some(entry) = self.entry_mut_by_pid(pid) {
             if entry.next_frame_slot + page_count > max_frame_slots {
@@ -858,7 +873,9 @@ impl ProcessManager {
             }
             let start_slot = entry.next_frame_slot;
             entry.next_frame_slot += page_count;
-            return Ok((entry.root_node, entry.address_space, start_slot));
+            let result = (entry.root_node, entry.address_space, start_slot);
+            self.exclude_shared_virtual_range(pid, base_va, page_count);
+            return Ok(result);
         }
 
         Err(CapabilityError::InvalidArgument)

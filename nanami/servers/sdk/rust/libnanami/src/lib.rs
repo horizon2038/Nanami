@@ -6,8 +6,10 @@ pub mod heap;
 pub mod io;
 pub mod ipc;
 mod platform;
+mod version;
 
 pub use platform::{request_nanami_info_platform, NanamiPlatformInfo};
+pub use version::{request_kernel_version, request_nanami_version};
 
 use a9n_abi::capability_call::ipc_port::MessageInfo;
 pub use a9n_abi::Word;

@@ -106,16 +106,32 @@ impl Storage {
                 _ => Err(RequestError::InvalidArgument),
             };
         }
-        let write = match request.code {
-            BLOCK_DEVICE_REQUEST_READ => false,
-            BLOCK_DEVICE_REQUEST_WRITE => true,
-            _ => return Err(RequestError::InvalidArgument),
-        };
         let session = self
             .session
             .as_ref()
             .filter(|s| s.pid == request.identifier)
             .ok_or(RequestError::InvalidArgument)?;
+        if request.code == BLOCK_DEVICE_REQUEST_FLUSH {
+            // IMMED=0: the successful CSW is the durability boundary, not just
+            // acceptance of the command. Never replay an uncertain write/flush.
+            let (ok, bytes) = controller.scsi(
+                root.disk,
+                &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                &mut [],
+                false,
+                input,
+            )?;
+            return if ok && bytes == 0 {
+                Ok((0, 0))
+            } else {
+                Err(RequestError::Protocol)
+            };
+        }
+        let write = match request.code {
+            BLOCK_DEVICE_REQUEST_READ => false,
+            BLOCK_DEVICE_REQUEST_WRITE => true,
+            _ => return Err(RequestError::InvalidArgument),
+        };
         let (lba, bytes) = mass_storage::block_range(
             root.partition.first_lba,
             root.partition.sector_count,
@@ -138,22 +154,6 @@ impl Storage {
         let (ok, transferred) = controller.scsi(root.disk, &cdb[..len], data, !write, input)?;
         if !ok || transferred != bytes {
             return Err(RequestError::Protocol);
-        }
-        if write {
-            // A successful reply promises persistence beyond a device cache.
-            // Never retry writes after an uncertain transport completion.
-            if !controller
-                .scsi(
-                    root.disk,
-                    &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                    &mut [],
-                    false,
-                    input,
-                )?
-                .0
-            {
-                return Err(RequestError::Protocol);
-            }
         }
         Ok((bytes, 0))
     }

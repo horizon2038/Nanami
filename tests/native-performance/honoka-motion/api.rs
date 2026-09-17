@@ -68,6 +68,9 @@ pub mod font {
     use super::*;
     pub struct TextRenderer;
     impl TextRenderer {
+        pub fn text_width(&self, text: &[u8]) -> i32 {
+            text.len() as i32 * 7
+        }
         pub fn draw_title(
             &self,
             _: &framebuffer::Framebuffer,

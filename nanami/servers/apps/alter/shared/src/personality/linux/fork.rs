@@ -167,6 +167,7 @@ pub(super) fn sys_fork(
         child.trace_enabled = parent.trace_enabled;
         child.diagnostics_enabled = parent.diagnostics_enabled;
         child.graphics_enabled = parent.graphics_enabled;
+        child.framebuffer_size = parent.framebuffer_size;
         child.graphics_session = parent.graphics_session;
         child.personality = parent.personality;
         child.terminal_canonical = parent.terminal_canonical;

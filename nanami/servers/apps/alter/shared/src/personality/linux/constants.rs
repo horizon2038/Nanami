@@ -276,6 +276,8 @@ pub(super) const LINUX_O_TRUNC: Word = 0o1000;
 pub(super) const LINUX_O_APPEND: Word = 0o2000;
 
 pub(super) const LINUX_O_NONBLOCK: Word = 0o4000;
+pub(super) const LINUX_O_DSYNC: Word = 0o10000;
+pub(super) const LINUX_O_SYNC: Word = 0o4010000;
 
 pub(super) const LINUX_O_LARGEFILE: Word = 0o100000;
 
@@ -362,14 +364,6 @@ pub(super) const LINUX_REL_X: u16 = 0;
 pub(super) const LINUX_REL_Y: u16 = 1;
 
 pub(super) const LINUX_REL_WHEEL: u16 = 8;
-
-pub(super) const ALTER_FB_WIDTH: Word = 800;
-
-pub(super) const ALTER_FB_HEIGHT: Word = 600;
-
-pub(super) const ALTER_FB_STRIDE: Word = ALTER_FB_WIDTH * 4;
-
-pub(super) const ALTER_FB_BYTES: Word = ALTER_FB_STRIDE * ALTER_FB_HEIGHT;
 
 pub(super) const LINUX_FBIOGET_VSCREENINFO: Word = 0x4600;
 
@@ -482,12 +476,6 @@ pub(super) const LINUX_SIGSET_BYTES: Word = 8;
 pub(super) const LINUX_KERNEL_SIGACTION_BYTES: usize = 32;
 
 pub(super) const LINUX_TIMESPEC_BYTES: Word = 16;
-
-pub(super) const ALTER_SLEEP_TICK_HZ: Word = 100;
-
-pub(super) const ALTER_SLEEP_TICK_MILLISECONDS: Word = 10;
-
-pub(super) const ALTER_SLEEP_TICK_NANOSECONDS: Word = 10_000_000;
 
 pub(super) const ALTER_FB_PRESENT_HZ: Word = 60;
 

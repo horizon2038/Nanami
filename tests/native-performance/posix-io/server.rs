@@ -3,7 +3,17 @@ use ipc::ServiceRequest;
 use posix::*;
 #[path = "../../../nanami/servers/apps/posix-server/src/state.rs"]
 mod state;
+use process::find_session;
 use state::*;
+fn map_request_error_to_status(error: RequestError) -> Word {
+    if let RequestError::Status(status) = error {
+        status
+    } else {
+        OS_RESPONSE_FATAL
+    }
+}
+#[path = "../../../nanami/servers/apps/posix-server/src/sync.rs"]
+mod sync;
 
 // Session lookup is outside the I/O handlers under test.
 mod process {
@@ -60,6 +70,57 @@ fn request(code: Word, fd: Word, buffer: Word, len: Word) -> ServiceRequest {
         arg1: buffer,
         arg2: len,
         arg3: 77,
+    }
+}
+
+#[test]
+fn fsync_forwards_shared_file_handles_and_rejects_invalid_fds() {
+    let mut runtime = runtime();
+    for fd in [3, 4] {
+        assert_eq!(
+            sync::handle_sync(&mut runtime, request(POSIX_REQUEST_FSYNC, fd, 0, 0)).0,
+            OS_RESPONSE_OK
+        );
+    }
+    assert_eq!(
+        sync::handle_sync(&mut runtime, request(POSIX_REQUEST_FSYNC, usize::MAX, 0, 0)).0,
+        OS_RESPONSE_INVALID_DESCRIPTOR
+    );
+    runtime.open_files[0].kind = FdKind::Directory;
+    assert_eq!(
+        sync::handle_sync(&mut runtime, request(POSIX_REQUEST_FSYNC, 3, 0, 0)).0,
+        OS_RESPONSE_OK
+    );
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.calls.len(), 3);
+        assert!(backend
+            .calls
+            .iter()
+            .all(|call| call.code == vfs::VFS_REQUEST_FSYNC && call.handle == 9));
+    });
+    BACKEND.with(|backend| backend.borrow_mut().result = Some(Err(RequestError::Transport)));
+    assert_eq!(
+        sync::handle_sync(&mut runtime, request(POSIX_REQUEST_SYNC, 0, 0, 0)).0,
+        OS_RESPONSE_FATAL
+    );
+}
+
+#[test]
+fn sync_write_waits_for_flush_on_normal_and_positioned_direct_paths() {
+    for code in [POSIX_REQUEST_WRITE_DIRECT, POSIX_REQUEST_PWRITE_DIRECT] {
+        let mut runtime = runtime();
+        runtime.open_files[0].status_flags = POSIX_O_SYNC;
+        assert_eq!(
+            io::handle_write_direct(&mut runtime, request(code, 3, 0, 100)).0,
+            OS_RESPONSE_OK
+        );
+        BACKEND.with(|backend| {
+            let backend = backend.borrow();
+            assert_eq!(backend.calls.len(), 2);
+            assert_eq!(backend.calls[0].code, vfs::VFS_REQUEST_WRITE_DELEGATED);
+            assert_eq!(backend.calls[1].code, vfs::VFS_REQUEST_FSYNC);
+        });
     }
 }
 
@@ -158,6 +219,46 @@ fn errors_do_not_advance_offset_or_retry_write() {
     );
     assert_eq!(runtime.open_files[0].offset, 123);
     BACKEND.with(|backend| assert_eq!(backend.borrow().calls.len(), 1));
+}
+
+#[test]
+fn sync_write_returns_flush_failure_without_replaying_the_accepted_write() {
+    let mut runtime = runtime();
+    runtime.open_files[0].status_flags = POSIX_O_SYNC;
+    BACKEND.with(|backend| backend.borrow_mut().sync_error = Some(RequestError::Transport));
+    assert_eq!(
+        io::handle_write_direct(&mut runtime, request(POSIX_REQUEST_WRITE_DIRECT, 3, 0, 20)),
+        (OS_RESPONSE_FATAL, 0, 0)
+    );
+    assert_eq!(runtime.open_files[0].offset, 123);
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.calls.len(), 2);
+        assert_eq!(backend.calls[0].code, vfs::VFS_REQUEST_WRITE_DELEGATED);
+        assert_eq!(backend.calls[1].code, vfs::VFS_REQUEST_FSYNC);
+    });
+}
+
+#[test]
+fn conventional_sync_write_also_waits_for_the_barrier() {
+    let mut runtime = runtime();
+    let input = [0x22; 20];
+    let mut scratch = [0; VFS_IO_OFFSET + 32];
+    runtime.sessions[0].shm_local = input.as_ptr() as Word;
+    runtime.sessions[0].shm_size = input.len();
+    runtime.vfs_shm = scratch.as_mut_ptr() as Word;
+    runtime.vfs_shm_size = scratch.len();
+    runtime.open_files[0].status_flags = POSIX_O_SYNC;
+    assert_eq!(
+        io::handle_write(&mut runtime, request(POSIX_REQUEST_WRITE, 3, 0, 20)).0,
+        OS_RESPONSE_OK
+    );
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.calls.len(), 2);
+        assert_eq!(backend.calls[0].code, vfs::VFS_REQUEST_WRITE);
+        assert_eq!(backend.calls[1].code, vfs::VFS_REQUEST_FSYNC);
+    });
 }
 
 #[test]

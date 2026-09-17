@@ -14,7 +14,7 @@ use super::{
     SYS_RT_SIGPROCMASK, SYS_RT_SIGSUSPEND, SYS_SCHED_GETAFFINITY, SYS_SELECT, SYS_SENDMSG,
     SYS_SETITIMER, SYS_SETPGID, SYS_SET_ROBUST_LIST, SYS_SET_TID_ADDRESS, SYS_SIGALTSTACK,
     SYS_STAT, SYS_STATX, SYS_UNAME, SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK,
-    SYS_WAIT4, SYS_WRITE, SYS_WRITEV,
+    SYS_WAIT4, SYS_WRITE, SYS_WRITEV, SYS_FSYNC, SYS_FDATASYNC, SYS_SYNC, SYS_SYNCFS,
 };
 
 pub(super) fn trace_syscall_action(
@@ -176,8 +176,9 @@ pub(super) fn trace_critical_action(
 pub(super) fn syscall_arg_count(number: Word) -> usize {
     match number {
         SYS_GETPID | SYS_GETPPID | SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID
-        | SYS_FORK | SYS_VFORK | SYS_GETTID => 0,
-        SYS_CLOSE | SYS_EXIT | SYS_EXIT_GROUP | SYS_PIPE | SYS_GETPGID => 1,
+        | SYS_FORK | SYS_VFORK | SYS_GETTID | SYS_SYNC => 0,
+        SYS_CLOSE | SYS_EXIT | SYS_EXIT_GROUP | SYS_PIPE | SYS_GETPGID
+        | SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => 1,
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
@@ -241,6 +242,10 @@ pub(super) fn syscall_name(number: Word) -> &'static [u8] {
         SYS_PIPE2 => b"pipe2",
         SYS_CREAT => b"creat",
         SYS_CLOSE => b"close",
+        SYS_FSYNC => b"fsync",
+        SYS_FDATASYNC => b"fdatasync",
+        SYS_SYNC => b"sync",
+        SYS_SYNCFS => b"syncfs",
         SYS_STAT => b"stat",
         SYS_LSTAT => b"lstat",
         SYS_STATX => b"statx",

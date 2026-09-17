@@ -54,7 +54,13 @@ impl Alpha {
                     1,
                     frame_directory,
                     chunk as Word,
-                )?;
+                ).map_err(|error| {
+                    error!(
+                        "[mem.err] frame node allocation failed pid={} chunk={} slots={}..{} arena={:#x} err={:?}",
+                        pid, chunk, start_slot, end_slot, process_generic, error
+                    );
+                    error
+                })?;
                 self.processes.register_frame_chunk(pid, chunk)?;
             }
             chunk += 1;

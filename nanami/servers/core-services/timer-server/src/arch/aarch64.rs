@@ -4,6 +4,7 @@ use libnanami::{RequestError, Word};
 // driver must own a concrete timer device instead of programming CNTV_* from
 // EL0; besides being platform policy, this avoids exposing a timing channel.
 pub const TICK_HZ: u64 = 100;
+pub const MODE: &str = "unsupported";
 
 pub struct PreparedTimer {
     pub resource: Word,
@@ -14,10 +15,15 @@ pub fn prepare(_timer_resource_slot: Word) -> Result<PreparedTimer, RequestError
     Err(RequestError::Unsupported)
 }
 
-pub fn start(_timer_resource: Word) -> Result<(), RequestError> {
-    Err(RequestError::Unsupported)
-}
-
-pub fn rearm() -> Result<(), RequestError> {
-    Err(RequestError::Unsupported)
+impl PreparedTimer {
+    pub fn start(&mut self) -> Result<(), RequestError> {
+        Err(RequestError::Unsupported)
+    }
+    pub fn now(&mut self) -> u64 {
+        0
+    }
+    pub fn on_interrupt(&mut self) {}
+    pub fn arm(&mut self, _deadline: Option<u64>) -> Result<(), RequestError> {
+        Err(RequestError::Unsupported)
+    }
 }

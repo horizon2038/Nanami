@@ -162,6 +162,35 @@ fn terminal_full_empty_and_wrapped_bulk_io() {
     }
 }
 
+#[test]
+fn terminal_output_newline_expansion_is_atomic_and_counts_source_bytes() {
+    let mut ring = ring::ByteRing::EMPTY;
+    let input = b"abc\ndef\n";
+    let mut output = [0u8; 10];
+    unsafe {
+        assert_eq!(ring.write_crlf(input.as_ptr(), input.len()), input.len());
+        assert_eq!(ring.read_into(output.as_mut_ptr(), output.len()), 10);
+    }
+    assert_eq!(&output, b"abc\r\ndef\r\n");
+    for _ in 0..RING_BYTES - 1 {
+        assert!(ring.push(b'x'));
+    }
+    unsafe {
+        assert_eq!(ring.write_crlf(b"\n".as_ptr(), 1), 0);
+    }
+    assert_eq!(ring.len, RING_BYTES - 1);
+    let mut byte = 0;
+    unsafe {
+        assert_eq!(ring.read_into(&mut byte, 1), 1);
+        assert_eq!(ring.write_crlf(b"\n".as_ptr(), 1), 1);
+    }
+    let mut all = vec![0; RING_BYTES];
+    unsafe {
+        assert_eq!(ring.read_into(all.as_mut_ptr(), RING_BYTES), RING_BYTES);
+    }
+    assert_eq!(&all[RING_BYTES - 2..], b"\r\n");
+}
+
 fn screen(width: usize, height: usize) -> framebuffer::ScreenInfo {
     framebuffer::ScreenInfo {
         width,

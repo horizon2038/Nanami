@@ -42,6 +42,10 @@ impl TcpRxQueue {
         self.buffers[index].window
     }
 
+    pub(super) fn readable(&self, index: usize) -> bool {
+        self.buffers[index].len != 0
+    }
+
     pub(super) fn push(&mut self, index: usize, payload: &[u8]) -> usize {
         let buffer = &mut self.buffers[index];
         let len = min(payload.len(), buffer.window as usize);
@@ -180,10 +184,14 @@ pub(super) fn handle_tcp_recv_request(
     for conn in &mut runtime.tcp_connections {
         if conn.active
             && conn.owner_id == request.identifier
-            && conn.eof_pending
+            && (conn.eof_pending || (request.arg3 != 0 && conn.state == TCP_STATE_CLOSE_WAIT))
             && (request.arg3 == 0 || conn.connection_id == request.arg3)
         {
-            conn.eof_pending = false;
+            // A per-connection read keeps returning EOF. The multiplexed API
+            // reports it once, so one half-closed peer cannot starve all others.
+            if request.arg3 == 0 {
+                conn.eof_pending = false;
+            }
             return (libnanami::OS_RESPONSE_OK, 0, conn.connection_id);
         }
     }

@@ -65,6 +65,10 @@ impl Runtime {
         if image_name.is_empty() || image_name.len() > ALTER_IMAGE_NAME_MAX {
             return false;
         }
+        let (terminal_canonical, terminal_echo, terminal_termios) = self.managed.iter()
+            .find(|p| terminal_id != 0 && p.pid != 0 && !p.exited && p.terminal_id == terminal_id)
+            .map(|p| (p.terminal_canonical, p.terminal_echo, p.terminal_termios))
+            .unwrap_or((true, true, None));
         let mut i = 0usize;
         while i < self.managed.len() {
             if self.managed[i].pid == 0 {
@@ -101,8 +105,9 @@ impl Runtime {
                     terminal_line_read: 0,
                     terminal_line_len: 0,
                     terminal_line_ready: false,
-                    terminal_canonical: true,
-                    terminal_echo: true,
+                    terminal_canonical,
+                    terminal_echo,
+                    terminal_termios,
                     terminal_read_waiting: false,
                     terminal_read_buffer: 0,
                     terminal_read_len: 0,
@@ -117,6 +122,7 @@ impl Runtime {
                     sleep_waiting: false,
                     sleep_deadline: 0,
                     sleep_context: LinuxSyscallContext::EMPTY,
+                    readiness_wait: None,
                     mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
                 };
                 return true;
@@ -213,6 +219,7 @@ impl Runtime {
         process.sleep_waiting = false;
         process.sleep_deadline = 0;
         process.sleep_context = LinuxSyscallContext::EMPTY;
+        process.readiness_wait = None;
         process.mappings = [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX];
         true
     }
@@ -381,6 +388,7 @@ impl Runtime {
     pub fn mark_process_exited(&mut self, pid: Word, status: Word) {
         if let Some(process) = self.managed_process_mut(pid) {
             process.exited = true;
+            process.readiness_wait = None;
             process.exit_status = status;
         }
     }

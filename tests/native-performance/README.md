@@ -11,6 +11,9 @@ documented in [Native hot-path follow-up](hotpaths.md).
 The Alpha mapping and Alter vectored-I/O follow-up is documented in
 [Alpha / Alter transfer paths](alpha-alter.md).
 
+The subsequent copy-window, clock-query and readiness review is documented
+in [Alter/Linux syscall hot paths](syscall-hotpaths.md).
+
 The module split and POSIX delegated-write follow-up is documented in
 [Alter / POSIX I/O](posix-io.md).
 

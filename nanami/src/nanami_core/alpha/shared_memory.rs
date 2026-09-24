@@ -185,6 +185,7 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let r = mapping.reservation;
         let entry = mapping.entry;
+        self.invalidate_process_copy_mappings(entry.pid)?;
         while mapping.mapped != 0 {
             let page = mapping.mapped - 1;
             let va = r.base_va + page * PAGE_SIZE;

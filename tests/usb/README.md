@@ -145,7 +145,66 @@ nonzero USB3 rates below 5 Gbit/s which the old parser rejected, and proceeds
 through controller/storage initialization with the new parser.
 The separate firmware-reserved RSDP/HPET mapping issue is not changed here.
 
+## Boot stalls at Honoka service connection
+
+`connect services start` does not identify the stalled server. Honoka now logs
+each registry connection and shared-memory attachment before the call.
+System Manager logs the boot image path and each load stage (`stat`, `heap`,
+`open`, `read` with offset/length, `close`, `spawn`) before blocking. These load
+messages are enabled only for system/session-list startup, not ordinary exec
+requests. Capture both servers' last lines, not just Honoka's.
+
+In particular, System Manager publishes `exec-service` before loading the
+system/session lists, but begins receiving exec requests afterward. Honoka
+waiting at `exec shm attach` during that interval is expected. If later image
+loads stop progressing, investigate that operation rather than treating the
+Honoka message as evidence of a compositor deadlock.
+
+To exercise USB BOT boot with a private disk (no artificial I/O limit):
+
+```sh
+python3 tests/usb/qemu-hid.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --usb-storage --coexist-ps2 --hpet on \
+  --bash-smoke --no-network --desktop-info-smoke
+```
+
+The unthrottled and 200-IOPS four-core tests reached the desktop with the
+current image. The HPET/timer/notification host suites also passed (31 tests,
+one ignored benchmark). This is diagnostic instrumentation, not a confirmed
+fix for the reported hardware stall. QEMU still provides xHCI INTx, unlike
+the reported hardware's `irq=false`, and does not reproduce its SMI behavior.
+
 ## Tests
+
+### Shell terminal and GUI resize
+
+Build the freestanding Linux validator into a private test rootfs, alongside
+BusyBox (with `vi` and `pwd` enabled):
+
+```sh
+clang --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -O2 \
+  tests/alter-linux/terminal.c -o out/alter-glibc-root/bin/terminal-test
+# Build an image with a separate ROOTFS_IMAGE and this LINUX_ROOTFS_DIR.
+python3 tests/usb/qemu-hid.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --usb-storage --coexist-ps2 --hpet on --bash-smoke --no-network --terminal-smoke
+python3 tests/usb/qemu-hid.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --usb-storage --coexist-ps2 --hpet on --bash-smoke --no-network --gui-resize-smoke
+```
+
+Both use disposable snapshot disks, without artificial storage throttling.
+The terminal test verifies native cursor insertion/history, untraced BusyBox vi
+editing, `:w <filename>`/`:x`, exact contents after shortening an existing file,
+resized `TIOCGWINSZ`, termios round-trip, and
+minimum-size shrink/grow. The GUI test covers eg-test, honoka-client,
+performance-monitor, image-viewer and Saran, checking close at resized geometry.
+Screenshots are retained for visual review. These are QEMU checks, not a
+confirmation that the previously reported real-hardware boot stall is fixed.
+
+Protocol and terminal scope: [Honoka resize and Shell terminal](../../nanami/servers/sdk/rust/nanami-services/src/gfx/honoka/README.md).
 
 Host tests compile the production parsers, BOT wire handling, rings, PCI
 preparation, storage-selection IPC, deferred root discovery and physical memory

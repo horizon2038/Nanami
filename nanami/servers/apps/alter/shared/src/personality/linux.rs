@@ -60,6 +60,8 @@ use descriptors::*;
 #[path = "linux/sync.rs"]
 mod sync;
 use sync::*;
+#[path = "linux/truncate.rs"]
+mod truncate;
 
 #[path = "linux/graphics_session.rs"]
 mod graphics_session;
@@ -99,10 +101,24 @@ use wait_signals::*;
 #[path = "linux/readiness.rs"]
 mod readiness;
 use readiness::*;
+#[path = "linux/poll_set.rs"]
+mod poll_set;
+use poll_set::*;
+#[path = "linux/poll_timeout.rs"]
+mod poll_timeout;
+use poll_timeout::*;
+#[path = "linux/poll_wait.rs"]
+mod poll_wait;
+use poll_wait::sys_poll_action;
+#[path = "linux/socket_readiness.rs"]
+mod socket_readiness;
+use socket_readiness::socket_readiness;
 
 #[path = "linux/clocks.rs"]
 mod clocks;
 use clocks::*;
+#[path = "linux/realtime.rs"]
+mod realtime;
 #[path = "linux/clock_events.rs"]
 mod clock_events;
 use clock_events::arm_clock_timer;
@@ -257,6 +273,7 @@ pub fn dispatch_syscall(
         SYS_CLOSE => sys_close(runtime, native_pid, context.args[0]),
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => sys_fsync(runtime, native_pid, context.args[0]),
         SYS_SYNC => sys_sync(runtime),
+        SYS_FTRUNCATE => truncate::sys_ftruncate(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP => sys_dup(runtime, native_pid, context.args[0]),
         SYS_DUP2 => sys_dup2(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP3 => sys_dup3(
@@ -362,14 +379,13 @@ pub fn dispatch_syscall(
             context.args[3],
             context.args[4],
         ),
-        SYS_POLL | SYS_PPOLL => sys_poll(runtime, native_pid, context.args[0], context.args[1]),
-        SYS_SELECT | SYS_PSELECT6 => sys_select(
-            runtime,
-            native_pid,
-            context.args[0],
-            context.args[1],
-            context.args[2],
-        ),
+        SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 => {
+            let action = sys_poll_action(runtime, native_pid, context);
+            record_action_result(runtime, native_pid, context.number, action);
+            trace_critical_action(runtime, native_pid, context, action);
+            trace_syscall_action(runtime, native_pid, context, action);
+            return action;
+        }
         SYS_STAT | SYS_LSTAT => sys_stat(runtime, native_pid, context.args[0], context.args[1]),
         SYS_FSTAT => sys_fstat(runtime, native_pid, context.args[0], context.args[1]),
         SYS_CHOWN | SYS_LCHOWN => sys_chown(runtime, native_pid, context.args[0]),
@@ -676,6 +692,7 @@ pub fn dispatch_syscall(
 }
 
 pub use clock_events::handle_timer_notification;
+pub use poll_wait::{handle_readiness_changes, handle_readiness_notification, wake_readiness_waiters};
 pub use descriptors::close_process_files;
 pub use input_device::wake_device_readers;
 pub use network_wait::wake_network_waiters;

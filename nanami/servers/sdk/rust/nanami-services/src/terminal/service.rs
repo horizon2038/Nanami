@@ -4,6 +4,18 @@ use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
 use super::constants::*;
 
+pub fn terminal_set_size(port: Word, id: Word, columns: Word, rows: Word) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(port, TERMINAL_REQUEST_SET_SIZE, id, columns, rows, 0, 4)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(())
+}
+
+pub fn terminal_set_output_crlf(port: Word, id: Word, enabled: bool) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(port, TERMINAL_REQUEST_SET_OUTPUT_CRLF, id, enabled as Word, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(())
+}
+
 pub fn terminal_attach_shared_memory(
     service_port: CapabilityDescriptor,
     size_bytes: Word,

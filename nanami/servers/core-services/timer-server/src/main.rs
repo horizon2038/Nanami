@@ -107,13 +107,8 @@ fn nanami_main() -> libnanami::NanamiResult {
                 libnanami::print!("\n");
             }
         }
-        if state.timer_started {
-            state.ticks = prepared_timer.now();
-            fire_expired_async_timers(&mut state);
-            prepared_timer
-                .arm(state.pending_timers.next())
-                .map_err(|e| log_error("[timer-server] arm failed: ", e))?;
-        }
+        complete_event(&mut state, &mut prepared_timer)
+            .map_err(|e| log_error("[timer-server] arm failed: ", e))?;
     }
 }
 

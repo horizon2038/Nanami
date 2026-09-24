@@ -54,6 +54,24 @@ pub(super) fn refresh_clock(
         state.timer_started = true;
     }
     state.ticks = timer.now();
+    state.clock_sampled = true;
+    Ok(())
+}
+
+pub(super) fn complete_event(
+    state: &mut TimerState,
+    timer: &mut arch::PreparedTimer,
+) -> Result<(), RequestError> {
+    if state.timer_started {
+        // A request that just sampled the clock can use that same sample for
+        // expiry checks. Never reuse it across IPC events or IRQ deliveries.
+        if !state.clock_sampled {
+            state.ticks = timer.now();
+        }
+        state.clock_sampled = false;
+        fire_expired_async_timers(state);
+        timer.arm(state.pending_timers.next())?;
+    }
     Ok(())
 }
 

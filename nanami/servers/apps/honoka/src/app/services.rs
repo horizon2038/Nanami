@@ -29,17 +29,27 @@ const HONOKA_THEME_PATH_MAX: usize = 128;
 const HONOKA_CONFIG_MAX: usize = 256;
 
 pub fn connect_services() -> Result<ServicePorts, libnanami::NanamiError> {
+    libnanami::println!("[honoka] connect: timer-service");
     let timer = connect_timer_service();
+    libnanami::println!("[honoka] connect: display_service");
     let display = connect_display_service(timer)?;
+    libnanami::println!("[honoka] connect: input-service");
     let input = connect_input_service(timer)?;
+    libnanami::println!("[honoka] connect: rtc-service");
     let rtc = connect_rtc_service(timer)?;
+    libnanami::println!("[honoka] connect: exec-service");
     let exec = connect_exec_service(timer)?;
+    // Registration precedes system-manager's receive loop. An attach here
+    // can wait for the remaining system/session images to finish loading.
+    libnanami::println!("[honoka] connect: exec shm attach");
     let (exec_shm, exec_shm_size) = nanami_services::exec::exec_attach_shared_memory(
         exec,
         nanami_services::exec::EXEC_DEFAULT_SHM_BYTES,
     )
     .map_err(|e| log_error("[honoka] exec shm attach failed: ", e))?;
+    libnanami::println!("[honoka] connect: vfs-service");
     let vfs = connect_vfs_service(timer)?;
+    libnanami::println!("[honoka] connect: vfs shm attach");
     let (vfs_shm, vfs_shm_size) =
         nanami_services::vfs::vfs_attach_shared_memory(vfs, VFS_SHM_BYTES)
             .map_err(|e| log_error("[honoka] vfs shm attach failed: ", e))?;

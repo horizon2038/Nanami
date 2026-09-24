@@ -7,3 +7,6 @@ mod sync;
 pub use constants::*;
 pub use io::*;
 pub use sync::*;
+#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/posix/truncate.rs"]
+mod truncate;
+pub use truncate::*;

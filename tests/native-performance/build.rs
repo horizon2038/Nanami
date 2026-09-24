@@ -2,6 +2,10 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(legacy_heap)");
     for (variable, default) in [
         (
+            "NANAMI_STATIC_AVL_SOURCE",
+            "../../nanami/src/nanami_utils/static_avl.rs",
+        ),
+        (
             "NANAMI_HEAP_SOURCE",
             "../../nanami/servers/sdk/rust/libnanami/src/heap.rs",
         ),

@@ -8,6 +8,7 @@ pub const SLOT_INPUT_SERVICE: Word = 25;
 pub const SLOT_HONOKA_SERVICE: Word = 26;
 pub const SLOT_HONOKA_PRESENT_NOTIFICATION_BASE: Word = 27;
 pub const SLOT_TIMER_SERVICE: Word = 31;
+pub const SLOT_RTC_SERVICE: Word = 32;
 
 pub const ALTER_REQUEST_CONTROL: Word = 0xb101;
 pub const ALTER_REQUEST_LOAD_ELF: Word = 0xb102;

@@ -1,5 +1,26 @@
 use super::*;
 
+pub(crate) fn handle_ftruncate(
+    request: ServiceRequest,
+    runtime: &mut Ext2Runtime,
+) -> (Word, Word, Word) {
+    let Some(file) = runtime.handles.get(request.arg0).copied().filter(|file| {
+        file.active && file.owner_pid == request.identifier
+    }) else {
+        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    if file.mode & 0xf000 != EXT2_S_IFREG {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    let result = read_inode(runtime, file.inode).and_then(|mut inode| {
+        truncate::resize_inode(runtime, file.inode, &mut inode, request.arg1)
+    });
+    match result {
+        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Err(error) => (map_request_error_to_status(error), 0, 0),
+    }
+}
+
 pub(crate) fn handle_read(
     request: ServiceRequest,
     runtime: &mut Ext2Runtime,

@@ -24,6 +24,8 @@ struct Fake {
     failed_descriptor: Option<Word>,
     copies: usize,
     starts: usize,
+    clock_reads: usize,
+    arms: Vec<Option<u64>>,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod ipc {
@@ -67,7 +69,12 @@ mod arch {
             Ok(())
         }
         pub fn now(&mut self) -> u64 {
+            FAKE.with(|state| state.borrow_mut().clock_reads += 1);
             self.ticks
+        }
+        pub fn arm(&mut self, deadline: Option<u64>) -> Result<(), RequestError> {
+            FAKE.with(|state| state.borrow_mut().arms.push(deadline));
+            Ok(())
         }
     }
 }
@@ -87,6 +94,45 @@ use timers::*;
 fn reset() -> TimerState {
     FAKE.with(|state| *state.borrow_mut() = Fake::default());
     TimerState::new()
+}
+
+#[test]
+fn clock_query_samples_once_per_event_and_irqs_get_a_fresh_sample() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 5 };
+    for now in [5, 9, 42] {
+        timer.ticks = now;
+        refresh_clock(&mut state, &mut timer, 19).unwrap();
+        assert_eq!(state.ticks, now);
+        complete_event(&mut state, &mut timer).unwrap();
+        assert!(!state.clock_sampled);
+    }
+    FAKE.with(|f| assert_eq!(f.borrow().clock_reads, 3));
+    // Notification/IRQ has no request-side refresh_clock call.
+    timer.ticks = 100;
+    complete_event(&mut state, &mut timer).unwrap();
+    assert_eq!(state.ticks, 100);
+    FAKE.with(|f| {
+        assert_eq!(f.borrow().clock_reads, 4);
+        assert_eq!(f.borrow().starts, 1);
+    });
+}
+
+#[test]
+fn event_completion_fires_due_timers_even_during_repeated_clock_queries() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 0 };
+    set_alarm(&mut state, &mut timer, 19, 1, 18, Some(20)).unwrap();
+    complete_event(&mut state, &mut timer).unwrap();
+    timer.ticks = 20;
+    refresh_clock(&mut state, &mut timer, 19).unwrap();
+    complete_event(&mut state, &mut timer).unwrap();
+    FAKE.with(|f| {
+        let f = f.borrow();
+        assert_eq!(f.notified, [32]);
+        assert_eq!(f.clock_reads, 2);
+        assert_eq!(f.arms, [Some(20), None]);
+    });
 }
 fn schedule(
     state: &mut TimerState,

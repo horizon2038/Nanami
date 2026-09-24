@@ -45,6 +45,31 @@ impl ByteRing {
         count
     }
 
+    /// Return the number of source bytes consumed, not expanded output bytes.
+    /// Never consume a newline unless both CR and LF fit in the ring.
+    pub unsafe fn write_crlf(&mut self, source: *const u8, count: usize) -> usize {
+        let source = core::slice::from_raw_parts(source, count);
+        let mut done = 0;
+        while done < count {
+            let end = source[done..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(count, |n| done + n);
+            let copied = self.write_from(source.as_ptr().add(done), end - done);
+            done += copied;
+            if done < end || done == count {
+                break;
+            }
+            if RING_BYTES - self.len < 2 {
+                break;
+            }
+            self.push(b'\r');
+            self.push(b'\n');
+            done += 1;
+        }
+        done
+    }
+
     /// `destination` must be writable for `count` bytes and not overlap this
     /// ring. Only the returned number of bytes is written.
     pub unsafe fn read_into(&mut self, destination: *mut u8, count: usize) -> usize {

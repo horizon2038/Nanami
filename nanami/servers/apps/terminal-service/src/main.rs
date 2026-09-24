@@ -47,6 +47,7 @@ struct TerminalSession {
     input_notification: Word,
     output_notification: Word,
     echo_enabled: bool,
+    output_crlf: bool,
     input_edit_len: usize,
     input: ByteRing,
     output: ByteRing,
@@ -61,6 +62,7 @@ impl TerminalSession {
         input_notification: 0,
         output_notification: 0,
         echo_enabled: true,
+        output_crlf: true,
         input_edit_len: 0,
         input: ByteRing::EMPTY,
         output: ByteRing::EMPTY,
@@ -93,12 +95,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         let event = match pending {
             Reply::Send(status, detail0, detail1) => {
                 pending = Reply::Drop;
-                libnanami::ipc::service_reply_receive_event(
-                    service_port,
-                    status,
-                    detail0,
-                    detail1,
-                )
+                libnanami::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
             }
             Reply::Drop => libnanami::ipc::service_receive_event(service_port),
         };
@@ -131,9 +128,19 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> Reply {
         TERMINAL_REQUEST_ATTACH_OUTPUT_NOTIFICATION => {
             handle_attach_output_notification(runtime, request)
         }
-        TERMINAL_REQUEST_ATTACH_INPUT_NOTIFICATION => handle_attach_input_notification(runtime, request),
+        TERMINAL_REQUEST_ATTACH_INPUT_NOTIFICATION => {
+            handle_attach_input_notification(runtime, request)
+        }
         TERMINAL_REQUEST_CLEAR => handle_clear(runtime, request),
         TERMINAL_REQUEST_SET_ECHO => handle_set_echo(runtime, request),
+        TERMINAL_REQUEST_SET_SIZE => handle_set_size(runtime, request),
+        TERMINAL_REQUEST_SET_OUTPUT_CRLF => match find_terminal(runtime, request.arg0) {
+            Some(index) => {
+                runtime.terminals[index].output_crlf = request.arg1 != 0;
+                (libnanami::OS_RESPONSE_OK, 0, 0)
+            }
+            None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        },
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
     Reply::Send(status, detail0, detail1)
@@ -191,6 +198,7 @@ fn handle_create(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word,
         input_notification: 0,
         output_notification: 0,
         echo_enabled: true,
+        output_crlf: true,
         input_edit_len: 0,
         input: ByteRing::EMPTY,
         output: ByteRing::EMPTY,
@@ -218,6 +226,17 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> 
     // Output has no per-byte editing. With echo disabled, input does not either.
     // Keep the editing/echo path below unchanged.
     let terminal = &mut runtime.terminals[index];
+    if !input && terminal.output_crlf {
+        let done = unsafe {
+            terminal
+                .output
+                .write_crlf((client.shm + request.arg1) as *const u8, request.arg2)
+        };
+        if done != 0 {
+            notify_terminal(terminal.output_notification);
+        }
+        return (libnanami::OS_RESPONSE_OK, done, 0);
+    }
     if !input || !terminal.echo_enabled {
         let (ring, notification) = if input {
             (&mut terminal.input, terminal.input_notification)
@@ -304,6 +323,7 @@ fn push_input_byte(terminal: &mut TerminalSession, byte: u8) -> (bool, bool) {
 fn echo_input_byte(output: &mut ByteRing, byte: u8) {
     match byte {
         b'\n' | b'\r' => {
+            let _ = output.push(b'\r');
             let _ = output.push(b'\n');
         }
         0x7f | 0x08 => {
@@ -359,6 +379,23 @@ fn handle_get_size(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Wor
         runtime.terminals[index].columns,
         runtime.terminals[index].rows,
     )
+}
+
+fn handle_set_size(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
+    let Some(index) = find_terminal(runtime, request.arg0) else {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    if request.arg1 == 0
+        || request.arg2 == 0
+        || request.arg1 > u16::MAX as Word
+        || request.arg2 > u16::MAX as Word
+    {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    let terminal = &mut runtime.terminals[index];
+    terminal.columns = request.arg1;
+    terminal.rows = request.arg2;
+    (libnanami::OS_RESPONSE_OK, 0, 0)
 }
 
 fn handle_clear(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {

@@ -18,6 +18,8 @@ use tcp_wire::emit_tcp_segment;
 mod tcp;
 #[path = "../../../nanami/servers/apps/net-server/src/app/tcp_index.rs"]
 mod tcp_index;
+#[path = "../../../nanami/servers/apps/net-server/src/app/readiness.rs"]
+mod readiness;
 use tcp_index::{active_tcp_connection_index, TcpIndex};
 
 const ETH_HDR_LEN: usize = 14;
@@ -36,6 +38,8 @@ struct NetRuntime {
     tcp_connections: [TcpConnection; TCP_MAX_CONNECTIONS],
     tcp_index: TcpIndex,
     tcp_rx: TcpRxQueue,
+    udp_rx: UdpRxQueue,
+    icmp_rx: IcmpRxQueue,
     session: Session,
     tx: std::cell::UnsafeCell<[u8; 2048]>,
     emitted: RefCell<Vec<Vec<u8>>>,
@@ -45,6 +49,12 @@ struct NetStats {
     tcp_rx: Word,
     tcp_tx: Word,
 }
+#[derive(Default)]
+struct UdpRxQueue { entries: Vec<UdpRxEntry> }
+struct UdpRxEntry { used: bool, pid: Word, dst_port: u16 }
+#[derive(Default)]
+struct IcmpRxQueue { entries: Vec<IcmpRxEntry> }
+struct IcmpRxEntry { used: bool, owner_id: Word, identifier: u16 }
 fn get_backend_shm_ptr(runtime: &NetRuntime, _: Word) -> *mut u8 {
     runtime.tx.get().cast()
 }
@@ -66,6 +76,50 @@ fn arp_lookup(_: &NetRuntime, _: [u8; 4]) -> Option<[u8; 6]> {
     Some([2; 6])
 }
 
+#[test]
+fn readiness_is_owner_scoped_and_does_not_consume_tcp_data_or_accept() {
+    let (_shm, mut runtime, mut stats) = setup();
+    connect(&mut runtime, &mut stats, 0, 100);
+    let id = runtime.tcp_connections[0].connection_id;
+    let query = |runtime: &NetRuntime, kind, id, owner| {
+        readiness::handle_readiness_request(runtime, ipc::ServiceRequest {
+            identifier: owner, arg0: kind, arg1: id, ..ipc::ServiceRequest::default()
+        })
+    };
+    assert_eq!(query(&runtime, net::NET_READINESS_TCP, id, 1), (0, net::NET_READY_WRITE, 0));
+    assert_ne!(query(&runtime, net::NET_READINESS_TCP, id, 2).0, 0);
+    runtime.tcp_rx.push(0, b"data");
+    for _ in 0..3 {
+        assert_eq!(query(&runtime, net::NET_READINESS_TCP, id, 1).1, net::NET_READY_READ | net::NET_READY_WRITE);
+    }
+    let mut dst = [0; 4];
+    assert!(runtime.tcp_rx.read_for(&runtime.tcp_connections, 1, id, &mut dst).is_some());
+    assert_eq!(&dst, b"data");
+    runtime.tcp_connections[0].accepted = false;
+    assert_eq!(query(&runtime, net::NET_READINESS_LISTENER, 80, 1).1, net::NET_READY_READ);
+    assert_eq!(query(&runtime, net::NET_READINESS_LISTENER, 81, 1).1, 0);
+    assert!(!runtime.tcp_connections[0].accepted);
+    runtime.tcp_connections[0].state = TCP_STATE_CLOSE_WAIT;
+    assert_eq!(query(&runtime, net::NET_READINESS_TCP, id, 1).1,
+        net::NET_READY_READ | net::NET_READY_WRITE | net::NET_READY_READ_CLOSED);
+}
+
+#[test]
+fn readiness_filters_datagram_queues_by_owner_and_port_without_dequeuing() {
+    let (_shm, mut runtime, _) = setup();
+    runtime.udp_rx.entries.push(UdpRxEntry { used: true, pid: 2, dst_port: 53 });
+    runtime.udp_rx.entries.push(UdpRxEntry { used: true, pid: 1, dst_port: 54 });
+    runtime.icmp_rx.entries.push(IcmpRxEntry { used: true, owner_id: 1, identifier: 100 });
+    let query = |runtime: &NetRuntime, kind, id| readiness::handle_readiness_request(runtime,
+        ipc::ServiceRequest { identifier: 1, arg0: kind, arg1: id, ..ipc::ServiceRequest::default() }).1;
+    assert_eq!(query(&runtime, net::NET_READINESS_UDP, 53), net::NET_READY_WRITE);
+    assert_eq!(query(&runtime, net::NET_READINESS_UDP, 54), net::NET_READY_READ | net::NET_READY_WRITE);
+    assert_eq!(query(&runtime, net::NET_READINESS_ICMP, 101), net::NET_READY_WRITE);
+    assert_eq!(query(&runtime, net::NET_READINESS_ICMP, 100), net::NET_READY_READ | net::NET_READY_WRITE);
+    assert_eq!(runtime.udp_rx.entries.len(), 2);
+    assert_eq!(runtime.icmp_rx.entries.len(), 1);
+}
+
 fn setup() -> (Vec<u8>, NetRuntime, NetStats) {
     let mut shm = vec![0; 4096];
     let buffers: Box<[TcpRxBuffer]> = (0..TCP_MAX_CONNECTIONS)
@@ -76,6 +130,8 @@ fn setup() -> (Vec<u8>, NetRuntime, NetStats) {
         ip: [10, 0, 2, 15],
         tcp_connections: [TcpConnection::EMPTY; TCP_MAX_CONNECTIONS],
         tcp_index: TcpIndex::EMPTY,
+        udp_rx: UdpRxQueue::default(),
+        icmp_rx: IcmpRxQueue::default(),
         tcp_rx: TcpRxQueue::new(
             Box::leak(buffers)
                 .try_into()
@@ -445,6 +501,10 @@ fn fin_cannot_skip_a_receive_hole_and_payload_fin_orders_data_before_eof() {
         receive(&mut runtime, &mut stats, 1, 1400),
         (OS_RESPONSE_OK, 0, 1)
     );
+    assert_eq!(receive(&mut runtime, &mut stats, 1, 1400), (OS_RESPONSE_OK, 0, 1));
+    assert_eq!(receive(&mut runtime, &mut stats, 0, 1400), (OS_RESPONSE_OK, 0, 1));
+    assert_eq!(receive(&mut runtime, &mut stats, 0, 1400), (OS_RESPONSE_OK, 0, 0));
+    assert_eq!(receive(&mut runtime, &mut stats, 1, 1400), (OS_RESPONSE_OK, 0, 1));
     let sent = runtime.emitted.borrow().len();
     packet(&mut runtime, &mut stats, 1000, 104, ack, TCP_FLAG_ACK, b"");
     assert_eq!(

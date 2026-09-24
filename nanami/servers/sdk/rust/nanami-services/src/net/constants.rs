@@ -25,6 +25,17 @@ pub const NET_SERVICE_REQUEST_SEND: Word = 0x3001;
 pub const NET_SERVICE_REQUEST_RECV: Word = 0x3002;
 pub const NET_SERVICE_REQUEST_CONTROL: Word = 0x3003;
 pub const NET_SERVICE_REQUEST_STATS: Word = 0x3004;
+/// Non-consuming, owner-scoped readiness: arg0=kind, arg1=port/connection ID.
+pub const NET_SERVICE_REQUEST_READINESS: Word = 0x3005;
+pub const NET_READINESS_UDP: Word = 1;
+pub const NET_READINESS_TCP: Word = 2;
+pub const NET_READINESS_LISTENER: Word = 3;
+pub const NET_READINESS_ICMP: Word = 4;
+pub const NET_READY_READ: Word = 1;
+pub const NET_READY_WRITE: Word = 2;
+pub const NET_READY_HANGUP: Word = 4;
+pub const NET_READY_ERROR: Word = 8;
+pub const NET_READY_READ_CLOSED: Word = 16;
 pub const NET_SERVICE_REQUEST_UDP_SEND: Word = 0x3010;
 pub const NET_SERVICE_REQUEST_UDP_RECV: Word = 0x3011;
 pub const NET_SERVICE_REQUEST_TCP_SEND: Word = 0x3020;

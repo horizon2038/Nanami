@@ -26,10 +26,20 @@ pub(super) fn read_file(
         let Ok(physical_block) = get_data_block(runtime, inode, logical_block) else {
             return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
         };
-        if physical_block == 0 {
-            break;
-        }
         let block_offset = (file_offset + copied) % runtime.block_size;
+        if physical_block == 0 {
+            let n = min(remaining, runtime.block_size - block_offset);
+            unsafe {
+                ptr::write_bytes(
+                    (session.shm_local as usize + out_offset + copied) as *mut u8,
+                    0,
+                    n,
+                );
+            }
+            copied += n;
+            remaining -= n;
+            continue;
+        }
         let block_capacity = runtime.block_shm_size as usize / runtime.block_size;
         if block_capacity == 0 {
             return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);

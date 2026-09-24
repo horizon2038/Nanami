@@ -71,10 +71,14 @@ pub(super) fn drain_terminal_canonical_line(
     pid: Word,
     max_len: Word,
 ) -> Result<Option<Word>, i32> {
-    if let Some(bytes) = pop_terminal_line(runtime, pid, max_len) {
-        return Ok(Some(bytes));
-    }
+    fill_terminal_canonical_line(runtime, pid)?;
+    Ok(pop_terminal_line(runtime, pid, max_len))
+}
 
+fn fill_terminal_canonical_line(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    if runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready {
+        return Ok(());
+    }
     let terminal_id = terminal_id_for_pid(runtime, pid)?;
     loop {
         let bytes = nanami_services::terminal::terminal_read_input(
@@ -85,13 +89,26 @@ pub(super) fn drain_terminal_canonical_line(
         )
         .map_err(map_request_error)?;
         if bytes == 0 {
-            return Ok(None);
+            return Ok(());
         }
         let byte = unsafe { ::core::ptr::read(runtime.terminal_shm as *const u8) };
         push_terminal_input_byte(runtime, pid, byte)?;
-        if let Some(bytes) = pop_terminal_line(runtime, pid, max_len) {
-            return Ok(Some(bytes));
+        if runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready {
+            return Ok(());
         }
+    }
+}
+
+pub(super) fn terminal_readable(runtime: &mut Runtime, pid: Word) -> Result<bool, i32> {
+    let terminal_id = terminal_id_for_pid(runtime, pid)?;
+    ensure_terminal_input_notification(runtime, terminal_id)?;
+    if runtime.terminal_canonical(pid).unwrap_or(true) {
+        fill_terminal_canonical_line(runtime, pid)?;
+        Ok(runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready)
+    } else {
+        // A zero-length service read reports queued bytes without consuming.
+        nanami_services::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 0)
+            .map(|bytes| bytes != 0).map_err(map_request_error)
     }
 }
 
@@ -153,9 +170,7 @@ pub(super) fn push_terminal_input_byte(
             process.terminal_line_ready = true;
         }
         0x04 => {
-            // Alter uses the terminal input stream to wake a blocked emulated read
-            // while terminating a foreground process. Treat EOT as a wake byte
-            // so stale control input is not exposed to the next process.
+            process.terminal_line_ready = true;
         }
         0x7f | 0x08 => {
             if process.terminal_line_len != 0 {
@@ -252,6 +267,9 @@ pub(super) fn sys_ioctl(
             .map(|process| (process.terminal_canonical, process.terminal_echo))
             .unwrap_or((true, true));
         write_linux_termios(runtime.posix_shm, canonical, echo);
+        if let Some(termios) = runtime.managed_process(pid).and_then(|p| p.terminal_termios) {
+            unsafe { ::core::ptr::copy_nonoverlapping(termios.as_ptr(), runtime.posix_shm as *mut u8, termios.len()); }
+        }
         write_target_memory(runtime, pid, argument, LINUX_TERMIOS_BYTES)?;
         return Ok(0);
     }
@@ -260,12 +278,30 @@ pub(super) fn sys_ioctl(
             return Err(EFAULT);
         }
         read_target_memory(runtime, pid, argument, LINUX_TERMIOS_BYTES)?;
+        let mut termios = [0; 36];
+        unsafe { ::core::ptr::copy_nonoverlapping(runtime.posix_shm as *const u8, termios.as_mut_ptr(), termios.len()); }
         let lflag = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 12) as *const u32) };
+        let oflag = u32::from_ne_bytes(termios[4..8].try_into().unwrap());
         let echo_enabled = (lflag & LINUX_ECHO) != 0;
         let terminal_id = terminal_id_for_pid(runtime, pid)?;
-        if let Some(process) = runtime.managed_process_mut(pid) {
-            process.terminal_canonical = (lflag & LINUX_ICANON) != 0;
-            process.terminal_echo = echo_enabled;
+        // Attributes belong to the terminal, not to an individual fork child.
+        for process in &mut runtime.managed {
+            if process.pid != 0 && process.terminal_id == terminal_id {
+                process.terminal_canonical = (lflag & LINUX_ICANON) != 0;
+                process.terminal_echo = echo_enabled;
+                process.terminal_termios = Some(termios);
+                if request == LINUX_TCSETSF {
+                    process.terminal_line_len = 0;
+                    process.terminal_line_read = 0;
+                    process.terminal_line_ready = false;
+                }
+            }
+        }
+        nanami_services::terminal::terminal_set_output_crlf(runtime.terminal_port, terminal_id,
+            oflag & LINUX_OPOST != 0 && oflag & LINUX_ONLCR != 0).map_err(map_request_error)?;
+        if request == LINUX_TCSETSF {
+            nanami_services::terminal::terminal_clear(runtime.terminal_port, terminal_id,
+                nanami_services::terminal::TERMINAL_CLEAR_INPUT).map_err(map_request_error)?;
         }
         nanami_services::terminal::terminal_set_echo(
             runtime.terminal_port,
@@ -290,6 +326,16 @@ pub(super) fn sys_ioctl(
             write_u16(runtime.posix_shm + 6, 0);
         }
         write_target_memory(runtime, pid, argument, 8)?;
+        return Ok(0);
+    }
+    if request == 0x5414 { // TIOCSWINSZ
+        if argument == 0 { return Err(EFAULT); }
+        read_target_memory(runtime, pid, argument, 8)?;
+        let rows = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const u16) };
+        let cols = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 2) as *const u16) };
+        let terminal_id = terminal_id_for_pid(runtime, pid)?;
+        nanami_services::terminal::terminal_set_size(runtime.terminal_port, terminal_id, cols as Word, rows as Word)
+            .map_err(map_request_error)?;
         return Ok(0);
     }
     Ok(0)

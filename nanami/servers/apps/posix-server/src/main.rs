@@ -20,6 +20,7 @@ mod path;
 pub(crate) mod process;
 mod state;
 mod sync;
+mod truncate;
 
 use environment::*;
 use fd::*;
@@ -130,6 +131,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_OPEN => handle_open(runtime, request),
         POSIX_REQUEST_CLOSE => handle_close(runtime, request),
         POSIX_REQUEST_FSYNC | POSIX_REQUEST_SYNC => sync::handle_sync(runtime, request),
+        POSIX_REQUEST_FTRUNCATE => truncate::handle_ftruncate(runtime, request),
         POSIX_REQUEST_DUP => handle_dup(runtime, request),
         POSIX_REQUEST_DUP2 => handle_dup2(runtime, request),
         POSIX_REQUEST_FCNTL => handle_fcntl(runtime, request),

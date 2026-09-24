@@ -52,6 +52,61 @@ struct Ext2Runtime {
 #[path = "../../../nanami/servers/core-services/ext2-server/src/file_io.rs"]
 mod file_io;
 
+fn map_request_error_to_status(error: RequestError) -> Word {
+    match error {
+        RequestError::Status(status) => status,
+        _ => OS_RESPONSE_FATAL,
+    }
+}
+
+mod truncate {
+    use super::*;
+    pub(super) fn resize_inode(
+        runtime: &mut Ext2Runtime,
+        inode: u32,
+        _: &mut Inode,
+        length: usize,
+    ) -> Result<(), RequestError> {
+        assert_eq!(inode, 7);
+        if let Some(error) = runtime.error {
+            return Err(RequestError::Status(error));
+        }
+        runtime.handles[0].size = length as u32;
+        Ok(())
+    }
+}
+
+#[test]
+fn truncate_checks_handle_owner_type_and_propagates_errors() {
+    let mut runtime = runtime(&[]);
+    let mut request = request(1, 0, 0);
+    request.arg1 = 13;
+    request.identifier = 99;
+    assert_eq!(
+        file_io::handle_ftruncate(request, &mut runtime).0,
+        OS_RESPONSE_INVALID_DESCRIPTOR
+    );
+    request.identifier = 10;
+    runtime.handles[0].mode = EXT2_S_IFDIR;
+    assert_eq!(
+        file_io::handle_ftruncate(request, &mut runtime).0,
+        OS_RESPONSE_INVALID_ARGUMENT
+    );
+    assert_eq!(runtime.inode_reads, 0);
+    runtime.handles[0].mode = EXT2_S_IFREG;
+    runtime.error = Some(OS_RESPONSE_FATAL);
+    assert_eq!(
+        file_io::handle_ftruncate(request, &mut runtime).0,
+        OS_RESPONSE_FATAL
+    );
+    runtime.error = None;
+    assert_eq!(
+        file_io::handle_ftruncate(request, &mut runtime).0,
+        OS_RESPONSE_OK
+    );
+    assert_eq!(runtime.handles[0].size, 13);
+}
+
 fn find_session(runtime: &Ext2Runtime, pid: Word) -> Option<ClientSession> {
     runtime.session.filter(|s| s.active && s.pid == pid)
 }

@@ -33,6 +33,7 @@ pub(super) fn sys_pipe_read(
         done += 1;
     }
     write_target_memory(runtime, pid, user_buffer, done as Word)?;
+    runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
     Ok(done as Word)
 }
 
@@ -64,6 +65,7 @@ pub(super) fn sys_pipe_write(
         pipe.len += 1;
         done += 1;
     }
+    runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
     Ok(done as Word)
 }
 
@@ -126,6 +128,7 @@ pub(super) fn release_pipe_file(runtime: &mut Runtime, file: LinuxFile) {
     if pipe.readers == 0 && pipe.writers == 0 {
         release_pipe_id(runtime, file.posix_fd);
     }
+    runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
 }
 
 pub(super) fn release_pipe_id(runtime: &mut Runtime, pipe_id: Word) {

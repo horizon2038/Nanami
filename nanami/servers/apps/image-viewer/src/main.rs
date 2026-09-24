@@ -94,7 +94,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     libnanami::ipc::init_ipc_tls().map_err(|e| log_error("[image-viewer] ipc tls failed: ", e))?;
 
     let (honoka_port, honoka_pid) = connect_honoka_service();
-    let timer_port = connect_timer_service();
+    let _timer_port = connect_timer_service();
     libnanami::print!("[image-viewer] services connected\n");
 
     let bmp = Bmp::<Rgb888>::from_slice(IMAGE_BMP).ok();
@@ -124,26 +124,17 @@ fn nanami_main() -> libnanami::NanamiResult {
     let content_width = actual_content_width as usize;
     let content_height = actual_content_height as usize;
 
-    let (shared_base, size_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_logical_framebuffer(honoka_port, window_id)
-            .map_err(|e| log_error("[image-viewer] attach framebuffer failed: ", e))?;
-    let framebuffer =
-        shared_base.saturating_add(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
-    let pixel_bytes =
-        size_bytes.saturating_sub(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
-    libnanami::println!(
-        "[image-viewer] logical framebuffer vaddr={:#x} bytes={:#x} content={}x{}",
-        framebuffer,
-        pixel_bytes,
-        content_width,
-        content_height
-    );
+    let mut surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+        .map_err(|e| log_error("[image-viewer] attach framebuffer failed: ", e))?;
+    let shared_base = surface.base;
+    let framebuffer = surface.pixels();
+    let pixel_bytes = surface.pixel_bytes();
     let (input_base, _input_bytes) =
         nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
             .map_err(|e| log_error("[image-viewer] attach input queue failed: ", e))?;
     nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
         .map_err(|e| log_error("[image-viewer] attach input notification failed: ", e))?;
-    let mut input_queue = nanami_services::input::InputEventQueue::new(input_base);
+    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
 
     let capacity_pixels = (pixel_bytes / 4) as usize;
     let expected_pixels = content_width.saturating_mul(content_height);
@@ -176,8 +167,30 @@ fn nanami_main() -> libnanami::NanamiResult {
     libnanami::print!("[image-viewer] rendered\n");
 
     loop {
-        drain_input(&mut input_queue, honoka_port, window_id);
-        let _ = nanami_services::timer::timer_service_sleep_milliseconds(timer_port, 1000);
+        if drain_input(&mut input_queue, honoka_port, window_id, &mut surface) {
+            display = HonokaFrameBuffer::new(
+                surface.pixels(),
+                surface.width,
+                surface.height,
+                surface.pixel_bytes() / 4,
+            );
+            draw_viewer(&mut display, bmp.as_ref(), image_size);
+            present_rect(
+                honoka_port,
+                window_id,
+                surface.base,
+                present_notification,
+                0,
+                0,
+                surface.width,
+                surface.height,
+            );
+        }
+        if input_queue.is_empty() {
+            let _ = libnanami::ipc::notification_wait(libnanami::ipc::process_slot_descriptor(
+                libnanami::PROCESS_SLOT_NOTIFICATION,
+            ));
+        }
     }
 }
 
@@ -497,17 +510,29 @@ fn push_damage_rect(base: Word, x: usize, y: usize, width: usize, height: usize)
 }
 
 fn drain_input(
-    input_queue: &mut nanami_services::input::InputEventQueue,
+    input_queue: &mut nanami_services::gfx::honoka::WindowEventQueue,
     honoka_port: Word,
     window_id: Word,
-) {
+    surface: &mut nanami_services::gfx::honoka::WindowSurface,
+) -> bool {
+    let mut changed = false;
     let mut drained = 0usize;
     while drained < 256 {
         let Some(packed) = input_queue.pop() else {
             break;
         };
-        let (kind, _, _, _, _) = nanami_services::input::unpack_input_event(packed);
-        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
+        let (kind, _, width, height, _) = nanami_services::input::unpack_input_event(packed);
+        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
+            match surface.resize(
+                honoka_port,
+                window_id,
+                width as u16 as usize,
+                height as u16 as usize,
+            ) {
+                Ok(resized) => changed |= resized,
+                Err(error) => log_request_error("[image-viewer] resize failed: ", error),
+            }
+        } else if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
             let _ = nanami_services::gfx::honoka::honoka_destroy_window(honoka_port, window_id);
             let _ = libnanami::request_exit();
             loop {
@@ -516,6 +541,7 @@ fn drain_input(
         }
         drained += 1;
     }
+    changed
 }
 
 fn read_word(base: Word, index: usize) -> Word {

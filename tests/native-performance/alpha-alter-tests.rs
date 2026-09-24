@@ -7,14 +7,75 @@ use std::cell::RefCell;
 pub type CapabilityDescriptor = usize;
 #[path = "../../nanami/src/nanami_utils/avl.rs"]
 pub mod avl;
-#[path = "../../nanami/src/nanami_utils/static_avl.rs"]
-pub mod static_avl;
+pub mod static_avl {
+    include!(env!("NANAMI_STATIC_AVL_SOURCE"));
+}
 pub mod nanami_utils {
     pub use crate::{avl, static_avl};
 }
 #[path = "../../nanami/src/nanami_core/vm_space.rs"]
 mod vm_space;
 use vm_space::{BootstrapVmSpace, VmSpace, VmTracker};
+
+#[test]
+fn static_avl_recycles_all_node_shapes_and_preserves_updates_at_capacity() {
+    let mut tree = static_avl::StaticAvlTree::<31>::new();
+    let mut expected = std::collections::BTreeMap::new();
+    let mut random = 17u64;
+    for step in 0..20_000 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let key = (random >> 32) as usize % 47;
+        if step % 3 == 0 {
+            assert_eq!(tree.remove(key), expected.remove(&key));
+        } else if expected.len() < 31 || expected.contains_key(&key) {
+            tree.insert(key, step).unwrap();
+            expected.insert(key, step);
+        } else {
+            assert_eq!(tree.insert(key, step), Err(()));
+        }
+        for key in 0..47 {
+            assert_eq!(tree.find(key), expected.get(&key).copied());
+        }
+    }
+    for (&key, &value) in &expected {
+        assert_eq!(tree.remove(key), Some(value));
+    }
+    for key in 0..31 {
+        tree.insert(key, key + 100).unwrap();
+    }
+    assert_eq!(tree.insert(31, 0), Err(()));
+    let mut empty = static_avl::StaticAvlTree::<0>::new();
+    assert_eq!(empty.insert(0, 1), Err(()));
+    assert_eq!(empty.remove(0), None);
+}
+
+#[test]
+#[ignore = "host microbenchmark; excludes map/unmap IPC"]
+fn bootstrap_temporary_mapping_churn_benchmark() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            use std::{hint::black_box, time::Instant};
+            for count in [1024, 4096, 9216, 14000] {
+                let mut tree = static_avl::StaticAvlTree::<16384>::new();
+                for key in 0..count {
+                    tree.insert(key, key).unwrap();
+                }
+                let start = Instant::now();
+                for _ in 0..100_000 {
+                    tree.insert(black_box(count), black_box(7)).unwrap();
+                    black_box(tree.remove(black_box(count)));
+                }
+                println!(
+                    "{count} mappings: {} ns per temporary insert/remove",
+                    start.elapsed().as_nanos() / 100_000
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
 const EIO: i32 = 5;
 const EFAULT: i32 = 14;

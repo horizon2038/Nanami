@@ -60,6 +60,7 @@ pub const POSIX_REQUEST_WRITE_DIRECT: Word = 0xa136;
 pub const POSIX_REQUEST_PWRITE_DIRECT: Word = 0xa137;
 pub const POSIX_REQUEST_FSYNC: Word = 0xa138;
 pub const POSIX_REQUEST_SYNC: Word = 0xa139;
+pub const POSIX_REQUEST_FTRUNCATE: Word = 0xa13a;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;

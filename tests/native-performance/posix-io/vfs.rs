@@ -2,6 +2,9 @@ use super::*;
 #[path = "../../../nanami/servers/sdk/rust/nanami-services/src/vfs/constants.rs"]
 mod constants;
 pub use constants::*;
+#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/vfs/truncate.rs"]
+mod truncate;
+pub use truncate::*;
 
 pub fn vfs_fsync(_port: Word, handle: Word) -> Result<(), RequestError> {
     record(Call {

@@ -331,13 +331,25 @@ pub(super) const LINUX_IOV_MAX: Word = 16;
 
 pub(super) const LINUX_POLLFD_BYTES: Word = 8;
 
-pub(super) const LINUX_POLLFD_MAX: Word = 32;
+pub(super) const LINUX_POLLFD_MAX: Word = crate::state::LINUX_FD_MAX;
 
 pub(super) const LINUX_POLLIN: i16 = 0x0001;
 
+pub(super) const LINUX_POLLPRI: i16 = 0x0002;
+
 pub(super) const LINUX_POLLOUT: i16 = 0x0004;
 
+pub(super) const LINUX_POLLERR: i16 = 0x0008;
+
+pub(super) const LINUX_POLLHUP: i16 = 0x0010;
+
 pub(super) const LINUX_POLLNVAL: i16 = 0x0020;
+
+pub(super) const LINUX_POLLRDNORM: i16 = 0x0040;
+
+pub(super) const LINUX_POLLWRNORM: i16 = 0x0100;
+
+pub(super) const LINUX_POLLRDHUP: i16 = 0x2000;
 
 pub(super) const LINUX_TCGETS: Word = 0x5401;
 

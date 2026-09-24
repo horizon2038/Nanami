@@ -14,6 +14,54 @@ fn map_request_error_to_status(error: RequestError) -> Word {
 }
 #[path = "../../../nanami/servers/apps/posix-server/src/sync.rs"]
 mod sync;
+#[path = "../../../nanami/servers/apps/posix-server/src/truncate.rs"]
+mod truncate;
+
+#[test]
+fn truncate_keeps_dup_offset_and_only_syncs_when_requested() {
+    for flags in [0, POSIX_O_SYNC] {
+        let mut runtime = runtime();
+        runtime.open_files[0].status_flags = flags;
+        assert_eq!(
+            truncate::handle_ftruncate(&mut runtime, request(POSIX_REQUEST_FTRUNCATE, 4, 19, 0)).0,
+            OS_RESPONSE_OK
+        );
+        assert_eq!(runtime.open_files[0].offset, 123);
+        BACKEND.with(|backend| {
+            let backend = backend.borrow();
+            assert_eq!(backend.calls[0].code, vfs::VFS_REQUEST_FTRUNCATE);
+            assert_eq!(backend.calls[0].handle, 9);
+            assert_eq!(backend.calls[0].buffer, 19);
+            assert_eq!(backend.calls.len(), if flags == 0 { 1 } else { 2 });
+        });
+    }
+}
+
+#[test]
+fn truncate_rejects_invalid_fds_and_nonfiles_and_reports_backend_error() {
+    let mut runtime = runtime();
+    assert_eq!(
+        truncate::handle_ftruncate(
+            &mut runtime,
+            request(POSIX_REQUEST_FTRUNCATE, usize::MAX, 19, 0)
+        )
+        .0,
+        OS_RESPONSE_INVALID_DESCRIPTOR
+    );
+    runtime.open_files[0].kind = FdKind::Directory;
+    assert_eq!(
+        truncate::handle_ftruncate(&mut runtime, request(POSIX_REQUEST_FTRUNCATE, 3, 19, 0)).0,
+        OS_RESPONSE_INVALID_ARGUMENT
+    );
+    BACKEND.with(|backend| assert!(backend.borrow().calls.is_empty()));
+    runtime.open_files[0].kind = FdKind::Regular;
+    BACKEND.with(|backend| backend.borrow_mut().result = Some(Err(RequestError::Transport)));
+    assert_eq!(
+        truncate::handle_ftruncate(&mut runtime, request(POSIX_REQUEST_FTRUNCATE, 3, 19, 0)).0,
+        OS_RESPONSE_FATAL
+    );
+    assert_eq!(runtime.open_files[0].offset, 123);
+}
 
 // Session lookup is outside the I/O handlers under test.
 mod process {

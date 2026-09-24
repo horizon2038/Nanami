@@ -93,6 +93,8 @@ pub fn call_port(
         words,
         if synchronize {
             2
+        } else if matches!(code, posix::POSIX_REQUEST_FTRUNCATE | vfs::VFS_REQUEST_FTRUNCATE) {
+            3
         } else if positioned {
             5
         } else {

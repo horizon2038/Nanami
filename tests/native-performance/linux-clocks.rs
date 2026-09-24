@@ -38,7 +38,13 @@ struct Process {
     sleep_waiting: bool,
     sleep_deadline: Word,
     sleep_context: LinuxSyscallContext,
+    exited: bool,
+    readiness_wait: Option<ReadinessWait>,
 }
+#[derive(Clone, Copy)]
+struct ReadinessWait { deadline: Option<Word> }
+mod state { pub mod readiness { pub const READY_TIMER: usize = 16; } }
+fn wake_readiness_waiters(_: &mut Runtime, _: Word) {}
 #[derive(Default, Clone, Copy)]
 struct Graphics {
     active: bool,
@@ -51,6 +57,7 @@ struct Runtime {
     timer_port: Word,
     monotonic_ticks: Word,
     monotonic_tick_hz: Word,
+    realtime_anchor: Option<(Word, Word)>,
     clock_deadline: Option<Word>,
     framebuffer_deadline: Option<Word>,
     managed: [Process; 4],
@@ -74,7 +81,24 @@ struct Fake {
     alarms: Vec<Option<Word>>,
     resumed: Vec<Word>,
     presented: usize,
+    rtc_reads: usize,
 }
+pub mod abi { pub const SLOT_RTC_SERVICE: usize = 32; }
+pub mod ipc { pub fn process_slot_descriptor(slot: usize) -> usize { slot } }
+pub mod registry {
+    pub fn connect_rtc_service(_: usize) -> Result<(), i32> { Ok(()) }
+}
+pub mod rtc {
+    use super::*;
+    #[derive(Clone, Copy)]
+    pub struct RtcDateTime { pub year: u16, pub month: u8, pub day: u8, pub hour: u8, pub minute: u8, pub second: u8 }
+    pub fn rtc_service_read(_: Word) -> Result<RtcDateTime, i32> {
+        FAKE.with(|f| f.borrow_mut().rtc_reads += 1);
+        Ok(RtcDateTime { year: 2000, month: 2, day: 29, hour: 12, minute: 34, second: 56 })
+    }
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/realtime.rs"]
+mod realtime;
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod timer {
     use super::*;
@@ -203,6 +227,48 @@ fn timespec_fraction_preserves_non_divisor_frequency() {
     FAKE.with(|fake| fake.borrow_mut().ticks = 2);
     sys_clock_gettime(&mut runtime, 1, 1, 1).unwrap();
     assert_eq!(timespec, [0, 666_666_666]);
+}
+
+#[test]
+fn realtime_and_gettimeofday_share_one_rtc_anchor_but_always_sample_current_time() {
+    let mut runtime = runtime(1_000_000_000);
+    let mut result = [0usize; 2];
+    runtime.posix_shm = result.as_mut_ptr() as Word;
+    FAKE.with(|fake| fake.borrow_mut().ticks = 10_000_000_000);
+    sys_clock_gettime(&mut runtime, 1, 0, 1).unwrap();
+    assert_eq!(result, [951827696, 0]); // 2000-02-29 12:34:56 UTC
+    FAKE.with(|fake| fake.borrow_mut().ticks += 1_234_567_890);
+    sys_gettimeofday(&mut runtime, 1, 1).unwrap();
+    assert_eq!(result, [951827697, 234567]);
+    sys_clock_gettime(&mut runtime, 1, 5, 1).unwrap();
+    assert_eq!(result, [951827697, 234567890]);
+    FAKE.with(|fake| {
+        assert_eq!(fake.borrow().rtc_reads, 1);
+        assert_eq!(fake.borrow().clock_reads, 3);
+        assert!(fake.borrow().alarms.is_empty());
+    });
+}
+
+#[test]
+fn unavailable_cpu_and_tai_clocks_fail_without_timer_ipc() {
+    let mut runtime = runtime(1_000_000_000);
+    for id in [2, 3, 10, 11, Word::MAX] {
+        assert_eq!(sys_clock_gettime(&mut runtime, 1, id, 1), Err(EINVAL));
+    }
+    FAKE.with(|fake| assert_eq!(fake.borrow().clock_reads, 0));
+}
+
+#[test]
+fn poll_sleep_and_framebuffer_share_the_earliest_deadline() {
+    let mut runtime = runtime(1000);
+    runtime.managed[0].readiness_wait = Some(ReadinessWait { deadline: Some(50) });
+    runtime.managed[1].sleep_waiting = true;
+    runtime.managed[1].sleep_deadline = 100;
+    arm_clock_timer(&mut runtime).unwrap();
+    assert_eq!(runtime.clock_deadline, Some(50));
+    runtime.managed[0].readiness_wait = None;
+    arm_clock_timer(&mut runtime).unwrap();
+    assert_eq!(runtime.clock_deadline, Some(100));
 }
 
 #[test]

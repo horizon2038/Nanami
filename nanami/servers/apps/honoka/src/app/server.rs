@@ -5,6 +5,23 @@ use crate::compositor::Compositor;
 
 pub fn handle_request(request: ServiceRequest, compositor: &mut Compositor) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::gfx::honoka::HONOKA_REQUEST_RESIZE_LOGICAL_FRAMEBUFFER => match compositor
+            .resize_surface(request.identifier, request.arg0, request.arg1, request.arg2)
+        {
+            Ok((base, bytes)) => (libnanami::OS_RESPONSE_OK, base, bytes),
+            Err(e) => (map_request_error_to_status(e), 0, 0),
+        },
+        nanami_services::gfx::honoka::HONOKA_REQUEST_RESIZE_VIEWPORT => {
+            match compositor.resize_viewport(
+                request.identifier,
+                request.arg0,
+                request.arg1,
+                request.arg2,
+            ) {
+                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Err(e) => (map_request_error_to_status(e), 0, 0),
+            }
+        }
         nanami_services::gfx::honoka::HONOKA_REQUEST_CREATE_WINDOW => {
             match compositor.create_window(
                 request.identifier,

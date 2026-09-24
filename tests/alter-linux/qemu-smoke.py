@@ -74,7 +74,9 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 time.sleep(0.35)
 
         for program in args.program or ["linux-syscall-smoke", "glibc-true", "glibc-regression"]:
-            start = serial.stat().st_size
+            # Match against the same decoded/newline-normalized text used below.
+            # Byte offsets drift with CRLF or UTF-8 serial output.
+            start = len(serial.read_text(errors="replace"))
             type_command(f"alter -t /alter/linux/bin/{program}")
             def guest_exit(text):
                 text = text[start:]

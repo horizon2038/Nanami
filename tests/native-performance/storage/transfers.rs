@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn sparse_reads_zero_holes_and_continue_to_later_data() {
+    let mut runtime = runtime(vec![0, 100, 0, 101, 0]);
+    let mut output = vec![0xaau8; 5 * BLOCK_SIZE];
+    let session = ClientSession {
+        shm_local: output.as_mut_ptr() as Word,
+        shm_size: output.len(),
+    };
+    let inode = Ext2Inode {
+        size: (output.len() - 11) as u32,
+    };
+    assert_eq!(
+        data_io::read_file(&mut runtime, session, inode, 3, output.len() - 3, 0),
+        Ok(output.len() - 14)
+    );
+    for (index, byte) in output.iter().copied().enumerate() {
+        let expected = if index >= output.len() - 14 {
+            0xaa
+        } else if matches!((index + 3) / BLOCK_SIZE, 1 | 3) {
+            0x77
+        } else {
+            0
+        };
+        assert_eq!(byte, expected, "offset {index}");
+    }
+}
+
+#[test]
 fn contiguous_overwrite_batches_io_without_reading_old_data_or_rewriting_inode() {
     let mut runtime = runtime((100..164).collect());
     let mut inode = Ext2Inode {

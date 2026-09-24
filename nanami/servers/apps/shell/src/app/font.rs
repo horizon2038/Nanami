@@ -3,7 +3,7 @@ use alloc::boxed::Box;
 use fontdue::{Font, FontSettings};
 use libnanami::Word;
 
-use super::{COLS, CONTENT_HEIGHT, FONT_W};
+use super::{COLS, FONT_W};
 
 // MIT License
 // Copyright (c) 2018 Source Foundry Authors
@@ -74,17 +74,18 @@ impl TextRenderer {
         &mut self,
         vaddr: Word,
         fb_width: usize,
+        fb_height: usize,
         y: usize,
         text: &[u8; COLS],
         colors: &[u32; COLS],
     ) {
         let mut x = 0usize;
         let mut i = 0usize;
-        while i < COLS {
+        while i < COLS.min(fb_width / FONT_W) {
             let ch = text[i];
             if ch != 0 {
                 if self.use_fontdue {
-                    self.draw_cached_glyph(vaddr, fb_width, x, y, ch, colors[i]);
+                    self.draw_cached_glyph(vaddr, fb_width, fb_height, x, y, ch, colors[i]);
                 } else {
                     draw_bitmap_char(vaddr, fb_width, x, y, ch, colors[i]);
                 }
@@ -98,6 +99,7 @@ impl TextRenderer {
         &mut self,
         vaddr: Word,
         fb_width: usize,
+        fb_height: usize,
         x: usize,
         y: usize,
         ch: u8,
@@ -121,11 +123,7 @@ impl TextRenderer {
                 if alpha != 0 {
                     let px = base_x + gx as i32;
                     let py = base_y + gy as i32;
-                    if px >= 0
-                        && py >= 0
-                        && (px as usize) < fb_width
-                        && (py as usize) < CONTENT_HEIGHT
-                    {
+                    if px >= 0 && py >= 0 && (px as usize) < fb_width && (py as usize) < fb_height {
                         let background = get_pixel(vaddr, fb_width, px as usize, py as usize);
                         let color = blend_over(background, text_color, alpha);
                         put_pixel(vaddr, fb_width, px as usize, py as usize, color);
@@ -134,6 +132,23 @@ impl TextRenderer {
                 gx += 1;
             }
             gy += 1;
+        }
+    }
+
+    pub fn draw_cell(
+        &mut self,
+        vaddr: Word,
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        ch: u8,
+        color: u32,
+    ) {
+        if self.use_fontdue {
+            self.draw_cached_glyph(vaddr, width, height, x, y, ch, color);
+        } else if x + FONT_W <= width && y + 12 <= height {
+            draw_bitmap_char(vaddr, width, x, y, ch, color);
         }
     }
 }

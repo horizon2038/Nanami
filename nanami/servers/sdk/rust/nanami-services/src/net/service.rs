@@ -102,6 +102,12 @@ pub fn net_service_stats(service_port: CapabilityDescriptor) -> Result<(Word, Wo
     Ok((detail0, detail1))
 }
 
+pub fn net_service_readiness(service_port: CapabilityDescriptor, kind: Word, id: Word) -> Result<Word, RequestError> {
+    let (status, ready, _) = call_port(service_port, super::NET_SERVICE_REQUEST_READINESS, kind, id, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(ready)
+}
+
 pub fn net_service_ipv4_config(
     service_port: CapabilityDescriptor,
 ) -> Result<([u8; 4], [u8; 4], [u8; 4]), RequestError> {

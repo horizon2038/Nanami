@@ -7,13 +7,15 @@ extern crate alloc;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use libnanami::{RequestError, Word};
 
-mod ansi_escape;
+mod editor;
 mod exec;
 mod file;
 #[path = "app/font.rs"]
 mod font;
 mod foreground;
+mod resize;
 mod scrollback;
+mod terminal;
 
 use font::{TextRenderer, DEFAULT_TEXT_COLOR};
 
@@ -89,33 +91,22 @@ fn nanami_main() -> libnanami::NanamiResult {
         .map_err(|e| log_error("[shell] set window opacity failed: ", e))?;
     let present_notification = attach_honoka_present_notification(honoka_pid, window_id)
         .map_err(|e| log_error("[shell] present notification failed: ", e))?;
-    let (shared_base, size_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_logical_framebuffer(honoka_port, window_id)
-            .map_err(|e| log_error("[shell] attach framebuffer failed: ", e))?;
-    let framebuffer =
-        shared_base.saturating_add(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
-    let _pixel_bytes =
-        size_bytes.saturating_sub(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
+    let surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+        .map_err(|e| log_error("[shell] attach framebuffer failed: ", e))?;
     let (input_base, _input_bytes) =
         nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
             .map_err(|e| log_error("[shell] attach input queue failed: ", e))?;
     nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
         .map_err(|e| log_error("[shell] attach input notification failed: ", e))?;
 
-    let mut shell = Shell::new(
-        honoka_port,
-        window_id,
-        shared_base,
-        framebuffer,
-        present_notification,
-        text,
-    );
+    let mut shell = Shell::new(honoka_port, window_id, surface, present_notification, text);
+    shell.foreground.resize(shell.cols(), shell.rows());
     shell.boot();
     shell.repaint_all();
     shell.present_full();
     start_shell_timer();
 
-    let mut input_queue = nanami_services::input::InputEventQueue::new(input_base);
+    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
     loop {
         drain_input(&mut input_queue, &mut shell);
         if shell.drain_foreground_output() {
@@ -141,58 +132,43 @@ fn nanami_main() -> libnanami::NanamiResult {
 struct Shell {
     honoka_port: Word,
     window_id: Word,
-    damage_queue: Word,
-    framebuffer: Word,
+    surface: nanami_services::gfx::honoka::WindowSurface,
     present_notification: Word,
     text: TextRenderer,
     scrollback: scrollback::Scrollback,
     scroll_offset: usize,
-    input: [u8; MAX_LINE],
-    input_len: usize,
-    history: [[u8; MAX_LINE]; HISTORY_MAX],
-    history_lens: [usize; HISTORY_MAX],
-    history_count: usize,
-    history_cursor: usize,
+    editor: editor::LineEditor<MAX_LINE, HISTORY_MAX>,
     cursor_visible: bool,
     cursor_ticks: usize,
     modifier_state: u8,
     files: file::FileShell,
     exec: exec::ExecShell,
     foreground: foreground::ForegroundApp,
-    foreground_partial_row: bool,
 }
 
 impl Shell {
     fn new(
         honoka_port: Word,
         window_id: Word,
-        damage_queue: Word,
-        framebuffer: Word,
+        surface: nanami_services::gfx::honoka::WindowSurface,
         present_notification: Word,
         text: TextRenderer,
     ) -> Self {
         Self {
             honoka_port,
             window_id,
-            damage_queue,
-            framebuffer,
+            surface,
             present_notification,
             text,
             scrollback: scrollback::Scrollback::new(),
             scroll_offset: 0,
-            input: [0; MAX_LINE],
-            input_len: 0,
-            history: [[0; MAX_LINE]; HISTORY_MAX],
-            history_lens: [0; HISTORY_MAX],
-            history_count: 0,
-            history_cursor: 0,
+            editor: editor::LineEditor::new(),
             cursor_visible: true,
             cursor_ticks: 0,
             modifier_state: 0,
             files: file::FileShell::new(),
             exec: exec::ExecShell::new(),
             foreground: foreground::ForegroundApp::new(),
-            foreground_partial_row: false,
         }
     }
 
@@ -203,22 +179,27 @@ impl Shell {
     }
 
     fn repaint_all(&mut self) {
+        if self.foreground.is_active() {
+            self.repaint_terminal();
+            return;
+        }
         fill_rect(
-            self.framebuffer,
-            (CONTENT_WIDTH, CONTENT_HEIGHT),
-            (0, 0, CONTENT_WIDTH, CONTENT_HEIGHT),
+            self.surface.pixels(),
+            (self.surface.width, self.surface.height),
+            (0, 0, self.surface.width, self.surface.height),
             0x0010_1418,
         );
         let start = self.visible_start();
         let mut row = 0usize;
-        while row < ROWS {
+        while row < self.rows() {
             let source = start + row;
             if source >= self.scrollback.len() {
                 break;
             }
             self.text.draw_text_colored(
-                self.framebuffer,
-                CONTENT_WIDTH,
+                self.surface.pixels(),
+                self.surface.width,
+                self.surface.height,
                 row * FONT_H,
                 self.scrollback.line(source),
                 self.scrollback.colors(source),
@@ -229,7 +210,13 @@ impl Shell {
     }
 
     fn present_full(&self) {
-        if push_damage_rect(self.damage_queue, 0, 0, CONTENT_WIDTH, CONTENT_HEIGHT) {
+        if push_damage_rect(
+            self.surface.base,
+            0,
+            0,
+            self.surface.width,
+            self.surface.height,
+        ) {
             let _ = libnanami::ipc::notification_notify(self.present_notification);
         } else {
             let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
@@ -237,14 +224,14 @@ impl Shell {
                 self.window_id,
                 0,
                 0,
-                CONTENT_WIDTH as Word,
-                CONTENT_HEIGHT as Word,
+                self.surface.width as Word,
+                self.surface.height as Word,
             );
         }
     }
 
     fn repaint_row(&mut self, row: usize) {
-        if row >= ROWS {
+        if row >= self.rows() {
             return;
         }
         let source = self.visible_start() + row;
@@ -253,14 +240,15 @@ impl Shell {
         }
         let y = row * FONT_H;
         fill_rect(
-            self.framebuffer,
-            (CONTENT_WIDTH, CONTENT_HEIGHT),
-            (0, y, CONTENT_WIDTH, FONT_H),
+            self.surface.pixels(),
+            (self.surface.width, self.surface.height),
+            (0, y, self.surface.width, FONT_H),
             0x0010_1418,
         );
         self.text.draw_text_colored(
-            self.framebuffer,
-            CONTENT_WIDTH,
+            self.surface.pixels(),
+            self.surface.width,
+            self.surface.height,
             y,
             self.scrollback.line(source),
             self.scrollback.colors(source),
@@ -275,24 +263,29 @@ impl Shell {
         {
             return;
         }
-        let visible_input = self.input_len.min(COLS.saturating_sub(3));
-        let column = 2 + visible_input;
-        if column >= COLS {
+        let column = 2 + self.editor.cursor - self.prompt_start();
+        if column >= self.cols() {
             return;
         }
         fill_rect(
-            self.framebuffer,
-            (CONTENT_WIDTH, CONTENT_HEIGHT),
+            self.surface.pixels(),
+            (self.surface.width, self.surface.height),
             (column * FONT_W, screen_row * FONT_H, FONT_W, FONT_H),
             DEFAULT_TEXT_COLOR,
         );
     }
 
     fn present_row(&self, row: usize) {
-        if row >= ROWS {
+        if row >= self.rows() {
             return;
         }
-        if push_damage_rect(self.damage_queue, 0, row * FONT_H, CONTENT_WIDTH, FONT_H) {
+        if push_damage_rect(
+            self.surface.base,
+            0,
+            row * FONT_H,
+            self.surface.width,
+            FONT_H,
+        ) {
             let _ = libnanami::ipc::notification_notify(self.present_notification);
         } else {
             let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
@@ -300,14 +293,24 @@ impl Shell {
                 self.window_id,
                 0,
                 (row * FONT_H) as Word,
-                CONTENT_WIDTH as Word,
+                self.surface.width as Word,
                 FONT_H as Word,
             );
         }
     }
 
     fn on_key(&mut self, code: Word, pressed: bool) {
+        let extended = code & 0x100 != 0;
+        let code = code & 0xff;
         match code {
+            0x1d => {
+                self.set_modifier(1 << if extended { 4 } else { 2 }, pressed);
+                return;
+            }
+            0x38 => {
+                self.set_modifier(1 << if extended { 5 } else { 3 }, pressed);
+                return;
+            }
             0x2a => {
                 self.set_modifier(MODIFIER_LEFT_SHIFT, pressed);
                 return;
@@ -328,6 +331,26 @@ impl Shell {
         match code {
             0x1c => self.submit(),
             0x0e => self.backspace(),
+            0x4b => {
+                self.editor.cursor = self.editor.cursor.saturating_sub(1);
+                self.edit_changed();
+            }
+            0x4d => {
+                self.editor.cursor = (self.editor.cursor + 1).min(self.editor.len);
+                self.edit_changed();
+            }
+            0x47 => {
+                self.editor.cursor = 0;
+                self.edit_changed();
+            }
+            0x4f => {
+                self.editor.cursor = self.editor.len;
+                self.edit_changed();
+            }
+            0x53 => {
+                self.editor.delete();
+                self.edit_changed();
+            }
             0x48 => self.history_prev(),
             0x50 => self.history_next(),
             0x49 => self.scroll_page_up(),
@@ -346,21 +369,31 @@ impl Shell {
             0x58 => {
                 let output = self.foreground.terminate_active();
                 self.push_foreground_output(output);
-                self.input_len = 0;
+                self.editor.clear();
                 self.push_prompt();
                 self.repaint_all();
                 self.present_full();
                 return;
             }
-            0x1c => {
-                input_ok = self.foreground.send_input_byte(b'\n');
-            }
-            0x0e => {
-                input_ok = self.foreground.send_input_byte(0x7f);
-            }
             _ => {
-                if let Some(ch) = scancode_to_ascii(code, self.shift_active()) {
-                    input_ok = self.foreground.send_input_byte(ch);
+                let sequence =
+                    terminal::keys::sequence(code, self.foreground.terminal.application_cursor);
+                if !sequence.is_empty() {
+                    input_ok = self.foreground.send_input(sequence);
+                } else if let Some(mut ch) = scancode_to_ascii(code, self.shift_active()) {
+                    if self.modifier_state & ((1 << 2) | (1 << 4)) != 0 {
+                        ch = match ch {
+                            b'?' => 0x7f,
+                            b'@'..=b'_' | b'a'..=b'z' => ch & 0x1f,
+                            b' ' => 0,
+                            _ => ch,
+                        };
+                    }
+                    input_ok = if self.modifier_state & ((1 << 3) | (1 << 5)) != 0 {
+                        self.foreground.send_input(&[0x1b, ch])
+                    } else {
+                        self.foreground.send_input_byte(ch)
+                    };
                 }
             }
         }
@@ -374,24 +407,16 @@ impl Shell {
     }
 
     fn type_char(&mut self, ch: u8) {
-        if self.input_len >= MAX_LINE {
-            return;
-        }
-        self.input[self.input_len] = ch;
-        self.input_len += 1;
-        self.history_cursor = self.history_count;
-        self.cursor_visible = true;
-        self.cursor_ticks = 0;
-        self.refresh_prompt_line();
+        self.editor.insert(ch);
+        self.edit_changed();
     }
 
     fn backspace(&mut self) {
-        if self.input_len == 0 {
-            return;
-        }
-        self.input_len -= 1;
-        self.input[self.input_len] = 0;
-        self.history_cursor = self.history_count;
+        self.editor.backspace();
+        self.edit_changed();
+    }
+
+    fn edit_changed(&mut self) {
         self.cursor_visible = true;
         self.cursor_ticks = 0;
         self.refresh_prompt_line();
@@ -403,8 +428,7 @@ impl Shell {
         self.push_history();
         self.execute_command();
         let _ = self.drain_foreground_output();
-        self.input = [0; MAX_LINE];
-        self.input_len = 0;
+        self.editor.clear();
         if !self.foreground.is_active() {
             self.push_prompt();
         }
@@ -413,10 +437,10 @@ impl Shell {
     }
 
     fn execute_command(&mut self) {
-        if self.input_len == 0 {
+        if self.editor.len == 0 {
             return;
         }
-        if bytes_eq(&self.input[..self.input_len], b"help") {
+        if bytes_eq(&self.editor.bytes[..self.editor.len], b"help") {
             self.push_line_bytes(b"commands: help, services, netinfo, fstest, posixtest");
             self.push_line_bytes(b"          ls, cat, rm, mkdir, cd");
             self.push_line_bytes(b"          path [PATH], external apps via PATH");
@@ -424,48 +448,48 @@ impl Shell {
             self.push_line_bytes(b"foreground app: F12 terminate");
             self.push_line_bytes(b"          nanami-control os.log enable|disable");
             self.push_line_bytes(b"          clear, echo, about");
-        } else if bytes_eq(&self.input[..self.input_len], b"services") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"services") {
             self.show_services();
-        } else if bytes_eq(&self.input[..self.input_len], b"netinfo") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"netinfo") {
             self.show_netinfo();
-        } else if bytes_eq(&self.input[..self.input_len], b"fstest") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"fstest") {
             self.run_fs_test();
             self.files.invalidate_vfs_session();
-        } else if bytes_eq(&self.input[..self.input_len], b"posixtest") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"posixtest") {
             self.run_posix_test();
-        } else if starts_with(&self.input[..self.input_len], b"nanami-control ") {
+        } else if starts_with(&self.editor.bytes[..self.editor.len], b"nanami-control ") {
             self.run_nanami_control();
-        } else if let Some(output) = self.files.execute(&self.input[..self.input_len]) {
+        } else if let Some(output) = self.files.execute(&self.editor.bytes[..self.editor.len]) {
             let mut i = 0usize;
             while i < output.len() {
                 self.push_line(output.line(i));
                 i += 1;
             }
-        } else if bytes_eq(&self.input[..self.input_len], b"clear") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"clear") {
             self.scrollback.clear();
-        } else if bytes_eq(&self.input[..self.input_len], b"about") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"about") {
             self.push_line_bytes(b"Honoka shell: shared-memory UI client");
-        } else if bytes_eq(&self.input[..self.input_len], b"echo") {
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"echo") {
             self.push_line([0; COLS]);
-        } else if starts_with(&self.input[..self.input_len], b"echo ") {
+        } else if starts_with(&self.editor.bytes[..self.editor.len], b"echo ") {
             let mut line = [0u8; COLS];
-            copy_bytes(&mut line, &self.input[5..self.input_len]);
+            copy_bytes(&mut line, &self.editor.bytes[5..self.editor.len]);
             self.push_line(line);
-        } else if starts_with(&self.input[..self.input_len], b"window ") {
+        } else if starts_with(&self.editor.bytes[..self.editor.len], b"window ") {
             let mut window_name = [0u8; 32];
-            if self.input_len <= 7 {
+            if self.editor.len <= 7 {
                 self.push_line_bytes(b"usage: window <title>");
                 return;
             }
 
-            copy_bytes(&mut window_name, &self.input[7..self.input_len]);
+            copy_bytes(&mut window_name, &self.editor.bytes[7..self.editor.len]);
 
             match nanami_services::gfx::honoka::honoka_create_window_with_title(
                 self.honoka_port,
                 WINDOW_X,
                 WINDOW_Y,
-                CONTENT_WIDTH as Word,
-                CONTENT_HEIGHT as Word,
+                self.surface.width as Word,
+                self.surface.height as Word,
                 &window_name,
             ) {
                 Ok(_) => {
@@ -473,7 +497,10 @@ impl Shell {
                 }
                 Err(_) => self.push_line_bytes(b"create window failed"),
             }
-        } else if let Some(output) = self.exec.execute_builtin(&self.input[..self.input_len]) {
+        } else if let Some(output) = self
+            .exec
+            .execute_builtin(&self.editor.bytes[..self.editor.len])
+        {
             let mut i = 0usize;
             while i < output.len() {
                 self.push_line(output.line(i));
@@ -493,7 +520,7 @@ impl Shell {
         self.foreground.prepare_start();
         let mut output = exec::CommandOutput::new();
         if let Some((pid, _path, _path_len)) = self.exec.spawn_with_terminal(
-            &self.input[..self.input_len],
+            &self.editor.bytes[..self.editor.len],
             self.foreground.terminal_id(),
             &mut output,
         ) {
@@ -508,7 +535,7 @@ impl Shell {
     }
 
     fn run_nanami_control(&mut self) {
-        let input = &self.input[..self.input_len];
+        let input = &self.editor.bytes[..self.editor.len];
         let result = if bytes_eq(input, b"nanami-control os.log enable") {
             libnanami::request_nanami_control("os.log", "enable")
         } else if bytes_eq(input, b"nanami-control os.log disable") {
@@ -545,35 +572,9 @@ impl Shell {
 
     fn push_foreground_output(&mut self, output: foreground::CommandOutput) -> bool {
         let mut scrolled = false;
-        if output.clear_screen() {
-            self.scrollback.clear();
-            self.scroll_offset = 0;
-            self.foreground_partial_row = false;
-            scrolled = true;
+        for i in 0..output.len() {
+            scrolled |= self.push_colored_line(output.line(i), [DEFAULT_TEXT_COLOR; COLS]);
         }
-        let mut i = 0usize;
-        while i < output.len() {
-            scrolled |=
-                self.push_foreground_line(output.line(i), output.colors(i), output.is_partial(i));
-            i += 1;
-        }
-        scrolled
-    }
-
-    fn push_foreground_line(
-        &mut self,
-        line: [u8; COLS],
-        colors: [u32; COLS],
-        partial: bool,
-    ) -> bool {
-        if self.foreground_partial_row && self.scrollback.len() != 0 {
-            let row = self.scrollback.len() - 1;
-            self.scrollback.replace(row, line, colors);
-            self.foreground_partial_row = partial;
-            return false;
-        }
-        let scrolled = self.push_colored_line(line, colors);
-        self.foreground_partial_row = partial;
         scrolled
     }
 
@@ -1439,15 +1440,26 @@ impl Shell {
         self.repaint_present_logical_row(row);
     }
 
+    fn cols(&self) -> usize {
+        (self.surface.width / FONT_W).max(1)
+    }
+    fn rows(&self) -> usize {
+        (self.surface.height / FONT_H).max(1)
+    }
+    fn prompt_start(&self) -> usize {
+        self.editor
+            .visible_start(self.cols().min(COLS).saturating_sub(3))
+    }
+
     fn prompt_line(&self) -> [u8; COLS] {
         let mut line = [0u8; COLS];
         line[0] = b'>';
         line[1] = b' ';
-        let max = self.input_len.min(COLS.saturating_sub(3));
-        let input_start = self.input_len.saturating_sub(max);
+        let input_start = self.prompt_start();
+        let max = (self.editor.len - input_start).min(self.cols().min(COLS).saturating_sub(3));
         let mut i = 0usize;
         while i < max {
-            line[2 + i] = self.input[input_start + i];
+            line[2 + i] = self.editor.bytes[input_start + i];
             i += 1;
         }
         line
@@ -1462,29 +1474,32 @@ impl Shell {
     }
 
     fn shift_active(&self) -> bool {
-        self.modifier_state != 0
+        self.modifier_state & (MODIFIER_LEFT_SHIFT | MODIFIER_RIGHT_SHIFT) != 0
     }
 
     fn trim_input(&mut self) {
         let mut start = 0usize;
-        while start < self.input_len && self.input[start] == b' ' {
+        while start < self.editor.len && self.editor.bytes[start] == b' ' {
             start += 1;
         }
-        let mut end = self.input_len;
-        while end > start && self.input[end - 1] == b' ' {
+        let mut end = self.editor.len;
+        while end > start && self.editor.bytes[end - 1] == b' ' {
             end -= 1;
         }
         let len = end - start;
         if start != 0 && len != 0 {
-            self.input.copy_within(start..end, 0);
+            self.editor.bytes.copy_within(start..end, 0);
         }
-        self.input[len..self.input_len].fill(0);
-        self.input_len = len;
+        self.editor.bytes[len..self.editor.len].fill(0);
+        self.editor.len = len;
     }
 
     fn on_timer(&mut self) {
         if self.foreground.is_active() {
             if let Some(output) = self.foreground.poll_status() {
+                if !self.foreground.is_active() {
+                    self.save_terminal_output();
+                }
                 let had_prompt = self.remove_prompt_row_if_present();
                 let should_restore_prompt = had_prompt || !self.foreground.is_active();
                 self.push_foreground_output(output);
@@ -1513,7 +1528,7 @@ impl Shell {
             return;
         }
         let screen_row = logical_row - start;
-        if screen_row >= ROWS {
+        if screen_row >= self.rows() {
             return;
         }
         self.repaint_row(screen_row);
@@ -1521,20 +1536,22 @@ impl Shell {
     }
 
     fn visible_start(&self) -> usize {
-        if self.scrollback.len() <= ROWS {
+        if self.scrollback.len() <= self.rows() {
             0
         } else {
-            self.scroll_offset.min(self.scrollback.len() - ROWS)
+            self.scroll_offset.min(self.scrollback.len() - self.rows())
         }
     }
 
     fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = self.scrollback.len().saturating_sub(ROWS);
+        self.scroll_offset = self.scrollback.len().saturating_sub(self.rows());
     }
 
     fn scroll_page_up(&mut self) {
         let old = self.scroll_offset;
-        self.scroll_offset = self.scroll_offset.saturating_sub(ROWS.saturating_sub(1));
+        self.scroll_offset = self
+            .scroll_offset
+            .saturating_sub(self.rows().saturating_sub(1));
         if self.scroll_offset == old {
             return;
         }
@@ -1544,8 +1561,8 @@ impl Shell {
 
     fn scroll_page_down(&mut self) {
         let old = self.scroll_offset;
-        self.scroll_offset = (self.scroll_offset + ROWS.saturating_sub(1))
-            .min(self.scrollback.len().saturating_sub(ROWS));
+        self.scroll_offset = (self.scroll_offset + self.rows().saturating_sub(1))
+            .min(self.scrollback.len().saturating_sub(self.rows()));
         if self.scroll_offset == old {
             return;
         }
@@ -1554,7 +1571,14 @@ impl Shell {
     }
 
     fn scroll_lines(&mut self, delta: i16) {
-        if self.scrollback.len() <= ROWS || delta == 0 {
+        if self.foreground.is_active() {
+            if self.foreground.terminal.scroll(delta) {
+                self.repaint_all();
+                self.present_full();
+            }
+            return;
+        }
+        if self.scrollback.len() <= self.rows() || delta == 0 {
             return;
         }
         let old = self.scroll_offset;
@@ -1562,7 +1586,7 @@ impl Shell {
             self.scroll_offset = self.scroll_offset.saturating_sub(delta as usize);
         } else {
             self.scroll_offset = (self.scroll_offset + (-delta) as usize)
-                .min(self.scrollback.len().saturating_sub(ROWS));
+                .min(self.scrollback.len().saturating_sub(self.rows()));
         }
         if self.scroll_offset == old {
             return;
@@ -1572,65 +1596,15 @@ impl Shell {
     }
 
     fn push_history(&mut self) {
-        if self.input_len == 0 {
-            self.history_cursor = self.history_count;
-            return;
-        }
-        if self.history_count != 0 {
-            let last = (self.history_count - 1) % HISTORY_MAX;
-            if self.history_lens[last] == self.input_len
-                && self.history[last][..self.input_len] == self.input[..self.input_len]
-            {
-                self.history_cursor = self.history_count;
-                return;
-            }
-        }
-        let slot = self.history_count % HISTORY_MAX;
-        self.history[slot] = [0; MAX_LINE];
-        self.history[slot][..self.input_len].copy_from_slice(&self.input[..self.input_len]);
-        self.history_lens[slot] = self.input_len;
-        self.history_count = self.history_count.saturating_add(1);
-        self.history_cursor = self.history_count;
+        self.editor.remember();
     }
-
     fn history_prev(&mut self) {
-        let available = self.history_count.min(HISTORY_MAX);
-        if available == 0 {
-            return;
-        }
-        let oldest = self.history_count - available;
-        if self.history_cursor > oldest {
-            self.history_cursor -= 1;
-        }
-        self.load_history_cursor();
+        self.editor.previous();
+        self.edit_changed();
     }
-
     fn history_next(&mut self) {
-        if self.history_cursor < self.history_count {
-            self.history_cursor += 1;
-        }
-        if self.history_cursor == self.history_count {
-            self.input_len = 0;
-        } else {
-            self.load_history_cursor();
-        }
-        self.cursor_visible = true;
-        self.cursor_ticks = 0;
-        self.refresh_prompt_line();
-    }
-
-    fn load_history_cursor(&mut self) {
-        if self.history_cursor >= self.history_count {
-            return;
-        }
-        let slot = self.history_cursor % HISTORY_MAX;
-        let len = self.history_lens[slot];
-        self.input = [0; MAX_LINE];
-        self.input[..len].copy_from_slice(&self.history[slot][..len]);
-        self.input_len = len;
-        self.cursor_visible = true;
-        self.cursor_ticks = 0;
-        self.refresh_prompt_line();
+        self.editor.next();
+        self.edit_changed();
     }
 
     fn remove_prompt_row_if_present(&mut self) -> bool {
@@ -1652,13 +1626,12 @@ impl Shell {
     }
 
     fn push_line(&mut self, line: [u8; COLS]) {
-        self.foreground_partial_row = false;
         let _ = self.push_colored_line(line, [DEFAULT_TEXT_COLOR; COLS]);
     }
 
     fn push_colored_line(&mut self, line: [u8; COLS], colors: [u32; COLS]) -> bool {
-        let following_bottom = self.scrollback.len() <= ROWS
-            || self.scroll_offset >= self.scrollback.len().saturating_sub(ROWS);
+        let following_bottom = self.scrollback.len() <= self.rows()
+            || self.scroll_offset >= self.scrollback.len().saturating_sub(self.rows());
         let scrolled = self.scrollback.push(line, colors);
         if scrolled {
             self.scroll_offset = self.scroll_offset.saturating_sub(1);
@@ -1670,14 +1643,19 @@ impl Shell {
     }
 }
 
-fn drain_input(input_queue: &mut nanami_services::input::InputEventQueue, shell: &mut Shell) {
+fn drain_input(
+    input_queue: &mut nanami_services::gfx::honoka::WindowEventQueue,
+    shell: &mut Shell,
+) {
     let mut drained = 0usize;
     while drained < 256 {
         let Some(packed) = input_queue.pop() else {
             break;
         };
-        let (kind, code, value0, _, _) = nanami_services::input::unpack_input_event(packed);
-        if kind == nanami_services::input::INPUT_EVENT_KIND_KEY {
+        let (kind, code, value0, value1, _) = nanami_services::input::unpack_input_event(packed);
+        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
+            shell.resize(value0 as u16 as usize, value1 as u16 as usize);
+        } else if kind == nanami_services::input::INPUT_EVENT_KIND_KEY {
             shell.on_key(code, value0 != 0);
         } else if kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL {
             shell.scroll_lines(value0.saturating_mul(3));

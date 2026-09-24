@@ -2,11 +2,17 @@ use a9n_abi::CapabilityDescriptor;
 
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
+#[path = "honoka/client.rs"]
+mod client;
+pub use client::*;
+
 pub const HONOKA_REQUEST_CREATE_WINDOW: Word = 0x7001;
 pub const HONOKA_REQUEST_DESTROY_WINDOW: Word = 0x7000;
 pub const HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER: Word = 0x7002;
 pub const HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER_TO_PROCESS: Word = 0x700b;
 pub const HONOKA_REQUEST_DETACH_LOGICAL_FRAMEBUFFER: Word = 0x700c;
+pub const HONOKA_REQUEST_RESIZE_LOGICAL_FRAMEBUFFER: Word = 0x700d;
+pub const HONOKA_REQUEST_RESIZE_VIEWPORT: Word = 0x700e;
 pub const HONOKA_REQUEST_MOVE_WINDOW: Word = 0x7003;
 pub const HONOKA_REQUEST_SET_WINDOW_VISIBLE: Word = 0x7004;
 pub const HONOKA_REQUEST_ATTACH_INPUT_QUEUE: Word = 0x7005;
@@ -27,6 +33,27 @@ pub const HONOKA_DAMAGE_ENTRY_WORDS: usize = 4;
 pub const HONOKA_WINDOW_TITLE_BYTES: usize = 24;
 pub const HONOKA_CREATE_WINDOW_TITLE_BYTES: usize = 16;
 pub const HONOKA_WINDOW_OPACITY_OPAQUE: u8 = u8::MAX;
+
+pub fn honoka_resize_viewport(
+    port: Word,
+    window: Word,
+    width: Word,
+    height: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        port,
+        HONOKA_REQUEST_RESIZE_VIEWPORT,
+        window,
+        width,
+        height,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
 
 pub fn honoka_create_window(
     honoka_port: CapabilityDescriptor,

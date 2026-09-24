@@ -28,6 +28,10 @@ impl Clock {
         (u128::from(cycles) * u128::from(self.period_fs) / 1_000_000).min(u64::MAX as u128) as u64
     }
 
+    pub(super) fn last_cycles(&self) -> u64 {
+        self.cycles
+    }
+
     pub(super) fn cycles_ceil(&self, nanoseconds: u64) -> u64 {
         (u128::from(nanoseconds) * 1_000_000)
             .div_ceil(u128::from(self.period_fs))

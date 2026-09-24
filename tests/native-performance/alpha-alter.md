@@ -1,5 +1,9 @@
 # Alpha / Alter transfer paths
 
+This records the initial transfer optimization. The later
+[poll/clock_gettime review](syscall-hotpaths.md) supersedes its per-transfer
+MAP/UNMAP counts with a lifetime-managed copy-window cache.
+
 This follow-up changes Nanami user-space only. A9N sources, syscall register
 writeback, and the fault/reply ABI are unchanged.
 

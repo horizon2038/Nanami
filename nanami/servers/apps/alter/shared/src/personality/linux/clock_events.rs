@@ -20,6 +20,9 @@ pub(super) fn arm_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
         .iter()
         .filter(|process| process.pid != 0 && process.sleep_waiting)
         .map(|process| process.sleep_deadline)
+        .chain(runtime.managed.iter()
+            .filter(|process| process.pid != 0 && !process.exited)
+            .filter_map(|process| process.readiness_wait.as_ref().and_then(|wait| wait.deadline)))
         .chain(runtime.framebuffer_deadline)
         .min();
     if runtime.clock_deadline != deadline {
@@ -68,28 +71,30 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
     }
 
     for index in 0..runtime.managed.len() {
-        let process = runtime.managed[index];
+        let process = &runtime.managed[index];
         if process.pid == 0
             || !process.sleep_waiting
             || process.sleep_deadline > runtime.monotonic_ticks
         {
             continue;
         }
+        let (pid, pcb, context, personality) = (process.pid, process.pcb, process.sleep_context, process.personality);
         runtime.managed[index].sleep_waiting = false;
         runtime.managed[index].sleep_deadline = 0;
         runtime.managed[index].sleep_context = LinuxSyscallContext::EMPTY;
-        record_syscall_result(runtime, process.pid, SYS_NANOSLEEP, 0);
+        record_syscall_result(runtime, pid, SYS_NANOSLEEP, 0);
         if crate::process::write_personality_syscall_return(
-            process.pcb,
-            process.sleep_context,
+            pcb,
+            context,
             0,
-            process.personality,
+            personality,
         )
         .is_ok()
         {
-            let _ = a9n_abi::arch::process_control_block::resume(process.pcb);
+            let _ = a9n_abi::arch::process_control_block::resume(pcb);
         }
     }
+    super::wake_readiness_waiters(runtime, crate::state::readiness::READY_TIMER);
     if let Err(errno) = arm_clock_timer(runtime) {
         libnanami::println!("[alter/linux] timer alarm failed errno={}", errno);
     }

@@ -12,6 +12,10 @@ name = "hotpaths"
 path = "hotpath-tests.rs"
 
 [[test]]
+name = "shell-terminal"
+path = "shell-terminal.rs"
+
+[[test]]
 name = "framebuffer"
 path = "framebuffer-tests.rs"
 
@@ -30,6 +34,14 @@ path = "alter-framebuffer.rs"
 [[test]]
 name = "alpha-alter"
 path = "alpha-alter-tests.rs"
+
+[[test]]
+name = "alpha-copy-window"
+path = "alpha-copy-window.rs"
+
+[[test]]
+name = "linux-readiness"
+path = "linux-readiness.rs"
 
 [[test]]
 name = "posix-io"
@@ -66,6 +78,10 @@ path = "ipc/main.rs"
 [[test]]
 name = "storage"
 path = "storage/main.rs"
+
+[[test]]
+name = "ext2-truncate"
+path = "ext2-truncate.rs"
 
 [[test]]
 name = "input-distribution"

@@ -1,5 +1,6 @@
 mod boot;
 mod control_requests;
+mod memory_copy;
 mod memory_requests;
 mod mmio;
 mod process_requests;
@@ -158,6 +159,7 @@ pub struct Alpha {
     kernel_version: alloc::string::String,
     platform_rsdp_address: usize,
     runtime_stack_top: usize,
+    copy_window: memory_copy::CopyWindow,
 }
 
 #[derive(Clone, Copy)]
@@ -328,6 +330,7 @@ impl Alpha {
             kernel_version: version_info::kernel_version(init_info),
             platform_rsdp_address: init_info.arch_info[0],
             runtime_stack_top: 0,
+            copy_window: memory_copy::CopyWindow::new(),
         })
     }
 

@@ -11,9 +11,10 @@ pub(super) fn sys_gettimeofday(
     timeval: Word,
 ) -> Result<Word, i32> {
     if timeval != 0 {
+        let (seconds, nanos) = super::realtime::realtime(runtime)?;
         unsafe {
-            write_u64(runtime.posix_shm, 0);
-            write_u64(runtime.posix_shm + 8, 0);
+            write_u64(runtime.posix_shm, seconds);
+            write_u64(runtime.posix_shm + 8, nanos / 1000);
         }
         write_target_memory(runtime, pid, timeval, 16)?;
     }
@@ -77,24 +78,38 @@ pub(super) fn sys_clock_gettime(
     if timespec == 0 {
         return Err(EFAULT);
     }
-    match clock_id {
-        0..=9 | 11 => {}
+    let (seconds, nanoseconds) = match clock_id {
+        0 | 5 | 8 => super::realtime::realtime(runtime)?,
+        1 | 4 | 6 | 7 | 9 => {
+            refresh_clock(runtime)?;
+            split_ticks(runtime.monotonic_ticks, runtime.monotonic_tick_hz)
+        }
+        // No per-process CPU accounting or TAI offset is available. Do not
+        // misrepresent system uptime as process/thread CPU time or TAI.
         _ => return Err(EINVAL),
-    }
-    refresh_clock(runtime)?;
-    let tick_hz = runtime.monotonic_tick_hz;
-    if tick_hz == 0 {
-        return Err(EIO);
-    }
-    let seconds = runtime.monotonic_ticks / tick_hz;
-    let nanoseconds =
-        ((runtime.monotonic_ticks % tick_hz) as u128 * 1_000_000_000 / tick_hz as u128) as Word;
+    };
     unsafe {
         write_u64(runtime.posix_shm, seconds);
         write_u64(runtime.posix_shm + 8, nanoseconds);
     }
     write_target_memory(runtime, pid, timespec, LINUX_TIMESPEC_BYTES)?;
     Ok(0)
+}
+
+pub(super) fn split_ticks(ticks: Word, tick_hz: Word) -> (Word, Word) {
+    if tick_hz == 1_000_000_000 {
+        // HPET already reports nanoseconds. Constant division avoids the
+        // generic 128-bit scale/divide on every clock_gettime call.
+        (
+            ticks / 1_000_000_000,
+            ticks % 1_000_000_000,
+        )
+    } else {
+        (
+            ticks / tick_hz,
+            ((ticks % tick_hz) as u128 * 1_000_000_000 / tick_hz as u128) as Word,
+        )
+    }
 }
 
 pub(super) fn sys_nanosleep_action(

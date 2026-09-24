@@ -21,10 +21,18 @@ pub(super) fn pump_input_events(runtime: &mut Runtime) {
 }
 
 pub(super) fn drain_input_queue(runtime: &mut Runtime, source: Word, session_id: Word) {
-    let mut queue = input::InputEventQueue::new(source);
+    let mut queue = honoka::WindowEventQueue::new(source);
     while let Some(packed) = queue.pop() {
         let (kind, code, value0, value1, flags) = input::unpack_input_event(packed);
         match kind {
+            input::INPUT_EVENT_KIND_WINDOW_RESIZE if session_id != 0 => {
+                if let Some(session) = runtime.graphics.get(session_id as usize - 1) {
+                    if let Err(error) = honoka::honoka_resize_viewport(session.honoka_port, session.window_id,
+                        value0 as u16 as Word, value1 as u16 as Word) {
+                        libnanami::println!("[alter/linux] framebuffer viewport resize failed: {}", error);
+                    }
+                }
+            }
             input::INPUT_EVENT_KIND_KEY => {
                 push_keyboard_event(
                     runtime,
@@ -237,6 +245,10 @@ pub(super) fn sys_evdev_read(
 ) -> Result<Word, i32> {
     if len < LINUX_INPUT_EVENT_BYTES {
         return Err(EINVAL);
+    }
+    let len = len.min(runtime.posix_shm_size);
+    if user_buffer == 0 || runtime.posix_shm == 0 || len < LINUX_INPUT_EVENT_BYTES {
+        return Err(EFAULT);
     }
     pump_input_events(runtime);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;

@@ -111,3 +111,22 @@ fn wide_clock_with_narrow_comparator_chunks_long_waits_but_can_idle() {
     timer.arm(None).unwrap();
     assert_eq!(mmio[0x100 / 8] & (1 << 2), 0);
 }
+
+#[test]
+fn unchanged_alarm_uses_event_sample_and_fired_alarm_can_be_rearmed() {
+    let mut mmio = device(true);
+    let mut timer = hpet::prepare(16).unwrap();
+    timer.start().unwrap();
+    timer.arm(Some(1_000_000)).unwrap();
+    mmio[0xf0 / 8] = 50_000;
+    assert_eq!(timer.now(), 500_000);
+    // A later MMIO value must not be read by the unchanged-alarm path. The
+    // real service handles the pending interrupt in its next event.
+    mmio[0xf0 / 8] = 100_001;
+    timer.arm(Some(1_000_000)).unwrap();
+    assert_eq!(mmio[0x108 / 8], 100_000);
+    timer.on_interrupt();
+    timer.now();
+    timer.arm(Some(1_000_000)).unwrap();
+    assert!(mmio[0x108 / 8] > 100_001);
+}

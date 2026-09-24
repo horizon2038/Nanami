@@ -27,6 +27,7 @@ pub const SYS_MREMAP: Word = 25;
 pub const SYS_MSYNC: Word = 26;
 pub const SYS_FSYNC: Word = 74;
 pub const SYS_FDATASYNC: Word = 75;
+pub const SYS_FTRUNCATE: Word = 77;
 pub const SYS_SYNC: Word = 162;
 pub const SYS_SYNCFS: Word = 306;
 pub const SYS_MADVISE: Word = 28;

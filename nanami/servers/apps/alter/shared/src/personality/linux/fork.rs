@@ -172,6 +172,7 @@ pub(super) fn sys_fork(
         child.personality = parent.personality;
         child.terminal_canonical = parent.terminal_canonical;
         child.terminal_echo = parent.terminal_echo;
+        child.terminal_termios = parent.terminal_termios;
     }
     if cfg!(debug_assertions) {
         if let Ok(read_back_fs_base) = read_register_value(child_pcb, REG_FS_BASE) {

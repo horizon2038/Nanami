@@ -1,6 +1,5 @@
 #[derive(Clone, Copy)]
 struct AvlNode {
-    used: bool,
     key: usize,
     value: usize,
     left: Option<usize>,
@@ -10,7 +9,6 @@ struct AvlNode {
 
 impl AvlNode {
     const EMPTY: Self = Self {
-        used: false,
         key: 0,
         value: 0,
         left: None,
@@ -22,6 +20,8 @@ impl AvlNode {
 #[derive(Clone, Copy)]
 pub struct StaticAvlTree<const N: usize> {
     root: Option<usize>,
+    free: Option<usize>,
+    initialized: usize,
     nodes: [AvlNode; N],
 }
 
@@ -29,6 +29,8 @@ impl<const N: usize> StaticAvlTree<N> {
     pub const fn new() -> Self {
         Self {
             root: None,
+            free: None,
+            initialized: 0,
             nodes: [AvlNode::EMPTY; N],
         }
     }
@@ -111,11 +113,11 @@ impl<const N: usize> StaticAvlTree<N> {
         let left = self.nodes[index].left;
         let right = self.nodes[index].right;
         if left.is_none() {
-            self.nodes[index] = AvlNode::EMPTY;
+            self.release_node(index);
             return (right, Some(removed));
         }
         if right.is_none() {
-            self.nodes[index] = AvlNode::EMPTY;
+            self.release_node(index);
             return (left, Some(removed));
         }
 
@@ -124,7 +126,7 @@ impl<const N: usize> StaticAvlTree<N> {
         self.nodes[index].key = self.nodes[successor].key;
         self.nodes[index].value = self.nodes[successor].value;
         self.nodes[index].right = new_right;
-        self.nodes[successor] = AvlNode::EMPTY;
+        self.release_node(successor);
         self.recompute_height(index);
         (Some(self.rebalance(index)), Some(removed))
     }
@@ -141,22 +143,34 @@ impl<const N: usize> StaticAvlTree<N> {
     }
 
     fn allocate_node(&mut self, key: usize, value: usize) -> Result<usize, ()> {
-        let mut i = 0;
-        while i < N {
-            if !self.nodes[i].used {
-                self.nodes[i] = AvlNode {
-                    used: true,
-                    key,
-                    value,
-                    left: None,
-                    right: None,
-                    height: 1,
-                };
-                return Ok(i);
-            }
-            i += 1;
-        }
-        Err(())
+        let index = if let Some(index) = self.free {
+            self.free = self.nodes[index].left;
+            index
+        } else if self.initialized < N {
+            let index = self.initialized;
+            self.initialized += 1;
+            index
+        } else {
+            return Err(());
+        };
+        self.nodes[index] = AvlNode {
+            key,
+            value,
+            left: None,
+            right: None,
+            height: 1,
+        };
+        Ok(index)
+    }
+
+    fn release_node(&mut self, index: usize) {
+        // Unlinked nodes use their left link for the free list. Never scan the
+        // live mappings to allocate a temporary mapping's bookkeeping node.
+        self.nodes[index] = AvlNode {
+            left: self.free,
+            ..AvlNode::EMPTY
+        };
+        self.free = Some(index);
     }
 
     fn height(&self, index: Option<usize>) -> i16 {

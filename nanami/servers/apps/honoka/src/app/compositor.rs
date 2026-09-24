@@ -7,10 +7,13 @@ use crate::constants::{
 };
 use crate::font::TextRenderer;
 use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
-use crate::input::InputEvent;
 use crate::info_panel::InfoPanel;
+use crate::input::InputEvent;
 use crate::motion_damage::MotionDamage;
 use crate::profile::Profile;
+
+#[path = "resize.rs"]
+mod resize;
 
 const MAX_DIRTY_RECTS: usize = 256;
 const MAX_INDIVIDUAL_DIRTY_RECTS: usize = 64;
@@ -63,6 +66,9 @@ struct Window {
     damage_queue: Word,
     local_fb: Word,
     fb_size: Word,
+    fb_width: usize,
+    fb_height: usize,
+    retired_fb: Option<(Word, Word)>,
     input_queue: Word,
     input_notify: Word,
     input_notify_slot: Word,
@@ -84,6 +90,9 @@ impl Window {
         damage_queue: 0,
         local_fb: 0,
         fb_size: 0,
+        fb_width: 0,
+        fb_height: 0,
+        retired_fb: None,
         input_queue: 0,
         input_notify: 0,
         input_notify_slot: 0,
@@ -119,6 +128,9 @@ pub struct Compositor {
     drag_origin_y: i32,
     drag_preview_x: i32,
     drag_preview_y: i32,
+    drag_preview_width: i32,
+    drag_preview_height: i32,
+    resizing_edges: u8,
     drag_outline_visible: bool,
     theme: Theme,
     dirty_rects: [Rect; MAX_DIRTY_RECTS],
@@ -171,6 +183,9 @@ impl Compositor {
             drag_origin_y: 0,
             drag_preview_x: 0,
             drag_preview_y: 0,
+            drag_preview_width: 0,
+            drag_preview_height: 0,
+            resizing_edges: 0,
             drag_outline_visible: false,
             theme,
             dirty_rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
@@ -339,6 +354,9 @@ impl Compositor {
             damage_queue: 0,
             local_fb: 0,
             fb_size: 0,
+            fb_width: 0,
+            fb_height: 0,
+            retired_fb: None,
             input_queue: 0,
             input_notify: 0,
             input_notify_slot,
@@ -431,6 +449,9 @@ impl Compositor {
         self.windows[index].local_fb =
             local_vaddr.saturating_add(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
         self.windows[index].fb_size = pixel_bytes;
+        let content = self.windows[index].content_rect();
+        self.windows[index].fb_width = content.width as usize;
+        self.windows[index].fb_height = content.height as usize;
         self.clear_logical_framebuffer(self.windows[index].local_fb, pixel_bytes);
         self.mark_dirty(self.windows[index].rect());
         Ok((peer_vaddr, size))
@@ -446,11 +467,26 @@ impl Compositor {
         if target_pid == 0 || self.windows[index].local_fb != 0 {
             return Err(libnanami::RequestError::InvalidArgument);
         }
-        let pixel_bytes = self.window_pixel_bytes(index)?;
+        // Reattaching a Linux fbdev mapping preserves the display mode even
+        // when its viewport was resized while that mapping was detached.
+        let content = self.windows[index].content_rect();
+        let window = self.windows[index];
+        let (width, height) = if window.fb_width != 0 && window.fb_height != 0 {
+            (window.fb_width, window.fb_height)
+        } else {
+            (content.width as usize, content.height as usize)
+        };
+        let pixel_bytes = width
+            .checked_mul(height)
+            .and_then(|v| v.checked_mul(4))
+            .filter(|bytes| *bytes != 0)
+            .ok_or(libnanami::RequestError::InvalidArgument)?;
         let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(target_pid, pixel_bytes)?;
         self.windows[index].damage_queue = 0;
         self.windows[index].local_fb = local_vaddr;
         self.windows[index].fb_size = pixel_bytes;
+        self.windows[index].fb_width = width;
+        self.windows[index].fb_height = height;
         self.clear_logical_framebuffer(self.windows[index].local_fb, pixel_bytes);
         self.mark_dirty(self.windows[index].rect());
         Ok((peer_vaddr, pixel_bytes))
@@ -645,8 +681,12 @@ impl Compositor {
 
         if let Some(index) = self.dragging_window {
             let old_preview = self.drag_preview_rect(index);
-            self.drag_preview_x = self.cursor_x.saturating_sub(self.drag_origin_x);
-            self.drag_preview_y = self.cursor_y.saturating_sub(self.drag_origin_y);
+            if self.resizing_edges == 0 {
+                self.drag_preview_x = self.cursor_x.saturating_sub(self.drag_origin_x);
+                self.drag_preview_y = self.cursor_y.saturating_sub(self.drag_origin_y);
+            } else {
+                self.update_resize_preview(index);
+            }
             let new_preview = self.drag_preview_rect(index);
             self.outline_damage.update(old_preview, new_preview);
         } else {
@@ -696,11 +736,18 @@ impl Compositor {
                 return false;
             };
 
-            if contains_rect(
-                self.windows[index].content_rect(),
-                self.cursor_x,
-                self.cursor_y,
-            ) {
+            let resize_edges = if code == 1 {
+                self.resize_edges(index)
+            } else {
+                0
+            };
+            if resize_edges == 0
+                && contains_rect(
+                    self.windows[index].content_rect(),
+                    self.cursor_x,
+                    self.cursor_y,
+                )
+            {
                 let window_id = self.windows[index].id;
                 let old_focus = self.find_focused_window().map(|i| self.windows[i].rect());
                 let old = self.windows[index].rect();
@@ -718,11 +765,14 @@ impl Compositor {
                 return true;
             }
 
-            if code != 1 || !self.point_in_title(index, self.cursor_x, self.cursor_y) {
+            if code != 1
+                || (resize_edges == 0 && !self.point_in_title(index, self.cursor_x, self.cursor_y))
+            {
                 return false;
             }
 
-            if self.point_in_close_button(index, self.cursor_x, self.cursor_y) {
+            if resize_edges == 0 && self.point_in_close_button(index, self.cursor_x, self.cursor_y)
+            {
                 self.deliver_client_close(index);
                 self.mark_dirty(self.windows[index].rect());
                 self.mark_dirty(self.cursor_rect());
@@ -737,6 +787,9 @@ impl Compositor {
                 self.drag_origin_y = self.cursor_y.saturating_sub(self.windows[index].y);
                 self.drag_preview_x = self.windows[index].x;
                 self.drag_preview_y = self.windows[index].y;
+                self.drag_preview_width = self.windows[index].width;
+                self.drag_preview_height = self.windows[index].height;
+                self.resizing_edges = resize_edges;
                 let dirty = self.windows[index].rect();
                 let drag_index = if index < MAX_WINDOWS - 1 {
                     self.raise_window(index);
@@ -759,21 +812,28 @@ impl Compositor {
             }
         } else {
             if let Some(index) = self.dragging_window {
+                if code != 1 {
+                    return false;
+                }
                 let old = self.windows[index].rect();
                 let old_preview = self.drag_preview_rect(index);
                 self.drag_outline_visible = false;
-                self.windows[index].x = self.drag_preview_x;
-                self.windows[index].y = self.drag_preview_y;
+                if self.resizing_edges != 0 {
+                    self.send_resize(index);
+                } else {
+                    self.windows[index].x = self.drag_preview_x;
+                    self.windows[index].y = self.drag_preview_y;
+                }
                 let new = self.windows[index].rect();
                 self.mark_dirty_outline(old_preview, DRAG_OUTLINE_THICKNESS + 1);
                 self.mark_dirty(old);
                 self.mark_dirty(new);
                 self.dragging_window = None;
+                self.resizing_edges = 0;
             } else if let Some(index) = self.find_focused_window() {
                 self.deliver_client_mouse_position(index);
                 self.deliver_client_button(index, code, false);
             }
-            if code == 1 {}
         }
         if redraw_cursor {
             self.mark_dirty(self.cursor_rect());
@@ -948,12 +1008,12 @@ impl Compositor {
     }
 
     fn drag_preview_rect(&self, index: usize) -> Rect {
-        let window = self.windows[index];
+        let _ = index;
         Rect::new(
             self.drag_preview_x,
             self.drag_preview_y,
-            window.width,
-            window.height,
+            self.drag_preview_width,
+            self.drag_preview_height,
         )
     }
 
@@ -1203,6 +1263,9 @@ impl Compositor {
         }
 
         self.windows[index] = Window::EMPTY;
+        if let Some((base, bytes)) = window.retired_fb {
+            let _ = libnanami::request_mapping_release(base, bytes);
+        }
         if window.damage_queue != 0 {
             let size = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES
                 .saturating_add(window.fb_size);
@@ -1874,12 +1937,17 @@ fn draw_window_surface(
                 theme.window_body,
                 window.opacity,
             );
-            if window.local_fb == 0 {
+            let empty_start = if window.local_fb == 0 || y >= content.y + window.fb_height as i32 {
+                content.x
+            } else {
+                (content.x + window.fb_width as i32).min(content.x + content.width)
+            };
+            if empty_start < content.x + content.width {
                 fill_window_span(
                     framebuffer,
                     dirty,
                     y,
-                    content.x,
+                    empty_start,
                     content.x.saturating_add(content.width),
                     darken(theme.window_body),
                     window.opacity,
@@ -1916,7 +1984,13 @@ fn draw_window_surface(
 
 fn draw_window_content(framebuffer: &Framebuffer, window: Window, dirty: Rect) {
     let content = window.content_rect();
-    let Some(area) = intersect_rect(content, dirty) else {
+    let surface = Rect::new(
+        content.x,
+        content.y,
+        content.width.min(window.fb_width as i32),
+        content.height.min(window.fb_height as i32),
+    );
+    let Some(area) = intersect_rect(surface, dirty) else {
         return;
     };
     framebuffer.blit_bgra32_from_alpha(
@@ -1926,7 +2000,7 @@ fn draw_window_content(framebuffer: &Framebuffer, window: Window, dirty: Rect) {
         area.height,
         window.local_fb,
         window.fb_size,
-        content.width.max(0) as usize,
+        window.fb_width,
         (area.x - content.x) as usize,
         (area.y - content.y) as usize,
         window.opacity,

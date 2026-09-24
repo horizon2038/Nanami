@@ -123,6 +123,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 if identifier & nanami_services::input::INPUT_NOTIFICATION_IDENTIFIER != 0 {
                     linux::wake_device_readers(&mut runtime);
                 }
+                linux::handle_readiness_notification(&mut runtime, identifier);
                 ReplyAction::DropReply
             }
             ServiceEvent::Fault {
@@ -172,6 +173,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         };
+        linux::handle_readiness_changes(&mut runtime);
     }
 }
 

@@ -159,8 +159,23 @@ struct OsRequestEvent {
 struct Alpha {
     processes: ProcessManager,
     memory: Memory,
+    copy_window: memory_copy::CopyWindow,
 }
 impl Alpha {
+    fn map_alpha_temporary_frame(
+        &mut self,
+        frame: usize,
+        va: usize,
+    ) -> Result<(), CapabilityError> {
+        machine(|m| {
+            assert!(m.frames.contains_key(&frame));
+            assert!(m.maps.insert((0, va), frame).is_none());
+        });
+        Ok(())
+    }
+    fn unmap_alpha_frame(&mut self, frame: usize, va: usize) -> Result<(), CapabilityError> {
+        arch::address_space::unmap(0, frame, va)
+    }
     fn ensure_process_frame_chunks(
         &mut self,
         _: usize,
@@ -186,6 +201,9 @@ impl Alpha {
     }
 }
 
+#[path = "../../nanami/src/nanami_core/alpha/memory_copy.rs"]
+mod memory_copy;
+
 #[path = "../../nanami/src/nanami_core/alpha/shared_memory.rs"]
 mod implementation;
 
@@ -204,6 +222,7 @@ fn alpha() -> Alpha {
     Alpha {
         processes,
         memory: Memory,
+        copy_window: memory_copy::CopyWindow::new(),
     }
 }
 
@@ -255,6 +274,52 @@ fn both_release_orders_remove_caps_before_free_and_reuse_reservations() {
             assert_eq!(entry.user_heap_next_va, 0x203000);
         }
     }
+}
+
+#[test]
+fn copy_window_is_invalidated_before_shared_caps_and_pages_are_recycled() {
+    let mut alpha = alpha();
+    for _ in 0..20 {
+        let (a, b) = create(&mut alpha, 1).unwrap();
+        for (pid, va) in [(1, a), (2, b)] {
+            let frame = alpha
+                .processes
+                .vm_space_mut(pid)
+                .unwrap()
+                .find_frame(va)
+                .unwrap();
+            alpha.map_process_copy_frame(pid, frame, None).unwrap();
+        }
+        machine(|m| assert_eq!(m.maps.len(), 4));
+        release(&mut alpha, 1, a, 1).unwrap();
+        machine(|m| assert_eq!(m.maps.len(), 2));
+        release(&mut alpha, 2, b, 1).unwrap();
+        assert_empty();
+    }
+}
+
+#[test]
+fn failed_copy_window_unmap_keeps_shared_cap_and_backing_live() {
+    let mut alpha = alpha();
+    let (a, b) = create(&mut alpha, 1).unwrap();
+    let frame = alpha
+        .processes
+        .vm_space_mut(1)
+        .unwrap()
+        .find_frame(a)
+        .unwrap();
+    alpha.map_process_copy_frame(1, frame, None).unwrap();
+    machine(|m| m.fail_unmap = true);
+    assert!(release(&mut alpha, 1, a, 1).is_err());
+    machine(|m| {
+        assert_eq!(m.maps.len(), 3);
+        assert_eq!(m.frames.len(), 2);
+        assert_eq!(m.live.len(), 1);
+        m.fail_unmap = false;
+    });
+    release(&mut alpha, 1, a, 1).unwrap();
+    release(&mut alpha, 2, b, 1).unwrap();
+    assert_empty();
 }
 
 #[test]

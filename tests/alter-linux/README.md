@@ -199,3 +199,39 @@ The Alter architecture-specific register writeback code is unchanged. A9N change
 limited to the separately approved `x_save_mask` declaration and the IPC fastpath
 follow-up described above. The only register-writeback change in that follow-up
 is skipping redundant FS/GS base programming after a process switch.
+
+## Readiness regression fixture
+
+`readiness.c` is a freestanding x86-64 fixture for poll/ppoll/select timeouts,
+pipe wakeups/EOF, empty terminal readiness and clock IDs. Build into a **test**
+Linux rootfs and run with the existing snapshot-disk smoke runner:
+
+```sh
+clang --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -O2 -Wall -Wextra -Werror -Wl,--image-base=0x400000 \
+  tests/alter-linux/readiness.c -o out/alter-glibc-root/bin/linux-readiness
+# Rebuild the image using a separate ROOTFS_IMAGE and this LINUX_ROOTFS_DIR.
+python3 tests/alter-linux/qemu-smoke.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img --smp 4 --program linux-readiness
+```
+
+### File truncation
+
+`truncate.c` exercises real `ftruncate(2)` traps through Alter, POSIX, VFS and
+ext2: direct/single/double-indirect shrink boundaries, sparse extension and
+zero-filled tails, unchanged dup offsets, sizes visible through another open
+descriptor, invalid/read-only descriptors, and fsync/close/reopen contents.
+It writes only `/tmp/truncate-test` in the disposable guest disk.
+
+```sh
+clang --target=x86_64-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -O2 \
+  tests/alter-linux/truncate.c -o out/alter-glibc-root/bin/truncate-test
+# Rebuild using a private ROOTFS_IMAGE and this LINUX_ROOTFS_DIR.
+python3 tests/alter-linux/qemu-smoke.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img --smp 4 --program truncate-test
+```
+
+The USB terminal smoke test also saves an explicitly named file from BusyBox vi,
+shortens an existing file, exits with `:x`, and checks both files byte-for-byte;
+see [USB tests](../usb/README.md#shell-terminal-and-gui-resize).

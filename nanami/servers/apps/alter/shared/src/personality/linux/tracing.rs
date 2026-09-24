@@ -14,7 +14,7 @@ use super::{
     SYS_RT_SIGPROCMASK, SYS_RT_SIGSUSPEND, SYS_SCHED_GETAFFINITY, SYS_SELECT, SYS_SENDMSG,
     SYS_SETITIMER, SYS_SETPGID, SYS_SET_ROBUST_LIST, SYS_SET_TID_ADDRESS, SYS_SIGALTSTACK,
     SYS_STAT, SYS_STATX, SYS_UNAME, SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK,
-    SYS_WAIT4, SYS_WRITE, SYS_WRITEV, SYS_FSYNC, SYS_FDATASYNC, SYS_SYNC, SYS_SYNCFS,
+    SYS_WAIT4, SYS_WRITE, SYS_WRITEV, SYS_FSYNC, SYS_FDATASYNC, SYS_SYNC, SYS_SYNCFS, SYS_FTRUNCATE,
 };
 
 pub(super) fn trace_syscall_action(
@@ -183,7 +183,7 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
         | SYS_RENAME | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID
-        | SYS_MSYNC | SYS_NANOSLEEP => 2,
+        | SYS_MSYNC | SYS_NANOSLEEP | SYS_FTRUNCATE => 2,
         SYS_READ
         | SYS_WRITE
         | SYS_READV
@@ -244,6 +244,7 @@ pub(super) fn syscall_name(number: Word) -> &'static [u8] {
         SYS_CLOSE => b"close",
         SYS_FSYNC => b"fsync",
         SYS_FDATASYNC => b"fdatasync",
+        SYS_FTRUNCATE => b"ftruncate",
         SYS_SYNC => b"sync",
         SYS_SYNCFS => b"syncfs",
         SYS_STAT => b"stat",

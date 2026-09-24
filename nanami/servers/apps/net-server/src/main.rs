@@ -34,6 +34,8 @@ mod tcp_send;
 mod tcp_state;
 #[path = "app/tcp_rx.rs"]
 mod tcp_rx;
+#[path = "app/readiness.rs"]
+mod readiness;
 #[path = "app/tcp_wire.rs"]
 mod tcp_wire;
 #[path = "app/udp.rs"]
@@ -671,7 +673,7 @@ fn handle_tcp_connect_request(
             && conn.peer_port == peer_port
             && conn.peer_ip == peer_ip
         {
-            let id = if conn.state == TCP_STATE_ESTABLISHED {
+            let id = if matches!(conn.state, TCP_STATE_ESTABLISHED | TCP_STATE_CLOSE_WAIT) {
                 conn.connection_id
             } else {
                 0
@@ -737,6 +739,7 @@ fn handle_network_request(
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::net::NET_SERVICE_REQUEST_READINESS => readiness::handle_readiness_request(runtime, request),
         nanami_services::net::NET_SERVICE_REQUEST_SEND => {
             // Raw L2 frame send: arg0=client shm offset, arg1=len
             let Some(session) = session_for(runtime, request.identifier) else {

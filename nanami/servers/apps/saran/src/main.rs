@@ -94,12 +94,10 @@ struct Saran<'a> {
     present_notification: Word,
 
     // framebuffer state
-    framebuffer_vaddr: Word,
-    width: usize,
-    height: usize,
+    surface: nanami_services::gfx::honoka::WindowSurface,
 
     // input state
-    input_queue: &'a mut nanami_services::input::InputEventQueue,
+    input_queue: &'a mut nanami_services::gfx::honoka::WindowEventQueue,
     mouse_pressed: bool,
     previous_mouse_x: Option<usize>,
     previous_mouse_y: Option<usize>,
@@ -114,10 +112,8 @@ impl<'a> Saran<'a> {
         timer_port: Word,
         notification: Word,
         present_notification: Word,
-        framebuffer_vaddr: Word,
-        width: usize,
-        height: usize,
-        input_queue: &'a mut nanami_services::input::InputEventQueue,
+        surface: nanami_services::gfx::honoka::WindowSurface,
+        input_queue: &'a mut nanami_services::gfx::honoka::WindowEventQueue,
         window_id: Word,
     ) -> Self {
         libnanami::println!(
@@ -126,9 +122,9 @@ impl<'a> Saran<'a> {
             timer_port,
             notification,
             present_notification,
-            framebuffer_vaddr,
-            width,
-            height,
+            surface.pixels(),
+            surface.width,
+            surface.height,
             window_id
         );
         Self {
@@ -136,9 +132,7 @@ impl<'a> Saran<'a> {
             timer_port,
             notification,
             present_notification,
-            framebuffer_vaddr,
-            width,
-            height,
+            surface,
             input_queue,
             mouse_pressed: false,
             previous_mouse_x: None,
@@ -186,19 +180,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     let present_notification = attach_honoka_present_notification(honoka_pid, window_id)
         .map_err(|e| log_error("[honoka-client] present notification failed: ", e))?;
 
-    // attach logical framebuffer
-    let (shared_base, size_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_logical_framebuffer(honoka_port, window_id)
-            .map_err(|e| log_error("[honoka-client] attach framebuffer failed: ", e))?;
-    let framebuffer =
-        shared_base.saturating_add(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
-    let pixel_bytes =
-        size_bytes.saturating_sub(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
-    libnanami::print!(
-        "[honoka-client] logical framebuffer vaddr={:#x} bytes={:#x}",
-        framebuffer,
-        pixel_bytes
-    );
+    let surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+        .map_err(|e| log_error("[Saran] attach framebuffer failed: ", e))?;
+    draw_paper(&surface);
 
     // attach input queue
     let (input_base, _input_bytes) =
@@ -208,73 +192,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         .map_err(|e| log_error("[shell] attach input notification failed: ", e))?;
 
     // create input event queue
-    let mut input_queue = nanami_services::input::InputEventQueue::new(input_base);
-
-    let mut random_gen = Xorshift::<3>::new([0x12345678, 0x9abcdef0, 0xdeadbeef]);
-
-    // draw background
-    /*
-    for i in 0..3000 {
-        let x = random_gen.next() as usize % (CONTENT_WIDTH - 100);
-        let y = random_gen.next() as usize % (CONTENT_HEIGHT - 100);
-        let w = random_gen.next() as usize % 100 + 1;
-        let h = random_gen.next() as usize % 100 + 1;
-        let color = random_gen.next();
-        draw_rect(
-            framebuffer,
-            CONTENT_WIDTH,
-            CONTENT_HEIGHT,
-            x,
-            y,
-            w,
-            h,
-            color,
-        );
-
-        // flush framebuffer
-        let _ = libnanami::ipc::notification_notify(present_notification);
-        let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
-            honoka_port,
-            window_id,
-            x as Word,
-            y as Word,
-            w as Word,
-            h as Word,
-        );
-    }
-    */
-
-    // draw background (frame)
-    let frame_x = 10;
-    let frame_y = 10;
-    let frame_w = CONTENT_WIDTH - (frame_x * 2);
-    let frame_h = CONTENT_HEIGHT - (frame_y * 2);
-    draw_rect(
-        framebuffer,
-        CONTENT_WIDTH,
-        CONTENT_HEIGHT,
-        frame_x,
-        frame_y,
-        frame_w,
-        frame_h,
-        0xff77_7777, // red
-    );
-
-    // draw background (paper)
-    let bg_x = 20;
-    let bg_y = 20;
-    let bg_w = CONTENT_WIDTH - (bg_x * 2);
-    let bg_h = CONTENT_HEIGHT - (bg_y * 2);
-    draw_rect(
-        framebuffer,
-        CONTENT_WIDTH,
-        CONTENT_HEIGHT,
-        bg_x,
-        bg_y,
-        bg_w,
-        bg_h,
-        0xffff_ffff, // white
-    );
+    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
 
     // create Saran
     let mut saran = Saran::new(
@@ -282,9 +200,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         timer_port,
         notification,
         present_notification,
-        framebuffer,
-        CONTENT_WIDTH,
-        CONTENT_HEIGHT,
+        surface,
         &mut input_queue,
         window_id,
     );
@@ -296,8 +212,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         saran.window_id,
         0 as Word,
         0 as Word,
-        saran.width as Word,
-        saran.height as Word,
+        saran.surface.width as Word,
+        saran.surface.height as Word,
     );
 
     // main loop
@@ -439,6 +355,7 @@ pub enum InputEvent {
     MouseButton { code: Word, pressed: bool },
     MouseWheel { delta: i32 },
     WindowClose,
+    Resize { width: usize, height: usize },
     Unknown,
 }
 
@@ -461,12 +378,17 @@ pub fn decode_input_event(packed: Word) -> InputEvent {
             delta: value0 as i32,
         },
         nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE => InputEvent::WindowClose,
+        nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE => InputEvent::Resize {
+            width: value0 as u16 as usize,
+            height: value1 as u16 as usize,
+        },
         _ => InputEvent::Unknown,
     }
 }
 
 fn drain_input(saran: &mut Saran) {
     let mut drained = 0usize;
+    let mut dirty = false;
 
     while drained < 256 {
         let Some(packed) = saran.input_queue.pop() else {
@@ -474,16 +396,44 @@ fn drain_input(saran: &mut Saran) {
         };
         let event = decode_input_event(packed);
         match event {
+            InputEvent::Resize { width, height } => {
+                match saran.surface.resize_with(
+                    saran.honoka_port,
+                    saran.window_id,
+                    width,
+                    height,
+                    |old, new| {
+                        draw_paper(new);
+                        let width = old.width.min(new.width).saturating_sub(40);
+                        let height = old.height.min(new.height).saturating_sub(40);
+                        for row in 20..20 + height {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    (old.pixels() as *const u32).add(row * old.width + 20),
+                                    (new.pixels() as *mut u32).add(row * new.width + 20),
+                                    width,
+                                );
+                            }
+                        }
+                    },
+                ) {
+                    Ok(changed) => dirty |= changed,
+                    Err(e) => log_request_error("[Saran] resize failed: ", e),
+                }
+                saran.previous_mouse_x = None;
+                saran.previous_mouse_y = None;
+            }
             InputEvent::MouseMove { dx, dy } => {
                 libnanami::println!("[Saran] mouse move dx={} dy={}", dx, dy);
                 if saran.mouse_pressed {
+                    dirty = true;
                     // draw when mouse pressed
                     if dx >= 0 && dy >= 0 {
                         /*
                         draw_rect(
-                            saran.framebuffer_vaddr,
-                            saran.width,
-                            saran.height,
+                            saran.surface.pixels(),
+                            saran.surface.width,
+                            saran.surface.height,
                             dx as usize,
                             dy as usize,
                             4,
@@ -492,9 +442,9 @@ fn drain_input(saran: &mut Saran) {
                         );
                         */
                         draw_line(
-                            saran.framebuffer_vaddr,
-                            saran.width,
-                            saran.height,
+                            saran.surface.pixels(),
+                            saran.surface.width,
+                            saran.surface.height,
                             saran.previous_mouse_x.unwrap_or(dx as usize),
                             saran.previous_mouse_y.unwrap_or(dy as usize),
                             dx as usize,
@@ -538,6 +488,16 @@ fn drain_input(saran: &mut Saran) {
         }
         drained += 1;
     }
+    if dirty {
+        let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+            saran.honoka_port,
+            saran.window_id,
+            0,
+            0,
+            saran.surface.width,
+            saran.surface.height,
+        );
+    }
 }
 
 fn busy_delay() {
@@ -555,4 +515,37 @@ fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
 
 fn log_request_error(prefix: &str, err: RequestError) {
     libnanami::println!("{}{}", prefix, err);
+}
+
+fn draw_paper(surface: &nanami_services::gfx::honoka::WindowSurface) {
+    draw_rect(
+        surface.pixels(),
+        surface.width,
+        surface.height,
+        0,
+        0,
+        surface.width,
+        surface.height,
+        0x0010_1418,
+    );
+    draw_rect(
+        surface.pixels(),
+        surface.width,
+        surface.height,
+        10,
+        10,
+        surface.width.saturating_sub(20),
+        surface.height.saturating_sub(20),
+        0x0077_7777,
+    );
+    draw_rect(
+        surface.pixels(),
+        surface.width,
+        surface.height,
+        20,
+        20,
+        surface.width.saturating_sub(40),
+        surface.height.saturating_sub(40),
+        0x00ff_ffff,
+    );
 }

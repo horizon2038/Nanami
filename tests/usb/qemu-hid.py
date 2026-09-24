@@ -30,6 +30,8 @@ parser.add_argument('--doom-first', action='store_true', help='Launch graphics D
 parser.add_argument('--doom-fb-size', help='Request a WIDTHxHEIGHT fbdev canvas for --doom-first')
 parser.add_argument('--framebuffer-smoke', action='store_true', help='Run fb-size-test for default, custom, odd and clamped dimensions, then exit')
 parser.add_argument('--desktop-info-smoke', action='store_true', help='Capture the desktop system-info panel after boot, then exit')
+parser.add_argument('--terminal-smoke', action='store_true', help='Exercise native history/editing, BusyBox vi and window resize (requires busybox)')
+parser.add_argument('--gui-resize-smoke', action='store_true', help='Shrink/grow and close every native GUI client')
 parser.add_argument('--framebuffer-case', choices=('all', 'default', 'clamped', 'stress'), default='all', help='Isolate a framebuffer case; clamped checks mapping/remapping only, stress repeats 128 mappings')
 parser.add_argument('--doom-save', action='store_true', help='Save/load a Doom game and record USB write/flush counts (requires --doom-first)')
 parser.add_argument('--writeback-smoke', action='store_true', help='Run writeback-test then retain a private disk for offline persistence checks (requires --bash-smoke)')
@@ -268,6 +270,16 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                 key = {'-': 'minus', '\n': 'ret', ' ': 'spc', '/': 'slash', '.': 'dot'}.get(char, char)
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': key}], 'hold-time': 50})
                 time.sleep(0.8)
+
+        if args.terminal_smoke:
+            from terminal_resize import exercise as exercise_terminal
+            exercise_terminal(qmp, wait_for, serial, logs)
+            raise SystemExit(0)
+
+        if args.gui_resize_smoke:
+            from gui_resize import exercise as exercise_gui
+            exercise_gui(qmp, logs, serial)
+            raise SystemExit(0)
 
         if args.writeback_smoke or args.timer_smoke or args.framebuffer_smoke:
             # boot.img is a disposable private clone, never the user's image.

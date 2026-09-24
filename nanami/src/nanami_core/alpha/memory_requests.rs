@@ -340,6 +340,7 @@ impl Alpha {
             return self.release_shared_memory(entry, reservation);
         }
 
+        self.invalidate_process_copy_mappings(target_pid)?;
         let mut i = 0usize;
         while i < page_count {
             let va = base_va + i * PAGE_SIZE;
@@ -576,8 +577,6 @@ impl Alpha {
         let copy_backward = source_pid == destination_pid
             && destination_va > source_va
             && destination_va < source_end;
-        let src_temp_va = PROCESS_COPY_TEMP_BASE;
-        let dst_temp_va = PROCESS_COPY_TEMP_BASE + PAGE_SIZE;
         let mut copied = 0usize;
         while copied < size_bytes {
             let (src, dst, chunk) = if copy_backward {
@@ -605,7 +604,7 @@ impl Alpha {
             let dst_offset = dst - dst_page;
             let src_frame = self.process_frame_for_page(source_pid, src_page)?;
             let dst_frame = self.process_frame_for_page(destination_pid, dst_page)?;
-            self.map_alpha_temporary_frame(src_frame, src_temp_va)?;
+            let src_temp_va = self.map_process_copy_frame(source_pid, src_frame, None)?;
 
             if src_frame == dst_frame {
                 unsafe {
@@ -615,12 +614,9 @@ impl Alpha {
                         chunk,
                     );
                 }
-                self.unmap_alpha_temporary_frame(src_frame, src_temp_va)?;
             } else {
-                if let Err(error) = self.map_alpha_temporary_frame(dst_frame, dst_temp_va) {
-                    let _ = self.unmap_alpha_temporary_frame(src_frame, src_temp_va);
-                    return Err(error);
-                }
+                let dst_temp_va =
+                    self.map_process_copy_frame(destination_pid, dst_frame, Some(src_temp_va))?;
                 unsafe {
                     ptr::copy_nonoverlapping(
                         (src_temp_va + src_offset) as *const u8,
@@ -628,10 +624,6 @@ impl Alpha {
                         chunk,
                     );
                 }
-                let src_unmap = self.unmap_alpha_temporary_frame(src_frame, src_temp_va);
-                let dst_unmap = self.unmap_alpha_temporary_frame(dst_frame, dst_temp_va);
-                src_unmap?;
-                dst_unmap?;
             }
             copied += chunk;
         }
@@ -753,13 +745,25 @@ impl Alpha {
         frame: CapabilityDescriptor,
         temp_va: usize,
     ) -> Result<(), CapabilityError> {
-        let alpha_as = self.processes.alpha_entry().address_space;
-        match arch::address_space::unmap(alpha_as, frame, temp_va) {
-            Ok(()) | Err(CapabilityError::IllegalOperation) => {
+        match self.unmap_alpha_frame(frame, temp_va) {
+            Err(CapabilityError::IllegalOperation) => {
                 self.processes.alpha_vm_space_mut().forget_frame(temp_va);
                 Ok(())
             }
-            Err(error) => Err(error),
+            result => result,
         }
+    }
+
+    pub(super) fn unmap_alpha_frame(
+        &mut self,
+        frame: CapabilityDescriptor,
+        virtual_address: usize,
+    ) -> Result<(), CapabilityError> {
+        let alpha_as = self.processes.alpha_entry().address_space;
+        arch::address_space::unmap(alpha_as, frame, virtual_address)?;
+        self.processes
+            .alpha_vm_space_mut()
+            .forget_frame(virtual_address);
+        Ok(())
     }
 }

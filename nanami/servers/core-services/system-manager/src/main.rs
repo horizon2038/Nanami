@@ -342,14 +342,21 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
         return Err(RequestError::InvalidArgument);
     }
     write_shm_bytes(vfs.shm, PATH_OFFSET, path);
-    spawn_vfs_path(vfs, path.len(), entry.priority)
+    libnanami::println!("[system-manager] loading {} path={}", entry.name, entry.path);
+    spawn_vfs_path::<true>(vfs, path.len(), entry.priority)
 }
 
-fn spawn_vfs_path(
+// Boot diagnostics must precede blocking calls; logging only errors cannot
+// distinguish a stuck image read from a child waiting for exec-service.
+// Ordinary exec requests compile out these per-stage messages.
+fn spawn_vfs_path<const BOOT_TRACE: bool>(
     vfs: &mut VfsClient,
     path_len: usize,
     priority: Word,
 ) -> Result<Word, RequestError> {
+    if BOOT_TRACE {
+        libnanami::println!("[system-manager] load stage=stat");
+    }
     let (_, size, kind) =
         nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
             .map_err(|error| log_spawn_stage("stat", error))?;
@@ -357,18 +364,31 @@ fn spawn_vfs_path(
         return Err(RequestError::InvalidArgument);
     }
 
+    if BOOT_TRACE {
+        libnanami::println!("[system-manager] load stage=heap bytes={:#x}", size);
+    }
     let (image_base, mapped_size) =
         libnanami::request_heap(size).map_err(|error| log_spawn_stage("heap", error))?;
     if image_base == 0 || mapped_size < size {
         return Err(RequestError::Protocol);
     }
 
+    if BOOT_TRACE {
+        libnanami::println!("[system-manager] load stage=open");
+    }
     let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
         .map_err(|error| log_spawn_stage("open", error))?;
     let mut offset = 0usize;
     while offset < size as usize {
         let remaining = size as usize - offset;
         let chunk = remaining.min(vfs.shm_size as usize);
+        if BOOT_TRACE {
+            libnanami::println!(
+                "[system-manager] load stage=read offset={:#x} bytes={:#x}",
+                offset,
+                chunk
+            );
+        }
         let read = match nanami_services::vfs::vfs_read(
             vfs.port,
             handle,
@@ -395,8 +415,14 @@ fn spawn_vfs_path(
         }
         offset += read;
     }
+    if BOOT_TRACE {
+        libnanami::println!("[system-manager] load stage=close");
+    }
     let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
 
+    if BOOT_TRACE {
+        libnanami::println!("[system-manager] load stage=spawn");
+    }
     libnanami::request_process_spawn_memory(image_base, size, priority)
         .map_err(|error| log_spawn_stage("process", error))
 }
@@ -805,7 +831,7 @@ fn handle_exec_spawn_path(
         );
     }
 
-    match spawn_vfs_path(vfs, path_len, request.arg2) {
+    match spawn_vfs_path::<false>(vfs, path_len, request.arg2) {
         Ok(pid) => {
             register_exec_child(runtime, request.identifier, pid);
             (libnanami::OS_RESPONSE_OK, pid, 0)

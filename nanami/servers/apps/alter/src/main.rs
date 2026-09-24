@@ -27,7 +27,7 @@ const ALTER_ENV: [&[u8]; 4] = [
     b"PATH=/bin:/usr/bin",
     b"HOME=/",
     b"USER=root",
-    b"TERM=nanami",
+    b"TERM=vt100",
 ];
 
 #[panic_handler]

@@ -1,7 +1,7 @@
 use libnanami::{RequestError, Word};
 
-use crate::ansi_escape::{AnsiAction, AnsiTerminal};
-use crate::{append_bytes, append_decimal, copy_bytes, COLS, DEFAULT_TEXT_COLOR};
+use crate::terminal::Terminal;
+use crate::{append_bytes, append_decimal, copy_bytes, COLS};
 
 const SLOT_TERMINAL_SERVICE: Word = 29;
 const SLOT_ALTER_SERVICE: Word = 28;
@@ -18,7 +18,7 @@ pub struct ForegroundApp {
     terminal_id: Word,
     lifecycle_port: Word,
     active_pid: Word,
-    terminal: AnsiTerminal,
+    pub terminal: Terminal,
     pending: [u8; TERMINAL_READ_BYTES],
     pending_pos: usize,
     pending_len: usize,
@@ -27,85 +27,42 @@ pub struct ForegroundApp {
 
 pub struct CommandOutput {
     lines: [[u8; COLS]; OUTPUT_LINES],
-    colors: [[u32; COLS]; OUTPUT_LINES],
-    partial: [bool; OUTPUT_LINES],
     len: usize,
-    clear_screen: bool,
+    screen_changed: bool,
 }
 
 impl CommandOutput {
     pub const fn new() -> Self {
         Self {
             lines: [[0; COLS]; OUTPUT_LINES],
-            colors: [[DEFAULT_TEXT_COLOR; COLS]; OUTPUT_LINES],
-            partial: [false; OUTPUT_LINES],
             len: 0,
-            clear_screen: false,
+            screen_changed: false,
         }
     }
-
     pub fn len(&self) -> usize {
         self.len
     }
-
     pub fn line(&self, index: usize) -> [u8; COLS] {
         self.lines[index]
     }
-
-    pub fn colors(&self, index: usize) -> [u32; COLS] {
-        self.colors[index]
-    }
-
-    pub fn is_partial(&self, index: usize) -> bool {
-        self.partial[index]
-    }
-
-    pub fn clear_screen(&self) -> bool {
-        self.clear_screen
-    }
-
     fn remaining(&self) -> usize {
         self.lines.len().saturating_sub(self.len)
     }
-
-    fn request_clear_screen(&mut self) {
-        self.clear_screen = true;
-    }
-
     pub fn push_bytes(&mut self, bytes: &[u8]) {
-        if self.len >= self.lines.len() {
-            return;
-        }
-        copy_bytes(&mut self.lines[self.len], bytes);
-        self.colors[self.len] = [DEFAULT_TEXT_COLOR; COLS];
-        self.len += 1;
+        let mut line = [0; COLS];
+        copy_bytes(&mut line, bytes);
+        self.push_line(line);
     }
-
     fn push_line(&mut self, line: [u8; COLS]) {
-        self.push_colored_line(line, [DEFAULT_TEXT_COLOR; COLS]);
-    }
-
-    fn push_colored_line(&mut self, line: [u8; COLS], colors: [u32; COLS]) {
-        self.push_colored(line, colors, false);
-    }
-
-    fn push_partial_colored_line(&mut self, line: [u8; COLS], colors: [u32; COLS]) {
-        self.push_colored(line, colors, true);
-    }
-
-    fn push_colored(&mut self, line: [u8; COLS], colors: [u32; COLS], partial: bool) {
-        if self.len >= self.lines.len() {
-            return;
+        if self.len < self.lines.len() {
+            self.lines[self.len] = line;
+            self.len += 1;
         }
-        self.lines[self.len] = line;
-        self.colors[self.len] = colors;
-        self.partial[self.len] = partial;
-        self.len += 1;
     }
 }
 
 impl ForegroundApp {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             connected: false,
             terminal_port: 0,
@@ -113,7 +70,7 @@ impl ForegroundApp {
             terminal_id: 0,
             lifecycle_port: 0,
             active_pid: 0,
-            terminal: AnsiTerminal::new(),
+            terminal: Terminal::new(crate::COLS, crate::ROWS),
             pending: [0; TERMINAL_READ_BYTES],
             pending_pos: 0,
             pending_len: 0,
@@ -163,7 +120,11 @@ impl ForegroundApp {
                 return false;
             }
         }
-        match nanami_services::terminal::terminal_create(self.terminal_port, 80, 24) {
+        match nanami_services::terminal::terminal_create(
+            self.terminal_port,
+            self.terminal.cols() as Word,
+            self.terminal.rows() as Word,
+        ) {
             Ok(id) => {
                 self.terminal_id = id;
                 if let Err(error) = nanami_services::terminal::terminal_attach_output_notification(
@@ -258,21 +219,46 @@ impl ForegroundApp {
     }
 
     pub fn send_input_byte(&mut self, byte: u8) -> bool {
+        self.send_input(&[byte])
+    }
+
+    pub fn send_input(&mut self, bytes: &[u8]) -> bool {
         if !self.connected || self.terminal_id == 0 {
             return false;
         }
+        if bytes.len() > TERMINAL_SHM_BYTES {
+            return false;
+        }
         unsafe {
-            core::ptr::write(self.terminal_shm as *mut u8, byte);
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.terminal_shm as *mut u8,
+                bytes.len(),
+            );
         }
         matches!(
             nanami_services::terminal::terminal_write_input(
                 self.terminal_port,
                 self.terminal_id,
                 0,
-                1,
+                bytes.len() as Word,
             ),
-            Ok(1)
+            Ok(n) if n == bytes.len()
         )
+    }
+
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.terminal.resize(cols, rows);
+        if self.connected {
+            if let Err(error) = nanami_services::terminal::terminal_set_size(
+                self.terminal_port,
+                self.terminal_id,
+                self.terminal.cols(),
+                self.terminal.rows(),
+            ) {
+                libnanami::println!("[shell] terminal resize failed: {}", error);
+            }
+        }
     }
 
     pub fn drain_output(&mut self) -> Option<CommandOutput> {
@@ -281,7 +267,7 @@ impl ForegroundApp {
         }
         let mut out = CommandOutput::new();
         self.drain_terminal_output_into(&mut out);
-        if out.len() == 0 && !out.clear_screen() {
+        if out.len() == 0 && !out.screen_changed {
             None
         } else {
             Some(out)
@@ -291,7 +277,7 @@ impl ForegroundApp {
     pub fn poll_status(&mut self) -> Option<CommandOutput> {
         let mut out = CommandOutput::new();
         self.poll_status_into(&mut out);
-        if out.len() == 0 && !out.clear_screen() {
+        if out.len() == 0 && !out.screen_changed {
             None
         } else {
             Some(out)
@@ -299,54 +285,31 @@ impl ForegroundApp {
     }
 
     fn drain_terminal_output_into(&mut self, out: &mut CommandOutput) -> bool {
-        let mut dirty_line = false;
-        let mut changed = false;
-        let mut exhausted = false;
-        while out.remaining() > 1 {
+        // Bound work per event so a continuous writer cannot starve GUI input.
+        for _ in 0..4096 {
             if self.pending_pos >= self.pending_len {
                 match self.refill_pending() {
                     Ok(true) => {}
-                    Ok(false) => {
-                        exhausted = true;
-                        break;
-                    }
+                    Ok(false) => return true,
                     Err(()) => {
-                        if !self.output_error_reported && out.remaining() != 0 {
+                        if !self.output_error_reported {
                             out.push_bytes(b"[terminal output read failed]");
                             self.output_error_reported = true;
                         }
-                        exhausted = true;
-                        break;
+                        return true;
                     }
                 }
             }
             let byte = self.pending[self.pending_pos];
             self.pending_pos += 1;
-            changed = true;
-            match self.terminal.process_byte(byte) {
-                AnsiAction::None => {}
-                AnsiAction::DirtyLine => {
-                    dirty_line = true;
-                }
-                AnsiAction::FlushLine => {
-                    self.flush_terminal_line(out);
-                    dirty_line = false;
-                }
-                AnsiAction::FlushLineAndRetry => {
-                    self.flush_terminal_line(out);
-                    dirty_line = matches!(self.terminal.process_byte(byte), AnsiAction::DirtyLine);
-                }
-                AnsiAction::ClearScreen => {
-                    out.request_clear_screen();
-                    self.terminal.clear_line();
-                    dirty_line = true;
-                }
+            self.terminal.process_byte(byte);
+            out.screen_changed = true;
+            let (response, len) = self.terminal.take_response();
+            if len != 0 {
+                let _ = self.send_input(&response[..len]);
             }
         }
-        if changed && (dirty_line || self.terminal.col() != 0) && out.remaining() != 0 {
-            out.push_partial_colored_line(self.terminal.line(), self.terminal.colors());
-        }
-        exhausted
+        false
     }
 
     fn refill_pending(&mut self) -> Result<bool, ()> {
@@ -377,11 +340,6 @@ impl ForegroundApp {
         Ok(true)
     }
 
-    fn flush_terminal_line(&mut self, out: &mut CommandOutput) {
-        out.push_colored_line(self.terminal.line(), self.terminal.colors());
-        self.terminal.clear_line();
-    }
-
     fn poll_status_into(&mut self, out: &mut CommandOutput) {
         if self.active_pid == 0 || out.remaining() == 0 {
             return;
@@ -403,7 +361,7 @@ impl ForegroundApp {
             return;
         }
         self.active_pid = 0;
-        self.reset_output_state();
+        // Keep the final screen until Shell has copied it into scrollback.
         if nanami_services::exec::exec_process_reap(lifecycle_port, pid).is_err() {
             let _ = libnanami::request_process_reap(pid);
         }
@@ -434,6 +392,11 @@ impl ForegroundApp {
                 | nanami_services::terminal::TERMINAL_CLEAR_OUTPUT,
         );
         let _ = nanami_services::terminal::terminal_set_echo(
+            self.terminal_port,
+            self.terminal_id,
+            true,
+        );
+        let _ = nanami_services::terminal::terminal_set_output_crlf(
             self.terminal_port,
             self.terminal_id,
             true,

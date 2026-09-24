@@ -10,6 +10,8 @@ mod mappings;
 mod processes;
 #[path = "state/waiters.rs"]
 mod waiters;
+#[path = "state/readiness.rs"]
+pub mod readiness;
 
 use libnanami::{RequestError, Word};
 
@@ -283,6 +285,7 @@ pub struct ManagedProcess {
     pub terminal_line_ready: bool,
     pub terminal_canonical: bool,
     pub terminal_echo: bool,
+    pub terminal_termios: Option<[u8; 36]>,
     pub terminal_read_waiting: bool,
     pub terminal_read_buffer: Word,
     pub terminal_read_len: Word,
@@ -297,6 +300,7 @@ pub struct ManagedProcess {
     pub sleep_waiting: bool,
     pub sleep_deadline: Word,
     pub sleep_context: LinuxSyscallContext,
+    pub readiness_wait: Option<readiness::ReadinessWait>,
     pub mappings: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
 }
 
@@ -341,6 +345,7 @@ impl ManagedProcess {
         terminal_line_ready: false,
         terminal_canonical: true,
         terminal_echo: true,
+        terminal_termios: None,
         terminal_read_waiting: false,
         terminal_read_buffer: 0,
         terminal_read_len: 0,
@@ -355,6 +360,7 @@ impl ManagedProcess {
         sleep_waiting: false,
         sleep_deadline: 0,
         sleep_context: LinuxSyscallContext::EMPTY,
+        readiness_wait: None,
         mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
     };
 }
@@ -427,9 +433,11 @@ pub struct Runtime {
     pub terminal_input_notification_id: Word,
     pub timer_port: Word,
     pub clock_deadline: Option<Word>,
+    pub readiness_changes: Word,
     pub framebuffer_deadline: Option<Word>,
     pub monotonic_ticks: Word,
     pub monotonic_tick_hz: Word,
+    pub realtime_anchor: Option<(Word, Word)>,
     pub network_port: Word,
     pub network_shm: Word,
     pub network_shm_size: Word,
@@ -490,9 +498,11 @@ impl Runtime {
             terminal_input_notification_id: 0,
             timer_port: 0,
             clock_deadline: None,
+            readiness_changes: 0,
             framebuffer_deadline: None,
             monotonic_ticks: 0,
             monotonic_tick_hz: 0,
+            realtime_anchor: None,
             network_port: 0,
             network_shm: 0,
             network_shm_size: 0,

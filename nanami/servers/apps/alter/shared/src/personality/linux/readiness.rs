@@ -1,294 +1,127 @@
 use super::{
-    keyboard_event_ready, mouse_event_ready, pump_input_events, read_target_memory,
-    write_target_memory, write_u64, LinuxFileKind, Runtime, Word, EFAULT, EINVAL, LINUX_FD_MAX,
-    LINUX_PIPE_BYTES, LINUX_POLLFD_BYTES, LINUX_POLLFD_MAX, LINUX_POLLIN, LINUX_POLLNVAL,
-    LINUX_POLLOUT,
+    keyboard_event_ready, mouse_event_ready, pump_input_events, socket_readiness,
+    terminal_readable, LinuxFile, LinuxFileKind, Runtime, Word, EBADF, LINUX_PIPE_BYTES,
+    LINUX_POLLERR, LINUX_POLLHUP, LINUX_POLLIN, LINUX_POLLNVAL, LINUX_POLLOUT, LINUX_POLLPRI,
+    LINUX_POLLRDNORM, LINUX_POLLWRNORM,
 };
+use crate::state::readiness::*;
 
-pub(super) fn sys_poll(
+pub(super) fn scan_readiness(
     runtime: &mut Runtime,
     pid: Word,
-    pollfds: Word,
-    nfds: Word,
+    wait: &mut ReadinessWait,
 ) -> Result<Word, i32> {
-    if pollfds == 0 && nfds != 0 {
-        return Err(EFAULT);
-    }
-    let count = ::core::cmp::min(nfds, LINUX_POLLFD_MAX);
-    let bytes = count.checked_mul(LINUX_POLLFD_BYTES).ok_or(EINVAL)?;
-    read_target_memory(runtime, pid, pollfds, bytes)?;
     let mut ready = 0;
-    let mut index = 0;
-    while index < count {
-        let entry = runtime.posix_shm + index * LINUX_POLLFD_BYTES;
-        let fd = unsafe { ::core::ptr::read_unaligned(entry as *const i32) };
-        let events = unsafe { ::core::ptr::read_unaligned((entry + 4) as *const i16) };
-        let revents = linux_poll_revents(runtime, pid, fd, events);
-        if revents != 0 {
-            ready += 1;
+    let mut input_pumped = false;
+    wait.sources = 0;
+    for entry in &mut wait.entries[..wait.count] {
+        entry.revents = if entry.fd < 0 {
+            0
+        } else if let Some(file) = runtime.linux_file(pid, entry.fd as Word) {
+            wait.sources |= match file.kind {
+                LinuxFileKind::Terminal => READY_TERMINAL,
+                LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
+                LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
+                LinuxFileKind::SocketUdp
+                | LinuxFileKind::SocketTcp
+                | LinuxFileKind::SocketTcpListener
+                | LinuxFileKind::SocketIcmp => READY_NETWORK,
+                _ => 0,
+            };
+            let available = fd_readiness(
+                runtime,
+                pid,
+                entry.fd as Word,
+                file,
+                entry.events,
+                &mut input_pumped,
+            )?;
+            // ERR/HUP/NVAL are reported even when no events were requested.
+            available & (entry.events | LINUX_POLLERR | LINUX_POLLHUP | LINUX_POLLNVAL)
+        } else {
+            LINUX_POLLNVAL
+        };
+        if wait.select && entry.revents & LINUX_POLLNVAL != 0 {
+            return Err(EBADF);
         }
-        unsafe {
-            ::core::ptr::write_unaligned((entry + 6) as *mut i16, revents);
-        }
-        index += 1;
+        let reported = if wait.select {
+            (entry.events & LINUX_POLLIN != 0
+                && entry.revents & (LINUX_POLLIN | LINUX_POLLHUP | LINUX_POLLERR) != 0)
+                || (entry.events & LINUX_POLLOUT != 0
+                    && entry.revents & (LINUX_POLLOUT | LINUX_POLLERR) != 0)
+                || (entry.events & LINUX_POLLPRI != 0 && entry.revents & LINUX_POLLPRI != 0)
+        } else {
+            entry.revents != 0
+        };
+        ready += Word::from(reported);
     }
-    write_target_memory(runtime, pid, pollfds, bytes)?;
     Ok(ready)
 }
 
-pub(super) fn linux_poll_revents(runtime: &mut Runtime, pid: Word, fd: i32, events: i16) -> i16 {
-    if fd < 0 {
-        return LINUX_POLLNVAL;
-    }
-    let Some(file) = runtime.linux_file(pid, fd as Word) else {
-        return LINUX_POLLNVAL;
-    };
-    match file.kind {
+fn fd_readiness(
+    runtime: &mut Runtime,
+    pid: Word,
+    fd: Word,
+    file: LinuxFile,
+    events: i16,
+    input_pumped: &mut bool,
+) -> Result<i16, i32> {
+    let read = LINUX_POLLIN | LINUX_POLLRDNORM;
+    let write = LINUX_POLLOUT | LINUX_POLLWRNORM;
+    Ok(match file.kind {
         LinuxFileKind::Terminal => {
-            let mut revents = 0;
-            if (events & LINUX_POLLIN) != 0 {
-                revents |= LINUX_POLLIN;
-            }
-            if (events & LINUX_POLLOUT) != 0 {
-                revents |= LINUX_POLLOUT;
-            }
-            revents
+            write
+                | if events & read != 0 && terminal_readable(runtime, pid)? {
+                    read
+                } else {
+                    0
+                }
         }
-        LinuxFileKind::Posix => {
-            if (events & LINUX_POLLIN) != 0 {
-                LINUX_POLLIN
-            } else if (events & LINUX_POLLOUT) != 0 {
-                LINUX_POLLOUT
-            } else {
-                0
-            }
+        LinuxFileKind::Posix | LinuxFileKind::VirtualFile | LinuxFileKind::Framebuffer => {
+            read | write
         }
-        LinuxFileKind::PipeRead => {
-            let pipe = runtime.pipe(file.posix_fd);
-            if (events & LINUX_POLLIN) != 0
-                && pipe
-                    .map(|pipe| pipe.len != 0 || pipe.writers == 0)
-                    .unwrap_or(false)
-            {
-                LINUX_POLLIN
-            } else {
-                0
+        LinuxFileKind::VirtualDirectory => read,
+        LinuxFileKind::PipeRead => match runtime.pipe(file.posix_fd) {
+            Some(pipe) => {
+                (if pipe.len != 0 { read } else { 0 })
+                    | (if pipe.writers == 0 { LINUX_POLLHUP } else { 0 })
             }
-        }
-        LinuxFileKind::PipeWrite => {
-            let pipe = runtime.pipe(file.posix_fd);
-            if (events & LINUX_POLLOUT) != 0
-                && pipe
-                    .map(|pipe| pipe.readers != 0 && pipe.len < LINUX_PIPE_BYTES)
-                    .unwrap_or(false)
-            {
-                LINUX_POLLOUT
-            } else {
-                0
+            None => LINUX_POLLNVAL,
+        },
+        LinuxFileKind::PipeWrite => match runtime.pipe(file.posix_fd) {
+            Some(pipe) => {
+                (if pipe.len < LINUX_PIPE_BYTES {
+                    write
+                } else {
+                    0
+                }) | (if pipe.readers == 0 { LINUX_POLLERR } else { 0 })
             }
-        }
+            None => LINUX_POLLNVAL,
+        },
+        LinuxFileKind::SocketNetlink => write | if file.peer_port != 0 { read } else { 0 },
         LinuxFileKind::SocketUdp
         | LinuxFileKind::SocketTcp
         | LinuxFileKind::SocketTcpListener
-        | LinuxFileKind::SocketIcmp
-        | LinuxFileKind::SocketNetlink => {
-            let mut revents = 0;
-            if (events & LINUX_POLLIN) != 0 {
-                revents |= LINUX_POLLIN;
-            }
-            if (events & LINUX_POLLOUT) != 0 && file.kind != LinuxFileKind::SocketTcpListener {
-                revents |= LINUX_POLLOUT;
-            }
-            revents
-        }
-        LinuxFileKind::VirtualDirectory | LinuxFileKind::VirtualFile => {
-            let mut revents = 0;
-            if (events & LINUX_POLLIN) != 0 {
-                revents |= LINUX_POLLIN;
-            }
-            if (events & LINUX_POLLOUT) != 0 && file.kind == LinuxFileKind::VirtualFile {
-                revents |= LINUX_POLLOUT;
-            }
-            revents
-        }
+        | LinuxFileKind::SocketIcmp => socket_readiness(runtime, pid, fd, file)?,
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
-            pump_input_events(runtime);
-            let session_id = file.resource >> 32;
-            let ready = match file.kind {
-                LinuxFileKind::EvdevKeyboard => keyboard_event_ready(runtime, session_id),
-                LinuxFileKind::EvdevMouse => mouse_event_ready(runtime, session_id),
-                _ => false,
+            if events & read == 0 {
+                return Ok(0);
+            }
+            if !*input_pumped {
+                pump_input_events(runtime);
+                *input_pumped = true;
+            }
+            let ready = if file.kind == LinuxFileKind::EvdevKeyboard {
+                keyboard_event_ready(runtime, file.resource >> 32)
+            } else {
+                mouse_event_ready(runtime, file.resource >> 32)
             };
-            if ready && (events & LINUX_POLLIN) != 0 {
-                LINUX_POLLIN
+            if ready {
+                read
             } else {
                 0
             }
         }
-        LinuxFileKind::Framebuffer => events & (LINUX_POLLIN | LINUX_POLLOUT),
         LinuxFileKind::Empty => LINUX_POLLNVAL,
-    }
-}
-
-pub(super) fn sys_select(
-    runtime: &mut Runtime,
-    pid: Word,
-    nfds: Word,
-    readfds: Word,
-    writefds: Word,
-) -> Result<Word, i32> {
-    if nfds == 0 {
-        return Ok(0);
-    }
-    let mut ready = 0;
-    if readfds != 0 {
-        let mut bits = read_fdset_word(runtime, pid, readfds)?;
-        let readable = readable_fdset_mask(runtime, pid, bits);
-        bits = readable;
-        if readable != 0 {
-            ready += count_low_fd_bits(readable);
-        }
-        write_fdset_word(runtime, pid, readfds, bits)?;
-    }
-    if writefds != 0 {
-        let requested = read_fdset_word(runtime, pid, writefds)?;
-        let writable = writable_fdset_mask(runtime, pid, requested);
-        if writable != 0 {
-            ready += count_low_fd_bits(writable);
-        }
-        write_fdset_word(runtime, pid, writefds, writable)?;
-    }
-    Ok(ready)
-}
-
-pub(super) fn read_fdset_word(
-    runtime: &mut Runtime,
-    pid: Word,
-    user_ptr: Word,
-) -> Result<Word, i32> {
-    read_target_memory(runtime, pid, user_ptr, 8)?;
-    Ok(unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const Word) })
-}
-
-pub(super) fn write_fdset_word(
-    runtime: &mut Runtime,
-    pid: Word,
-    user_ptr: Word,
-    value: Word,
-) -> Result<(), i32> {
-    unsafe {
-        write_u64(runtime.posix_shm, value);
-    }
-    write_target_memory(runtime, pid, user_ptr, 8)
-}
-
-pub(super) fn count_low_fd_bits(bits: Word) -> Word {
-    let mut count = 0;
-    let mut bit = 0;
-    while bit < 64 {
-        if (bits & (1usize << bit)) != 0 {
-            count += 1;
-        }
-        bit += 1;
-    }
-    count
-}
-
-pub(super) fn readable_fdset_mask(runtime: &mut Runtime, pid: Word, requested: Word) -> Word {
-    let mut out = 0;
-    let mut fd = 0usize;
-    while fd < LINUX_FD_MAX && fd < 64 {
-        let bit = 1usize << fd;
-        if (requested & bit) != 0 {
-            if let Some(file) = runtime.linux_file(pid, fd as Word) {
-                match file.kind {
-                    LinuxFileKind::Terminal => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::PipeRead => {
-                        if runtime
-                            .pipe(file.posix_fd)
-                            .map(|pipe| pipe.len != 0 || pipe.writers == 0)
-                            .unwrap_or(false)
-                        {
-                            out |= bit;
-                        }
-                    }
-                    LinuxFileKind::Posix => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::VirtualDirectory
-                    | LinuxFileKind::VirtualFile
-                    | LinuxFileKind::Framebuffer => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::EvdevKeyboard => {
-                        pump_input_events(runtime);
-                        if keyboard_event_ready(runtime, file.resource >> 32) {
-                            out |= bit;
-                        }
-                    }
-                    LinuxFileKind::EvdevMouse => {
-                        pump_input_events(runtime);
-                        if mouse_event_ready(runtime, file.resource >> 32) {
-                            out |= bit;
-                        }
-                    }
-                    LinuxFileKind::SocketUdp
-                    | LinuxFileKind::SocketTcp
-                    | LinuxFileKind::SocketTcpListener
-                    | LinuxFileKind::SocketIcmp
-                    | LinuxFileKind::SocketNetlink => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::PipeWrite => {}
-                    LinuxFileKind::Empty => {}
-                }
-            }
-        }
-        fd += 1;
-    }
-    out
-}
-
-pub(super) fn writable_fdset_mask(runtime: &Runtime, pid: Word, requested: Word) -> Word {
-    let mut out = 0;
-    let mut fd = 0usize;
-    while fd < LINUX_FD_MAX && fd < 64 {
-        let bit = 1usize << fd;
-        if (requested & bit) != 0 {
-            if let Some(file) = runtime.linux_file(pid, fd as Word) {
-                match file.kind {
-                    LinuxFileKind::PipeWrite => {
-                        if runtime
-                            .pipe(file.posix_fd)
-                            .map(|pipe| pipe.readers != 0 && pipe.len < LINUX_PIPE_BYTES)
-                            .unwrap_or(false)
-                        {
-                            out |= bit;
-                        }
-                    }
-                    LinuxFileKind::Empty | LinuxFileKind::PipeRead => {}
-                    LinuxFileKind::Terminal | LinuxFileKind::Posix => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::VirtualFile | LinuxFileKind::Framebuffer => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::VirtualDirectory
-                    | LinuxFileKind::EvdevKeyboard
-                    | LinuxFileKind::EvdevMouse => {}
-                    LinuxFileKind::SocketUdp
-                    | LinuxFileKind::SocketTcp
-                    | LinuxFileKind::SocketIcmp
-                    | LinuxFileKind::SocketNetlink => {
-                        out |= bit;
-                    }
-                    LinuxFileKind::SocketTcpListener => {}
-                }
-            }
-        }
-        fd += 1;
-    }
-    out
+    })
 }

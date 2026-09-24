@@ -189,6 +189,9 @@ impl PreparedTimer {
         unsafe {
             write64(self.resource, REG_INTERRUPT_STATUS, 1);
         }
+        // Keep the enabled state so arm(None) still disables the comparator.
+        // The fired comparator must not qualify for the unchanged-alarm path.
+        self.comparator = 0;
     }
 
     pub fn arm(&mut self, deadline: Option<u64>) -> Result<(), RequestError> {
@@ -201,10 +204,13 @@ impl PreparedTimer {
             }
             return Ok(());
         }
-        let now = self.counter();
-        if self.armed && self.deadline == deadline && now < self.comparator {
+        // The service samples now() for every event before arming. Reuse that
+        // observation when the existing comparator is still in the future.
+        // Actual comparator programming below always obtains fresh samples.
+        if self.armed && self.deadline == deadline && self.clock.last_cycles() < self.comparator {
             return Ok(());
         }
+        let now = self.counter();
         // A 32-bit counter needs wrap maintenance even when clients are idle;
         // a 32-bit comparator also needs bounded steps for distant deadlines.
         let limit = if self.comparator_wide {

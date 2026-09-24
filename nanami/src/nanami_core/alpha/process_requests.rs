@@ -473,6 +473,13 @@ impl Alpha {
     }
 
     pub(super) fn cleanup_failed_spawn(&mut self, pid: usize, root_slot: usize) {
+        if let Err(error) = self.invalidate_process_copy_mappings(pid) {
+            error!(
+                "[proc.err] copy window cleanup failed pid={} err={:?}",
+                pid, error
+            );
+            return;
+        }
         let _ = arch::node::revoke(self.root.root_descriptor, root_slot as Word);
         let _ = arch::node::remove(self.root.root_descriptor, root_slot as Word);
 
@@ -1005,6 +1012,7 @@ impl Alpha {
         pid: usize,
         target: crate::nanami_core::process::ProcessEntry,
     ) -> Result<(), CapabilityError> {
+        self.invalidate_process_copy_mappings(pid)?;
         let allocations =
             self.processes
                 .reset_runtime_memory_for_exec(pid, 0, 0, USER_HEAP_LIMIT)?;
@@ -1169,6 +1177,7 @@ impl Alpha {
         if !entry.exited {
             return Err(CapabilityError::IllegalOperation);
         }
+        self.invalidate_process_copy_mappings(pid)?;
         arch::node::revoke(self.root.root_descriptor, entry.root_slot as Word)?;
         arch::node::remove(self.root.root_descriptor, entry.root_slot as Word)?;
         let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);

@@ -16,6 +16,7 @@ use block_allocation::*;
 
 mod file_io;
 use file_io::*;
+mod truncate;
 
 use core::cmp::min;
 use core::ptr;
@@ -321,6 +322,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
             | nanami_services::vfs::VFS_REQUEST_REMOVE
             | nanami_services::vfs::VFS_REQUEST_LINK
             | nanami_services::vfs::VFS_REQUEST_RENAME
+            | nanami_services::vfs::VFS_REQUEST_FTRUNCATE
     ) {
         if let Err(error) = runtime.block_cache.check_writable() {
             return (map_request_error_to_status(error), 0, 0);
@@ -348,6 +350,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         nanami_services::vfs::VFS_REQUEST_REMOVE => handle_remove(request, runtime),
         nanami_services::vfs::VFS_REQUEST_LINK => handle_link(request, runtime),
         nanami_services::vfs::VFS_REQUEST_RENAME => handle_rename(request, runtime),
+        nanami_services::vfs::VFS_REQUEST_FTRUNCATE => handle_ftruncate(request, runtime),
         _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
@@ -486,8 +489,8 @@ fn handle_open_compound(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (
         if kind == nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY {
             return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
-        if let Err(status) = truncate_inode(runtime, inode_no, &mut inode) {
-            return (status, 0, 0);
+        if let Err(error) = truncate::resize_inode(runtime, inode_no, &mut inode, 0) {
+            return (map_request_error_to_status(error), 0, 0);
         }
     }
     match alloc_handle(runtime, request.identifier, inode_no, inode) {
@@ -910,7 +913,7 @@ fn write_inode(
     let p = runtime.block_shm as usize + in_block;
     w16_mem(p + 0, inode.mode);
     w32_mem(p + 4, inode.size);
-    w32_mem(p + 24, sectors);
+    w32_mem(p + 28, sectors);
     w16_mem(p + 26, inode.links_count);
     let mut i = 0usize;
     while i < EXT2_INODE_BLOCK_POINTERS {
@@ -1805,25 +1808,6 @@ fn free_inode_blocks(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<(), 
             first += 1;
         }
         free_block(runtime, double_block)?;
-    }
-    Ok(())
-}
-
-fn truncate_inode(
-    runtime: &mut Ext2Runtime,
-    inode_no: u32,
-    inode: &mut Ext2Inode,
-) -> Result<(), Word> {
-    free_inode_blocks(runtime, *inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-    inode.size = 0;
-    inode.block = [0; EXT2_INODE_BLOCK_POINTERS];
-    write_inode(runtime, inode_no, *inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-    let mut i = 1usize;
-    while i < runtime.handles.len() {
-        if runtime.handles[i].active && runtime.handles[i].inode == inode_no {
-            runtime.handles[i].size = 0;
-        }
-        i += 1;
     }
     Ok(())
 }

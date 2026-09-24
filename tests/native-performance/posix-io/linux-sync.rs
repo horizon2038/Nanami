@@ -2,6 +2,8 @@
 use super::*;
 const EBADF: i32 = 9;
 const EINVAL: i32 = 22;
+const LINUX_O_RDONLY: Word = 0;
+const LINUX_O_ACCMODE: Word = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinuxFileKind {
     Posix,
@@ -40,6 +42,33 @@ fn map_request_error(_error: RequestError) -> i32 {
 }
 #[path = "../../../nanami/servers/apps/alter/shared/src/personality/linux/sync.rs"]
 mod production;
+#[path = "../../../nanami/servers/apps/alter/shared/src/personality/linux/truncate.rs"]
+mod truncate;
+
+#[test]
+fn ftruncate_validates_access_and_signed_length_before_ipc() {
+    let mut runtime = runtime(LinuxFileKind::Posix, 0);
+    assert_eq!(truncate::sys_ftruncate(&mut runtime, 42, 99, 1), Err(EBADF));
+    assert_eq!(truncate::sys_ftruncate(&mut runtime, 42, 7, 1), Err(EINVAL));
+    runtime.file.resource = 2;
+    assert_eq!(
+        truncate::sys_ftruncate(&mut runtime, 42, 7, usize::MAX),
+        Err(EINVAL)
+    );
+    runtime.file.kind = LinuxFileKind::VirtualFile;
+    assert_eq!(truncate::sys_ftruncate(&mut runtime, 42, 7, 1), Err(EINVAL));
+    BACKEND.with(|backend| assert!(backend.borrow().calls.is_empty()));
+    runtime.file.kind = LinuxFileKind::Posix;
+    assert_eq!(truncate::sys_ftruncate(&mut runtime, 42, 7, 1234), Ok(0));
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.calls[0].code, posix::POSIX_REQUEST_FTRUNCATE);
+        assert_eq!(backend.calls[0].handle, 8);
+        assert_eq!(backend.calls[0].buffer, 1234);
+    });
+    BACKEND.with(|backend| backend.borrow_mut().result = Some(Err(RequestError::Transport)));
+    assert_eq!(truncate::sys_ftruncate(&mut runtime, 42, 7, 0), Err(5));
+}
 
 fn runtime(kind: LinuxFileKind, resource: Word) -> Runtime {
     reset();

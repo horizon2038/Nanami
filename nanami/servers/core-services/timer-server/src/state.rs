@@ -37,6 +37,7 @@ impl PendingAsyncTimer {
 pub(super) struct TimerState {
     pub(super) ticks: u64,
     pub(super) timer_started: bool,
+    pub(super) clock_sampled: bool,
     pub(super) schedule_count: usize,
     pub(super) fire_count: usize,
     pub(super) client_notifications: [ClientNotificationEntry; MAX_CLIENT_NOTIFICATIONS],
@@ -48,6 +49,7 @@ impl TimerState {
         Self {
             ticks: 0,
             timer_started: false,
+            clock_sampled: false,
             schedule_count: 0,
             fire_count: 0,
             client_notifications: [ClientNotificationEntry::EMPTY; MAX_CLIENT_NOTIFICATIONS],

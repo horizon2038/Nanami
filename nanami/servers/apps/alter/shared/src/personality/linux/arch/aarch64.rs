@@ -78,6 +78,7 @@ pub const SYS_MPROTECT: Word = 226;
 pub const SYS_MSYNC: Word = 227;
 pub const SYS_FSYNC: Word = 82;
 pub const SYS_FDATASYNC: Word = 83;
+pub const SYS_FTRUNCATE: Word = 46;
 pub const SYS_SYNC: Word = 162;
 pub const SYS_SYNCFS: Word = 267;
 pub const SYS_MADVISE: Word = 233;

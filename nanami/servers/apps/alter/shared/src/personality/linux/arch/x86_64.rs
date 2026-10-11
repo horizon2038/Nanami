@@ -2,6 +2,7 @@ use libnanami::Word;
 
 pub const SYS_READ: Word = 0;
 pub const SYS_WRITE: Word = 1;
+pub const SYS_SENDFILE: Word = 40;
 pub const SYS_OPEN: Word = 2;
 pub const SYS_CLOSE: Word = 3;
 pub const SYS_STAT: Word = 4;

@@ -28,6 +28,9 @@ pub(super) fn sys_virtual_getdents(
             8,
         ) as usize;
         if out + reclen > count as usize || out + reclen > runtime.posix_shm_size as usize {
+            if out == 0 {
+                return Err(EINVAL);
+            }
             break;
         }
         unsafe {
@@ -53,12 +56,12 @@ pub(super) fn sys_virtual_getdents(
         out += reclen;
         index += 1;
     }
+    if out != 0 {
+        write_target_memory(runtime, pid, user_buffer, out as Word)?;
+    }
     file.offset = index as Word;
     if !runtime.set_linux_file(pid, fd, file) {
         return Err(EBADF);
-    }
-    if out != 0 {
-        write_target_memory(runtime, pid, user_buffer, out as Word)?;
     }
     Ok(out as Word)
 }
@@ -83,11 +86,21 @@ pub(super) fn sys_virtual_read(
     }
     let memory_text;
     let memory_text_len;
+    let mut network_text;
+    let mut resolver_text;
     let image_name;
     let bytes = if node == VirtualNode::ProcMemInfo {
         let info = libnanami::request_nanami_info_memory().map_err(map_request_error)?;
         (memory_text, memory_text_len) = format_proc_meminfo(info.total_bytes, info.free_bytes);
         &memory_text[..memory_text_len]
+    } else if node == VirtualNode::ProcNetArp {
+        network_text = [0u8; 4096];
+        let len = super::proc_net::read_arp(runtime, &mut network_text)?;
+        &network_text[..len]
+    } else if node == VirtualNode::ResolvConf {
+        resolver_text = [0u8; 64];
+        let len = super::resolver::read_resolv_conf(runtime, &mut resolver_text)?;
+        &resolver_text[..len]
     } else if node == VirtualNode::ProcSelfExe {
         let process = runtime.managed_process(pid).ok_or(ESRCH)?;
         image_name = process.image_name;
@@ -191,6 +204,15 @@ pub(super) fn open_virtual_path(
             Ok(None)
         };
     };
+    open_virtual_node(runtime, pid, node, linux_flags).map(Some)
+}
+
+pub(super) fn open_virtual_node(
+    runtime: &mut Runtime,
+    pid: Word,
+    node: VirtualNode,
+    linux_flags: Word,
+) -> Result<Word, i32> {
     if (linux_flags & LINUX_O_DIRECTORY) != 0 && !node.is_directory() {
         return Err(ENOTDIR);
     }
@@ -209,6 +231,18 @@ pub(super) fn open_virtual_path(
         0
     } | (linux_flags & LINUX_O_NONBLOCK);
     let file = match node {
+        VirtualNode::Root => {
+            let root = super::guest_root_for_process(runtime, pid)?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(root.as_ptr(), runtime.posix_shm as *mut u8, root.len());
+            }
+            let backing = super::posix::posix_open(
+                runtime.posix_port, 0, root.len() as Word, super::posix::POSIX_O_DIRECTORY,
+            ).map_err(super::map_path_request_error)?;
+            let mut file = LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, node.id(), fd_flags);
+            file.posix_fd = backing;
+            file
+        }
         VirtualNode::DevTty => LinuxFile::terminal(),
         VirtualNode::DevNull | VirtualNode::DevZero => {
             LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)
@@ -240,8 +274,13 @@ pub(super) fn open_virtual_path(
         }
         _ => LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags),
     };
-    runtime
-        .allocate_linux_file(pid, file, 0)
-        .map(Some)
-        .ok_or(EMFILE)
+    match runtime.allocate_linux_file(pid, file, 0) {
+        Some(fd) => Ok(fd),
+        None => {
+            if file.has_posix_backend() {
+                let _ = super::posix::posix_close(runtime.posix_port, file.posix_fd);
+            }
+            Err(EMFILE)
+        }
+    }
 }

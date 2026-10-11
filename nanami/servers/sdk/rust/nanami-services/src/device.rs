@@ -6,6 +6,93 @@ pub const DEVICE_MANAGER_SERVICE: &str = "device-manager";
 pub const DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE: Word = 0xd001;
 pub const DEVICE_MANAGER_REQUEST_USB_CONTROLLER: Word = 0xd002;
 pub const DEVICE_MANAGER_REQUEST_STORAGE_PROBE: Word = 0xd003;
+pub const DEVICE_MANAGER_REQUEST_ACPI_RSDP: Word = 0xd004;
+pub const DEVICE_MANAGER_REQUEST_USB_IRQ: Word = 0xd005;
+pub const DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE: Word = 0xd006;
+pub const DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT: Word = 0xd007;
+pub const ACPI_ROUTE_NOTIFICATION: Word = 1;
+
+/// None means ACPI resolution is still in progress; Some(None) means no route.
+pub fn usb_irq(
+    service: CapabilityDescriptor,
+    index: Word,
+) -> Result<Option<Option<Word>>, RequestError> {
+    let (status, ready, irq) =
+        call_port(service, DEVICE_MANAGER_REQUEST_USB_IRQ, index, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if ready > 1 || irq >= 24 {
+        return Err(RequestError::Protocol);
+    }
+    Ok((ready != 0).then_some((irq != 0).then_some(irq)))
+}
+
+/// Only acpi-server can inspect unresolved boot-selected USB PCI functions.
+pub fn usb_pci_route(
+    service: CapabilityDescriptor,
+    index: Word,
+) -> Result<Option<(Word, u8)>, RequestError> {
+    let (status, address, pin) = call_port(
+        service,
+        DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE,
+        index,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if pin == 0 {
+        return Ok(None);
+    }
+    if address & !0x00ff_1f07 != 0 || pin > 4 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(Some((address, pin as u8)))
+}
+
+pub fn report_usb_irq(
+    service: CapabilityDescriptor,
+    index: Word,
+    irq: Option<Word>,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service,
+        DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT,
+        index,
+        irq.unwrap_or(0),
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+/// RSDP is delegated only to the boot-selected ACPI server.
+pub fn acpi_rsdp(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
+    let (status, rsdp, _) = call_port(
+        service_port,
+        DEVICE_MANAGER_REQUEST_ACPI_RSDP,
+        0,
+        0,
+        0,
+        0,
+        1,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if rsdp == 0 {
+        return Err(RequestError::Unsupported);
+    }
+    Ok(rsdp)
+}
 pub const STORAGE_PENDING: Word = 0;
 pub const STORAGE_SELECTED: Word = 1;
 pub const STORAGE_NOT_SELECTED: Word = 2;
@@ -97,7 +184,7 @@ pub fn usb_controller(
     }
     let bytes = details & !4095;
     let irq = details & 4095;
-    if physical & 4095 != 0 || !bytes.is_power_of_two() || bytes > 0x100000 || irq >= 16 {
+    if physical & 4095 != 0 || !bytes.is_power_of_two() || bytes > 0x100000 || irq >= 24 {
         return Err(RequestError::Protocol);
     }
     Ok(Some(UsbControllerResource {

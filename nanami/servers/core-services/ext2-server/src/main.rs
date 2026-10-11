@@ -29,7 +29,7 @@ use block_connection::connect_block_device;
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
-const BLOCK_SHM_BYTES: Word = 0x4000;
+const BLOCK_SHM_BYTES: Word = nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES;
 const BLOCK_READ_RETRY_LIMIT: usize = 4;
 const MAX_SESSIONS: usize = 16;
 const MAX_DELEGATED_SESSIONS: usize = 16;
@@ -202,6 +202,7 @@ struct Ext2Runtime {
     handles: [FileHandle; MAX_HANDLES],
     block_cache: block_cache::BlockCache,
     writeback: writeback::Writeback,
+    frozen_by: Option<Word>,
     inode_cache: [CachedInode; EXT2_INODE_CACHE_ENTRIES],
     inode_cache_next: usize,
     dentry_cache: [CachedDentry; EXT2_DENTRY_CACHE_ENTRIES],
@@ -247,8 +248,13 @@ fn nanami_main() -> libnanami::NanamiResult {
         sessions: [ClientSession::EMPTY; MAX_SESSIONS],
         delegated_sessions: [DelegatedSession::EMPTY; MAX_DELEGATED_SESSIONS],
         handles: [FileHandle::EMPTY; MAX_HANDLES],
-        block_cache: block_cache::BlockCache::new(block_size, EXT2_BLOCK_CACHE_BUDGET, block_shm_size),
+        block_cache: block_cache::BlockCache::new(
+            block_size,
+            EXT2_BLOCK_CACHE_BUDGET,
+            block_shm_size,
+        ),
         writeback: writeback::Writeback::new(timer_port),
+        frozen_by: None,
         inode_cache: [CachedInode::EMPTY; EXT2_INODE_CACHE_ENTRIES],
         inode_cache_next: 0,
         dentry_cache: [CachedDentry::EMPTY; EXT2_DENTRY_CACHE_ENTRIES],
@@ -265,9 +271,17 @@ fn nanami_main() -> libnanami::NanamiResult {
     let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut pending = (libnanami::OS_RESPONSE_OK, 0, 0);
     let mut has_reply = false;
+    let mut request_sequence = 0usize;
     loop {
         let event = if has_reply {
             has_reply = false;
+            if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+                libnanami::println!(
+                    "[vfs.trace] reply-receive seq={} status={:#x}",
+                    request_sequence,
+                    pending.0
+                );
+            }
             match libnanami::ipc::service_reply_receive_event(
                 service_port,
                 pending.0,
@@ -289,7 +303,25 @@ fn nanami_main() -> libnanami::NanamiResult {
 
         match event {
             ServiceEvent::Request(request) => {
+                if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+                    request_sequence = request_sequence.wrapping_add(1);
+                    libnanami::println!(
+                        "[vfs.trace] request seq={} pid={} code={:#x} arg0={:#x} arg1={:#x}",
+                        request_sequence,
+                        request.identifier,
+                        request.code,
+                        request.arg0,
+                        request.arg1
+                    );
+                }
                 pending = handle_request(request, &mut runtime);
+                if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+                    libnanami::println!(
+                        "[vfs.trace] handled seq={} status={:#x}",
+                        request_sequence,
+                        pending.0
+                    );
+                }
                 if let Err(error) = writeback::after_request(&mut runtime) {
                     pending = (map_request_error_to_status(error), 0, 0);
                 }
@@ -324,11 +356,14 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
             | nanami_services::vfs::VFS_REQUEST_RENAME
             | nanami_services::vfs::VFS_REQUEST_FTRUNCATE
     ) {
-        if let Err(error) = runtime.block_cache.check_writable() {
+        if let Err(error) = writeback::check_writable(runtime) {
             return (map_request_error_to_status(error), 0, 0);
         }
     }
     match request.code {
+        nanami_services::vfs::VFS_REQUEST_FREEZE | nanami_services::vfs::VFS_REQUEST_THAW => {
+            writeback::handle_freeze(request, runtime)
+        }
         nanami_services::vfs::VFS_REQUEST_FSYNC | nanami_services::vfs::VFS_REQUEST_SYNC => {
             writeback::handle_sync(request, runtime)
         }
@@ -511,6 +546,9 @@ fn handle_stat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
     let Some(session) = find_session(runtime, request.identifier) else {
         return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
+    if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+        libnanami::println!("[vfs.trace] stat lookup begin");
+    }
     let Some(inode_no) = lookup_path(
         runtime,
         session,
@@ -519,6 +557,9 @@ fn handle_stat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
     ) else {
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
+    if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+        libnanami::println!("[vfs.trace] stat inode begin inode={}", inode_no);
+    }
     let Ok(inode) = read_inode(runtime, inode_no) else {
         return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };

@@ -2,6 +2,7 @@ mod bulk;
 mod capabilities;
 mod dma;
 mod enumerate;
+mod events;
 mod hid;
 mod init;
 mod poll;
@@ -10,6 +11,7 @@ pub mod registers;
 pub mod ring;
 mod storage;
 mod transfer;
+mod wait;
 
 pub use storage::Disk;
 
@@ -25,13 +27,19 @@ use core::sync::atomic::{fence, Ordering};
 use dma::Dma;
 use libnanami::{RequestError, Word};
 use registers::*;
-use ring::{Consumer, Producer, Trb, IOC};
+use ring::{Producer, Trb, IOC};
 
 const MAX_SLOTS: usize = 16;
 const MAX_INTERFACES: usize = 4;
 const BULK_BASE: usize = (4 + 2 * MAX_INTERFACES) * 4096;
-const SLOT_BYTES: usize = BULK_BASE + 0xc000;
+// Two bulk rings, BOT scratch, then one aligned data buffer with alignment slack.
+const SLOT_BYTES: usize = BULK_BASE + 0x3000 + 2 * crate::usb::mass_storage::DATA_BYTES - 4096;
 const SLOT_BASE: usize = 0x4000;
+const _: () = assert!(
+    crate::usb::mass_storage::DATA_BYTES == 0x10000
+        && nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
+            <= crate::usb::mass_storage::DATA_BYTES
+);
 
 struct Endpoint {
     dci: u8,
@@ -66,7 +74,8 @@ pub struct Controller {
     dma: Dma,
     _scratch: Option<Dma>,
     command_ring: Producer,
-    events: Consumer,
+    events: events::Events,
+    interrupts_enabled: bool,
     slots: Vec<Option<Device>>,
     context_bytes: usize,
     ports: usize,
@@ -120,12 +129,7 @@ impl Controller {
         unsafe { write(self.doorbells, slot as usize * 4, dci as u32) };
     }
     fn event(&mut self) -> Option<Trb> {
-        let event = self.events.pop()?;
-        // Advance ERDP including EHB. Device ownership of consumed event entries
-        // resumes only after the event fields have been acquired.
-        fence(Ordering::SeqCst);
-        unsafe { write64(self.interrupter, 0x18, self.events.next_physical() | 8) };
-        Some(event)
+        self.events.pop(self.interrupter)
     }
     fn dispatch(&mut self, event: Trb, input: &mut Input) {
         // Synchronous storage/control temporarily borrows a composite device.
@@ -200,7 +204,10 @@ impl Controller {
                     self.doorbell(slot as u8, dci);
                 }
             }
-            37 => self.fail(input), // Host Controller Event (e.g. event-ring overrun).
+            37 => {
+                libnanami::println!("[usb-server] host controller event code={}", event.code());
+                self.fail(input);
+            }
             _ => {}
         }
     }
@@ -231,8 +238,21 @@ impl Controller {
         }
     }
     fn fail(&mut self, input: &mut Input) {
-        self.storage_changed |= self.running;
+        if !self.running {
+            return;
+        }
+        self.storage_changed = true;
         self.running = false;
+        let (command, status, iman) = unsafe {
+            (
+                read(self.op, USBCMD),
+                read(self.op, USBSTS),
+                read(self.interrupter, 0),
+            )
+        };
+        let erdp = unsafe {
+            u64::from(read(self.interrupter, 0x18)) | u64::from(read(self.interrupter, 0x1c)) << 32
+        };
         // Do not free or reuse DMA memory even if this controller cannot halt.
         unsafe { write(self.op, USBCMD, 0) };
         for device in self.slots.iter_mut().flatten() {
@@ -241,7 +261,19 @@ impl Controller {
                 endpoint.mouse.release(|event| input.emit(event));
             }
         }
-        libnanami::print!("[usb-server] controller stopped after fatal error\n");
+        libnanami::println!(
+            "[usb-server] controller stopped: USBCMD={:#x} USBSTS={:#x} IMAN={:#x} irq-enabled={}",
+            command,
+            status,
+            iman,
+            self.interrupts_enabled
+        );
+        libnanami::println!(
+            "[usb-server] event ring ERDP={:#x} next={:#x}",
+            erdp,
+            self.events.dequeue()
+        );
+        self.interrupts_enabled = false;
     }
     fn command(&mut self, trb: Trb, input: &mut Input) -> Result<Trb, RequestError> {
         if !self.running {
@@ -252,46 +284,44 @@ impl Controller {
             .submit(&[trb])
             .ok_or(RequestError::Protocol)?;
         self.doorbell(0, 0);
-        for _ in 0..1000 {
-            for _ in 0..ring::ENTRIES {
-                let Some(event) = self.event() else {
-                    break;
-                };
-                if event.kind() == 33 && event.parameter & !15 == pointer {
-                    self.command_ring.complete();
-                    if event.code() != 1 {
-                        libnanami::println!(
-                            "[usb-server] command {} failed code={}",
-                            trb.kind(),
-                            event.code()
-                        );
-                        return Err(RequestError::Protocol);
-                    }
-                    return Ok(event);
+        self.wait_completion(1000, input, |this, input, event| {
+            if event.kind() == 33 && event.parameter & !15 == pointer {
+                this.command_ring.complete();
+                if event.code() != 1 {
+                    libnanami::println!(
+                        "[usb-server] command {} failed code={}",
+                        trb.kind(),
+                        event.code()
+                    );
+                    return Err(RequestError::Protocol);
                 }
-                self.dispatch(event, input);
+                return Ok(Some(event));
             }
-            self.delay(1)?;
-        }
-        self.fail(input);
-        Err(RequestError::Transport)
+            this.dispatch(event, input);
+            Ok(None)
+        })
+        .inspect_err(|error| {
+            libnanami::println!(
+                "[usb-server] command wait failed kind={} slot={} trb={:#x}: {}",
+                trb.kind(),
+                trb.slot(),
+                pointer,
+                error
+            );
+        })
     }
     pub fn poll(&mut self, input: &mut Input) {
         if !self.running {
             return;
         }
-        // Acknowledge the interrupt source before rearming the kernel IRQ, then
-        // recheck the event ring in the server loop to close the masked window.
-        unsafe {
-            write(self.op, USBSTS, 1 << 3);
-            write(self.interrupter, 0, if self.irq.is_some() { 3 } else { 1 });
-        }
+        self.events.begin(self.op, self.interrupter);
         for _ in 0..ring::ENTRIES {
             let Some(event) = self.event() else {
                 break;
             };
             self.dispatch(event, input);
         }
+        self.events.finish(self.interrupter);
         if self.dirty {
             self.dirty = false;
             self.scan_ports(input);

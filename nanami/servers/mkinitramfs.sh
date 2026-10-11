@@ -39,7 +39,7 @@ is_supported_on_target() {
     app_name="$1"
     if [ "$NANAMI_TARGET_ARCH" = "aarch64" ]; then
         case "$app_name" in
-            ahci-server|hpet-server|timer-server) return 1 ;;
+            acpi-server|ahci-server|hpet-server|timer-server) return 1 ;;
         esac
     fi
     return 0

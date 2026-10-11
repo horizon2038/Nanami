@@ -7,6 +7,7 @@ use libnanami::{RequestError, Word};
 #[path = "arch.rs"]
 mod arch;
 mod storage;
+mod usb_irq;
 
 const SERVICE_PORT_SLOT: Word = 20;
 
@@ -19,9 +20,12 @@ struct DriverState {
     storage: storage::Selection,
     hpet_pid: Word,
     hpet_mmio_base: Word,
+    acpi_pid: Word,
+    acpi_rsdp: Word,
     usb_pid: Word,
     usb_controllers: [Option<nanami_services::device::UsbControllerResource>; 4],
     usb_count: usize,
+    usb_routes: usb_irq::Routes,
 }
 
 #[panic_handler]
@@ -39,6 +43,39 @@ fn spawn(image: &str) -> Result<Word, RequestError> {
 
 fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE
+        | nanami_services::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => state
+            .usb_routes
+            .handle(request, state.acpi_pid, &mut state.usb_controllers),
+        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_IRQ => {
+            if state.usb_pid == 0 || request.identifier != state.usb_pid {
+                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+            }
+            if request.arg0 >= state.usb_count {
+                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            }
+            match state.usb_routes.query(request.arg0, state.acpi_pid) {
+                Ok(ready) => (
+                    libnanami::OS_RESPONSE_OK,
+                    ready as Word,
+                    state.usb_controllers[request.arg0]
+                        .unwrap()
+                        .irq
+                        .unwrap_or(0),
+                ),
+                Err(error) => {
+                    libnanami::println!("[driver-manager] ACPI IRQ dispatch failed: {}", error);
+                    (libnanami::OS_RESPONSE_FATAL, 0, 0)
+                }
+            }
+        }
+        nanami_services::device::DEVICE_MANAGER_REQUEST_ACPI_RSDP => {
+            if state.acpi_pid != 0 && request.identifier == state.acpi_pid {
+                (libnanami::OS_RESPONSE_OK, state.acpi_rsdp, 0)
+            } else {
+                (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+            }
+        }
         nanami_services::device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE => {
             match state.storage.report(request.identifier, request.arg0) {
                 Ok(decision) => (libnanami::OS_RESPONSE_OK, decision, 0),
@@ -100,16 +137,22 @@ fn nanami_main() -> libnanami::NanamiResult {
         storage: storage::Selection::new(),
         hpet_pid: 0,
         hpet_mmio_base: selected_timer.hpet_mmio_base,
+        acpi_pid: 0,
+        acpi_rsdp: 0,
         usb_pid: 0,
         usb_controllers: [None; 4],
         usb_count: 0,
+        usb_routes: usb_irq::Routes::default(),
     };
     for index in 0..state.usb_controllers.len() {
         let Some(address) = arch::usb_controller(index)? else {
             break;
         };
         match arch::prepare_usb_controller(address) {
-            Ok(resource) => {
+            Ok((resource, pin)) => {
+                state
+                    .usb_routes
+                    .add(state.usb_count, address, pin, resource.irq);
                 state.usb_controllers[state.usb_count] = Some(resource);
                 state.usb_count += 1;
             }
@@ -138,6 +181,18 @@ fn nanami_main() -> libnanami::NanamiResult {
                 state.storage.pids[1] = pid;
             }
             Err(error) => libnanami::println!("[driver-manager] USB spawn failed: {}", error),
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        state.acpi_rsdp =
+            libnanami::request_driver_platform_info(libnanami::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?
+                .0;
+        if state.acpi_rsdp != 0 {
+            match spawn("./bin/acpi-server") {
+                Ok(pid) => state.acpi_pid = pid,
+                Err(error) => libnanami::println!("[driver-manager] ACPI spawn failed: {}", error),
+            }
         }
     }
     libnanami::print!("[driver-manager] ready\n");

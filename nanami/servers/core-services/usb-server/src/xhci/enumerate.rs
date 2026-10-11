@@ -154,15 +154,16 @@ impl Controller {
         };
         let result = self.configure_device(slot, &mut device, packet, input);
         if let Err(error) = result {
-            if self
-                .command(
-                    Trb {
-                        control: (10 << 10) | (slot as u32) << 24,
-                        ..Trb::default()
-                    },
-                    input,
-                )
-                .is_err()
+            if self.running
+                && self
+                    .command(
+                        Trb {
+                            control: (10 << 10) | (slot as u32) << 24,
+                            ..Trb::default()
+                        },
+                        input,
+                    )
+                    .is_err()
             {
                 self.fail(input);
             }

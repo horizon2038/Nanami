@@ -22,6 +22,13 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let property = decode_control_text(request.arg0, request.arg1);
         let value = decode_control_text(request.arg2, request.arg3);
+        #[cfg(target_arch = "x86_64")]
+        if option_env!("NANAMI_BOOT_PC_TRACE") == Some("1")
+            && bytes_equal(&property, b"boot.pc")
+            && bytes_equal(&value, b"sample")
+        {
+            return self.trace_boot_processes(request.identifier);
+        }
         if bytes_equal(&property, b"os.log") {
             if bytes_equal(&value, b"enable") {
                 crate::nanami_utils::log::set_info_enabled(true);

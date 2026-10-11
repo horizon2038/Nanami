@@ -14,20 +14,50 @@ pub fn timer_service_sleep_milliseconds(
     timer_service_port: CapabilityDescriptor,
     milliseconds: Word,
 ) -> Result<(), RequestError> {
+    if milliseconds == 0 {
+        return Ok(());
+    }
+    let (start, hz) = timer_service_monotonic_ticks(timer_service_port)?;
+    if hz == 0 {
+        return Err(RequestError::Protocol);
+    }
+    let duration = (milliseconds as u128 * hz as u128)
+        .div_ceil(1000)
+        .min(Word::MAX as u128) as Word;
+    let deadline = start.saturating_add(duration);
     timer_service_sleep_async_on_notification_milliseconds(
         timer_service_port,
         milliseconds,
         crate::PROCESS_SLOT_NOTIFICATION,
     )?;
     let notification = crate::ipc::process_slot_descriptor(crate::PROCESS_SLOT_NOTIFICATION);
-    wait_timer_notification(notification)
+    let mut deferred = 0;
+    let result = (|| loop {
+        let identifier = crate::ipc::notification_wait(notification)?;
+        deferred |= identifier & !TIMER_NOTIFICATION_IDENTIFIER_BIT;
+        // The badge is shared by intervals and independent alarms. It is a
+        // wakeup hint, not proof that this particular sleep has expired.
+        if identifier & TIMER_NOTIFICATION_IDENTIFIER_BIT != 0
+            && timer_service_monotonic_ticks(timer_service_port)?.0 >= deadline
+        {
+            return Ok(());
+        }
+    })();
+    // Include combined IRQ/timer badges, and restore on failure as well.
+    crate::ipc::preserve_interrupted_notification(deferred);
+    result
 }
 
+/// Sleep on a notification reserved exclusively for sequential delay requests.
+/// Unlike the bound notification, this must not receive intervals or IRQs.
 pub fn timer_service_sleep_on_notification_milliseconds(
     timer_service_port: CapabilityDescriptor,
     milliseconds: Word,
     notification_slot: Word,
 ) -> Result<(), RequestError> {
+    if notification_slot == crate::PROCESS_SLOT_NOTIFICATION {
+        return timer_service_sleep_milliseconds(timer_service_port, milliseconds);
+    }
     timer_service_sleep_async_on_notification_milliseconds(
         timer_service_port,
         milliseconds,
@@ -50,19 +80,8 @@ pub fn timer_service_sleep_blocking_server_milliseconds(
     timer_service_port: CapabilityDescriptor,
     milliseconds: Word,
 ) -> Result<(), RequestError> {
-    let (status, _, _) = call_port(
-        timer_service_port,
-        TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS,
-        milliseconds,
-        0,
-        0,
-        0,
-        2,
-    )?;
-    if status != OS_RESPONSE_OK {
-        return Err(RequestError::Status(status));
-    }
-    Ok(())
+    // The server acknowledges SLEEP immediately and signals expiration later.
+    timer_service_sleep_milliseconds(timer_service_port, milliseconds)
 }
 
 pub fn timer_service_sleep_seconds(

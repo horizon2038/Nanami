@@ -127,6 +127,33 @@ pub fn net_service_ipv4_config(
     ))
 }
 
+pub fn net_service_ipv4_netmask(service_port: CapabilityDescriptor) -> Result<[u8; 4], RequestError> {
+    let (status, mask, _) = net_service_control_ex(
+        service_port,
+        super::constants::NET_SERVICE_CONTROL_GET_IPV4_NETMASK,
+        0,
+        0,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(unpack_ipv4(mask as u32))
+}
+
+pub fn net_service_arp_snapshot(
+    service_port: CapabilityDescriptor,
+    offset: Word,
+    capacity: Word,
+) -> Result<Word, RequestError> {
+    let (status, count, _) = call_port(
+        service_port, super::NET_SERVICE_REQUEST_ARP_SNAPSHOT, offset, capacity, 0, 0, 3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(count)
+}
+
 pub fn net_service_mac_address(
     service_port: CapabilityDescriptor,
 ) -> Result<[u8; 6], RequestError> {

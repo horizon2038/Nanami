@@ -965,20 +965,42 @@ write_directory(alter_freebsd_usr_bin_block, EXT2_ALTER_FREEBSD_USR_BIN_INO, EXT
     (name, inode, EXT2_FT_REG_FILE) for name, inode, _data in freebsd_binaries
 ])
 
+next_inode = EXT2_FIRST_APP_INO + len(rootfs_binaries) + len(linux_binaries) + len(freebsd_binaries)
+
+def allocate_inode():
+    global next_inode
+    inode = next_inode
+    next_inode += 1
+    mark_inode_used(inode)
+    return inode
+
+def ensure_directory(parent, name, mode=0o755):
+    block, grandparent, entries = directory_records[parent]
+    existing = next((entry for entry in entries if entry[0] == name), None)
+    if existing:
+        if existing[2] != EXT2_FT_DIR:
+            raise SystemExit(f'[ext2-image] rootfs directory collision: {name}')
+        return existing[1]
+    inode = allocate_inode()
+    child_block = alloc_data_block()
+    write_inode(inode, EXT2_S_IFDIR | mode, block_size, 2, [child_block])
+    write_directory(child_block, inode, parent, [])
+    entries.append((name, inode, EXT2_FT_DIR))
+    write_directory(block, parent, grandparent, entries)
+    w16(inode_off(parent) + 26, 2 + sum(entry[2] == EXT2_FT_DIR for entry in entries))
+    gdt[(inode - 1) // inodes_per_group]['used_dirs'] += 1
+    return inode
+
+# BusyBox installs system applets here, even without a host rootfs overlay.
+ensure_directory(EXT2_ALTER_LINUX_INO, 'sbin')
+ensure_directory(EXT2_ALTER_LINUX_USR_INO, 'sbin')
+
 linux_rootfs = os.environ.get('LINUX_ROOTFS_DIR', '')
 if linux_rootfs:
     import stat
     if not os.path.isdir(linux_rootfs):
         raise SystemExit(f'[ext2-image] invalid LINUX_ROOTFS_DIR: {linux_rootfs}')
-    next_inode = EXT2_FIRST_APP_INO + len(rootfs_binaries) + len(linux_binaries) + len(freebsd_binaries)
     directories = {'': EXT2_ALTER_LINUX_INO}
-
-    def allocate_inode():
-        global next_inode
-        inode = next_inode
-        next_inode += 1
-        mark_inode_used(inode)
-        return inode
 
     # Do not follow host symlinks: an absolute guest link could escape the root
     # and accidentally package an unrelated host file.
@@ -996,17 +1018,7 @@ if linux_rootfs:
                 raise SystemExit(f'[ext2-image] unsupported rootfs name: {name!r}')
             existing = next((entry for entry in entries if entry[0] == name), None)
             if stat.S_ISDIR(mode):
-                if existing:
-                    if existing[2] != EXT2_FT_DIR:
-                        raise SystemExit(f'[ext2-image] rootfs path collision: {source}')
-                    inode = existing[1]
-                else:
-                    inode = allocate_inode()
-                    child_block = alloc_data_block()
-                    write_inode(inode, EXT2_S_IFDIR | (mode & 0o777), block_size, 2, [child_block])
-                    write_directory(child_block, inode, parent, [])
-                    entries.append((name, inode, EXT2_FT_DIR))
-                    gdt[(inode - 1) // inodes_per_group]['used_dirs'] += 1
+                inode = ensure_directory(parent, name, mode & 0o777)
                 directories[os.path.join(relative, name)] = inode
                 continue
             if existing:
@@ -1036,15 +1048,16 @@ if linux_rootfs:
         write_directory(block, parent, grandparent, entries)
         w16(inode_off(parent) + 26, 2 + sum(entry[2] == EXT2_FT_DIR for entry in entries))
 
-    # Overlay allocation changed the primary superblock and group counters.
-    w32(s + 12, blocks_count - sum(desc['used_blocks'] for desc in gdt))
-    w32(s + 16, inodes_count - sum(desc['used_inodes'] for desc in gdt))
-    for index, desc in enumerate(gdt):
-        off = gdt_off + index * 32
-        w16(off + 12, desc['count'] - desc['used_blocks'])
-        w16(off + 14, inodes_per_group - desc['used_inodes'])
-        w16(off + 16, desc['used_dirs'])
     print(f'[ext2-image] seeded Linux rootfs tree: {linux_rootfs}')
+
+# Include both the standard directories and optional overlay allocations.
+w32(s + 12, blocks_count - sum(desc['used_blocks'] for desc in gdt))
+w32(s + 16, inodes_count - sum(desc['used_inodes'] for desc in gdt))
+for index, desc in enumerate(gdt):
+    off = gdt_off + index * 32
+    w16(off + 12, desc['count'] - desc['used_blocks'])
+    w16(off + 14, inodes_per_group - desc['used_inodes'])
+    w16(off + 16, desc['used_dirs'])
 
 with open(out, 'wb') as f:
     f.write(image)

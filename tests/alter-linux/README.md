@@ -38,7 +38,91 @@ the printed temporary directory. Repeat with `--smp 1` to check single-core.
 No physical disks are accessed. For interactive testing, run
 `alter /alter/linux/bin/glibc-regression` in Nanami's shell.
 
-Host-only ELF validation and storage startup tests:
+## BusyBox networking regression
+
+Build the freestanding fixture with the static-fork ELF base used by Alter:
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -O2 \
+  -Wl,--image-base=0x400000,-z,norelro,-z,separate-loadable-segments \
+  tests/alter-linux/network.c -o out/alter-glibc-root/bin/network-test
+```
+
+Include `bin/busybox` through `EXTRA_LINUX_BINS`, seed this fixture through
+`LINUX_ROOTFS_DIR`, and rebuild the rootfs (`ROOTFS_REBUILD=1`). Run:
+
+```sh
+python3 tests/alter-linux/qemu-smoke.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --network --program network-test --smp 4
+```
+
+This uses restricted user-mode networking. It verifies repeated `busybox
+--install`, installed hard-link identity and errno, Linux interface ioctls,
+DHCP-derived resolver defaults and explicit-file precedence, loopback/gateway
+ICMP, the real ARP table, and warning-free `ip a`/`ip addr`/`ip link` output
+(including `SIOCGIFTXQLEN`, which returns the software queue length, not the
+driver's TX ring capacity). A separate opt-in test
+uses outbound NAT (no port forwards) for public DNS/ICMP interoperability:
+
+```sh
+python3 tests/alter-linux/qemu-smoke.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img --internet \
+  --program 'busybox nslookup google.com' --program 'busybox ping -c 1 google.com'
+```
+
+Signal delivery remains outside this change: ordinary repeated ping, alarm
+timeouts, and Ctrl-C still depend on the deferred signal implementation.
+ARP inspection and interface queries are supported; ARP/interface mutation,
+IPv6, and a general Linux routing configuration API are not implemented here.
+These tests do not overwrite the supplied image or access physical disks.
+
+Validation (2026-09-24): the network fixture passes with one and four CPUs;
+BusyBox `nslookup google.com` and `ping -c 1 google.com` pass with outbound NAT.
+The host suite passes 370 tests (7 ignored). Hardware has not been retested.
+Separately, read-only `e2fsck -fn` reports pre-existing group-layout, bitmap,
+and reference-count inconsistencies in the built-in image writer. These were
+reproduced with the unmodified writer as well; this change does not claim to
+make generated images pass e2fsck.
+
+## Directory visibility and sendfile regressions
+
+Build the two freestanding fixtures (LLVM with the x86-64 target and LLD):
+
+```sh
+for fixture in directory sendfile; do
+  clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+    -fno-stack-protector -fno-builtin -O2 \
+    -Wl,--image-base=0x400000,-z,norelro,-z,separate-loadable-segments \
+    tests/alter-linux/$fixture.c -o out/alter-glibc-root/bin/$fixture-test
+done
+```
+
+Seed these through `LINUX_ROOTFS_DIR`, with `bin/bash` and `bin/busybox` in
+`EXTRA_LINUX_BINS`. Use a disposable rootfs/image: the fixtures create, rename,
+and delete guest files. Run on snapshots without network access:
+
+```sh
+python3 tests/alter-linux/qemu-smoke.py --image /path/to/test/spencer.img \
+  --program directory-test --program sendfile-test --smp 4
+```
+
+`directory-test` reproduces bash-created files readable by `cat` but absent from
+`ls /` on the old implementation. It checks merged mountpoints, rename/unlink
+visibility, small-buffer pagination, and shared root offsets through dup/seek.
+`sendfile-test` checks explicit/implicit offsets, EOF, a 100-KB transfer, append
+and access-mode errors, bad pointers, and pipe/terminal output. Host sendfile
+tests also inject short output writes and EAGAIN to check input-position
+preservation. Repeat the guest tests with `--smp 1`.
+
+Validation (2026-09-24): both fixtures pass on x86_64 QEMU with one and four
+CPUs. The host suite passes 375 tests (7 ignored), and Alter/Linux builds for
+x86_64 and AArch64. The old image fails the directory fixture specifically at
+the assertion that the newly created file appears in `ls`. Hardware and
+AArch64 runtime behavior have not been tested.
+
+## Host-only ELF validation and storage startup tests
 
 ```sh
 rustc --test -A dead_code tests/alter-linux/elf-tests.rs -o out/alter-elf-tests

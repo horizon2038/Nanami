@@ -27,6 +27,11 @@ pub const NET_SERVICE_REQUEST_CONTROL: Word = 0x3003;
 pub const NET_SERVICE_REQUEST_STATS: Word = 0x3004;
 /// Non-consuming, owner-scoped readiness: arg0=kind, arg1=port/connection ID.
 pub const NET_SERVICE_REQUEST_READINESS: Word = 0x3005;
+/// Read-only ARP snapshot: arg0=SHM offset, arg1=capacity in bytes; returns count.
+/// Records contain IPv4 (4 bytes), MAC (6 bytes), then two reserved zero bytes.
+pub const NET_SERVICE_REQUEST_ARP_SNAPSHOT: Word = 0x3006;
+pub const NET_ARP_ENTRY_BYTES: usize = 12;
+pub const NET_ARP_MAX_ENTRIES: usize = 32;
 pub const NET_READINESS_UDP: Word = 1;
 pub const NET_READINESS_TCP: Word = 2;
 pub const NET_READINESS_LISTENER: Word = 3;
@@ -52,6 +57,7 @@ pub const NET_SERVICE_CONTROL_POLL: Word = 3;
 pub const NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY: Word = 16;
 pub const NET_SERVICE_CONTROL_GET_IPV4_CONFIG: Word = 17;
 pub const NET_SERVICE_CONTROL_GET_MAC: Word = 18;
+pub const NET_SERVICE_CONTROL_GET_IPV4_NETMASK: Word = 19;
 pub const NET_SERVICE_CONTROL_UDP_BIND: Word = 32;
 pub const NET_SERVICE_CONTROL_TCP_BIND: Word = 33;
 pub const NET_SERVICE_CONTROL_UDP_UNBIND: Word = 34;

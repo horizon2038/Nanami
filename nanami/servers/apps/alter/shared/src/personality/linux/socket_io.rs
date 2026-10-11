@@ -269,7 +269,11 @@ pub(super) fn sys_socket_recv(
                     runtime.network_shm,
                     received + LINUX_IPV4_HEADER_LEN,
                     peer_ip,
-                    network_ipv4(runtime)?,
+                    if peer_ip >> 24 == 127 {
+                        0x7f000001
+                    } else {
+                        network_ipv4(runtime)?
+                    },
                     ttl,
                     LINUX_IPPROTO_ICMP as u8,
                 );

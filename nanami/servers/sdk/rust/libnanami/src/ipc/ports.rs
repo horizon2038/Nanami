@@ -65,7 +65,10 @@ pub fn notification_poll(
     notification_poll_zeroed(notification_descriptor).map_err(map_capability_error)
 }
 
-pub(crate) fn preserve_interrupted_notification(identifier: Word) {
+/// Defer a consumed bound-notification badge to the next IPC/event-loop wait.
+/// Call only after leaving the selective wait; replaying it inside that wait
+/// would repeatedly consume the same badge instead of waiting for hardware.
+pub fn preserve_interrupted_notification(identifier: Word) {
     if identifier != 0 {
         PENDING_NOTIFICATION.fetch_or(identifier, Ordering::AcqRel);
     }

@@ -1,5 +1,24 @@
 use super::*;
 
+pub(crate) fn handle_snapshot_request(
+    runtime: &NetRuntime,
+    request: libnanami::ipc::ServiceRequest,
+) -> (Word, Word, Word) {
+    let Some(session) = session_for(runtime, request.identifier) else {
+        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+    };
+    if request.arg0 > session.shm_size || request.arg1 > session.shm_size - request.arg0 {
+        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    let out = unsafe {
+        core::slice::from_raw_parts_mut((session.shm_local + request.arg0) as *mut u8, request.arg1)
+    };
+    match runtime.arp.snapshot(out) {
+        Some(count) => (libnanami::OS_RESPONSE_OK, count, 0),
+        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+    }
+}
+
 pub(crate) fn emit_arp_request(
     runtime: &NetRuntime,
     target_ip: [u8; 4],

@@ -31,7 +31,7 @@ impl Pci {
     }
 }
 
-pub fn prepare(bdf: Word) -> Result<UsbControllerResource, RequestError> {
+pub fn prepare(bdf: Word) -> Result<(UsbControllerResource, u8), RequestError> {
     if bdf & !0x00ff_1f07 != 0 {
         return Err(RequestError::InvalidArgument);
     }
@@ -112,7 +112,11 @@ pub fn prepare(bdf: Word) -> Result<UsbControllerResource, RequestError> {
     let interrupt = pci.read(0x3c)?;
     let line = (interrupt & 0xff) as usize;
     let pin = (interrupt >> 8) as u8;
-    let irq = (pin != 0 && line != 0 && line < 16).then_some(line);
+    let irq = ((1..=4).contains(&pin)
+        && line != 0
+        && line < 24
+        && option_env!("NANAMI_USB_ACPI_IRQ") != Some("1"))
+    .then_some(line);
     pci.write16(4, (command | 6) & !(1 << 10))?;
     libnanami::println!(
         "[driver-manager] USB PCI BAR={:#x} bytes={:#x} INTx={}",
@@ -120,9 +124,12 @@ pub fn prepare(bdf: Word) -> Result<UsbControllerResource, RequestError> {
         bytes,
         line
     );
-    Ok(UsbControllerResource {
-        physical: physical as usize,
-        bytes: bytes as usize,
-        irq,
-    })
+    Ok((
+        UsbControllerResource {
+            physical: physical as usize,
+            bytes: bytes as usize,
+            irq,
+        },
+        pin,
+    ))
 }

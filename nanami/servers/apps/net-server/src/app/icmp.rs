@@ -159,7 +159,8 @@ pub(crate) fn emit_icmp_echo_from_session(
     let payload_len = payload_len as usize;
     if payload_len < 8
         || payload_len > ICMP_PAYLOAD_MAX
-        || payload_offset + payload_len as Word > session.shm_size
+        || payload_offset > session.shm_size
+        || payload_len > session.shm_size - payload_offset
     {
         return Err(RequestError::InvalidArgument);
     }
@@ -170,6 +171,33 @@ pub(crate) fn emit_icmp_echo_from_session(
         (dst_ip_be >> 8) as u8,
         dst_ip_be as u8,
     ];
+    if dst_ip[0] == 127 || dst_ip == runtime.ip {
+        let mut entry = IcmpRxEntry::EMPTY;
+        entry.owner_id = owner_id;
+        entry.identifier = identifier;
+        entry.src_ip = dst_ip;
+        entry.ttl = 64;
+        entry.len = payload_len;
+        let payload = &mut entry.payload[..payload_len];
+        unsafe {
+            ptr::copy_nonoverlapping(
+                (session.shm_local + payload_offset) as *const u8,
+                payload.as_mut_ptr(),
+                payload_len,
+            );
+        }
+        payload[0] = ICMP_ECHO_REPLY;
+        payload[1] = 0;
+        payload[2..4].fill(0);
+        write_u16_be(&mut payload[4..6], identifier);
+        let checksum = checksum16(payload, 0);
+        write_u16_be(&mut payload[2..4], checksum);
+        runtime.icmp_rx.push(entry);
+        if session.rx_notification != 0 {
+            let _ = libnanami::ipc::notification_notify(session.rx_notification);
+        }
+        return Ok(payload_len);
+    }
     let next_hop = next_hop_ip(runtime, dst_ip);
     let dst_mac = if let Some(mac) = arp_lookup(runtime, next_hop) {
         mac

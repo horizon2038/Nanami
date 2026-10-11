@@ -1,0 +1,20 @@
+[package]
+name = "acpi_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+acpi = "=6.1.1"
+libnanami = { path = "../../sdk/rust/libnanami" }
+nanami-services = { path = "../../sdk/rust/nanami-services" }
+
+[patch.crates-io]
+acpi = { path = "../../vendor/acpi" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

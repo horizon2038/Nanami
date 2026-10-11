@@ -103,7 +103,8 @@ mod usb;
 #[test]
 fn bar_probe_restores_address_and_disables_message_interrupts() {
     PCI.with(|pci| *pci.borrow_mut() = FakePci::default());
-    let resource = usb::prepare(0x600).unwrap();
+    let (resource, pin) = usb::prepare(0x600).unwrap();
+    assert_eq!(pin, 1);
     assert_eq!(
         (resource.physical, resource.bytes, resource.irq),
         (0xc1000000, 0x4000, Some(11))
@@ -130,7 +131,7 @@ fn high_mmio_preserves_the_firmware_assigned_64_bit_bar() {
         *pci.borrow_mut() = FakePci::default();
         pci.borrow_mut().config[5] = 8;
     });
-    let resource = usb::prepare(0x600).unwrap();
+    let (resource, _) = usb::prepare(0x600).unwrap();
     assert_eq!((resource.physical, resource.bytes), (0x8c1000000, 0x4000));
     PCI.with(|pci| {
         let pci = pci.borrow();
@@ -162,7 +163,8 @@ fn thirty_two_bit_bar_and_missing_intx_are_supported() {
         pci.config[4] &= !4;
         pci.config[0x3c / 4] = 0xff;
     });
-    let resource = usb::prepare(0x600).unwrap();
+    let (resource, pin) = usb::prepare(0x600).unwrap();
+    assert_eq!(pin, 0);
     assert_eq!((resource.bytes, resource.irq), (0x4000, None));
 }
 
@@ -173,4 +175,40 @@ fn cyclic_pci_capability_list_is_rejected() {
         pci.borrow_mut().config[0x48 / 4] |= 0x4000;
     });
     assert_eq!(usb::prepare(0x600).unwrap_err(), RequestError::Protocol);
+}
+
+#[test]
+fn firmware_ioapic_lines_are_not_limited_to_isa_irqs() {
+    for line in 16..=23 {
+        PCI.with(|pci| {
+            *pci.borrow_mut() = FakePci::default();
+            pci.borrow_mut().config[0x3c / 4] = 0x100 | line;
+        });
+        let (resource, pin) = usb::prepare(0x600).unwrap();
+        assert_eq!(pin, 1);
+        assert_eq!(resource.irq, Some(line as usize));
+    }
+}
+
+#[test]
+fn missing_line_preserves_pin_for_acpi_routing() {
+    for line in [0, 24, 255] {
+        PCI.with(|pci| {
+            *pci.borrow_mut() = FakePci::default();
+            pci.borrow_mut().config[0x3c / 4] = 0x100 | line;
+        });
+        let (resource, pin) = usb::prepare(0x600).unwrap();
+        assert_eq!((resource.irq, pin), (None, 1));
+    }
+}
+
+#[test]
+fn invalid_interrupt_pin_never_enables_irq() {
+    for pin in [0, 5, 255] {
+        PCI.with(|pci| {
+            *pci.borrow_mut() = FakePci::default();
+            pci.borrow_mut().config[0x3c / 4] = pin << 8 | 11;
+        });
+        assert_eq!(usb::prepare(0x600).unwrap().0.irq, None);
+    }
 }

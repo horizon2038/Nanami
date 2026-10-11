@@ -98,6 +98,9 @@ pub(super) fn sys_statx(
     if raw_len == 0 && (flags & LINUX_AT_EMPTY_PATH) != 0 {
         let file = runtime.linux_file(pid, dirfd).ok_or(EBADF)?;
         let stat = match file.kind {
+            _ if file.is_root_directory() => {
+                posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?
+            }
             LinuxFileKind::Terminal => (0, 0, posix::POSIX_FILE_TYPE_CHAR_DEVICE, 5, 0),
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => {
                 (0, 0, POSIX_FILE_TYPE_PIPE, 0, 0)
@@ -137,13 +140,22 @@ pub(super) fn stat_current_path(
     let path =
         unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
     if let Some(node) = virtual_fs::lookup(path, graphics_enabled(runtime, pid)) {
-        return virtual_node_stat_from_node(runtime, pid, node);
+        if node != VirtualNode::Root {
+            return virtual_node_stat_from_node(runtime, pid, node);
+        }
     }
     if is_linux_virtual_path(runtime.posix_shm, len) {
         return Err(ENOENT);
     }
+    let fallback = virtual_fs::fallback_file(path);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_stat(runtime.posix_port, 0, vfs_len).map_err(map_path_request_error)
+    match (posix::posix_stat(runtime.posix_port, 0, vfs_len), fallback) {
+        (
+            Err(libnanami::RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Some(node),
+        ) => virtual_node_stat_from_node(runtime, pid, node),
+        (result, _) => result.map_err(map_path_request_error),
+    }
 }
 
 pub(super) fn sys_fstat(
@@ -166,7 +178,7 @@ pub(super) fn sys_fstat(
         write_linux_pipe_stat(runtime, pid, stat_ptr)?;
         return Ok(0);
     }
-    if matches!(
+    if !file.is_root_directory() && matches!(
         file.kind,
         LinuxFileKind::VirtualDirectory
             | LinuxFileKind::VirtualFile
@@ -178,7 +190,7 @@ pub(super) fn sys_fstat(
         write_linux_stat(runtime, pid, stat_ptr, stat)?;
         return Ok(0);
     }
-    if file.kind != LinuxFileKind::Posix {
+    if !file.has_posix_backend() {
         return Err(EBADF);
     }
     let stat = posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
@@ -218,6 +230,7 @@ pub(super) fn virtual_node_stat_from_node(
             .managed_process(pid)
             .map(|process| (process.image_name_len as Word, 0, 0))
             .ok_or(ESRCH)?,
+        VirtualNode::ResolvConf => (super::resolver::read_resolv_conf(runtime, &mut [0; 64])?, 0, 0),
         _ => (
             virtual_fs::static_file(node)
                 .map(|bytes| bytes.len() as Word)

@@ -2,8 +2,49 @@ use super::*;
 
 const WRITEBACK_DELAY_MS: Word = 1000;
 
+pub(super) fn check_writable(runtime: &Ext2Runtime) -> Result<(), RequestError> {
+    if runtime.frozen_by.is_some() {
+        return Err(RequestError::Status(
+            libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+        ));
+    }
+    runtime.block_cache.check_writable()
+}
+
+pub(super) fn handle_freeze(
+    request: ServiceRequest,
+    runtime: &mut Ext2Runtime,
+) -> (Word, Word, Word) {
+    // Resolve the registered service's PID; the request identifier is minted by
+    // Alpha, not supplied by the caller. No shared data buffer is needed here.
+    if runtime.writeback.power_pid.is_none() {
+        runtime.writeback.power_pid =
+            libnanami::connect_service_by_name_with_pid(nanami_services::power::ACPI_SERVICE, 25)
+                .ok();
+    }
+    if runtime.writeback.power_pid != Some(request.identifier) {
+        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+    }
+    if request.code == nanami_services::vfs::VFS_REQUEST_THAW {
+        if runtime.frozen_by == Some(request.identifier) {
+            runtime.frozen_by = None;
+        }
+        return (libnanami::OS_RESPONSE_OK, 0, 0);
+    }
+    // The server is single-threaded: no write can slip between flush and freeze.
+    match flush_blocks(runtime) {
+        Ok(()) => {
+            runtime.frozen_by = Some(request.identifier);
+            libnanami::println!("[ext2-server] storage synchronized and frozen");
+            (libnanami::OS_RESPONSE_OK, 0, 0)
+        }
+        Err(error) => (map_request_error_to_status(error), 0, 0),
+    }
+}
+
 pub(super) struct Writeback {
     timer: Option<Word>,
+    power_pid: Option<Word>,
     pub(super) armed: bool,
 }
 
@@ -11,6 +52,7 @@ impl Writeback {
     pub(super) fn new(timer: Option<Word>) -> Self {
         Self {
             timer,
+            power_pid: None,
             armed: false,
         }
     }

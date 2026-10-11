@@ -27,6 +27,7 @@ const SLOT_POSIX_SERVICE: Word = 26;
 const SLOT_POSIX_TEST_TIMER_SERVICE: Word = 27;
 const SLOT_EXEC_SERVICE: Word = 31;
 const SLOT_SHELL_TIMER_SERVICE: Word = 30;
+const SLOT_ACPI_SERVICE: Word = 32;
 const WINDOW_X: Word = 90;
 const WINDOW_Y: Word = 78;
 const WINDOW_OPACITY: u8 = 224;
@@ -144,6 +145,7 @@ struct Shell {
     files: file::FileShell,
     exec: exec::ExecShell,
     foreground: foreground::ForegroundApp,
+    acpi_port: Option<Word>,
 }
 
 impl Shell {
@@ -169,6 +171,7 @@ impl Shell {
             files: file::FileShell::new(),
             exec: exec::ExecShell::new(),
             foreground: foreground::ForegroundApp::new(),
+            acpi_port: None,
         }
     }
 
@@ -440,9 +443,34 @@ impl Shell {
         if self.editor.len == 0 {
             return;
         }
+        if bytes_eq(&self.editor.bytes[..self.editor.len], b"shutdown") {
+            if !cfg!(target_arch = "x86_64") {
+                self.push_line_bytes(b"shutdown: ACPI is currently supported on x86_64 only");
+                return;
+            }
+            self.push_line_bytes(b"Synchronizing storage and powering off...");
+            self.repaint_all();
+            self.present_full();
+            let result = (|| {
+                if self.acpi_port.is_none() {
+                    nanami_services::registry::connect_service(
+                        nanami_services::power::ACPI_SERVICE,
+                        SLOT_ACPI_SERVICE,
+                    )?;
+                    self.acpi_port = Some(libnanami::ipc::process_slot_descriptor(SLOT_ACPI_SERVICE));
+                }
+                nanami_services::power::shutdown(self.acpi_port.unwrap())
+            })();
+            if let Err(error) = result {
+                libnanami::println!("[shell] shutdown failed: {}", error);
+                self.push_line_bytes(b"shutdown failed (see serial log); power remains on");
+            }
+            return;
+        }
         if bytes_eq(&self.editor.bytes[..self.editor.len], b"help") {
             self.push_line_bytes(b"commands: help, services, netinfo, fstest, posixtest");
             self.push_line_bytes(b"          ls, cat, rm, mkdir, cd");
+            self.push_line_bytes(b"          shutdown (x86_64 ACPI S5)");
             self.push_line_bytes(b"          path [PATH], external apps via PATH");
             self.push_line_bytes(b"          nanami-info memory|process, performance-monitor");
             self.push_line_bytes(b"foreground app: F12 terminate");

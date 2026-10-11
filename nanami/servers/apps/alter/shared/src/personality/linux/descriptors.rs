@@ -16,13 +16,31 @@ pub(super) fn sys_open(
     linux_flags: Word,
 ) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
+    open_current_path(runtime, pid, len, linux_flags)
+}
+
+fn open_current_path(
+    runtime: &mut Runtime,
+    pid: Word,
+    len: Word,
+    linux_flags: Word,
+) -> Result<Word, i32> {
     if let Some(fd) = open_virtual_path(runtime, pid, len, linux_flags)? {
         return Ok(fd);
     }
+    let path = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, len) };
+    let fallback = super::virtual_fs::fallback_file(path);
     let flags = translate_open_flags(linux_flags);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    let fd =
-        posix::posix_open(runtime.posix_port, 0, vfs_len, flags).map_err(map_path_request_error)?;
+    let fd = match (posix::posix_open(runtime.posix_port, 0, vfs_len, flags), fallback) {
+        (
+            Err(libnanami::RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Some(node),
+        ) if linux_flags & (super::LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_TRUNC) == 0 => {
+            return super::open_virtual_node(runtime, pid, node, linux_flags);
+        }
+        (result, _) => result.map_err(map_path_request_error)?,
+    };
     let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {
@@ -45,21 +63,7 @@ pub(super) fn sys_openat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    if let Some(fd) = open_virtual_path(runtime, pid, len, linux_flags)? {
-        return Ok(fd);
-    }
-    let flags = translate_open_flags(linux_flags);
-    let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    let fd =
-        posix::posix_open(runtime.posix_port, 0, vfs_len, flags).map_err(map_path_request_error)?;
-    let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
-        LINUX_FD_CLOEXEC
-    } else {
-        0
-    };
-    runtime
-        .allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags, linux_flags), 0)
-        .ok_or(EMFILE)
+    open_current_path(runtime, pid, len, linux_flags)
 }
 
 pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
@@ -73,7 +77,7 @@ pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Wo
         );
     }
     match file.kind {
-        LinuxFileKind::Posix => {
+        _ if file.has_posix_backend() => {
             posix::posix_close(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
         }
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
@@ -88,6 +92,7 @@ pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Wo
         | LinuxFileKind::EvdevKeyboard
         | LinuxFileKind::EvdevMouse
         | LinuxFileKind::Framebuffer
+        | LinuxFileKind::Posix
         | LinuxFileKind::Empty => {}
     }
     Ok(0)
@@ -128,7 +133,7 @@ pub(super) fn sys_dup2(
         }
         Ok(new_fd)
     } else {
-        if new_file.kind == LinuxFileKind::Posix {
+        if new_file.has_posix_backend() {
             let _ = posix::posix_close(runtime.posix_port, new_file.posix_fd);
         }
         Err(EBADF)
@@ -167,6 +172,12 @@ pub(super) fn sys_lseek(
     whence: Word,
 ) -> Result<Word, i32> {
     let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.is_root_directory() {
+        if whence > posix::POSIX_SEEK_CUR {
+            return Err(EINVAL);
+        }
+        return map_word(posix::posix_seek(runtime.posix_port, file.posix_fd, offset, whence));
+    }
     if file.kind == LinuxFileKind::PipeRead
         || file.kind == LinuxFileKind::PipeWrite
         || file.kind == LinuxFileKind::Terminal
@@ -334,13 +345,18 @@ pub(super) fn duplicate_linux_file(
     file: LinuxFile,
 ) -> Result<LinuxFile, i32> {
     match file.kind {
+        _ if file.has_posix_backend() => {
+            let fd = duplicate_posix_backend_fd(runtime, file.posix_fd)?;
+            Ok(LinuxFile { posix_fd: fd, ..file })
+        }
         LinuxFileKind::Empty => Err(EBADF),
         LinuxFileKind::Terminal
         | LinuxFileKind::VirtualDirectory
         | LinuxFileKind::VirtualFile
         | LinuxFileKind::EvdevKeyboard
         | LinuxFileKind::EvdevMouse
-        | LinuxFileKind::Framebuffer => Ok(file),
+        | LinuxFileKind::Framebuffer
+        | LinuxFileKind::Posix => Ok(file),
         LinuxFileKind::PipeRead => {
             let pipe = runtime.pipe_mut(file.posix_fd).ok_or(EBADF)?;
             pipe.readers = pipe.readers.saturating_add(1);
@@ -356,10 +372,6 @@ pub(super) fn duplicate_linux_file(
         | LinuxFileKind::SocketTcpListener
         | LinuxFileKind::SocketIcmp
         | LinuxFileKind::SocketNetlink => Ok(file),
-        LinuxFileKind::Posix => {
-            let fd = duplicate_posix_backend_fd(runtime, file.posix_fd)?;
-            Ok(LinuxFile::posix(fd, file.flags, file.resource))
-        }
     }
 }
 
@@ -393,7 +405,7 @@ pub(super) fn duplicate_posix_backend_fd(runtime: &mut Runtime, old_fd: Word) ->
 pub(super) fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<(), i32> {
     if let Some(file) = runtime.clear_linux_file(pid, fd) {
         match file.kind {
-            LinuxFileKind::Posix => {
+            _ if file.has_posix_backend() => {
                 posix::posix_close(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
             }
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
@@ -408,6 +420,7 @@ pub(super) fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Resu
             | LinuxFileKind::EvdevKeyboard
             | LinuxFileKind::EvdevMouse
             | LinuxFileKind::Framebuffer
+            | LinuxFileKind::Posix
             | LinuxFileKind::Empty => {}
         }
     }
@@ -456,7 +469,7 @@ pub(super) fn inherit_linux_files(
                 }
             };
             if !runtime.set_linux_file(child_pid, fd as Word, child_file) {
-                if child_file.kind == LinuxFileKind::Posix {
+                if child_file.has_posix_backend() {
                     let _ = posix::posix_close(runtime.posix_port, child_file.posix_fd);
                 }
                 close_process_files(runtime, child_pid);

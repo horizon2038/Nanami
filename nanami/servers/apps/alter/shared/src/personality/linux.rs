@@ -5,6 +5,9 @@ mod vectored;
 mod file_io;
 use file_io::*;
 
+#[path = "linux/sendfile.rs"]
+mod sendfile;
+
 #[path = "linux/input_device.rs"]
 mod input_device;
 use input_device::*;
@@ -20,6 +23,9 @@ use network_wait::*;
 #[path = "linux/sockets.rs"]
 mod sockets;
 use sockets::*;
+
+#[path = "linux/socket_ioctl.rs"]
+mod socket_ioctl;
 
 #[path = "linux/socket_io.rs"]
 mod socket_io;
@@ -49,9 +55,19 @@ use pipe::*;
 mod filesystem;
 use filesystem::*;
 
+#[path = "linux/directory.rs"]
+mod directory;
+use directory::sys_getdents64;
+
 #[path = "linux/virtual_files.rs"]
 mod virtual_files;
 use virtual_files::*;
+
+#[path = "linux/proc_net.rs"]
+mod proc_net;
+
+#[path = "linux/resolver.rs"]
+mod resolver;
 
 #[path = "linux/descriptors.rs"]
 mod descriptors;
@@ -218,6 +234,9 @@ pub fn dispatch_syscall(
             context.args[0],
             context.args[1],
             context.args[2],
+        ),
+        SYS_SENDFILE => sendfile::sys_sendfile(
+            runtime, native_pid, context.args[0], context.args[1], context.args[2], context.args[3],
         ),
         SYS_PREAD64 | SYS_PWRITE64 => sys_positioned_io(
             runtime,

@@ -69,6 +69,15 @@ pub struct LinuxFile {
 }
 
 impl LinuxFile {
+    pub fn is_root_directory(self) -> bool {
+        self.kind == LinuxFileKind::VirtualDirectory
+            && self.resource == super::virtual_fs::VirtualNode::Root.id()
+    }
+
+    pub fn has_posix_backend(self) -> bool {
+        self.kind == LinuxFileKind::Posix || self.is_root_directory()
+    }
+
     pub const EMPTY: Self = Self {
         kind: LinuxFileKind::Empty,
         posix_fd: 0,

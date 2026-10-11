@@ -68,8 +68,24 @@ name = "hpet"
 path = "hpet-tests.rs"
 
 [[test]]
+name = "timer-wait"
+path = "timer-wait.rs"
+
+[[test]]
+name = "usb-completion"
+path = "usb/completion.rs"
+
+[[test]]
 name = "linux-clocks"
 path = "linux-clocks.rs"
+
+[[test]]
+name = "linux-network"
+path = "linux-network.rs"
+
+[[test]]
+name = "linux-sendfile"
+path = "linux-sendfile.rs"
 
 [[test]]
 name = "ipc-notifications"
@@ -88,8 +104,20 @@ name = "input-distribution"
 path = "input-distribution-tests.rs"
 
 [[test]]
+name = "ps2-init"
+path = "ps2/main.rs"
+
+[[test]]
 name = "network"
 path = "network/main.rs"
+
+[[test]]
+name = "dhcp"
+path = "dhcp.rs"
+
+[[test]]
+name = "virtio-lifecycle"
+path = "virtio-lifecycle.rs"
 
 [[test]]
 name = "usb"
@@ -106,6 +134,14 @@ path = "usb/storage.rs"
 [[test]]
 name = "usb-discovery"
 path = "usb-discovery/main.rs"
+
+[[test]]
+name = "usb-service"
+path = "usb-service.rs"
+
+[[test]]
+name = "usb-irq"
+path = "usb/irq.rs"
 
 [[test]]
 name = "physical-memory"

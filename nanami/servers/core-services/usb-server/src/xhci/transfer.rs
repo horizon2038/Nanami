@@ -55,45 +55,49 @@ impl Controller {
             .ok_or(RequestError::Protocol)?;
         self.doorbell(slot, 1);
         let mut received = len;
-        for _ in 0..1000 {
-            for _ in 0..ring::ENTRIES {
-                let Some(event) = self.event() else {
-                    break;
-                };
-                if event.kind() == 32 && event.slot() == slot && event.endpoint() == 1 {
-                    if event.code() == 13 {
-                        let residual = (event.status & 0xffffff) as usize;
-                        if residual > len {
-                            return Err(RequestError::Protocol);
-                        }
-                        received = len - residual;
-                    } else if event.code() == 6 {
-                        // Optional requests (e.g. GET_MAX_LUN) may stall. Restore
-                        // EP0's dequeue before a fallback or subsequent request.
-                        self.reset_endpoint(slot, 1, &mut device.control, true, input)?;
-                        return Err(RequestError::Unsupported);
-                    } else if event.code() != 1 {
-                        libnanami::println!(
-                            "[usb-server] control req={:#x} slot={} code={}",
-                            request,
-                            slot,
-                            event.code()
-                        );
+        self.wait_completion(1000, input, |this, input, event| {
+            if event.kind() == 32 && event.slot() == slot && event.endpoint() == 1 {
+                if event.code() == 13 {
+                    let residual = (event.status & 0xffffff) as usize;
+                    if residual > len {
                         return Err(RequestError::Protocol);
                     }
-                    if event.parameter & !15 == pointer {
-                        device.control.complete();
-                        return Ok(received);
-                    }
-                } else {
-                    self.dispatch(event, input);
+                    received = len - residual;
+                } else if event.code() == 6 {
+                    // Optional requests (e.g. GET_MAX_LUN) may stall. Restore
+                    // EP0's dequeue before a fallback or subsequent request.
+                    this.reset_endpoint(slot, 1, &mut device.control, true, input)?;
+                    return Err(RequestError::Unsupported);
+                } else if event.code() != 1 {
+                    libnanami::println!(
+                        "[usb-server] control req={:#x} slot={} code={}",
+                        request,
+                        slot,
+                        event.code()
+                    );
+                    return Err(RequestError::Protocol);
                 }
+                if event.parameter & !15 == pointer {
+                    device.control.complete();
+                    return Ok(Some(received));
+                }
+            } else {
+                this.dispatch(event, input);
             }
-            self.delay(1)?;
-        }
-        // No further DMA-buffer access is safe after an uncompleted transfer.
-        self.fail(input);
-        Err(RequestError::Transport)
+            Ok(None)
+        })
+        .inspect_err(|error| {
+            if !matches!(error, RequestError::Unsupported) {
+                libnanami::println!(
+                    "[usb-server] control wait failed port={} slot={} setup={:#x} trb={:#x}: {}",
+                    device.port,
+                    slot,
+                    setup,
+                    pointer,
+                    error
+                );
+            }
+        })
     }
 
     pub(super) fn set_context32(&self, device: &Device, context: usize, word: usize, value: u32) {

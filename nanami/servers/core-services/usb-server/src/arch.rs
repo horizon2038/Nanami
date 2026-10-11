@@ -22,6 +22,9 @@ pub fn prepare(
     Ok(ControllerResource {
         mmio,
         bytes: resource.bytes,
-        irq: resource.irq,
+        // Exercise the same fallback as machines without a routed INTx line.
+        irq: resource
+            .irq
+            .filter(|_| option_env!("NANAMI_USB_POLL_ONLY") != Some("1")),
     })
 }

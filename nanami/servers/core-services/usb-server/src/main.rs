@@ -2,26 +2,39 @@
 #![no_main]
 extern crate alloc;
 
+// Opt-in only: serial tracing changes timing and is unsuitable for benchmarks.
+macro_rules! io_trace {
+    ($($arg:tt)*) => {
+        if option_env!("NANAMI_USB_IO_TRACE") == Some("1") {
+            libnanami::println!("[usb.trace] {}", format_args!($($arg)*));
+        }
+    };
+}
+
 mod arch;
 mod input;
+mod service;
 mod storage;
 mod usb;
 mod xhci;
 
 use alloc::vec::Vec;
-use libnanami::ipc::ServiceEvent;
 use libnanami::{RequestError, Word};
 
 const SLOT_DELAY_NOTIFICATION: Word = 26;
 
 fn delay(timer: Word, milliseconds: Word) -> Result<(), RequestError> {
     // The bound notification also receives periodic polling and IRQ events.
-    // Neither may satisfy a debounce/reset/transfer wait early.
-    nanami_services::timer::timer_service_sleep_on_notification_milliseconds(
+    // Neither may satisfy a debounce/reset delay early. Transfer completion
+    // waits instead use IRQ-or-deadline on the bound notification.
+    io_trace!("timer wait begin ms={}", milliseconds);
+    let result = nanami_services::timer::timer_service_sleep_on_notification_milliseconds(
         timer,
         milliseconds,
         SLOT_DELAY_NOTIFICATION,
-    )
+    );
+    io_trace!("timer wait end ok={}", result.is_ok());
+    result
 }
 
 #[panic_handler]
@@ -55,9 +68,24 @@ fn nanami_main() -> libnanami::NanamiResult {
     let manager = libnanami::ipc::process_slot_descriptor(25);
     let mut resources = Vec::new();
     for index in 0..4 {
-        let Some(resource) = nanami_services::device::usb_controller(manager, index)? else {
+        let Some(mut resource) = nanami_services::device::usb_controller(manager, index)? else {
             break;
         };
+        if option_env!("NANAMI_USB_POLL_ONLY") != Some("1") {
+            for attempt in 0..3000 {
+                match nanami_services::device::usb_irq(manager, index) {
+                    Ok(Some(irq)) => {
+                        resource.irq = irq;
+                        break;
+                    }
+                    Ok(None) if attempt != 2999 => delay(timer, 10)?,
+                    result => {
+                        libnanami::println!("[usb-server] controller {} ACPI IRQ unavailable ({:?}); polling fallback", index, result);
+                        break;
+                    }
+                }
+            }
+        }
         resources.push(resource);
     }
     let mut input = input::Input::new();
@@ -81,69 +109,13 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
     // Once controllers run, errors must not exit and release their DMA memory.
     let mut storage = storage::Storage::new(manager, discovery_failed);
-    if let Err(error) = serve(&mut controllers, &mut input, &mut storage, timer) {
+    if let Err(error) = service::serve(&mut controllers, &mut input, &mut storage, timer) {
         libnanami::println!("[usb-server] service failed: {}; retaining DMA", error);
         loop {
             let _ = libnanami::ipc::notification_wait(notification);
         }
     }
     Ok(())
-}
-
-fn serve(
-    controllers: &mut [xhci::Controller],
-    input: &mut input::Input,
-    storage: &mut storage::Storage,
-    timer: Word,
-) -> Result<(), RequestError> {
-    libnanami::register_service_by_name("usb-service", 20)?;
-    // Maintenance also recovers missed/shared INTx events. No hardware counter
-    // is exposed to users; this uses the selected platform timer service.
-    nanami_services::timer::timer_service_interval_on_notification_milliseconds(
-        timer,
-        10,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
-    )?;
-    let port = libnanami::ipc::process_slot_descriptor(20);
-    let mut pending = None;
-    let mut input_retry = 0u8;
-    libnanami::println!("[usb-server] online controllers={}", controllers.len());
-    loop {
-        for controller in controllers.iter_mut() {
-            controller.poll(input);
-            if let Some(irq) = controller.irq {
-                let _ = libnanami::ipc::interrupt_ack(irq);
-            }
-            controller.poll(input);
-        }
-        storage.poll(controllers, input, timer)?;
-        input.flush();
-        if !input.connected() {
-            // Also retry under sustained block traffic, without a rootfs boot
-            // dependency or a high-priority busy loop. Failed lookups are cheap.
-            input_retry = input_retry.wrapping_add(1);
-            if input_retry == 1 {
-                let _ = input.connect();
-            }
-        }
-        let event = if let Some((status, count, detail)) = pending.take() {
-            libnanami::ipc::service_reply_receive_event(port, status, count, detail)?
-        } else {
-            libnanami::ipc::service_receive_event(port)?
-        };
-        if let ServiceEvent::Request(request) = event {
-            pending = Some(match request.code {
-                nanami_services::usb::USB_SERVICE_REQUEST_INFO => {
-                    let interfaces: usize = controllers
-                        .iter()
-                        .map(|controller| controller.counts().1)
-                        .sum();
-                    (libnanami::OS_RESPONSE_OK, controllers.len(), interfaces)
-                }
-                _ => storage.request(request, controllers, input),
-            });
-        }
-    }
 }
 
 libnanami::nanami_entry!(nanami_main);

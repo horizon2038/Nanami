@@ -141,6 +141,10 @@ impl Consumer {
             Some(event)
         }
     }
+    pub fn ready(&self) -> bool {
+        let src = (self.virtual_address as *const Trb).wrapping_add(self.dequeue);
+        unsafe { ptr::read_volatile(&(*src).control) & CYCLE == self.cycle as u32 }
+    }
     pub fn next_physical(&self) -> u64 {
         self.physical + (self.dequeue * 16) as u64
     }

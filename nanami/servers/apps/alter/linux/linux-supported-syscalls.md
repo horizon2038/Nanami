@@ -9,7 +9,7 @@ not imply complete Linux semantics for every flag or edge case.
 
 ## File and Directory I/O
 
-`read`, `write`, `readv`, `writev`, `pread64`, `pwrite64`, `open`, `openat`, `creat`, `close`, `lseek`,
+`read`, `write`, `readv`, `writev`, `pread64`, `pwrite64`, `sendfile`, `open`, `openat`, `creat`, `close`, `lseek`,
 `getdents64`, `stat`, `lstat`, `fstat`, `newfstatat`, `statx`, `access`,
 `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `mkdir`, `mkdirat`,
 `mknod`, `mknodat`, `rmdir`, `unlink`, `unlinkat`, `rename`, `renameat`,
@@ -21,6 +21,19 @@ including descriptors shared through `dup`/`fork`. `newfstatat` supports
 `AT_EMPTY_PATH`, including `AT_FDCWD`; other relative-dirfd operations remain
 partial. `O_APPEND` is applied on each POSIX write (also on `pwrite64`, matching
 Linux), and `F_GETFL`/`F_SETFL` share append/nonblocking state across duplicates.
+
+The guest root merges its real VFS directory with virtual mountpoints, suppressing
+duplicate mount names. Directory reads preserve entries that do not fit the
+caller's buffer; root directory cookies and positions are shared across
+`dup`/`fork`, with `lseek` supporting rewind and resuming from `d_off`.
+
+`sendfile` transfers regular-file input through service shared memory to regular
+files, terminals, TCP sockets, pipes, or the null/zero devices. Each call returns
+at most one buffer's worth of data; callers must handle short transfers. Explicit
+offsets preserve the input fd position, output errors do not consume input, and
+append-mode file outputs are rejected. Full-pipe/TCP backpressure currently
+returns `EAGAIN`; blocking sendfile parking is not implemented. Other input
+types and output devices return an error rather than fabricated success.
 
 ## File Descriptors and Polling
 

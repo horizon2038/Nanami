@@ -3,6 +3,62 @@
 The subsequent TX queue, RX batch and TCP lookup changes are documented in
 [HTTP throughput follow-up](performance.md).
 
+## Launcher and DHCP bootstrap regression (2026-10-11)
+
+`scripts/run-nanami.sh run` previously forced `NET_MODE=user`, discarding
+`BRIDGE_IF`. It now defaults to bridged mode when that interface is specified,
+and preserves explicit `NET_MODE` and `QEMU_USE_SUDO` choices:
+
+```sh
+BRIDGE_IF=en0 ./scripts/run-nanami.sh run
+```
+
+On macOS, bridged mode uses the launcher's `auto` sudo policy. This command
+regenerates the rootfs; back up saved files before running it. Five isolated
+wrapper tests check the network environment without building, launching QEMU,
+invoking sudo or modifying the user's images:
+
+```sh
+python3 tests/usb/qemu-launcher.py
+```
+
+DHCP previously read only eight packets per 200-ms minimum sleep. A queued
+offer behind unrelated LAN traffic could therefore be delayed even with a
+working RX notification. Bootstrap now drains bounded 128-frame batches,
+waits on the bound RX/timer notification, and retains one replaceable polling
+alarm for a polling-only NIC or missing server. Monotonic deadlines include
+receive processing time and are not extended by unrelated packets. Outstanding
+alarms are cancelled on success, timeout and IPC failure.
+
+DHCP subnet option 1 was also requested but discarded, and native next-hop
+selection and Linux `SIOCGIFNETMASK`/broadcast queries assumed `/24`. The stack
+now validates and applies the lease's contiguous mask, retains an OFFER mask
+when ACK omits it, and gives a valid ACK mask precedence. On-link selection
+uses the actual masked addresses. An additive native mask-query control keeps
+the existing IPv4-config response unchanged; Linux ifreq layout and syscall
+numbers are unchanged. Missing or malformed masks retain the configured default.
+
+```sh
+cargo test --locked --release --manifest-path tests/native-performance/Cargo.toml \
+  --test dhcp --test network --test linux-network
+python3 tests/network/qemu-http.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --multicast --boot-multicast --evict-arp --subnet-prefix 23 -n 1000 -c 10 --timeout 30
+```
+
+Nine production-DHCP/routing host tests cover a 64-frame burst, an RX wake
+before the polling alarm, continuous traffic with processing cost, absent-server deadlines
+and cancellation after notification errors, OFFER/ACK precedence, invalid masks
+and routing for every prefix length. Linux ABI tests also check native masks
+and computed broadcasts for `/16`, `/23` and `/25`. The burst took 2,950 simulated ms
+before the fix and at most 400 ms afterward, including address announcements.
+The QEMU test passed 1,000/1,000 requests with zero failures while injecting
+multicast during DHCP bootstrap and ARP-cache eviction during HTTP operation
+on a `/23` subnet. A separate `/25` run without injection also completed
+1,000/1,000 with zero failures. Both verified the guest's applied DHCP mask.
+This is a private virtual-LAN test, not an actual vmnet-bridged or hardware
+validation; host bridge testing still requires sudo authentication.
+
 ## ARP-resolution loss
 
 The bridged-network failure combined a one-entry ARP cache, learning from
@@ -116,6 +172,10 @@ is still unmodified `ab -n ... -c ...`; the correction is logged in qemu.log.
 Without the option, the runner preserves normal QEMU behavior.
 
 `--multicast` injects unrelated IPv4/UDP multicast every 10 ms.
+Add `--boot-multicast` to start that traffic during DHCP bootstrap; it requires
+`--multicast`. By default injection begins only after HTTP starts.
+`--subnet-prefix 23|24|25` changes the private DHCP subnet and asserts the
+guest's applied mask before HTTP testing (default: 24).
 `--evict-arp` also advertises 40 neighbors every 500 ms, exceeding cache
 capacity. The runner counts guest ARP requests for the HTTP next hop.
 It fails unless ab reports all requested responses complete with zero failures.

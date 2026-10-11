@@ -231,6 +231,7 @@ pub(super) fn syscall_name(number: Word) -> &'static [u8] {
         SYS_PREAD64 => b"pread64",
         SYS_PWRITE64 => b"pwrite64",
         SYS_WRITE => b"write",
+        super::SYS_SENDFILE => b"sendfile",
         SYS_READV => b"readv",
         SYS_SENDMSG => b"sendmsg",
         SYS_RECVMSG => b"recvmsg",

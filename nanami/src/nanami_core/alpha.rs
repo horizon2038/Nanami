@@ -1,4 +1,6 @@
 mod boot;
+#[cfg(target_arch = "x86_64")]
+mod boot_trace;
 mod control_requests;
 mod memory_copy;
 mod memory_requests;

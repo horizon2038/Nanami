@@ -13,7 +13,9 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
-parser.add_argument("--program", action="append", help="run only this guest basename (repeatable)")
+parser.add_argument("--program", action="append", help="guest basename and optional arguments (repeatable)")
+parser.add_argument("--network", action="store_true", help="attach an isolated user-mode virtio NIC (no external network access)")
+parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
 args = parser.parse_args()
 repo = pathlib.Path(__file__).resolve().parents[2]
@@ -25,7 +27,10 @@ print(f"Test logs: {logs}", flush=True)
 command = [
     "qemu-system-x86_64", "-machine", "hpet=on", "-cpu", "max", "-smp", str(args.smp),
     "-m", "4G", "-display", "none", "-serial", f"file:{serial}",
-    "-monitor", "stdio", "-nic", "none",
+    "-monitor", "stdio",
+    *(["-netdev", "user,id=net0" + ("" if args.internet else ",restrict=on"), "-device",
+       "virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on"]
+      if args.network or args.internet else ["-nic", "none"]),
     "-drive", f"if=pflash,format=raw,readonly=on,file={firmware / 'OVMF_CODE.fd'}",
     "-drive", f"if=pflash,format=raw,file={logs / 'OVMF_VARS.fd'}",
     "-device", "ich9-ahci,id=ahci,addr=3",
@@ -80,7 +85,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
             type_command(f"alter -t /alter/linux/bin/{program}")
             def guest_exit(text):
                 text = text[start:]
-                spawned = re.search(r"managed rootfs process image=" + re.escape(program) + r" pid=(\d+)", text)
+                spawned = re.search(r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)", text)
                 if not spawned:
                     return None
                 return re.search(r"exit pid=" + spawned[1] + r" syscall=\d+ status=(\d+)", text)

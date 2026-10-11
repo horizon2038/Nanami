@@ -18,41 +18,46 @@ impl Alpha {
                 return Err(CapabilityError::InvalidArgument);
             }
 
-            let mapped_size = align_up(size_bytes, PAGE_SIZE);
+            let mapped_size = size_bytes
+                .checked_add(PAGE_SIZE - 1)
+                .map(|size| size & !(PAGE_SIZE - 1))
+                .ok_or(CapabilityError::InvalidArgument)?;
+            physical_address
+                .checked_add(mapped_size)
+                .ok_or(CapabilityError::InvalidArgument)?;
             let page_count = mapped_size / PAGE_SIZE;
             stage = "reserve-virtual";
             let (root_node, address_space, base_va, start_slot) = self
                 .processes
                 .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
-            stage = "allocate-physical";
-            let base_page =
-                self.memory
-                    .allocate_physical_at(physical_address, mapped_size, true)?;
-            let base_paddr = base_page * PAGE_SIZE;
-            if base_paddr != physical_address {
-                return Err(CapabilityError::InvalidArgument);
-            }
-            stage = "convert-frames";
-            let (converted_base_index, skip_pages, converted_page_count) = self
-                .memory
-                .ensure_alpha_frames_for_range_from_initial_generic(
-                    physical_address,
-                    mapped_size,
-                    true,
-                )?;
-            if converted_page_count != page_count {
-                return Err(CapabilityError::InvalidArgument);
-            }
-
             stage = "frame-slots";
             self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
             stage = "copy-frames";
             let mut i = 0usize;
             while i < page_count {
                 page = i;
+                // Firmware tables may span distinct initial generics. Resolve
+                // each physical page, retaining one contiguous virtual mapping.
+                let physical_page = physical_address + i * PAGE_SIZE;
+                stage = "allocate-physical";
+                let base_page = self
+                    .memory
+                    .allocate_physical_at(physical_page, PAGE_SIZE, true)?;
+                if base_page * PAGE_SIZE != physical_page {
+                    return Err(CapabilityError::InvalidArgument);
+                }
+                stage = "convert-frames";
+                let (converted_base_index, skip_pages, _) = self
+                    .memory
+                    .ensure_alpha_frames_for_range_from_initial_generic(
+                        physical_page,
+                        PAGE_SIZE,
+                        true,
+                    )?;
+                stage = "copy-frames";
                 let source_frame = self
                     .memory
-                    .physical_frame_descriptor_from_index(converted_base_index + skip_pages + i)
+                    .physical_frame_descriptor_from_index(converted_base_index + skip_pages)
                     .ok_or(CapabilityError::InvalidArgument)?;
                 arch::node::copy(
                     process_frame_chunk_descriptor(

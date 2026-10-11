@@ -27,7 +27,7 @@ const DHCP_SEND_ERROR_BACKOFF_MS: Word = 250;
 const DHCP_RETX_BACKOFF_INITIAL_MS: Word = 4000;
 const DHCP_RETX_BACKOFF_MAX_MS: Word = 64000;
 const DHCP_MAX_RETRIES: usize = 6;
-const DHCP_PUMP_BURST: usize = 8;
+const DHCP_PUMP_BURST: usize = 128;
 
 #[derive(Clone, Copy)]
 struct DhcpParsed {
@@ -36,6 +36,7 @@ struct DhcpParsed {
     server_ip: [u8; 4],
     router_ip: [u8; 4],
     dns_ip: [u8; 4],
+    subnet_mask: Option<[u8; 4]>,
 }
 
 impl DhcpParsed {
@@ -45,6 +46,7 @@ impl DhcpParsed {
         server_ip: [0; 4],
         router_ip: [0; 4],
         dns_ip: [0; 4],
+        subnet_mask: None,
     };
 }
 
@@ -89,6 +91,9 @@ pub(crate) fn process_dhcp_payload(
         if parsed.dns_ip != [0; 4] {
             runtime.dhcp_dns_ip = parsed.dns_ip;
         }
+        if let Some(mask) = parsed.subnet_mask {
+            runtime.dhcp_subnet_mask = Some(mask);
+        }
         libnanami::print!("[net-server][dhcp] offer received ip=");
         log_ip(runtime.dhcp_offer_ip);
         libnanami::print!(" server=");
@@ -114,6 +119,9 @@ pub(crate) fn process_dhcp_payload(
         }
         if parsed.dns_ip != [0; 4] {
             runtime.dhcp_dns_ip = parsed.dns_ip;
+        }
+        if let Some(mask) = parsed.subnet_mask {
+            runtime.dhcp_subnet_mask = Some(mask);
         }
         libnanami::print!("[net-server][dhcp] ack received ip=");
         log_ip(runtime.dhcp_offer_ip);
@@ -172,6 +180,7 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
     runtime.dhcp_server_ip = [0; 4];
     runtime.dhcp_router_ip = [0; 4];
     runtime.dhcp_dns_ip = [0; 4];
+    runtime.dhcp_subnet_mask = None;
     runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
 
     libnanami::print!("[net-server][dhcp] bootstrap start xid=0x");
@@ -184,6 +193,7 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
         runtime.dhcp_server_ip = [0; 4];
         runtime.dhcp_router_ip = [0; 4];
         runtime.dhcp_dns_ip = [0; 4];
+        runtime.dhcp_subnet_mask = None;
 
         let mut retry = 0usize;
         loop {
@@ -270,32 +280,91 @@ fn use_configured_fallback(runtime: &mut NetRuntime, reason: &str) {
 }
 
 fn wait_dhcp_offer(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {
-    let mut elapsed = 0usize;
-    while elapsed < timeout_ms as usize {
-        let _ = super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
-        if runtime.dhcp_offer_valid {
-            return true;
-        }
-        super::sleep_ms(runtime.timer_port, DHCP_POLL_STEP_MS);
-        elapsed = elapsed.saturating_add(DHCP_POLL_STEP_MS as usize);
-    }
-    false
+    wait_dhcp(runtime, stats, timeout_ms, false)
 }
 
 fn wait_dhcp_ack(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {
-    let mut elapsed = 0usize;
-    while elapsed < timeout_ms as usize {
-        let _ = super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
-        if runtime.dhcp_ack_valid {
-            return true;
+    wait_dhcp(runtime, stats, timeout_ms, true)
+}
+
+fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, ack: bool) -> bool {
+    use nanami_services::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
+    let complete = |runtime: &NetRuntime| {
+        if ack {
+            runtime.dhcp_ack_valid
+        } else {
+            runtime.dhcp_offer_valid
         }
-        if !runtime.dhcp_offer_valid {
-            return false;
+    };
+    let Some(timer) = runtime.timer_port else {
+        // Preserve the bounded fallback for platforms without a clock service.
+        let mut elapsed = 0;
+        while elapsed < timeout_ms {
+            super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
+            if complete(runtime) {
+                return true;
+            }
+            if ack && !runtime.dhcp_offer_valid {
+                return false;
+            }
+            super::sleep_ms(None, DHCP_POLL_STEP_MS);
+            elapsed += DHCP_POLL_STEP_MS;
         }
-        super::sleep_ms(runtime.timer_port, DHCP_POLL_STEP_MS);
-        elapsed = elapsed.saturating_add(DHCP_POLL_STEP_MS as usize);
+        return false;
+    };
+    let mut alarm = None;
+    let result = (|| -> Result<bool, RequestError> {
+        let (start, hz) = timer_service_monotonic_ticks(timer)?;
+        if hz == 0 {
+            return Err(RequestError::Protocol);
+        }
+        let ticks =
+            |ms: Word| ((ms as u128 * hz as u128).div_ceil(1000)).min(Word::MAX as u128) as Word;
+        let deadline = start.saturating_add(ticks(timeout_ms));
+        loop {
+            let count = super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
+            if complete(runtime) {
+                return Ok(true);
+            }
+            if ack && !runtime.dhcp_offer_valid {
+                return Ok(false);
+            }
+            let now = timer_service_monotonic_ticks(timer)?.0;
+            if now >= deadline {
+                return Ok(false);
+            }
+            // A full batch may leave a DHCP reply queued behind LAN traffic.
+            // Drain another bounded batch instead of inserting a minimum sleep.
+            if count == DHCP_PUMP_BURST {
+                continue;
+            }
+            if alarm.is_none_or(|tick| tick <= now) {
+                let tick = now.saturating_add(ticks(DHCP_POLL_STEP_MS)).min(deadline);
+                timer_service_set_alarm_ticks(
+                    timer,
+                    libnanami::PROCESS_SLOT_NOTIFICATION,
+                    Some(tick),
+                )?;
+                alarm = Some(tick);
+            }
+            // RX notifications wake immediately; the alarm covers polling-only
+            // NICs and an absent server. Only one replaceable alarm is live.
+            libnanami::ipc::notification_wait(libnanami::ipc::process_slot_descriptor(
+                libnanami::PROCESS_SLOT_NOTIFICATION,
+            ))?;
+        }
+    })();
+    if alarm.is_some() {
+        if let Err(error) =
+            timer_service_set_alarm_ticks(timer, libnanami::PROCESS_SLOT_NOTIFICATION, None)
+        {
+            log_request_error("[net-server][dhcp] alarm cancellation failed: ", error);
+        }
     }
-    false
+    result.unwrap_or_else(|error| {
+        log_request_error("[net-server][dhcp] wait failed: ", error);
+        false
+    })
 }
 
 fn dhcp_backoff_ms(retry: usize) -> Word {
@@ -318,9 +387,14 @@ fn apply_lease(runtime: &mut NetRuntime) {
     if runtime.dhcp_dns_ip != [0; 4] {
         runtime.dns_ip = runtime.dhcp_dns_ip;
     }
+    if let Some(mask) = runtime.dhcp_subnet_mask {
+        runtime.subnet_mask = mask;
+    }
 
     libnanami::print!("[net-server][dhcp] lease ip=");
     log_ip(runtime.ip);
+    libnanami::print!(" mask=");
+    log_ip(runtime.subnet_mask);
     libnanami::print!(" gw=");
     log_ip(runtime.gateway_ip);
     libnanami::print!(" dns=");
@@ -549,6 +623,12 @@ fn parse_dhcp_payload(payload: &[u8], expected_xid: u32) -> Option<DhcpParsed> {
         let data = &payload[i..i + len];
         match code {
             DHCP_OPT_MSG_TYPE if len >= 1 => out.msg_type = data[0],
+            DHCP_OPT_SUBNET_MASK if len == 4 => {
+                let mask = [data[0], data[1], data[2], data[3]];
+                if super::routing::valid_subnet_mask(mask) {
+                    out.subnet_mask = Some(mask);
+                }
+            }
             DHCP_OPT_SERVER_ID if len >= 4 => out.server_ip.copy_from_slice(&data[0..4]),
             DHCP_OPT_ROUTER if len >= 4 => out.router_ip.copy_from_slice(&data[0..4]),
             DHCP_OPT_DNS if len >= 4 => out.dns_ip.copy_from_slice(&data[0..4]),

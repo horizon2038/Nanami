@@ -57,14 +57,27 @@ See [physical capability management](../../nanami/src/nanami_core/memory/README.
   READ/WRITE(10/16), bounded partition I/O and cache synchronization on writes.
   Storage requires 512-byte logical sectors, one BOT interface per device and
   up to 16 logical units. GPT probing is read-only.
-- A bounded timer wait also polls the event ring; interrupt delivery is INTx
-  when available. Debounce/reset/transfer delays use a separate notification
-  from periodic polling and IRQs, so these events cannot finish a delay early.
+- Command/control/bulk completions share an IRQ-or-deadline wait. Short
+  transfers use bounded active polling without timer RPCs. Slower transfers
+  unmask the IRQ and recheck the ring before waiting on the bound notification;
+  their absolute timeout is not extended by unrelated notifications. Polling-only
+  controllers use one-shot checks. Debounce/reset delays still use a private
+  notification so IRQs and periodic maintenance cannot shorten them.
+  Deadline expiry is followed by a final bounded event drain: a completion that
+  arrived during the clock RPC is not discarded. Initial enumeration exercises
+  the same path with interrupt delivery disabled and one-shot polling alarms.
   No raw hardware timer counter is exposed.
+- ERDP acknowledges only examined event entries; EHB is cleared at the end of
+  every drain, including empty drains and synchronous-transfer returns. Posted
+  interrupt acknowledgements are flushed before the kernel IRQ is unmasked.
 - Each endpoint has at most one transfer outstanding. HID completions remain
   serviced during synchronous block transfers, including on composite devices.
   Ring reuse follows completion or endpoint stop/reset. Fatal/timeouts retain
   DMA mappings; uncertain writes are not replayed automatically.
+  Failed controllers cannot be restarted by the subsequent IRQ-enable step.
+  Failure-only diagnostics report the command/control operation and HC/event-ring
+  registers, distinguishing a timeout from a Host Controller Event or timer IPC
+  failure without enabling per-request serial tracing.
 - AHCI probe DMA is quiesced before reusing buffers for another port.
   Driver failure paths retain DMA rather than exiting with a live controller.
 
@@ -73,6 +86,128 @@ storage sectors, report-only/NKRO/vendor or SuperSpeed HID, horizontal wheels,
 buttons beyond the first three, high-resolution wheel multiplier negotiation,
 keyboard LEDs, suspend/resume, PCI hotplug, MSI/MSI-X delivery or AArch64 USB.
 Attach test devices directly to xHCI root ports.
+
+## Physical-machine INTx routing
+
+A PCI Interrupt Line value of `255` is not proof that a controller cannot
+interrupt. Driver Manager now retains the BDF and Interrupt Pin and asks
+acpi-server to resolve missing routes. The `acpi` AML interpreter evaluates
+`_PIC(1)` and the matching PCI root bridge's `_PRT`. Direct GSI entries and
+PCI link devices' `_CRS` are supported, including nonzero SourceIndex values.
+The manager authenticates route reports from its selected ACPI server; the
+USB driver still obtains the IRQ capability through Alpha's existing API.
+
+Resolution starts after timer-service is available and runs asynchronously,
+without a manager-to-ACPI blocking RPC. USB bounds the wait to 3,000 retries
+with 10 ms private timer sleeps (about 30 seconds plus IPC overhead).
+Existing valid PCI lines need no AML evaluation.
+`_INI`, `_SRS`, ACPI power-mode changes and `_S5` are not run for routing.
+The interpreter is retained for a later shutdown request.
+
+For newly resolved routes, the current kernel API supports the GSI 16–23
+level/active-low policy. Other attributes are rejected rather than silently
+programmed incorrectly. Behind-bridge INTx swizzling, link reprogramming,
+shared IRQ fan-out and MSI/MSI-X are not implemented. Such controllers retain
+the timer-polling fallback. No A9N changes are part of this implementation.
+
+Expected hardware logs are `USB PCI ... pin=... -> GSI=... level/low`, followed
+by `xHCI ... irq=true`. An unsupported route prints its attributes and falls
+back explicitly. The reported PC now logs GSI 16, `irq=true` and working
+enumeration/hotplug, but boot still stalls later. These logs alone do not prove
+interrupt delivery or resolve the remaining stall.
+
+Host regression tests:
+
+```sh
+cargo test --locked --release --manifest-path tests/acpi/Cargo.toml
+cargo test --locked --release --manifest-path tests/native-performance/Cargo.toml \
+  --test usb-irq --test usb-pci --test usb-service --test usb-completion --test timer-wait
+```
+
+`NANAMI_USB_ACPI_IRQ=1 make init` ignores the firmware PCI Line for testing
+ACPI discovery even on QEMU. This is not needed on hardware. QEMU q35 currently
+describes its GSI links as active-high, which cannot be expressed for GSI 23
+through the current kernel API; the forced-ACPI test must take the fallback:
+
+```sh
+python3 tests/acpi/qemu-shutdown.py --image /path/to/private-test.img \
+  --machine q35 --smp 4 --hpet on --storage usb --usb-input --i8042 off \
+  --require-usb-acpi-fallback
+```
+
+The private image must contain the just-built init ELF. Without the override,
+the usual QEMU firmware line continues to be used. `NANAMI_USB_IO_TRACE=1`
+also logs notification badges (`1 << IRQ`, versus timer bit 63), allowing
+interrupt delivery to be distinguished from merely acquiring an IRQ capability.
+Rebuild without these diagnostic environment variables for normal use.
+
+### Boot stops while USB hotplug still works
+
+Hotplug activity does not prove that a pending VFS or block-device RPC has
+completed. Honoka's `connect: exec shm attach` also waits until System Manager
+finishes loading the remaining boot services; it is not necessarily a display
+failure. A white framebuffer while System Manager is still loading Honoka also
+does not mean that Honoka has started or hung.
+
+Start with low-volume saved-PC sampling, **without** per-I/O tracing:
+
+```sh
+NANAMI_BOOT_PC_TRACE=1 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+  ROOTFS_REBUILD=1 make image
+```
+
+Keep the existing `EXTRA_LINUX_BINS`/rootfs settings when rebuilding. Rebuilding
+the rootfs also removes any previous PCI trace from `/bin/virtio-net`;
+`ROOTFS_REBUILD=0` would retain that binary and its compile-time trace flag.
+On x86_64, every 500 delivered USB maintenance timer events (nominally five
+seconds), `usb.watch` requests a read-only `boot.pc` sample from Alpha.
+Its `sample begin` line summarizes requests and delivered IRQ notification
+events since the preceding sample (not a hardware IRQ count, since notifications
+can coalesce). No per-request or per-IRQ lines are emitted in this mode.
+It runs only with no pending block reply. Alpha resolves VFS, timer and exec
+service PIDs from the registry and logs their last saved RIP/RSP/RFLAGS and
+RAX/RDI, without suspending, resuming or writing registers. These are saved
+contexts, not atomic live CPU snapshots or kernel scheduler state. The control
+is disabled in normal builds and only the registered USB server can request it.
+No new kernel ABI is involved. This diagnostic adds synchronous Alpha IPC and
+changes timing; it is not a workaround for the stall.
+
+After a stop, keep capturing for at least 20 seconds and include both
+`usb.watch` and `boot.pc` lines (or note their absence). Timer notifications can
+coalesce, so samples may be more than five seconds apart. Repeated saved PCs can
+be symbolized using the exact unstripped server ELF from this build. A lone
+`sample begin` instead localizes a wait on Alpha; no timer-driven samples
+despite hotplug logs points to a different path than a progressing watcher.
+An unchanged PC at an IPC receive is normal for an idle service: correlate
+samples with the outstanding request rather than treating repetition as a hang.
+
+Only if per-request detail is needed, enable the much heavier I/O trace:
+
+```sh
+NANAMI_BOOT_IO_TRACE=1 NANAMI_BOOT_PC_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+  ROOTFS_REBUILD=1 make image
+```
+
+Keep any existing `EXTRA_LINUX_BINS`/rootfs settings when rebuilding. This flag
+adds VFS request sequence numbers, uncached block read entry/return, USB block
+request/reply entry, and virtio-net PCI config selection/read/return logs.
+Unlike `NANAMI_USB_IO_TRACE`, it does not trace periodic USB maintenance.
+Capture the serial log from boot through the stop, including a subsequent
+hotplug event. A `reply-receive` line means that the syscall is about to be
+entered, not that the receiver has consumed the reply.
+
+For the full I/O trace, the image must contain both the new init ELF (ext2/USB)
+and the rebuilt rootfs (`virtio-net`); `make init` alone does not update the
+disk's `/bin/virtio-net`.
+Debug output currently makes one kernel call per character. On the reported
+hardware, the saved VFS PCs repeatedly landed in `DebugWriter::write_str`
+while the Honoka read offset continued to advance. Full tracing can therefore
+obscure the original stall with diagnostic-induced slowness; it is unsuitable
+for measuring storage speed. The reported run eventually reached Honoka online
+after about fifteen minutes; this establishes progress, not that logging alone
+accounts for the delay. Compare with all three trace flags disabled before
+attributing the remaining latency. A previously trace-enabled rootfs binary
+also needs rebuilding to remove its PCI trace.
 
 ## USB mouse wheel
 
@@ -172,10 +307,71 @@ python3 tests/usb/qemu-hid.py \
 The unthrottled and 200-IOPS four-core tests reached the desktop with the
 current image. The HPET/timer/notification host suites also passed (31 tests,
 one ignored benchmark). This is diagnostic instrumentation, not a confirmed
-fix for the reported hardware stall. QEMU still provides xHCI INTx, unlike
-the reported hardware's `irq=false`, and does not reproduce its SMI behavior.
+fix for the reported hardware stall. Those runs used QEMU's xHCI INTx, unlike
+the reported hardware's `irq=false`, and do not reproduce its SMI behavior.
+The polling-only regression setup below covers the software fallback separately.
 
 ## Tests
+
+### Larger bounded storage batches (2026-10-11)
+
+The block SDK and ext2 connection now default to 64-KiB shared memory instead
+of 16 KiB. USB BOT accepts that same bounded batch. Its per-slot data area is
+64-KiB aligned, with checked allocation bounds and reserved alignment slack,
+so each data stage still uses one normal TRB without crossing the xHCI 64-KiB
+boundary. Smaller client sessions remain supported; request formats and service
+numbers are unchanged. AHCI derives its buffer size from the shared SDK limit.
+For contiguous data reads this reduces the number of block RPCs/BOT commands
+by up to four, not a claim of fourfold total hardware throughput.
+
+The USB storage host test rejects oversized/out-of-partition/overflowing
+requests and accepts a full 64-KiB batch. Both four-core HPET and single-core
+PIT fallback booted from USB with no PS/2 controller and no injected input.
+The HPET run with reads throttled to 20 IOPS reached readiness in 18.56 seconds;
+the unthrottled PIT run took 7.14 seconds. Both subsequently passed S5 shutdown.
+These different configurations are integration checks, not a comparative
+benchmark or proof that the physical machine's mouse-dependent stall is fixed.
+
+```sh
+cargo test --locked --release --manifest-path tests/native-performance/Cargo.toml \
+  --test storage --test usb-storage --test usb-completion --test usb-service
+python3 tests/acpi/qemu-shutdown.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --storage usb --usb-input --i8042 off --read-iops 20
+python3 tests/acpi/qemu-shutdown.py \
+  --image spencer/out/x86_64-pc99-release/spencer.img \
+  --storage usb --usb-input --i8042 off --hpet off --smp 1
+```
+
+### USB reply/maintenance ordering
+
+USB now completes each block reply before running periodic HID polling, port
+enumeration or input-service connection RPCs. Those operations run on maintenance
+notifications instead of before every reply. Bulk waits still dispatch HID events.
+The `usb-service` host tests include the production event loop and assert this
+ordering, including replies followed by deferred notifications and IRQ rechecks.
+
+To test machines with no usable INTx route under QEMU, build with
+`NANAMI_USB_POLL_ONLY=1`. The resulting driver must log `irq=false`.
+This is a compile-time test override, not a hardware detection change; omit it
+for normal builds. For example, with a private image built with that override:
+
+```sh
+python3 tests/acpi/qemu-shutdown.py --image /path/to/private/test.img \
+  --smp 4 --hpet on --storage usb --usb-input --i8042 off --read-iops 200
+```
+
+The harness injects no input until Honoka and Shell finish booting. Read
+throttling exercises timer-backed bulk completion waits; shutdown then checks
+storage synchronization and ACPI S5. Passing this does not establish that the
+reported real-hardware stall (keypresses/unplug allowing reads to progress) is
+fixed.
+
+If hardware still stalls, build with `NANAMI_USB_IO_TRACE=1` and capture the
+last `[usb.trace]` lines both before and after a keypress. Request/reply,
+maintenance/input connection, bulk completion and timer-wait boundaries are
+logged separately. Tracing is off by default and changes timing; do not use it
+for performance measurements. Neither override changes A9N.
 
 ### Shell terminal and GUI resize
 

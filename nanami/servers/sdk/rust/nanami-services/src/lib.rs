@@ -7,6 +7,7 @@ pub mod gfx;
 pub mod input;
 pub mod net;
 pub mod posix;
+pub mod power;
 pub mod registry;
 pub mod rtc;
 pub mod terminal;

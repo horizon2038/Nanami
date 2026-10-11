@@ -294,9 +294,6 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
     -serial mon:stdio
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE"
     -drive "if=pflash,format=raw,file=$OVMF_VARS_RUNTIME"
-    "${storage_args[@]}"
-    --no-reboot
-    --no-shutdown
   )
   if [ "$USB_INPUT" = "on" ] || [ "$STORAGE_DEVICE" = "usb" ]; then
     args+=(
@@ -304,6 +301,8 @@ if [ "$TARGET_ARCH" = "x86_64" ]; then
       -device "qemu-xhci,id=xhci,addr=6,msi=off,msix=off"
     )
   fi
+  # USB storage names xhci.0, so create its parent controller first.
+  args+=("${storage_args[@]}")
   if [ "$USB_INPUT" = "on" ]; then
     args+=(
       -device "usb-kbd,id=usb-kbd,bus=xhci.0,port=1"
@@ -328,8 +327,6 @@ else
     -drive "if=none,id=blk0,format=$BLOCK_IMAGE_FORMAT,file=$BLOCK_IMAGE"
     -device "virtio-blk-device,drive=blk0"
     -global virtio-mmio.force-legacy=false
-    --no-reboot
-    --no-shutdown
   )
 fi
 args+=("${ACCEL_ARGS[@]}")

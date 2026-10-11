@@ -8,7 +8,7 @@ pub fn usb_controller(_index: usize) -> Result<Option<libnanami::Word>, RequestE
 
 pub fn prepare_usb_controller(
     _: usize,
-) -> Result<nanami_services::device::UsbControllerResource, RequestError> {
+) -> Result<(nanami_services::device::UsbControllerResource, u8), RequestError> {
     Err(RequestError::Unsupported)
 }
 

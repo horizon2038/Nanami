@@ -3,11 +3,12 @@
 extern crate alloc;
 extern crate self as libnanami;
 extern crate self as nanami_services;
-pub use std::print;
 use std::{cell::RefCell, cmp::min, ptr};
+pub use std::{print, println};
 pub type Word = usize;
 pub const OS_RESPONSE_OK: Word = 0;
 pub const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
+pub const OS_RESPONSE_PERMISSION_DENIED: Word = 2;
 pub const OS_RESPONSE_INVALID_DESCRIPTOR: Word = 3;
 pub const OS_RESPONSE_ILLEGAL_OPERATION: Word = 4;
 pub const OS_RESPONSE_FATAL: Word = 5;
@@ -43,6 +44,7 @@ struct Ext2Runtime {
     block_count: usize,
     block_cache: block_cache::BlockCache,
     writeback: writeback::Writeback,
+    frozen_by: Option<Word>,
     handles: [FileHandle; 2],
     mapping: Vec<u32>,
     scratch: Box<[u8; BUFFER_SIZE]>,
@@ -79,6 +81,22 @@ use ipc::ServiceRequest;
 pub mod vfs {
     pub const VFS_REQUEST_FSYNC: usize = 0x9111;
     pub const VFS_REQUEST_SYNC: usize = 0x9112;
+    pub const VFS_REQUEST_FREEZE: usize = 0x9114;
+    pub const VFS_REQUEST_THAW: usize = 0x9115;
+}
+pub mod power {
+    pub const ACPI_SERVICE: &str = "acpi-service";
+}
+pub fn connect_service_by_name_with_pid(name: &str, slot: Word) -> Result<Word, RequestError> {
+    assert_eq!((name, slot), (power::ACPI_SERVICE, 25));
+    FAKE.with(|fake| {
+        let mut fake = fake.borrow_mut();
+        if fake.power_connected {
+            return Err(RequestError::Status(OS_RESPONSE_ILLEGAL_OPERATION));
+        }
+        fake.power_connected = true;
+        Ok(8)
+    })
 }
 pub mod registry {
     use super::*;
@@ -104,6 +122,7 @@ pub mod timer {
 
 #[derive(Default)]
 struct Fake {
+    power_connected: bool,
     disk: Vec<u8>,
     durable: Vec<u8>,
     shm: usize,
@@ -255,6 +274,7 @@ fn runtime(mapping: Vec<u32>) -> Ext2Runtime {
         block_count: 1024,
         block_cache: block_cache::BlockCache::new(BLOCK_SIZE, 128 * BLOCK_SIZE, BUFFER_SIZE),
         writeback: writeback::Writeback::new(Some(SLOT_TIMER_SERVICE)),
+        frozen_by: None,
         handles: [
             FileHandle {
                 active: true,
@@ -292,6 +312,7 @@ fn write(
 #[path = "block-allocation.rs"]
 mod block_allocation_tests;
 mod cache;
+mod shutdown;
 mod transfers;
 #[path = "writeback-tests.rs"]
 mod writeback_tests;

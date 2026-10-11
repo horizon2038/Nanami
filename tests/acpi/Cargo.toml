@@ -1,0 +1,16 @@
+[package]
+name = "nanami-acpi-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+acpi = "=6.1.1"
+
+[patch.crates-io]
+acpi = { path = "../../nanami/servers/vendor/acpi" }
+
+[lib]
+path = "power.rs"
+
+[workspace]

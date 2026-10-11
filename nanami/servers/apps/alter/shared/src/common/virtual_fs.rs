@@ -29,6 +29,11 @@ pub enum VirtualNode {
     RootBin,
     RootEtc,
     RootUsr,
+    RootSbin,
+    ProcNet,
+    ProcNetArp,
+    ResolvConf,
+    Hosts,
 }
 
 impl VirtualNode {
@@ -62,6 +67,11 @@ impl VirtualNode {
             22 => Some(Self::RootBin),
             23 => Some(Self::RootEtc),
             24 => Some(Self::RootUsr),
+            25 => Some(Self::RootSbin),
+            26 => Some(Self::ProcNet),
+            27 => Some(Self::ProcNetArp),
+            28 => Some(Self::ResolvConf),
+            29 => Some(Self::Hosts),
             _ => None,
         }
     }
@@ -83,13 +93,15 @@ impl VirtualNode {
                 | Self::RootBin
                 | Self::RootEtc
                 | Self::RootUsr
+                | Self::RootSbin
+                | Self::ProcNet
         )
     }
 
     pub const fn is_regular_file(self) -> bool {
         matches!(
             self,
-            Self::ProcSelfExe | Self::ProcVersion | Self::ProcCpuInfo | Self::ProcMemInfo
+            Self::ProcSelfExe | Self::ProcVersion | Self::ProcCpuInfo | Self::ProcMemInfo | Self::ProcNetArp | Self::ResolvConf | Self::Hosts
         )
     }
 }
@@ -99,6 +111,14 @@ pub struct DirectoryEntry {
     pub name: &'static [u8],
     pub node: VirtualNode,
 }
+
+// Only mounted/aliased paths belong here. Ordinary root entries come from VFS.
+pub const ROOT_MOUNTS: &[DirectoryEntry] = &[
+    DirectoryEntry { name: b"dev", node: VirtualNode::Dev },
+    DirectoryEntry { name: b"proc", node: VirtualNode::Proc },
+    DirectoryEntry { name: b"sys", node: VirtualNode::Sys },
+    DirectoryEntry { name: b"temp", node: VirtualNode::Temp },
+];
 
 pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
     match path {
@@ -117,6 +137,8 @@ pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
         b"/proc/version" => Some(VirtualNode::ProcVersion),
         b"/proc/cpuinfo" => Some(VirtualNode::ProcCpuInfo),
         b"/proc/meminfo" => Some(VirtualNode::ProcMemInfo),
+        b"/proc/net" | b"/proc/self/net" => Some(VirtualNode::ProcNet),
+        b"/proc/net/arp" | b"/proc/self/net/arp" => Some(VirtualNode::ProcNetArp),
         b"/sys" => Some(VirtualNode::Sys),
         b"/sys/class" => Some(VirtualNode::SysClass),
         b"/sys/class/input" => Some(VirtualNode::SysClassInput),
@@ -134,41 +156,7 @@ pub fn directory_entry(
     graphics_enabled: bool,
 ) -> Option<DirectoryEntry> {
     let entry = match directory {
-        VirtualNode::Root => match index {
-            0 => DirectoryEntry {
-                name: b"bin",
-                node: VirtualNode::RootBin,
-            },
-            1 => DirectoryEntry {
-                name: b"dev",
-                node: VirtualNode::Dev,
-            },
-            2 => DirectoryEntry {
-                name: b"etc",
-                node: VirtualNode::RootEtc,
-            },
-            3 => DirectoryEntry {
-                name: b"proc",
-                node: VirtualNode::Proc,
-            },
-            4 => DirectoryEntry {
-                name: b"sys",
-                node: VirtualNode::Sys,
-            },
-            5 => DirectoryEntry {
-                name: b"tmp",
-                node: VirtualNode::Tmp,
-            },
-            6 => DirectoryEntry {
-                name: b"temp",
-                node: VirtualNode::Temp,
-            },
-            7 => DirectoryEntry {
-                name: b"usr",
-                node: VirtualNode::RootUsr,
-            },
-            _ => return None,
-        },
+        VirtualNode::Root => *ROOT_MOUNTS.get(index)?,
         VirtualNode::Dev => match index {
             0 => DirectoryEntry {
                 name: b"input",
@@ -220,6 +208,7 @@ pub fn directory_entry(
                 name: b"meminfo",
                 node: VirtualNode::ProcMemInfo,
             },
+            4 => DirectoryEntry { name: b"net", node: VirtualNode::ProcNet },
             _ => return None,
         },
         VirtualNode::ProcSelf => match index {
@@ -227,6 +216,11 @@ pub fn directory_entry(
                 name: b"exe",
                 node: VirtualNode::ProcSelfExe,
             },
+            1 => DirectoryEntry { name: b"net", node: VirtualNode::ProcNet },
+            _ => return None,
+        },
+        VirtualNode::ProcNet => match index {
+            0 => DirectoryEntry { name: b"arp", node: VirtualNode::ProcNetArp },
             _ => return None,
         },
         VirtualNode::Sys => match index {
@@ -274,6 +268,16 @@ pub fn static_file(node: VirtualNode) -> Option<&'static [u8]> {
     match node {
         VirtualNode::ProcVersion => Some(PROC_VERSION),
         VirtualNode::ProcCpuInfo => Some(CPU_INFO),
+        VirtualNode::Hosts => Some(b"127.0.0.1 localhost\n"),
+        _ => None,
+    }
+}
+
+/// Defaults only: a real rootfs file always takes precedence.
+pub fn fallback_file(path: &[u8]) -> Option<VirtualNode> {
+    match path {
+        b"/etc/resolv.conf" => Some(VirtualNode::ResolvConf),
+        b"/etc/hosts" => Some(VirtualNode::Hosts),
         _ => None,
     }
 }

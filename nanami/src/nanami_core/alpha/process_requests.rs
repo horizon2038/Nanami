@@ -4,7 +4,15 @@ impl Alpha {
     fn configure_process_affinity(
         &mut self,
         pcb: CapabilityDescriptor,
+        image_name: &str,
     ) -> Result<Word, CapabilityError> {
+        // ACPI's SMI_CMD must be accessed on the boot processor. The server
+        // comes from the trusted initramfs; keep its suspended PCB on the BSP.
+        #[cfg(target_arch = "x86_64")]
+        if image_name == "./bin/acpi-server" {
+            return Ok(0);
+        }
+        let _ = image_name;
         // The available cores come from init_info. A newly created, suspended
         // PCB starts on core 0; no affinity probing is needed.
         let affinity = self.processes.allocate_affinity();
@@ -404,7 +412,7 @@ impl Alpha {
             0,
         ));
         spawn_stage = "affinity";
-        let affinity = spawn_try!(self.configure_process_affinity(child_pcb));
+        let affinity = spawn_try!(self.configure_process_affinity(child_pcb, image_name));
 
         spawn_stage = "process-install";
         spawn_try!(self.processes.install_process(

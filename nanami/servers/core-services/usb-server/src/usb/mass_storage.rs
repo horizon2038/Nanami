@@ -1,5 +1,8 @@
 //! Wire formats for SCSI transparent / Bulk-Only Transport (not UAS).
 
+// A single normal xHCI TRB can cover this when its buffer is 64-KiB aligned.
+pub const DATA_BYTES: usize = 0x10000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BulkEndpoint {
     pub address: u8,
@@ -178,7 +181,7 @@ pub fn block_range(first: u64, sectors: u64, block: usize, count: usize) -> Opti
     let relative = (block as u64).checked_mul(2)?;
     let length = (count as u64).checked_mul(2)?;
     let bytes = count.checked_mul(1024)?;
-    if count == 0 || bytes > 0x4000 || relative.checked_add(length)? > sectors {
+    if count == 0 || bytes > DATA_BYTES || relative.checked_add(length)? > sectors {
         return None;
     }
     Some((first.checked_add(relative)?, bytes))

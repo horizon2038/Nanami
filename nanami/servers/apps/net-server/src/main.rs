@@ -36,6 +36,8 @@ mod tcp_state;
 mod tcp_rx;
 #[path = "app/readiness.rs"]
 mod readiness;
+#[path = "app/routing.rs"]
+mod routing;
 #[path = "app/tcp_wire.rs"]
 mod tcp_wire;
 #[path = "app/udp.rs"]
@@ -51,6 +53,7 @@ use dhcp::dhcp_bootstrap;
 use dns::handle_dns_query_request;
 use ethernet::process_ethernet_frame;
 use icmp::{emit_icmp_echo_from_session, handle_icmp_recv_request};
+use routing::next_hop_ip;
 use tcp_index::{active_tcp_connection_index, TcpIndex};
 use tcp_rx::{handle_tcp_recv_request, TcpRxBuffer, TcpRxQueue};
 use tcp_send::handle_tcp_send_request;
@@ -433,6 +436,7 @@ struct NetRuntime {
     backend_rx_batch: bool,
     mac: [u8; 6],
     ip: [u8; 4],
+    subnet_mask: [u8; 4],
     gateway_ip: [u8; 4],
     dns_ip: [u8; 4],
     arp: ArpCache,
@@ -451,6 +455,7 @@ struct NetRuntime {
     dhcp_server_ip: [u8; 4],
     dhcp_router_ip: [u8; 4],
     dhcp_dns_ip: [u8; 4],
+    dhcp_subnet_mask: Option<[u8; 4]>,
     dns_waiting: bool,
     dns_txid: u16,
     dns_src_port: u16,
@@ -576,15 +581,6 @@ fn emit_frame(runtime: &NetRuntime, frame_len: usize) -> Result<Word, RequestErr
         frame_len as Word,
     )
 }
-
-fn next_hop_ip(runtime: &NetRuntime, destination: [u8; 4]) -> [u8; 4] {
-    if destination[0..3] == runtime.ip[0..3] {
-        destination
-    } else {
-        runtime.gateway_ip
-    }
-}
-
 
 fn notify_client_sessions(runtime: &NetRuntime) {
     for session in runtime.sessions {
@@ -739,6 +735,7 @@ fn handle_network_request(
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     match request.code {
+        nanami_services::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => arp::handle_snapshot_request(runtime, request),
         nanami_services::net::NET_SERVICE_REQUEST_READINESS => readiness::handle_readiness_request(runtime, request),
         nanami_services::net::NET_SERVICE_REQUEST_SEND => {
             // Raw L2 frame send: arg0=client shm offset, arg1=len
@@ -829,6 +826,9 @@ fn handle_network_request(
             }
             nanami_services::net::NET_SERVICE_CONTROL_GET_MAC => {
                 (libnanami::OS_RESPONSE_OK, pack_mac(runtime.mac), 0)
+            }
+            nanami_services::net::NET_SERVICE_CONTROL_GET_IPV4_NETMASK => {
+                (libnanami::OS_RESPONSE_OK, pack_ipv4(runtime.subnet_mask) as Word, 0)
             }
             nanami_services::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY => {
                 cleanup_stale_client_sessions(runtime);
@@ -1201,6 +1201,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         backend_rx_batch,
         mac,
         ip: [10, 0, 2, 15],
+        subnet_mask: [255, 255, 255, 0],
         gateway_ip: [10, 0, 2, 2],
         dns_ip: [10, 0, 2, 3],
         arp: ArpCache::EMPTY,
@@ -1219,6 +1220,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         dhcp_server_ip: [0; 4],
         dhcp_router_ip: [0; 4],
         dhcp_dns_ip: [0; 4],
+        dhcp_subnet_mask: None,
         dns_waiting: false,
         dns_txid: 0,
         dns_src_port: 0,

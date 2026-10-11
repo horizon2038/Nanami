@@ -42,6 +42,14 @@ pub(super) fn map_network_error(error: RequestError) -> i32 {
     }
 }
 
+pub(super) fn map_link_request_error(error: RequestError) -> i32 {
+    match error {
+        RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR) => ENOENT,
+        RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EEXIST,
+        other => map_request_error(other),
+    }
+}
+
 pub(super) fn map_network_bind_error(error: RequestError) -> i32 {
     match error {
         RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION) => EADDRINUSE,

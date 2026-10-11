@@ -5,6 +5,7 @@ All sockets are loopback-only; the guest has restricted user networking.
 The injection port is a private QEMU hub peer, not a host/LAN raw socket.
 """
 import argparse
+import ipaddress
 import os
 import pathlib
 import platform
@@ -24,12 +25,18 @@ parser.add_argument('--smp', type=int, default=4)
 parser.add_argument('-n', '--requests', type=int, default=1000)
 parser.add_argument('-c', '--concurrency', type=int, default=100)
 parser.add_argument('--multicast', action='store_true')
+parser.add_argument('--boot-multicast', action='store_true',
+                    help='inject LAN multicast during DHCP bootstrap as well as HTTP')
+parser.add_argument('--subnet-prefix', type=int, choices=(23, 24, 25), default=24,
+                    help='DHCP subnet prefix; verify the guest applies its mask')
 parser.add_argument('--evict-arp', action='store_true', help='also fill the neighbor cache with 40 test peers')
 parser.add_argument('--keep-alive', action='store_true')
 parser.add_argument('--timeout', type=int, default=60)
 parser.add_argument('--fix-slirp-backlog', action='store_true',
                     help='Darwin only: raise the QEMU host-forward listener backlog from 1 to SOMAXCONN')
 args = parser.parse_args()
+if args.boot_multicast and not args.multicast:
+    parser.error('--boot-multicast requires --multicast')
 repo = pathlib.Path(__file__).resolve().parents[2]
 logs = pathlib.Path(tempfile.mkdtemp(prefix='nanami-http-test-'))
 firmware = repo / 'spencer/a9nloader-rs/tools'
@@ -60,7 +67,7 @@ peer_port = peer.getsockname()[1]
 command = [
     'qemu-system-x86_64', '-machine', 'hpet=on', '-cpu', 'max', '-smp', str(args.smp),
     '-m', '4G', '-display', 'none', '-serial', f'file:{serial}', '-monitor', 'stdio',
-    '-netdev', f'user,id=user0,restrict=on,hostfwd=tcp:127.0.0.1:{port}-:80',
+    '-netdev', f'user,id=user0,restrict=on,net=10.0.2.0/{args.subnet_prefix},dhcpstart=10.0.2.15,hostfwd=tcp:127.0.0.1:{port}-:80',
     '-netdev', 'hubport,id=user-port,hubid=0,netdev=user0',
     '-netdev', f'socket,id=inject,udp=127.0.0.1:{peer_port},localaddr=127.0.0.1:{inject_port}',
     '-netdev', 'hubport,id=inject-port,hubid=0,netdev=inject',
@@ -91,6 +98,8 @@ def neighbor_frame(host):
 
 stop = threading.Event()
 inject = threading.Event()
+if args.boot_multicast:
+    inject.set()
 arp_requests = 0
 
 def network_peer():
@@ -141,6 +150,12 @@ with (logs / 'qemu.log').open('w') as diagnostics:
     worker.start()
     try:
         wait_for(lambda text: re.search(r'\[\s*shell\] font init end', text) and '[              honoka] online' in text)
+        expected_mask = str(ipaddress.IPv4Network(f'10.0.2.0/{args.subnet_prefix}').netmask)
+        # SMP boot logs can interleave characters from different services.
+        # Only apply_lease logs this dotted mask token; do not require its
+        # prefix and address to survive as one uninterrupted serial line.
+        wait_for(lambda text: re.search(r'\bmask=' + re.escape(expected_mask) + r'\b', text))
+        print(f'Guest applied DHCP mask {expected_mask}', flush=True)
         time.sleep(5)
         for char in 'http-server\n':
             send(f'sendkey { {"-": "minus", chr(10): "ret"}.get(char, char)} 50')

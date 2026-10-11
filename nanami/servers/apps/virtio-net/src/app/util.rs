@@ -5,6 +5,11 @@ pub(crate) fn log_request_error(prefix: &str, err: RequestError) {
 }
 
 pub(crate) fn fail_device(io_desc: Word, io_base: Word) {
+    // Early initialization failures have no device BAR. In particular, the
+    // PCI I/O capability also permits legacy ports: base 0 is not a device.
+    if io_base == 0 {
+        return;
+    }
     if let Ok(mut s) = read_device_status(io_desc, io_base) {
         s |= VIRTIO_STATUS_FAILED;
         let _ = write_device_status(io_desc, io_base, s);

@@ -1,19 +1,25 @@
 use super::*;
 use std::cmp::min;
+use std::ptr;
 #[path = "../../../nanami/servers/libs/net-wire/src/lib.rs"]
 #[allow(unused_attributes)]
 mod wire;
-use wire::read_u16_be;
+use wire::{ipv4_checksum, read_u16_be, write_u16_be, write_u32_be};
 #[path = "../../../nanami/servers/apps/net-server/src/app/arp_cache.rs"]
 mod arp_cache;
 use arp_cache::ArpCache;
 #[path = "../../../nanami/servers/apps/net-server/src/app/arp.rs"]
 mod arp;
 use arp::{arp_lookup, emit_arp_request};
+#[path = "../../../nanami/servers/apps/net-server/src/app/dns.rs"]
+mod dns;
 #[path = "../../../nanami/servers/apps/net-server/src/app/ip.rs"]
 mod ip;
 #[path = "../../../nanami/servers/apps/net-server/src/app/tcp_send.rs"]
 mod tcp_send;
+#[path = "../../../nanami/servers/apps/net-server/src/app/routing.rs"]
+mod routing;
+use routing::next_hop_ip;
 
 const ETH_HDR_LEN: usize = 14;
 const BACKEND_TX_OFFSET: Word = 0;
@@ -41,6 +47,7 @@ struct Session {
 struct NetRuntime {
     mac: [u8; 6],
     ip: [u8; 4],
+    subnet_mask: [u8; 4],
     gateway_ip: [u8; 4],
     arp: ArpCache,
     dhcp_waiting: bool,
@@ -48,6 +55,13 @@ struct NetRuntime {
     session: Session,
     tcp_connections: [TcpConnection; 1],
     tcp_rx: RxWindow,
+    timer_port: Option<Word>,
+    dns_ip: [u8; 4],
+    dns_waiting: bool,
+    dns_src_port: u16,
+    dns_txid: u16,
+    dns_answer_valid: bool,
+    dns_answer_ip: [u8; 4],
 }
 struct RxWindow;
 impl RxWindow {
@@ -64,13 +78,6 @@ fn get_backend_shm_ptr(runtime: &NetRuntime, _: Word) -> *mut u8 {
 }
 fn emit_frame(_: &NetRuntime, len: usize) -> Result<Word, RequestError> {
     Ok(len)
-}
-fn next_hop_ip(runtime: &NetRuntime, ip: [u8; 4]) -> [u8; 4] {
-    if ip[..3] == runtime.ip[..3] {
-        ip
-    } else {
-        runtime.gateway_ip
-    }
 }
 fn session_for(runtime: &NetRuntime, owner: Word) -> Option<Session> {
     (owner == 1).then_some(runtime.session)
@@ -108,17 +115,9 @@ mod dhcp {
         false
     }
 }
-mod dns {
-    use super::*;
-    pub(super) fn process_dns_payload(
-        _: &mut NetRuntime,
-        _: [u8; 4],
-        _: u16,
-        _: u16,
-        _: &[u8],
-    ) -> bool {
-        false
-    }
+fn sleep_ms(_: Option<Word>, _: Word) {}
+fn pump_backend(_: &mut NetRuntime, _: &mut NetStats) -> Word {
+    0
 }
 mod icmp {
     use super::*;
@@ -162,6 +161,7 @@ fn setup() -> (Vec<u8>, NetRuntime) {
     let runtime = NetRuntime {
         mac: [2, 0, 0, 0, 0, 26],
         ip: [192, 168, 1, 26],
+        subnet_mask: [255, 255, 255, 0],
         gateway_ip: [192, 168, 1, 1],
         arp: ArpCache::EMPTY,
         dhcp_waiting: false,
@@ -179,6 +179,13 @@ fn setup() -> (Vec<u8>, NetRuntime) {
             state: 2,
         }],
         tcp_rx: RxWindow,
+        timer_port: None,
+        dns_ip: [192, 168, 1, 1],
+        dns_waiting: false,
+        dns_src_port: 53053,
+        dns_txid: 123,
+        dns_answer_valid: false,
+        dns_answer_ip: [0; 4],
     };
     (buffer, runtime)
 }
@@ -207,6 +214,49 @@ fn multiple_neighbors_and_mac_updates_do_not_overwrite_the_http_peer() {
 }
 
 #[test]
+fn arp_snapshot_exports_real_entries_and_checks_bounds_before_writing() {
+    let (buffer, mut runtime) = setup();
+    let mut request = ipc::ServiceRequest {
+        identifier: 1,
+        arg0: 16,
+        arg1: 12,
+        ..Default::default()
+    };
+    assert_eq!(
+        arp::handle_snapshot_request(&runtime, request),
+        (OS_RESPONSE_OK, 0, 0)
+    );
+    runtime.arp.update([192, 168, 1, 1], [2, 3, 4, 5, 6, 7]);
+    request = ipc::ServiceRequest {
+        identifier: 1,
+        arg0: 16,
+        arg1: 12,
+        ..Default::default()
+    };
+    assert_eq!(
+        arp::handle_snapshot_request(&runtime, request),
+        (OS_RESPONSE_OK, 1, 0)
+    );
+    assert_eq!(&buffer[16..28], &[192, 168, 1, 1, 2, 3, 4, 5, 6, 7, 0, 0]);
+    for (owner, offset, capacity, error) in [
+        (2, 0, 12, OS_RESPONSE_PERMISSION_DENIED),
+        (1, usize::MAX, 1, OS_RESPONSE_INVALID_ARGUMENT),
+        (1, 1, usize::MAX, OS_RESPONSE_INVALID_ARGUMENT),
+        (1, 0, 11, OS_RESPONSE_INVALID_ARGUMENT),
+    ] {
+        let before = buffer.clone();
+        let request = ipc::ServiceRequest {
+            identifier: owner,
+            arg0: offset,
+            arg1: capacity,
+            ..Default::default()
+        };
+        assert_eq!(arp::handle_snapshot_request(&runtime, request).0, error);
+        assert_eq!(buffer, before);
+    }
+}
+
+#[test]
 fn bounded_cache_handles_replacement_and_relearning() {
     let mut cache = ArpCache::EMPTY;
     for host in 1..=200 {
@@ -216,6 +266,56 @@ fn bounded_cache_handles_replacement_and_relearning() {
     assert_eq!(cache.lookup([10, 0, 0, 200]), Some([2, 0, 0, 0, 0, 200]));
     cache.update([10, 0, 0, 1], [4; 6]);
     assert_eq!(cache.lookup([10, 0, 0, 1]), Some([4; 6]));
+}
+
+#[test]
+fn dns_replies_for_linux_udp_sockets_are_not_consumed_by_native_resolver() {
+    let (_buffer, mut runtime) = setup();
+    let answer = [
+        0, 123, 0x81, 0x80, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 8, 8, 4, 4,
+    ];
+    let server = runtime.dns_ip;
+    assert!(!dns::process_dns_payload(
+        &mut runtime,
+        server,
+        53,
+        53053,
+        &answer
+    ));
+    runtime.dns_waiting = true;
+    assert!(!dns::process_dns_payload(
+        &mut runtime,
+        server,
+        53,
+        40000,
+        &answer
+    ));
+    assert!(!dns::process_dns_payload(
+        &mut runtime,
+        [1, 2, 3, 4],
+        53,
+        53053,
+        &answer
+    ));
+    let mut other = answer;
+    other[1] = 124;
+    assert!(!dns::process_dns_payload(
+        &mut runtime,
+        server,
+        53,
+        53053,
+        &other
+    ));
+    assert!(runtime.dns_waiting && !runtime.dns_answer_valid);
+    assert!(dns::process_dns_payload(
+        &mut runtime,
+        server,
+        53,
+        53053,
+        &answer
+    ));
+    assert_eq!(runtime.dns_answer_ip, [8, 8, 4, 4]);
+    assert!(runtime.dns_answer_valid && !runtime.dns_waiting);
 }
 
 #[test]

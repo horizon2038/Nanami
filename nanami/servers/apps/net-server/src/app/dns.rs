@@ -59,16 +59,21 @@ pub(crate) fn handle_dns_query_request(
 
 pub(crate) fn process_dns_payload(
     runtime: &mut NetRuntime,
-    _src_ip: [u8; 4],
+    src_ip: [u8; 4],
     src_port: u16,
     dst_port: u16,
     payload: &[u8],
 ) -> bool {
-    if src_port != DNS_SERVER_PORT {
+    // Only consume replies to the native resolver's own outstanding query.
+    // Linux libc uses an ordinary UDP socket; its DNS replies must reach it.
+    if src_port != DNS_SERVER_PORT
+        || !runtime.dns_waiting
+        || dst_port != runtime.dns_src_port
+        || src_ip != runtime.dns_ip
+        || payload.len() < 2
+        || read_u16_be(payload) != runtime.dns_txid
+    {
         return false;
-    }
-    if !runtime.dns_waiting || dst_port != runtime.dns_src_port {
-        return true;
     }
 
     let Some((txid, answer_ip)) = parse_dns_response(payload) else {
@@ -91,7 +96,7 @@ fn dns_query_ipv4(
     timeout_ms: Word,
 ) -> Result<[u8; 4], RequestError> {
     let server_ip = runtime.dns_ip;
-    let dst_mac = match ensure_arp(runtime, stats, server_ip) {
+    let dst_mac = match ensure_arp(runtime, stats, next_hop_ip(runtime, server_ip)) {
         Some(v) => v,
         None => {
             return Err(RequestError::Status(

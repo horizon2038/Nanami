@@ -18,6 +18,7 @@ pub const SYS_GETDENTS64: Word = 61;
 pub const SYS_LSEEK: Word = 62;
 pub const SYS_READ: Word = 63;
 pub const SYS_WRITE: Word = 64;
+pub const SYS_SENDFILE: Word = 71;
 pub const SYS_READV: Word = 65;
 pub const SYS_WRITEV: Word = 66;
 pub const SYS_PREAD64: Word = 67;

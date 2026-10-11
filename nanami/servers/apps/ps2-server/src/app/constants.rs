@@ -35,5 +35,6 @@ pub const PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER: u8 = 0x04;
 pub const MAX_PS2_BYTES_PER_DRAIN: usize = 128;
 pub const MAX_KEY_EVENTS_PER_BATCH: usize = 32;
 pub const MAX_MOUSE_BUTTON_EVENTS_PER_BATCH: usize = 32;
-pub const PS2_ACK_TIMEOUT: usize = 500_000;
+pub const PS2_ACK_TIMEOUT_MS: Word = 500;
+pub const PS2_INPUT_TIMEOUT_MS: Word = 200;
 pub const HEARTBEAT_IRQ_INTERVAL: usize = 65536;

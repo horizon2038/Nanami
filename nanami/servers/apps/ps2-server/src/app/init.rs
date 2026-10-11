@@ -1,16 +1,17 @@
 use libnanami::{RequestError, Word};
 
 use crate::constants::{
-    PS2_ACK_TIMEOUT, PS2_COMMAND_PORT, PS2_CONTROLLER_ENABLE_AUX, PS2_CONTROLLER_READ_CONFIG,
-    PS2_CONTROLLER_WRITE_CONFIG, PS2_CONTROLLER_WRITE_TO_MOUSE, PS2_DATA_PORT, PS2_MOUSE_ACK,
-    PS2_MOUSE_CMD_DISABLE_DATA_REPORTING, PS2_MOUSE_CMD_ENABLE_DATA_REPORTING,
-    PS2_MOUSE_CMD_GET_DEVICE_ID, PS2_MOUSE_CMD_SET_DEFAULTS, PS2_MOUSE_CMD_SET_RESOLUTION,
-    PS2_MOUSE_CMD_SET_SAMPLE_RATE, PS2_MOUSE_CMD_SET_SCALING_1_TO_1, PS2_MOUSE_ID_INTELLIMOUSE,
-    PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER, PS2_MOUSE_ID_STANDARD, PS2_MOUSE_RESEND,
-    PS2_MOUSE_RESOLUTION, PS2_MOUSE_SAMPLE_RATE, PS2_STATUS_PORT,
+    PS2_ACK_TIMEOUT_MS, PS2_COMMAND_PORT, PS2_CONTROLLER_ENABLE_AUX, PS2_CONTROLLER_READ_CONFIG,
+    PS2_CONTROLLER_WRITE_CONFIG, PS2_CONTROLLER_WRITE_TO_MOUSE, PS2_DATA_PORT,
+    PS2_INPUT_TIMEOUT_MS, PS2_MOUSE_ACK, PS2_MOUSE_CMD_DISABLE_DATA_REPORTING,
+    PS2_MOUSE_CMD_ENABLE_DATA_REPORTING, PS2_MOUSE_CMD_GET_DEVICE_ID, PS2_MOUSE_CMD_SET_DEFAULTS,
+    PS2_MOUSE_CMD_SET_RESOLUTION, PS2_MOUSE_CMD_SET_SAMPLE_RATE, PS2_MOUSE_CMD_SET_SCALING_1_TO_1,
+    PS2_MOUSE_ID_INTELLIMOUSE, PS2_MOUSE_ID_INTELLIMOUSE_EXPLORER, PS2_MOUSE_ID_STANDARD,
+    PS2_MOUSE_RESEND, PS2_MOUSE_RESOLUTION, PS2_MOUSE_SAMPLE_RATE,
 };
-use crate::controller::drain_controller;
+use crate::controller::{drain_controller, read_status};
 use crate::state::Ps2Server;
+use crate::wait::Wait;
 
 pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     let _ = drain_controller(server);
@@ -89,11 +90,11 @@ fn enable_mouse_wheel(server: &mut Ps2Server) -> Result<u8, RequestError> {
 }
 
 fn read_controller_config(server: &mut Ps2Server) -> Result<Word, RequestError> {
-    let mut i = 0usize;
-    while i < PS2_ACK_TIMEOUT {
-        let status = libnanami::io::io_read(server.io_desc, PS2_STATUS_PORT, 1)?;
+    let mut wait = Wait::new("controller config", PS2_ACK_TIMEOUT_MS);
+    loop {
+        let status = read_status(server.io_desc)?;
         if (status & 0x01) == 0 {
-            i += 1;
+            wait.pause(status)?;
             continue;
         }
 
@@ -104,13 +105,12 @@ fn read_controller_config(server: &mut Ps2Server) -> Result<Word, RequestError> 
                 &mut server.mouse_batch,
                 &mut server.mouse_packet_count,
             );
-            i += 1;
+            wait.pause(status)?;
             continue;
         }
 
         return Ok(data as Word);
     }
-    Err(RequestError::Transport)
 }
 
 fn write_mouse_command(server: &mut Ps2Server, command: Word) -> Result<(), RequestError> {
@@ -137,12 +137,12 @@ fn write_mouse_command_with_data(
 }
 
 fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
-    let mut i = 0usize;
-    while i < PS2_ACK_TIMEOUT {
-        let status = libnanami::io::io_read(server.io_desc, PS2_STATUS_PORT, 1)?;
+    let mut wait = Wait::new("mouse ack", PS2_ACK_TIMEOUT_MS);
+    loop {
+        let status = read_status(server.io_desc)?;
 
         if (status & 0x01) == 0 {
-            i += 1;
+            wait.pause(status)?;
             continue;
         }
 
@@ -152,7 +152,7 @@ fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
             server
                 .keyboard
                 .push_byte(data, &mut server.key_events, &mut server.key_event_count);
-            i += 1;
+            wait.pause(status)?;
             continue;
         }
 
@@ -170,19 +170,16 @@ fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
             &mut server.mouse_batch,
             &mut server.mouse_packet_count,
         );
-        i += 1;
+        wait.pause(status)?;
     }
-
-    libnanami::print!("[ps2-server] mouse ack timeout\n");
-    Err(RequestError::Transport)
 }
 
 fn read_mouse_data_byte(server: &mut Ps2Server) -> Result<u8, RequestError> {
-    let mut i = 0usize;
-    while i < PS2_ACK_TIMEOUT {
-        let status = libnanami::io::io_read(server.io_desc, PS2_STATUS_PORT, 1)?;
+    let mut wait = Wait::new("mouse data", PS2_ACK_TIMEOUT_MS);
+    loop {
+        let status = read_status(server.io_desc)?;
         if (status & 0x01) == 0 {
-            i += 1;
+            wait.pause(status)?;
             continue;
         }
 
@@ -194,19 +191,17 @@ fn read_mouse_data_byte(server: &mut Ps2Server) -> Result<u8, RequestError> {
         server
             .keyboard
             .push_byte(data, &mut server.key_events, &mut server.key_event_count);
-        i += 1;
+        wait.pause(status)?;
     }
-    Err(RequestError::Transport)
 }
 
 fn wait_input_buffer_clear(io_desc: Word) -> Result<(), RequestError> {
-    let mut i = 0usize;
-    while i < 200_000 {
-        let status = libnanami::io::io_read(io_desc, PS2_STATUS_PORT, 1)?;
+    let mut wait = Wait::new("input buffer", PS2_INPUT_TIMEOUT_MS);
+    loop {
+        let status = read_status(io_desc)?;
         if (status & 0x02) == 0 {
             return Ok(());
         }
-        i += 1;
+        wait.pause(status)?;
     }
-    Err(RequestError::Transport)
 }

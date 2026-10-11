@@ -17,6 +17,8 @@ pub mod logging;
 pub mod publish;
 #[path = "app/state.rs"]
 pub mod state;
+#[path = "app/wait.rs"]
+mod wait;
 
 use crate::constants::{
     HEARTBEAT_IRQ_INTERVAL, PS2_DATA_PORT, PS2_STATUS_PORT, SLOT_INPUT_NOTIFICATION,
@@ -25,7 +27,7 @@ use crate::constants::{
 use crate::controller::drain_controller;
 use crate::init::initialize_mouse;
 use crate::irq::{ack_waited_irqs, update_irq_counters};
-use crate::logging::{busy_delay, log_error, log_request_error};
+use crate::logging::{log_error, log_request_error};
 use crate::publish::publish_pending_events;
 use crate::state::{DrainState, Ps2Server};
 
@@ -44,6 +46,9 @@ fn nanami_main() -> libnanami::NanamiResult {
     let irq12_desc = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT_MOUSE);
     let io_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_PORT);
 
+    controller::read_status(io_desc)
+        .map_err(|e| log_error("[ps2-server] controller unavailable: ", e))?;
+    wait::initialize().map_err(|e| log_error("[ps2-server] timer init failed: ", e))?;
     bind_notification(notif_desc)?;
     let (input_port, input_pid) = connect_input_service()?;
     attach_input_drivers(input_port)?;
@@ -51,6 +56,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     let input_notification = attach_input_notification(input_pid)?;
 
     let mut server = Ps2Server::new(io_desc, input_queue_vaddr, input_notification);
+    libnanami::print!("[ps2-server] initializing controller\n");
     initialize_mouse(&mut server).map_err(|e| log_error("[ps2-server] init failed: ", e))?;
     arm_irqs(irq1_desc, irq12_desc)?;
 
@@ -92,7 +98,7 @@ fn connect_input_service() -> Result<(Word, Word), libnanami::NanamiError> {
             }
             Err(e) => {
                 log_request_error("[ps2-server] waiting input-service: ", e);
-                busy_delay();
+                wait::sleep(10).map_err(|e| log_error("[ps2-server] retry wait failed: ", e))?;
             }
         }
     }

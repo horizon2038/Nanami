@@ -76,7 +76,24 @@ fn read_blocks_uncached(
 ) -> Result<(), RequestError> {
     let mut attempt = 0;
     let read = loop {
-        match nanami_services::block::block_device_read(runtime.block_port, block, count, offset) {
+        if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+            libnanami::println!(
+                "[vfs.trace] block-read begin block={} count={} attempt={}",
+                block,
+                count,
+                attempt + 1
+            );
+        }
+        let result =
+            nanami_services::block::block_device_read(runtime.block_port, block, count, offset);
+        if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+            libnanami::println!(
+                "[vfs.trace] block-read end block={} result={:?}",
+                block,
+                result
+            );
+        }
+        match result {
             Ok(read) => break read,
             Err(error)
                 if attempt + 1 < BLOCK_READ_RETRY_LIMIT

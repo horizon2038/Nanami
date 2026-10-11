@@ -256,6 +256,9 @@ pub(super) fn sys_ioctl(
             return sys_framebuffer_ioctl(runtime, pid, file, request, argument);
         }
         LinuxFileKind::Terminal => {}
+        kind if super::is_socket_kind(kind) => {
+            return super::socket_ioctl::sys_socket_ioctl(runtime, pid, request, argument);
+        }
         _ => return Err(ENOTTY),
     }
     if request == LINUX_TCGETS {

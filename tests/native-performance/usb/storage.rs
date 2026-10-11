@@ -8,6 +8,7 @@ pub type CapabilityDescriptor = usize;
 pub const OS_RESPONSE_OK: Word = 0;
 #[derive(Debug, PartialEq)]
 pub enum RequestError {
+    Unsupported,
     Protocol,
     Transport,
     Status(Word),
@@ -232,18 +233,20 @@ fn scsi_lba_endianness_and_32_bit_boundary() {
 #[test]
 fn block_requests_cannot_escape_root_or_overflow_dma() {
     assert_eq!(wire::block_range(4096, 100, 0, 16), Some((4096, 16384)));
+    assert_eq!(wire::block_range(4096, 128, 0, 64), Some((4096, 65536)));
     assert_eq!(wire::block_range(4096, 100, 49, 1), Some((4194, 1024)));
     for (block, count) in [
         (50, 1),
         (49, 2),
         (0, 0),
-        (0, 17),
+        (0, 65),
         (usize::MAX, 1),
         (1, usize::MAX),
     ] {
         assert_eq!(wire::block_range(4096, 100, block, count), None);
     }
     assert_eq!(wire::block_range(u64::MAX, 100, 1, 1), None);
+    assert_eq!(wire::block_range(4096, 4096, 0, 65), None);
 }
 
 #[test]

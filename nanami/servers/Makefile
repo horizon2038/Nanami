@@ -11,6 +11,7 @@ ifeq ($(ARCH),aarch64)
 # Drivers for devices that cannot exist on the current platform are not part
 # of that target. The manager selects from the binaries built for its platform.
 RUST_APP_DIRS := $(filter-out \
+	core-services/acpi-server \
 	core-services/ahci-server \
 	core-services/hpet-server \
 	core-services/timer-server,\

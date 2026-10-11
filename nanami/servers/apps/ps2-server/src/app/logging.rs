@@ -8,11 +8,3 @@ pub fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
-
-pub fn busy_delay() {
-    let mut i = 0usize;
-    while i < 1_000_000 {
-        core::hint::spin_loop();
-        i += 1;
-    }
-}

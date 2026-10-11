@@ -84,7 +84,8 @@ impl Controller {
             dma,
             _scratch: scratch,
             command_ring: unsafe { Producer::new(dma.physical_at(0x1000), dma.virtual_at(0x1000)) },
-            events: unsafe { Consumer::new(dma.physical_at(0x2000), dma.virtual_at(0x2000)) },
+            events: unsafe { events::Events::new(dma.physical_at(0x2000), dma.virtual_at(0x2000)) },
+            interrupts_enabled: false,
             slots: table,
             context_bytes: if hcc & 4 != 0 { 64 } else { 32 },
             ports,
@@ -150,12 +151,14 @@ impl Controller {
         );
         Ok(controller)
     }
-    pub fn enable_interrupts(&self) {
-        if self.irq.is_some() {
+    pub fn enable_interrupts(&mut self) {
+        if self.running && self.irq.is_some() {
             unsafe {
                 write(self.interrupter, 0, 3);
                 write(self.op, USBCMD, 5);
+                let _ = read(self.op, USBCMD);
             }
+            self.interrupts_enabled = true;
         }
     }
 }

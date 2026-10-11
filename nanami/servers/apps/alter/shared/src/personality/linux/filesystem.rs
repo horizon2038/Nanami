@@ -1,114 +1,18 @@
 use super::{
-    align_up_word, bounded_len, current_virtual_node, is_at_fdcwd, is_linux_virtual_path,
-    map_create_request_error, map_path_request_error, map_request_error, map_unit, move_shm_bytes,
+    bounded_len, current_virtual_node, is_at_fdcwd, is_linux_virtual_path,
+    map_create_request_error, map_link_request_error, map_path_request_error, map_request_error,
+    map_unit, move_shm_bytes,
     path_equals, path_is_absolute, posix, read_c_string, reject_virtual_fs_mutation,
-    resolve_current_shm_path, resolve_path, sys_virtual_getdents, translate_guest_path_at,
-    translate_guest_path_for_vfs, vfs, write_target_memory, write_u16, write_u64, LinuxFileKind,
-    Runtime, Word, ALTER_IO_OFFSET, EBADF, EFAULT, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOSYS,
+    resolve_current_shm_path, resolve_path, translate_guest_path_at,
+    translate_guest_path_for_vfs, write_target_memory,
+    Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG, ENOENT, ENOSYS,
     ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW, LINUX_CWD_MAX,
-    LINUX_DIRENT64_NAME_OFFSET, LINUX_DT_BLK, LINUX_DT_CHR, LINUX_DT_DIR, LINUX_DT_REG,
-    LINUX_DT_UNKNOWN, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
+    LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
 };
-
-pub(super) fn sys_getdents64(
-    runtime: &mut Runtime,
-    pid: Word,
-    fd: Word,
-    user_buffer: Word,
-    count: Word,
-) -> Result<Word, i32> {
-    if user_buffer == 0 {
-        return Err(EFAULT);
-    }
-    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    if file.kind == LinuxFileKind::VirtualDirectory {
-        return sys_virtual_getdents(runtime, pid, fd, user_buffer, count);
-    }
-    if file.kind != LinuxFileKind::Posix {
-        return Err(ENOTDIR);
-    }
-    let posix_offset = ALTER_IO_OFFSET as Word;
-    let max_records = ::core::cmp::max(
-        1,
-        ::core::cmp::min(
-            16,
-            runtime.posix_shm_size.saturating_sub(posix_offset)
-                / vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES as Word,
-        ),
-    );
-    let (entries, next_index) =
-        posix::posix_read_dir(runtime.posix_port, file.posix_fd, max_records, posix_offset)
-            .map_err(map_request_error)?;
-    if entries == 0 {
-        return Ok(0);
-    }
-
-    let source_base = runtime.posix_shm + posix_offset;
-    let first_next_index = next_index.saturating_sub(entries);
-    let mut out_offset = 0 as Word;
-    let mut index = 0 as Word;
-    while index < entries {
-        let entry = source_base + index * vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES as Word;
-        let inode = unsafe { ::core::ptr::read_unaligned(entry as *const Word) };
-        let kind = unsafe {
-            ::core::ptr::read_unaligned(
-                (entry + vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET as Word) as *const Word,
-            )
-        };
-        let name_len = unsafe {
-            ::core::ptr::read_unaligned(
-                (entry + vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET as Word) as *const Word,
-            )
-        } as usize;
-        if name_len == 0 || name_len >= vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES {
-            return Err(EIO);
-        }
-        let reclen = align_up_word((LINUX_DIRENT64_NAME_OFFSET + name_len + 1) as Word, 8);
-        if out_offset + reclen > count || out_offset + reclen > posix_offset {
-            break;
-        }
-        let dtype = match kind {
-            posix::POSIX_FILE_TYPE_DIRECTORY => LINUX_DT_DIR,
-            posix::POSIX_FILE_TYPE_CHAR_DEVICE => LINUX_DT_CHR,
-            posix::POSIX_FILE_TYPE_BLOCK_DEVICE => LINUX_DT_BLK,
-            posix::POSIX_FILE_TYPE_REGULAR => LINUX_DT_REG,
-            _ => LINUX_DT_UNKNOWN,
-        };
-        unsafe {
-            let out = runtime.posix_shm + out_offset;
-            ::core::ptr::write_bytes(out as *mut u8, 0, reclen as usize);
-            write_u64(out, inode);
-            write_u64(out + 8, first_next_index + index + 1);
-            write_u16(out + 16, reclen as u16);
-            ::core::ptr::write((out + 18) as *mut u8, dtype as u8);
-            ::core::ptr::copy_nonoverlapping(
-                (entry + vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET as Word) as *const u8,
-                (out + LINUX_DIRENT64_NAME_OFFSET as Word) as *mut u8,
-                name_len,
-            );
-        }
-        out_offset += reclen;
-        index += 1;
-    }
-    if out_offset == 0 {
-        return Err(EINVAL);
-    }
-    write_target_memory(runtime, pid, user_buffer, out_offset)?;
-    Ok(out_offset)
-}
 
 pub(super) fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    if current_virtual_node(runtime, pid, len).is_some() {
-        return Ok(0);
-    }
-    if is_linux_virtual_path(runtime.posix_shm, len) {
-        return Err(ENOENT);
-    }
-    let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_stat(runtime.posix_port, 0, vfs_len)
-        .map(|_| 0)
-        .map_err(map_path_request_error)
+    super::stat_current_path(runtime, pid, len).map(|_| 0)
 }
 
 pub(super) fn sys_faccessat(
@@ -124,16 +28,7 @@ pub(super) fn sys_faccessat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    if current_virtual_node(runtime, pid, len).is_some() {
-        return Ok(0);
-    }
-    if is_linux_virtual_path(runtime.posix_shm, len) {
-        return Err(ENOENT);
-    }
-    let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_stat(runtime.posix_port, 0, vfs_len)
-        .map(|_| 0)
-        .map_err(map_path_request_error)
+    super::stat_current_path(runtime, pid, len).map(|_| 0)
 }
 
 pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
@@ -281,7 +176,7 @@ pub(super) fn sys_link(
         new_vfs_len,
     )
     .map(|_| 0)
-    .map_err(map_request_error)
+    .map_err(map_link_request_error)
 }
 
 pub(super) fn sys_unlinkat(
@@ -340,7 +235,7 @@ pub(super) fn sys_linkat(
         new_vfs_len,
     )
     .map(|_| 0)
-    .map_err(map_request_error)
+    .map_err(map_link_request_error)
 }
 
 pub(super) fn sys_rmdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {

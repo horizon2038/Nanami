@@ -27,8 +27,17 @@ fn pci_cfg_read32(
     offset: u8,
 ) -> Result<u32, RequestError> {
     let addr = pci_cfg_addr(bus, dev, func, offset);
+    if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+        libnanami::println!("[pci.trace] select addr={:#x}", addr);
+    }
     libnanami::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
+    if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+        libnanami::println!("[pci.trace] read addr={:#x}", addr);
+    }
     let data = libnanami::io::io_read(io_desc, PCI_CFG_DATA_PORT, 4)? as u32;
+    if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
+        libnanami::println!("[pci.trace] done addr={:#x} data={:#x}", addr, data);
+    }
     Ok(data)
 }
 

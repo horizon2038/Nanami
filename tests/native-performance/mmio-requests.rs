@@ -62,10 +62,12 @@ impl Memory {
     fn allocate_physical_at(
         &mut self,
         address: usize,
-        _: usize,
+        bytes: usize,
         allow_device: bool,
     ) -> Result<usize, CapabilityError> {
         assert!(allow_device);
+        // Each page belongs to a different physical allocation/generic.
+        assert_eq!(bytes, PAGE_SIZE);
         step("allocate-physical")?;
         Ok(address / PAGE_SIZE)
     }
@@ -76,6 +78,7 @@ impl Memory {
         device: bool,
     ) -> Result<(usize, usize, usize), CapabilityError> {
         assert!(device);
+        assert_eq!(bytes, PAGE_SIZE);
         step("convert-frames")?;
         Ok((address / PAGE_SIZE, 0, bytes / PAGE_SIZE))
     }
@@ -168,7 +171,12 @@ fn all_mmio_failure_stages_report_original_request_and_preserve_error() {
 
 #[test]
 fn later_page_failures_identify_page_index() {
-    for stage in ["copy-frames", "map-frames"] {
+    for stage in [
+        "allocate-physical",
+        "convert-frames",
+        "copy-frames",
+        "map-frames",
+    ] {
         assert_eq!(run(Some(stage), 1, request()), Err(CapabilityError::Fatal));
         FAKE.with(|fake| assert!(fake.borrow().logs[0].contains(&format!("stage={stage} page=1"))));
     }
@@ -195,14 +203,32 @@ fn successful_mapping_keeps_response_and_emits_no_error() {
             fake.calls,
             [
                 "reserve-virtual",
+                "frame-slots",
                 "allocate-physical",
                 "convert-frames",
-                "frame-slots",
                 "copy-frames",
+                "allocate-physical",
+                "convert-frames",
                 "copy-frames",
                 "map-frames",
                 "map-frames"
             ]
         );
     });
+}
+
+#[test]
+fn overflowing_range_never_touches_allocators() {
+    for (physical, bytes) in [
+        (0x1000, usize::MAX),
+        (usize::MAX & !(PAGE_SIZE - 1), PAGE_SIZE),
+    ] {
+        let request = OsRequestEvent {
+            identifier: 1,
+            arg0: physical,
+            arg1: bytes,
+        };
+        assert_eq!(run(None, 0, request), Err(CapabilityError::InvalidArgument));
+        FAKE.with(|fake| assert!(fake.borrow().calls.is_empty()));
+    }
 }

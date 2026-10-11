@@ -1,4 +1,4 @@
-const CAPACITY: usize = 32;
+const CAPACITY: usize = nanami_services::net::NET_ARP_MAX_ENTRIES;
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -28,6 +28,21 @@ impl ArpCache {
             .iter()
             .find(|entry| entry.ip == ip)
             .map(|entry| entry.mac)
+    }
+
+    pub(super) fn snapshot(&self, out: &mut [u8]) -> Option<usize> {
+        use nanami_services::net::NET_ARP_ENTRY_BYTES;
+        let bytes = self.len * NET_ARP_ENTRY_BYTES;
+        let out = out.get_mut(..bytes)?;
+        for (entry, record) in self.entries[..self.len]
+            .iter()
+            .zip(out.chunks_exact_mut(NET_ARP_ENTRY_BYTES))
+        {
+            record[..4].copy_from_slice(&entry.ip);
+            record[4..10].copy_from_slice(&entry.mac);
+            record[10..].fill(0);
+        }
+        Some(self.len)
     }
 
     pub(super) fn update(&mut self, ip: [u8; 4], mac: [u8; 6]) {

@@ -71,12 +71,16 @@ impl Controller {
                 halted: false,
             });
         }
-        // A 16-KiB-aligned buffer cannot cross the xHCI 64-KiB TRB boundary.
+        // A 64-KiB-aligned buffer cannot cross the xHCI 64-KiB TRB boundary.
         // Reserve alignment slack per slot; the controller allocation need only
         // be page-aligned. One normal TRB suffices for each BOT stage.
-        let data_physical = (device.dma.physical_at(BULK_BASE + 0x3000) + 0x3fff) & !0x3fff;
+        let data_bytes = crate::usb::mass_storage::DATA_BYTES;
+        let data_physical = (device.dma.physical_at(BULK_BASE + 0x3000) + data_bytes as u64 - 1)
+            & !(data_bytes as u64 - 1);
         let data_offset = (data_physical - device.dma.physical) as usize;
-        debug_assert!(data_offset + 0x4000 <= device.dma.bytes);
+        if data_offset + data_bytes > device.dma.bytes {
+            return Err(RequestError::Protocol);
+        }
         device.storage = Some(Storage {
             interface: interface.number,
             endpoints: endpoints.try_into().map_err(|_| RequestError::Protocol)?,
@@ -88,7 +92,7 @@ impl Controller {
             data: Dma {
                 physical: data_physical,
                 virtual_address: device.dma.virtual_at(data_offset),
-                bytes: 0x4000,
+                bytes: data_bytes,
             },
             tag: 0,
             failed: false,
@@ -154,61 +158,46 @@ impl Controller {
                 control: (1 << 10) | IOC | (1 << 2),
             }])
             .ok_or(RequestError::Protocol)?;
-        let mut poll = poll::CompletionPoll::new(unsafe { read(self.runtime, MFINDEX) });
+        io_trace!(
+            "bulk begin slot={} ep={} trb={:#x} bytes={}",
+            slot,
+            endpoint.dci(),
+            pointer,
+            len
+        );
         self.doorbell(slot, endpoint.dci());
-        let mut waits = 0;
-        loop {
-            for _ in 0..ring::ENTRIES {
-                let Some(event) = self.event() else {
-                    core::hint::spin_loop();
-                    continue;
-                };
-                if event.kind() == 32 && event.slot() == slot && event.endpoint() == endpoint.dci()
-                {
-                    if event.parameter & !15 != pointer {
-                        self.fail(input);
-                        return Err(RequestError::Protocol);
-                    }
-                    if event.code() == 6 {
-                        endpoint.halted = true;
-                        return Err(RequestError::Unsupported); // Caller clears the halt before reuse.
-                    }
-                    let residual = (event.status & 0xffffff) as usize;
-                    if matches!(event.code(), 1 | 13) && residual <= len {
-                        endpoint.ring.complete();
-                        return Ok(len - residual);
-                    }
-                    libnanami::println!(
-                        "[usb-server] bulk slot={} ep={} code={}",
+        self.wait_completion(5000, input, |this, input, event| {
+            if event.kind() == 32 && event.slot() == slot && event.endpoint() == endpoint.dci() {
+                if event.parameter & !15 != pointer {
+                    this.fail(input);
+                    return Err(RequestError::Protocol);
+                }
+                if event.code() == 6 {
+                    endpoint.halted = true;
+                    return Err(RequestError::Unsupported); // Caller clears the halt before reuse.
+                }
+                let residual = (event.status & 0xffffff) as usize;
+                if matches!(event.code(), 1 | 13) && residual <= len {
+                    endpoint.ring.complete();
+                    io_trace!(
+                        "bulk end slot={} ep={} bytes={}",
                         slot,
                         endpoint.dci(),
-                        event.code()
+                        len - residual
                     );
-                    self.fail(input);
-                    return Err(RequestError::Transport);
+                    return Ok(Some(len - residual));
                 }
-                self.dispatch(event, input);
-                if !self.running {
-                    return Err(RequestError::Transport);
-                }
+                libnanami::println!(
+                    "[usb-server] bulk slot={} ep={} code={}",
+                    slot,
+                    endpoint.dci(),
+                    event.code()
+                );
+                this.fail(input);
+                return Err(RequestError::Transport);
             }
-            // Most BOT stages finish well before the timer's next tick. Do not
-            // turn each CBW/data/CSW into a 10-ms sleep, even without an IRQ.
-            if poll.keep_polling(unsafe { read(self.runtime, MFINDEX) }) {
-                continue;
-            }
-            if waits == 5000 {
-                break;
-            }
-            if let Err(error) = self.delay(1) {
-                self.fail(input);
-                return Err(error);
-            }
-            waits += 1;
-        }
-        // A timeout is not completion. Stop the controller and retain its DMA;
-        // never copy from/reuse a buffer that hardware may still be accessing.
-        self.fail(input);
-        Err(RequestError::Transport)
+            this.dispatch(event, input);
+            Ok(None)
+        })
     }
 }

@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 use crate::constants::{
     PS2_ACK_TIMEOUT_MS, PS2_COMMAND_PORT, PS2_CONTROLLER_ENABLE_AUX, PS2_CONTROLLER_READ_CONFIG,
@@ -17,7 +17,7 @@ pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     let _ = drain_controller(server);
 
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         server.io_desc,
         PS2_COMMAND_PORT,
         1,
@@ -25,7 +25,7 @@ pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     )?;
 
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         server.io_desc,
         PS2_COMMAND_PORT,
         1,
@@ -40,20 +40,20 @@ pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     config &= !(1 << 5);
 
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         server.io_desc,
         PS2_COMMAND_PORT,
         1,
         PS2_CONTROLLER_WRITE_CONFIG,
     )?;
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(server.io_desc, PS2_DATA_PORT, 1, config)?;
+    nanami_runtime::io::io_write(server.io_desc, PS2_DATA_PORT, 1, config)?;
 
-    libnanami::print!("[ps2-server] ctrl cfg ");
-    libnanami::print!("{:#x}", config_before);
-    libnanami::print!(" -> ");
-    libnanami::print!("{:#x}", config);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[ps2-server] ctrl cfg ");
+    nanami_runtime::print!("{:#x}", config_before);
+    nanami_runtime::print!(" -> ");
+    nanami_runtime::print!("{:#x}", config);
+    nanami_runtime::print!("\n");
 
     write_mouse_command(server, PS2_MOUSE_CMD_DISABLE_DATA_REPORTING)?;
     write_mouse_command(server, PS2_MOUSE_CMD_SET_DEFAULTS)?;
@@ -66,7 +66,7 @@ pub fn initialize_mouse(server: &mut Ps2Server) -> Result<(), RequestError> {
     write_mouse_command_with_data(server, PS2_MOUSE_CMD_SET_SAMPLE_RATE, PS2_MOUSE_SAMPLE_RATE)?;
     write_mouse_command(server, PS2_MOUSE_CMD_ENABLE_DATA_REPORTING)?;
 
-    libnanami::println!(
+    nanami_runtime::println!(
         "[ps2-server] mouse rate={}Hz resolution={} id={:#x} packet={} scaling=1:1",
         PS2_MOUSE_SAMPLE_RATE,
         PS2_MOUSE_RESOLUTION,
@@ -98,7 +98,7 @@ fn read_controller_config(server: &mut Ps2Server) -> Result<Word, RequestError> 
             continue;
         }
 
-        let data = libnanami::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
+        let data = nanami_runtime::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
         if (status & 0x20) != 0 {
             server.mouse.push_byte(
                 data,
@@ -115,14 +115,14 @@ fn read_controller_config(server: &mut Ps2Server) -> Result<Word, RequestError> 
 
 fn write_mouse_command(server: &mut Ps2Server, command: Word) -> Result<(), RequestError> {
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         server.io_desc,
         PS2_COMMAND_PORT,
         1,
         PS2_CONTROLLER_WRITE_TO_MOUSE,
     )?;
     wait_input_buffer_clear(server.io_desc)?;
-    libnanami::io::io_write(server.io_desc, PS2_DATA_PORT, 1, command)?;
+    nanami_runtime::io::io_write(server.io_desc, PS2_DATA_PORT, 1, command)?;
 
     wait_mouse_ack(server)
 }
@@ -146,7 +146,7 @@ fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
             continue;
         }
 
-        let data = libnanami::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
+        let data = nanami_runtime::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
 
         if (status & 0x20) == 0 {
             server
@@ -161,7 +161,7 @@ fn wait_mouse_ack(server: &mut Ps2Server) -> Result<(), RequestError> {
         }
 
         if data == PS2_MOUSE_RESEND {
-            libnanami::print!("[ps2-server] mouse resend\n");
+            nanami_runtime::print!("[ps2-server] mouse resend\n");
             return Err(RequestError::Protocol);
         }
 
@@ -183,7 +183,7 @@ fn read_mouse_data_byte(server: &mut Ps2Server) -> Result<u8, RequestError> {
             continue;
         }
 
-        let data = libnanami::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
+        let data = nanami_runtime::io::io_read(server.io_desc, PS2_DATA_PORT, 1)? as u8;
         if (status & 0x20) != 0 {
             return Ok(data);
         }

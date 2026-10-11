@@ -1,6 +1,6 @@
-use libnanami::ipc::ServiceRequest;
-use libnanami::Word;
-use nanami_services::posix::*;
+use nanami_runtime::ipc::ServiceRequest;
+use nanami_runtime::Word;
+use nanami_client::posix::*;
 
 use crate::state::*;
 
@@ -13,17 +13,17 @@ pub(crate) fn alloc_open_file_and_fd(
 ) -> (Word, Word, Word) {
     let Some(open_index) = alloc_open_file(runtime, kind, vfs_handle) else {
         if matches!(kind, FdKind::Regular | FdKind::Directory) {
-            let _ = nanami_services::vfs::vfs_close(runtime.vfs_port, vfs_handle);
+            let _ = nanami_client::vfs::vfs_close(runtime.vfs_port, vfs_handle);
         }
-        return (libnanami::OS_RESPONSE_FATAL, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
     };
     runtime.open_files[open_index].status_flags =
         status_flags & (POSIX_O_APPEND | POSIX_O_NONBLOCK | POSIX_O_SYNC);
     match alloc_fd(&mut runtime.sessions[session_index], open_index) {
-        (libnanami::OS_RESPONSE_OK, fd, detail) => (libnanami::OS_RESPONSE_OK, fd, detail),
+        (nanami_runtime::OS_RESPONSE_OK, fd, detail) => (nanami_runtime::OS_RESPONSE_OK, fd, detail),
         _ => {
             release_open_file(runtime, open_index);
-            (libnanami::OS_RESPONSE_FATAL, 0, 0)
+            (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
         }
     }
 }
@@ -72,28 +72,28 @@ pub(crate) fn release_cloexec_session_fds(runtime: &mut Runtime, session_index: 
 
 pub(crate) fn handle_close(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let open_index = runtime.sessions[index].fds[fd].open_file;
     runtime.sessions[index].fds[fd] = FileDescriptor::EMPTY;
     release_open_file(runtime, open_index);
-    (libnanami::OS_RESPONSE_OK, 0, 0)
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }
 
 pub(crate) fn handle_dup(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(runtime, index, request.arg0 as usize, None)
 }
 
 pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(
         runtime,
@@ -108,40 +108,40 @@ pub(crate) fn handle_fcntl(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     match request.arg1 {
         POSIX_F_GETFD => (
-            libnanami::OS_RESPONSE_OK,
+            nanami_runtime::OS_RESPONSE_OK,
             runtime.sessions[index].fds[fd].flags,
             0,
         ),
         POSIX_F_SETFD => {
             if (request.arg2 & !POSIX_FD_CLOEXEC) != 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             runtime.sessions[index].fds[fd].flags = request.arg2 & POSIX_FD_CLOEXEC;
-            (libnanami::OS_RESPONSE_OK, 0, 0)
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
         }
         POSIX_F_GETFL | POSIX_F_SETFL => {
             let open_index = runtime.sessions[index].fds[fd].open_file;
             if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-                return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
             }
             if request.arg1 == POSIX_F_SETFL {
                 runtime.open_files[open_index].status_flags =
                     (runtime.open_files[open_index].status_flags & POSIX_O_SYNC)
                     | (request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK));
-                (libnanami::OS_RESPONSE_OK, 0, 0)
+                (nanami_runtime::OS_RESPONSE_OK, 0, 0)
             } else {
-                (libnanami::OS_RESPONSE_OK, runtime.open_files[open_index].status_flags, 0)
+                (nanami_runtime::OS_RESPONSE_OK, runtime.open_files[open_index].status_flags, 0)
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -173,11 +173,11 @@ fn alloc_fd(session: &mut Session, open_file: usize) -> (Word, Word, Word) {
                 open_file,
                 flags: 0,
             };
-            return (libnanami::OS_RESPONSE_OK, fd as Word, 0);
+            return (nanami_runtime::OS_RESPONSE_OK, fd as Word, 0);
         }
         fd += 1;
     }
-    (libnanami::OS_RESPONSE_FATAL, 0, 0)
+    (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
 }
 
 fn duplicate_fd(
@@ -187,28 +187,28 @@ fn duplicate_fd(
     new_fd: Option<usize>,
 ) -> (Word, Word, Word) {
     if old_fd >= MAX_FDS || !runtime.sessions[session_index].fds[old_fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let open_index = runtime.sessions[session_index].fds[old_fd].open_file;
     if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
 
     let target_fd = match new_fd {
         Some(fd) => {
             if fd >= MAX_FDS {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             fd
         }
         None => match lowest_free_fd(&runtime.sessions[session_index]) {
             Some(fd) => fd,
-            None => return (libnanami::OS_RESPONSE_FATAL, 0, 0),
+            None => return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0),
         },
     };
 
     if target_fd == old_fd {
-        return (libnanami::OS_RESPONSE_OK, target_fd as Word, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, target_fd as Word, 0);
     }
     if runtime.sessions[session_index].fds[target_fd].active {
         let old_target_open = runtime.sessions[session_index].fds[target_fd].open_file;
@@ -223,7 +223,7 @@ fn duplicate_fd(
         open_file: open_index,
         flags: 0,
     };
-    (libnanami::OS_RESPONSE_OK, target_fd as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, target_fd as Word, 0)
 }
 
 fn lowest_free_fd(session: &Session) -> Option<usize> {
@@ -247,7 +247,7 @@ fn release_open_file(runtime: &mut Runtime, open_index: usize) {
     }
     let entry = runtime.open_files[open_index];
     if matches!(entry.kind, FdKind::Regular | FdKind::Directory) {
-        let _ = nanami_services::vfs::vfs_close(runtime.vfs_port, entry.vfs_handle);
+        let _ = nanami_client::vfs::vfs_close(runtime.vfs_port, entry.vfs_handle);
     }
     runtime.open_files[open_index] = OpenFile::EMPTY;
 }

@@ -155,7 +155,7 @@ pub(super) fn sys_kill(
         };
     }
     if runtime.managed_process(target_pid).is_some() {
-        libnanami::request_process_kill(target_pid, signal).map_err(map_request_error)?;
+        nanami_runtime::request_process_kill(target_pid, signal).map_err(map_request_error)?;
         return Ok(0);
     }
     map_unit(posix::posix_kill(runtime.posix_port, target_pid, signal), 0)

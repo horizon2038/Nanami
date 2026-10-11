@@ -1,6 +1,6 @@
 //! Exercise the real loader memory policy and user-space ACPI walker together.
 #![allow(dead_code)]
-extern crate self as libnanami;
+extern crate self as nanami_runtime;
 use std::{cell::RefCell, collections::BTreeMap};
 use uefi::boot::MemoryType;
 pub type Word = usize;

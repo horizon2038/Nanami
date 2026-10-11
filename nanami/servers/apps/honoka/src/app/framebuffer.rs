@@ -1,5 +1,5 @@
 use core::sync::atomic::{fence, Ordering};
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::constants::CURSOR_SIZE;
 
@@ -69,14 +69,14 @@ impl Framebuffer {
         vaddr: Word,
         bytes: Word,
         screen: ScreenInfo,
-    ) -> Result<Self, libnanami::NanamiError> {
+    ) -> Result<Self, nanami_runtime::NanamiError> {
         if display_port == 0
             || vaddr == 0
             || bytes == 0
             || screen.bits_per_pixel != 32
             || screen.stride_bytes == 0
         {
-            return Err(libnanami::NanamiError::INVALID_ARGUMENT);
+            return Err(nanami_runtime::NanamiError::INVALID_ARGUMENT);
         }
         Ok(Self {
             display_port,
@@ -98,7 +98,7 @@ impl Framebuffer {
         self.bytes
     }
 
-    pub fn present(&self, rect: Rect) -> Result<(), libnanami::RequestError> {
+    pub fn present(&self, rect: Rect) -> Result<(), nanami_runtime::RequestError> {
         if rect.is_empty() {
             return Ok(());
         }
@@ -118,7 +118,7 @@ impl Framebuffer {
             return Ok(());
         }
         fence(Ordering::Release);
-        nanami_services::gfx::display_service_present(self.display_port, x, y, x1 - x, y1 - y)
+        nanami_client::gfx::display_service_present(self.display_port, x, y, x1 - x, y1 - y)
     }
 
     pub fn color(&self, r8: u8, g8: u8, b8: u8) -> u32 {

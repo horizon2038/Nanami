@@ -29,14 +29,14 @@ impl EventQueue {
     }
 
     pub(super) fn push_with_event_kind(&mut self, event_kind: Word, value: Word) {
-        if event_kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE && self.count > 0 {
+        if event_kind == nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE && self.count > 0 {
             let last_index = if self.tail == 0 {
                 EVENT_QUEUE_CAPACITY - 1
             } else {
                 self.tail - 1
             };
             let last_kind = self.values[last_index] & 0xff;
-            if last_kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE {
+            if last_kind == nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE {
                 // Coalesce mouse move events to keep latest pointer position delta.
                 self.values[last_index] = value;
                 return;

@@ -24,7 +24,7 @@ pub(super) fn spawn_rootfs_fork_child(
     let path_len = write_rootfs_image_path(runtime, image_name, personality)?;
     let loaded =
         load_cached_fork_linux_elf_image(runtime, 0, path_len as Word).map_err(map_load_error)?;
-    libnanami::request_process_spawn_memory_fault_handler_suspended(
+    nanami_runtime::request_process_spawn_memory_fault_handler_suspended(
         loaded.address,
         loaded.size,
         4,
@@ -103,13 +103,13 @@ pub(super) fn log_execve_load_error(
         )
     };
     match ::core::str::from_utf8(path) {
-        Ok(text) => libnanami::println!(
+        Ok(text) => nanami_runtime::println!(
             "[alter/linux] execve load failed pid={} path={} err={}",
             pid,
             text,
             load_error_name(error)
         ),
-        Err(_) => libnanami::println!(
+        Err(_) => nanami_runtime::println!(
             "[alter/linux] execve load failed pid={} path-len={} err={}",
             pid,
             path_len,
@@ -215,7 +215,7 @@ pub(super) fn read_current_elf_metadata_at(
     pid: Word,
     image_base: Word,
 ) -> Result<Option<CurrentElfMetadata>, i32> {
-    if libnanami::request_process_memory_read(
+    if nanami_runtime::request_process_memory_read(
         pid,
         image_base,
         runtime.posix_shm,
@@ -293,7 +293,7 @@ pub(super) fn install_freebsd_exec_tls(
         return Err(ENOMEM);
     }
     let (tls_base, mapped) =
-        libnanami::request_process_map_anonymous(pid, total).map_err(map_request_error)?;
+        nanami_runtime::request_process_map_anonymous(pid, total).map_err(map_request_error)?;
     if mapped < total {
         return Err(ENOMEM);
     }
@@ -301,7 +301,7 @@ pub(super) fn install_freebsd_exec_tls(
         ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, total as usize);
     }
     if elf.tls_file_size != 0 {
-        libnanami::request_process_memory_read(
+        nanami_runtime::request_process_memory_read(
             pid,
             elf.tls_vaddr,
             runtime.posix_shm,
@@ -316,9 +316,9 @@ pub(super) fn install_freebsd_exec_tls(
             fs_base,
         );
     }
-    libnanami::request_process_memory_write(pid, tls_base, runtime.posix_shm, total)
+    nanami_runtime::request_process_memory_write(pid, tls_base, runtime.posix_shm, total)
         .map_err(map_request_error)?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter/freebsd] exec tls pid={} base={:#x} fs={:#x} file={:#x} mem={:#x}",
         pid,
         tls_base,

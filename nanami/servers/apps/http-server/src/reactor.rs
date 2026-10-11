@@ -33,13 +33,13 @@ pub(super) fn run_http_reactor(
     rx_notification: Option<Word>,
     shm_vaddr: Word,
     shm_size: Word,
-) -> libnanami::NanamiResult {
+) -> nanami_runtime::NanamiResult {
     let mut connections = [HttpConnection::EMPTY; HTTP_CONNECTIONS];
     let tx_capacity = tx_capacity(shm_size);
     if tx_capacity == 0 {
-        libnanami::print!("[http-server] invalid tx shm capacity=0\n");
-        return Err(libnanami::NanamiError(
-            libnanami::OS_RESPONSE_INVALID_ARGUMENT,
+        nanami_runtime::print!("[http-server] invalid tx shm capacity=0\n");
+        return Err(nanami_runtime::NanamiError(
+            nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
         ));
     }
 
@@ -82,7 +82,7 @@ fn drain_tcp_rx(
     // request that we cannot retain while all response slots are occupied.
     let mut free_slots = connections.iter().filter(|conn| !conn.active).count();
     while budget < RX_BUDGET && free_slots != 0 {
-        let (received, connection_id) = match nanami_services::net::net_service_tcp_recv_ex(
+        let (received, connection_id) = match nanami_client::net::net_service_tcp_recv_ex(
             net_desc,
             META_OFFSET,
             RX_OFFSET,
@@ -117,7 +117,7 @@ fn drain_tcp_rx(
                     prepare_response(conn, connection_id, req, response_cache);
                 }
             }
-            None => libnanami::print!("[http-server] no free http connection slot\n"),
+            None => nanami_runtime::print!("[http-server] no free http connection slot\n"),
         }
         did_work = true;
         budget += 1;
@@ -162,8 +162,8 @@ fn flush_http_tx(
                     sent += 1;
                 }
                 Ok(false) => {}
-                Err(libnanami::RequestError::Status(
-                    nanami_services::net::NET_SERVICE_RESPONSE_WOULD_BLOCK,
+                Err(nanami_runtime::RequestError::Status(
+                    nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK,
                 )) => {}
                 Err(e) => {
                     if !is_client_abort(e) {
@@ -181,10 +181,10 @@ fn flush_http_tx(
     (did_work, pending_tx || index < connections.len())
 }
 
-fn is_client_abort(err: libnanami::RequestError) -> bool {
+fn is_client_abort(err: nanami_runtime::RequestError) -> bool {
     matches!(
         err,
-        libnanami::RequestError::Status(code) if code == libnanami::OS_RESPONSE_ILLEGAL_OPERATION
+        nanami_runtime::RequestError::Status(code) if code == nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION
     )
 }
 
@@ -194,12 +194,12 @@ fn flush_one_connection(
     tx_capacity: usize,
     response_cache: &ResponseCache,
     conn: &mut HttpConnection,
-) -> Result<bool, libnanami::RequestError> {
+) -> Result<bool, nanami_runtime::RequestError> {
     if !conn.active {
         return Ok(false);
     }
     if conn.close_only {
-        nanami_services::net::net_service_tcp_send_on_connection(
+        nanami_client::net::net_service_tcp_send_on_connection(
             net_desc,
             conn.connection_id,
             0,
@@ -255,7 +255,7 @@ fn flush_one_connection(
         TCP_FLAG_ACK | TCP_FLAG_PSH
     };
 
-    nanami_services::net::net_service_tcp_send_on_connection(
+    nanami_client::net::net_service_tcp_send_on_connection(
         net_desc,
         conn.connection_id,
         TX_OFFSET,
@@ -307,7 +307,7 @@ fn prepare_response(
     let (_, header_len) = response_header(response_cache, kind, keep_alive);
     if header_len == 0 || header_len > HTTP_HEADER_CAP {
         conn.active = false;
-        libnanami::print!("[http-server] cached header invalid\n");
+        nanami_runtime::print!("[http-server] cached header invalid\n");
         return;
     }
 }
@@ -335,9 +335,9 @@ fn idle_recv_backoff(
         } else {
             idle_backoff_spin();
         }
-        let _ = nanami_services::net::net_service_control(
+        let _ = nanami_client::net::net_service_control(
             net_desc,
-            nanami_services::net::NET_SERVICE_CONTROL_POLL,
+            nanami_client::net::NET_SERVICE_CONTROL_POLL,
             0,
             0,
         );
@@ -345,7 +345,7 @@ fn idle_recv_backoff(
         return;
     }
     if let Some(notification) = *rx_notification {
-        match libnanami::ipc::notification_wait(notification) {
+        match nanami_runtime::ipc::notification_wait(notification) {
             Ok(_) => {
                 *idle_streak = 0;
                 return;

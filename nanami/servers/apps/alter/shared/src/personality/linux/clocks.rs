@@ -160,7 +160,7 @@ pub(super) fn sys_nanosleep_action(
 
 pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
     let (ticks, tick_hz) =
-        nanami_services::timer::timer_service_monotonic_ticks(runtime.timer_port)
+        nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
             .map_err(map_request_error)?;
     if tick_hz == 0 {
         return Err(EIO);

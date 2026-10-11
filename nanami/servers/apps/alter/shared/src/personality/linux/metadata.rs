@@ -151,7 +151,7 @@ pub(super) fn stat_current_path(
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     match (posix::posix_stat(runtime.posix_port, 0, vfs_len), fallback) {
         (
-            Err(libnanami::RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Err(nanami_runtime::RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)),
             Some(node),
         ) => virtual_node_stat_from_node(runtime, pid, node),
         (result, _) => result.map_err(map_path_request_error),

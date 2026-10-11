@@ -1,6 +1,6 @@
 //! Exercise ext2's real startup loop with deterministic service/timer responses.
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 
 use std::cell::RefCell;
 

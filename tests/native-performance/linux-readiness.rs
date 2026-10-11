@@ -1,7 +1,7 @@
 #![allow(dead_code, private_interfaces)]
 extern crate self as a9n_abi;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 pub mod terminal {
     pub const TERMINAL_NOTIFICATION_INPUT: usize = 1 << 52;
 }

@@ -7,12 +7,12 @@ mod imp;
 
 pub use imp::*;
 
-pub fn validate_platform(architecture: &str, platform: &str) -> Result<(), libnanami::RequestError> {
+pub fn validate_platform(architecture: &str, platform: &str) -> Result<(), nanami_runtime::RequestError> {
     match (architecture, platform) {
         #[cfg(target_arch = "x86_64")]
         ("x86_64", "pc99") => Ok(()),
         #[cfg(target_arch = "aarch64")]
         ("aarch64", "qemu") => Ok(()),
-        _ => Err(libnanami::RequestError::Unsupported),
+        _ => Err(nanami_runtime::RequestError::Unsupported),
     }
 }

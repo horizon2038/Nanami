@@ -29,7 +29,7 @@ pub(super) fn drain_input_queue(runtime: &mut Runtime, source: Word, session_id:
                 if let Some(session) = runtime.graphics.get(session_id as usize - 1) {
                     if let Err(error) = honoka::honoka_resize_viewport(session.honoka_port, session.window_id,
                         value0 as u16 as Word, value1 as u16 as Word) {
-                        libnanami::println!("[alter/linux] framebuffer viewport resize failed: {}", error);
+                        nanami_runtime::println!("[alter/linux] framebuffer viewport resize failed: {}", error);
                     }
                 }
             }

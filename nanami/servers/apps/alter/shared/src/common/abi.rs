@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const SLOT_SERVICE_PORT: Word = 20;
 pub const SLOT_POSIX_SERVICE: Word = 22;

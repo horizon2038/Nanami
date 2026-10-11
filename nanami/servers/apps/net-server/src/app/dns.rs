@@ -5,12 +5,12 @@ const DNS_DEFAULT_CLIENT_PORT: u16 = 53053;
 
 pub(crate) fn handle_dns_query_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
     default_timeout_ms: Word,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
 
     let name_offset = request.arg0;
@@ -23,13 +23,13 @@ pub(crate) fn handle_dns_query_request(
     };
 
     if name_len == 0 || name_len > 253 {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if name_offset + name_len as Word > session.shm_size {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if out_offset + 4 > session.shm_size {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let mut host = [0u8; 253];
@@ -54,7 +54,7 @@ pub(crate) fn handle_dns_query_request(
         write_u32_be(dst, be as u32);
     }
 
-    (libnanami::OS_RESPONSE_OK, be, 0)
+    (nanami_runtime::OS_RESPONSE_OK, be, 0)
 }
 
 pub(crate) fn process_dns_payload(
@@ -100,7 +100,7 @@ fn dns_query_ipv4(
         Some(v) => v,
         None => {
             return Err(RequestError::Status(
-                libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+                nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
             ))
         }
     };
@@ -136,7 +136,7 @@ fn dns_query_ipv4(
 
     runtime.dns_waiting = false;
     Err(RequestError::Status(
-        libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+        nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
     ))
 }
 

@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 use super::super::TimerSelection;
 
@@ -30,13 +30,13 @@ fn read_config32(
     function: u8,
     offset: u8,
 ) -> Result<u32, RequestError> {
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         descriptor,
         PCI_CONFIG_ADDRESS,
         4,
         config_address(bus, device, function, offset) as Word,
     )?;
-    Ok(libnanami::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
+    Ok(nanami_runtime::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
 }
 
 fn find_pci_class(
@@ -76,7 +76,7 @@ fn find_pci_class(
                     let class = read_config32(descriptor, bus, device, function, 0x08)?;
                     if class >> 8 == wanted {
                         if index == 0 {
-                            libnanami::println!(
+                            nanami_runtime::println!(
                                 "[driver-manager] PCI class={:06x} at {:02x}:{:02x}.{}",
                                 wanted,
                                 bus,
@@ -108,33 +108,33 @@ fn find_pci_class(
 }
 
 pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
-    libnanami::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
-    let descriptor = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
+    nanami_runtime::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
+    let descriptor = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
     let storage_image = if find_pci_class(descriptor, PCI_CLASS_AHCI, 0)?.is_some() {
         "./bin/ahci-server"
     } else if find_pci_class(descriptor, 0x010000, 0)?.is_some() {
-        libnanami::print!(
+        nanami_runtime::print!(
             "[driver-manager] no PCI AHCI controller; selecting virtio-blk fallback\n"
         );
         "./bin/virtio-blk-server"
     } else {
-        libnanami::print!("[driver-manager] no PCI storage controller; probing USB storage\n");
+        nanami_runtime::print!("[driver-manager] no PCI storage controller; probing USB storage\n");
         return Ok(None);
     };
     Ok(Some(storage_image))
 }
 
 pub fn usb_controller(index: usize) -> Result<Option<Word>, RequestError> {
-    let descriptor = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
+    let descriptor = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
     find_pci_class(descriptor, PCI_CLASS_XHCI, index)
 }
 
 pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {
     let (rsdp, _) =
-        libnanami::request_driver_platform_info(libnanami::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?;
+        nanami_runtime::request_driver_platform_info(nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?;
     let hpet_mmio_base = match acpi::find_hpet_mmio_base(rsdp) {
         Ok(Some(address)) => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[driver-manager] ACPI HPET at {:#x} (RSDP {:#x})",
                 address,
                 rsdp
@@ -142,11 +142,11 @@ pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {
             address
         }
         Ok(None) => {
-            libnanami::print!("[driver-manager] ACPI HPET not found; selecting PIT fallback\n");
+            nanami_runtime::print!("[driver-manager] ACPI HPET not found; selecting PIT fallback\n");
             0
         }
         Err(error) => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[driver-manager] ACPI scan failed (RSDP {:#x}): {}; selecting PIT fallback",
                 rsdp,
                 error

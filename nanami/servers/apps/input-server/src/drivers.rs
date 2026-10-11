@@ -2,10 +2,10 @@ use super::*;
 
 pub(super) fn driver_mask(kind: Word) -> Word {
     match kind {
-        nanami_services::input::INPUT_DRIVER_KEYBOARD => {
-            nanami_services::input::INPUT_SUBSCRIBE_KEYBOARD
+        nanami_client::input::INPUT_DRIVER_KEYBOARD => {
+            nanami_client::input::INPUT_SUBSCRIBE_KEYBOARD
         }
-        nanami_services::input::INPUT_DRIVER_MOUSE => nanami_services::input::INPUT_SUBSCRIBE_MOUSE,
+        nanami_client::input::INPUT_DRIVER_MOUSE => nanami_client::input::INPUT_SUBSCRIBE_MOUSE,
         _ => 0,
     }
 }

@@ -21,7 +21,7 @@ impl Selection {
     }
 
     pub fn report(&mut self, pid: usize, roots: usize) -> Result<usize, ()> {
-        use nanami_services::device::{
+        use nanami_client::device::{
             STORAGE_AMBIGUOUS, STORAGE_NOT_SELECTED, STORAGE_PENDING, STORAGE_SELECTED,
         };
         let index = self

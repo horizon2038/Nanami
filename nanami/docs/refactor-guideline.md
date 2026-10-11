@@ -43,13 +43,13 @@ When changing a loop, preserve:
 - Prefer one canonical implementation over copied Linux/FreeBSD/native variants
   when their semantics are genuinely identical.
 
-## Keep `libnanami` Narrow
+## Keep `nanami_runtime` Narrow
 
-`libnanami` is the low-level client boundary for Nanami core operations. It
+`nanami_runtime` is the low-level client boundary for Nanami core operations. It
 should contain startup, IPC primitives, architecture support, heap support, and
 wrappers around Alpha's generic requests.
 
-Service-specific APIs belong in `nanami-services` or a dedicated reusable
+Service-specific APIs belong in `nanami-client` or a dedicated reusable
 crate. For example, Honoka window calls, VFS records, terminal protocols, and
 network operations do not belong in Alpha-facing low-level code.
 

@@ -32,15 +32,15 @@ impl Runtime {
         // Do not retry a failed write through another route: it may have committed data.
         match (direct, offset) {
             (true, Some(offset)) => {
-                nanami_services::posix::posix_pwrite_direct(self.posix_port, fd, input, len, offset)
+                nanami_client::posix::posix_pwrite_direct(self.posix_port, fd, input, len, offset)
             }
             (true, None) => {
-                nanami_services::posix::posix_write_direct(self.posix_port, fd, input, len)
+                nanami_client::posix::posix_write_direct(self.posix_port, fd, input, len)
             }
             (false, Some(offset)) => {
-                nanami_services::posix::posix_pwrite(self.posix_port, fd, input, len, offset)
+                nanami_client::posix::posix_pwrite(self.posix_port, fd, input, len, offset)
             }
-            (false, None) => nanami_services::posix::posix_write(self.posix_port, fd, input, len),
+            (false, None) => nanami_client::posix::posix_write(self.posix_port, fd, input, len),
         }
     }
 
@@ -64,14 +64,14 @@ impl Runtime {
                 .filter(|end| *end <= self.posix_direct_shm_size)
                 .is_some()
         {
-            match nanami_services::posix::posix_read_direct(self.posix_port, fd, out_offset, len) {
+            match nanami_client::posix::posix_read_direct(self.posix_port, fd, out_offset, len) {
                 Ok(bytes) => return Ok((bytes, self.posix_direct_shm + out_offset)),
                 // The delegated path is an optimization. A transient IPC or backing-store
                 // failure must not turn an otherwise valid Linux read into EIO.
                 Err(_) => {}
             }
         }
-        let bytes = nanami_services::posix::posix_read(self.posix_port, fd, out_offset, len)?;
+        let bytes = nanami_client::posix::posix_read(self.posix_port, fd, out_offset, len)?;
         Ok((bytes, self.posix_shm + out_offset))
     }
 
@@ -89,12 +89,12 @@ impl Runtime {
                 .is_some()
         {
             if let Ok(bytes) =
-                nanami_services::posix::posix_pread_direct(self.posix_port, fd, out, len, offset)
+                nanami_client::posix::posix_pread_direct(self.posix_port, fd, out, len, offset)
             {
                 return Ok((bytes, self.posix_direct_shm + out));
             }
         }
-        let bytes = nanami_services::posix::posix_pread(self.posix_port, fd, out, len, offset)?;
+        let bytes = nanami_client::posix::posix_pread(self.posix_port, fd, out, len, offset)?;
         Ok((bytes, self.posix_shm + out))
     }
 }

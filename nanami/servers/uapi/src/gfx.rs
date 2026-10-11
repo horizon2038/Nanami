@@ -1,0 +1,8 @@
+use crate::Word;
+pub mod honoka;
+
+pub const DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO: Word = 0x5001;
+
+pub const DISPLAY_SERVICE_REQUEST_PREPARE_SHARED_FRAMEBUFFER: Word = 0x5002;
+
+pub const DISPLAY_SERVICE_REQUEST_PRESENT: Word = 0x5003;

@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const ELF_MACHINE: u16 = 0x3e;
 pub const PLATFORM: &[u8] = b"x86_64";

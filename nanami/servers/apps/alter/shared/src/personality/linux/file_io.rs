@@ -109,7 +109,7 @@ pub(super) fn sys_positioned_io(
             return if done != 0 { Ok(done) } else { Err(EIO) };
         }
         let result = if write {
-            libnanami::request_process_memory_read(
+            nanami_runtime::request_process_memory_read(
                 pid,
                 buffer + done,
                 runtime.posix_write_buffer().0,
@@ -255,7 +255,7 @@ pub(super) fn sys_write(
         if chunk == 0 {
             return Err(EIO);
         }
-        libnanami::request_process_memory_read(pid, user_buffer + done, destination, chunk)
+        nanami_runtime::request_process_memory_read(pid, user_buffer + done, destination, chunk)
             .map_err(map_request_error)?;
         let written = runtime
             .write_posix(file.posix_fd, 0, chunk, None)
@@ -297,7 +297,7 @@ pub(super) fn sys_writev(
                 iovecs,
                 capacity,
                 |source, offset, len| {
-                    libnanami::request_process_memory_read(pid, source, destination + offset, len)
+                    nanami_runtime::request_process_memory_read(pid, source, destination + offset, len)
                         .map_err(map_request_error)
                 },
                 |len| {
@@ -314,7 +314,7 @@ pub(super) fn sys_writev(
                 iovecs,
                 capacity,
                 |source, offset, len| {
-                    libnanami::request_process_memory_read(
+                    nanami_runtime::request_process_memory_read(
                         pid,
                         source,
                         runtime.terminal_shm + offset,
@@ -323,7 +323,7 @@ pub(super) fn sys_writev(
                     .map_err(map_request_error)
                 },
                 |len| {
-                    let written = nanami_services::terminal::terminal_write_output(
+                    let written = nanami_client::terminal::terminal_write_output(
                         runtime.terminal_port,
                         terminal_id,
                         0,

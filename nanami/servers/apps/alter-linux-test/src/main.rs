@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libnanami::Word;
+use nanami_runtime::Word;
 
 const SLOT_ALTER_LINUX: Word = 26;
 const SLOT_TERMINAL_SERVICE: Word = 29;
@@ -66,14 +66,14 @@ const MOUSE_EVENT_OUTPUT: &[u8] = b"\x02\x00\x00\x00\x05\x00\x00\x00";
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[alter-test] panic");
-    let _ = libnanami::request_exit();
+    nanami_runtime::println!("[alter-test] panic");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::println!("[alter-test] regression start");
-    libnanami::ipc::init_ipc_tls()?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::println!("[alter-test] regression start");
+    nanami_runtime::ipc::init_ipc_tls()?;
 
     let alter_port = connect_service("alter-linux", SLOT_ALTER_LINUX)?;
     let terminal_port = connect_terminal_service()?;
@@ -83,24 +83,24 @@ fn nanami_main() -> libnanami::NanamiResult {
         return fail("alter shared memory too small", alter_port, 0);
     }
     let (terminal_shm, terminal_shm_size) =
-        nanami_services::terminal::terminal_attach_shared_memory(terminal_port, 0x4000)?;
+        nanami_client::terminal::terminal_attach_shared_memory(terminal_port, 0x4000)?;
     if terminal_shm_size < 0x1000 {
         return fail("terminal shared memory too small", alter_port, 0);
     }
-    libnanami::request_notification_port_create(SLOT_TEST_NOTIFICATION, 0)?;
-    let terminal_id = nanami_services::terminal::terminal_create(terminal_port, 80, 24)?;
-    nanami_services::terminal::terminal_attach_output_notification(
+    nanami_runtime::request_notification_port_create(SLOT_TEST_NOTIFICATION, 0)?;
+    let terminal_id = nanami_client::terminal::terminal_create(terminal_port, 80, 24)?;
+    nanami_client::terminal::terminal_attach_output_notification(
         terminal_port,
         terminal_id,
         SLOT_TEST_NOTIFICATION,
     )?;
-    nanami_services::timer::timer_service_sleep_async_on_notification_milliseconds(
+    nanami_client::timer::timer_service_sleep_async_on_notification_milliseconds(
         timer_port,
         TEST_TIMEOUT_MS,
         SLOT_TEST_NOTIFICATION,
     )?;
     let launch_len = write_launch_block(alter_shm, &DIRECT_ARGV, &TEST_ENV);
-    let (status, direct_pid, _) = libnanami::call_service_port(
+    let (status, direct_pid, _) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_SPAWN_LINUX,
         0,
@@ -109,11 +109,11 @@ fn nanami_main() -> libnanami::NanamiResult {
         0,
         5,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         return fail("Linux syscall smoke spawn failed", alter_port, terminal_id);
     }
 
-    let notification = libnanami::ipc::process_slot_descriptor(SLOT_TEST_NOTIFICATION);
+    let notification = nanami_runtime::ipc::process_slot_descriptor(SLOT_TEST_NOTIFICATION);
     let mut direct_patterns = [(DIRECT_OUTPUT, 0usize)];
     if !wait_for_output(
         terminal_port,
@@ -131,14 +131,14 @@ fn nanami_main() -> libnanami::NanamiResult {
     if !wait_for_exit(alter_port, timer_port, direct_pid)? {
         return fail("Linux syscall smoke status failed", alter_port, terminal_id);
     }
-    let _ = libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, direct_pid, 1, 0, 0, 3);
-    libnanami::println!(
+    let _ = nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, direct_pid, 1, 0, 0, 3);
+    nanami_runtime::println!(
         "[alter-test] PASS Linux syscall smoke pid={} output-and-status-ok",
         direct_pid
     );
 
     if cfg!(target_arch = "aarch64") {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter-test] PASS AArch64 Linux ELF pid={} syscalls-and-link-ok",
             direct_pid
         );
@@ -147,7 +147,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 
     let launch_len = write_launch_block(alter_shm, &BASH_ARGV, &TEST_ENV);
-    let (status, bash_pid, _) = libnanami::call_service_port(
+    let (status, bash_pid, _) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_SPAWN_LINUX,
         0,
@@ -156,7 +156,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         0,
         5,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         return fail("bash spawn failed", alter_port, terminal_id);
     }
 
@@ -171,7 +171,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         return fail("bash prompt timeout", alter_port, terminal_id);
     }
 
-    nanami_services::terminal::terminal_set_echo(terminal_port, terminal_id, false)?;
+    nanami_client::terminal::terminal_set_echo(terminal_port, terminal_id, false)?;
     write_terminal_input(
         terminal_port,
         terminal_id,
@@ -191,7 +191,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("busybox --install failed", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS busybox --install hard links");
+    nanami_runtime::println!("[alter-test] PASS busybox --install hard links");
 
     write_terminal_input(terminal_port, terminal_id, terminal_shm, IWASM_COMMAND)?;
 
@@ -206,7 +206,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         return fail("iwasm output timeout", alter_port, terminal_id);
     }
 
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter-test] PASS interactive iwasm pid={} output-and-status-ok",
         bash_pid
     );
@@ -231,7 +231,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("virtual dev output timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS virtual /dev");
+    nanami_runtime::println!("[alter-test] PASS virtual /dev");
 
     write_terminal_input(
         terminal_port,
@@ -253,7 +253,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("virtual sys input timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS virtual /sys/class/input");
+    nanami_runtime::println!("[alter-test] PASS virtual /sys/class/input");
 
     write_terminal_input(
         terminal_port,
@@ -271,7 +271,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("disabled framebuffer visible", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS graphics option disabled");
+    nanami_runtime::println!("[alter-test] PASS graphics option disabled");
 
     write_terminal_input(
         terminal_port,
@@ -289,7 +289,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("virtual proc output timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS virtual /proc");
+    nanami_runtime::println!("[alter-test] PASS virtual /proc");
 
     write_terminal_input(
         terminal_port,
@@ -307,7 +307,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("virtual temp write timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS virtual /temp write");
+    nanami_runtime::println!("[alter-test] PASS virtual /temp write");
 
     write_terminal_input(
         terminal_port,
@@ -328,11 +328,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("virtual temp read timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS virtual fs pid={}", bash_pid);
+    nanami_runtime::println!("[alter-test] PASS virtual fs pid={}", bash_pid);
 
-    let _ = libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, bash_pid, 1, 0, 0, 3);
+    let _ = nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, bash_pid, 1, 0, 0, 3);
     let launch_len = write_launch_block(alter_shm, &BASH_ARGV, &TEST_ENV);
-    let (status, graphics_pid, _) = libnanami::call_service_port(
+    let (status, graphics_pid, _) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_SPAWN_LINUX,
         0,
@@ -341,7 +341,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         ALTER_LAUNCH_FLAG_GRAPHICS,
         5,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         return fail("graphics bash spawn failed", alter_port, terminal_id);
     }
     let mut graphics_prompt = [(PROMPT, 0usize)];
@@ -365,13 +365,13 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("graphics framebuffer timeout", alter_port, terminal_id);
     }
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter-test] PASS graphics framebuffer pid={}",
         graphics_pid
     );
 
     let launch_len = write_launch_block(alter_shm, &KEYBOARD_ARGV, &TEST_ENV);
-    let (status, keyboard_pid, _) = libnanami::call_service_port(
+    let (status, keyboard_pid, _) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_SPAWN_LINUX,
         0,
@@ -380,7 +380,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         ALTER_LAUNCH_FLAG_GRAPHICS,
         5,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         return fail("keyboard evdev timeout", alter_port, terminal_id);
     }
     let mut keyboard_patterns = [(KEYBOARD_EVENT_OUTPUT, 0usize)];
@@ -393,11 +393,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("keyboard evdev timeout", alter_port, terminal_id);
     }
-    let _ = libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, keyboard_pid, 1, 0, 0, 3);
-    libnanami::println!("[alter-test] PASS evdev keyboard");
+    let _ = nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, keyboard_pid, 1, 0, 0, 3);
+    nanami_runtime::println!("[alter-test] PASS evdev keyboard");
 
     let launch_len = write_launch_block(alter_shm, &MOUSE_ARGV, &TEST_ENV);
-    let (status, mouse_pid, _) = libnanami::call_service_port(
+    let (status, mouse_pid, _) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_SPAWN_LINUX,
         0,
@@ -406,7 +406,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         ALTER_LAUNCH_FLAG_GRAPHICS,
         5,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         return fail("mouse evdev timeout", alter_port, terminal_id);
     }
     let mut mouse_patterns = [(MOUSE_EVENT_OUTPUT, 0usize)];
@@ -419,8 +419,8 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("mouse evdev timeout", alter_port, terminal_id);
     }
-    let _ = libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, mouse_pid, 1, 0, 0, 3);
-    libnanami::println!("[alter-test] PASS evdev mouse");
+    let _ = nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, mouse_pid, 1, 0, 0, 3);
+    nanami_runtime::println!("[alter-test] PASS evdev mouse");
 
     write_terminal_input(terminal_port, terminal_id, terminal_shm, NETWORK_COMMAND)?;
     let mut network_patterns = [
@@ -439,44 +439,44 @@ fn nanami_main() -> libnanami::NanamiResult {
     )? {
         return fail("socket output timeout", alter_port, terminal_id);
     }
-    libnanami::println!("[alter-test] PASS interactive sockets pid={}", graphics_pid);
+    nanami_runtime::println!("[alter-test] PASS interactive sockets pid={}", graphics_pid);
     cleanup(alter_port, terminal_id);
     Ok(())
 }
 
-fn connect_service(name: &str, slot: Word) -> Result<Word, libnanami::RequestError> {
+fn connect_service(name: &str, slot: Word) -> Result<Word, nanami_runtime::RequestError> {
     loop {
-        match libnanami::connect_service_by_name(name, slot) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(slot)),
-            Err(_) => libnanami::yield_now(),
+        match nanami_runtime::connect_service_by_name(name, slot) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(slot)),
+            Err(_) => nanami_runtime::yield_now(),
         }
     }
 }
 
-fn connect_terminal_service() -> Result<Word, libnanami::RequestError> {
+fn connect_terminal_service() -> Result<Word, nanami_runtime::RequestError> {
     loop {
-        match nanami_services::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE) {
+        match nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE) {
             Ok(()) => {
-                return Ok(libnanami::ipc::process_slot_descriptor(
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
                     SLOT_TERMINAL_SERVICE,
                 ));
             }
-            Err(_) => libnanami::yield_now(),
+            Err(_) => nanami_runtime::yield_now(),
         }
     }
 }
 
-fn connect_timer_service() -> Result<Word, libnanami::RequestError> {
+fn connect_timer_service() -> Result<Word, nanami_runtime::RequestError> {
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
-            Err(_) => libnanami::yield_now(),
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
+            Err(_) => nanami_runtime::yield_now(),
         }
     }
 }
 
-fn attach_alter_memory(alter_port: Word) -> Result<(Word, Word), libnanami::RequestError> {
-    let (status, shm, size) = libnanami::call_service_port(
+fn attach_alter_memory(alter_port: Word) -> Result<(Word, Word), nanami_runtime::RequestError> {
+    let (status, shm, size) = nanami_runtime::call_service_port(
         alter_port,
         ALTER_REQUEST_CONTROL,
         ALTER_CONTROL_ATTACH_SHARED_MEMORY,
@@ -485,8 +485,8 @@ fn attach_alter_memory(alter_port: Word) -> Result<(Word, Word), libnanami::Requ
         0,
         3,
     )?;
-    if status != libnanami::OS_RESPONSE_OK {
-        return Err(libnanami::RequestError::Status(status));
+    if status != nanami_runtime::OS_RESPONSE_OK {
+        return Err(nanami_runtime::RequestError::Status(status));
     }
     Ok((shm, size))
 }
@@ -515,18 +515,18 @@ fn wait_for_exit(
     alter_port: Word,
     timer_port: Word,
     pid: Word,
-) -> Result<bool, libnanami::RequestError> {
+) -> Result<bool, nanami_runtime::RequestError> {
     let mut attempts = 0usize;
     while attempts < 1000 {
         let (status, exited, exit_status) =
-            libnanami::call_service_port(alter_port, ALTER_REQUEST_STATUS, pid, 0, 0, 0, 3)?;
-        if status != libnanami::OS_RESPONSE_OK {
+            nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_STATUS, pid, 0, 0, 0, 3)?;
+        if status != nanami_runtime::OS_RESPONSE_OK {
             return Ok(false);
         }
         if exited != 0 {
             return Ok(exit_status == 0);
         }
-        nanami_services::timer::timer_service_sleep_milliseconds(timer_port, 10)?;
+        nanami_client::timer::timer_service_sleep_milliseconds(timer_port, 10)?;
         attempts += 1;
     }
     Ok(false)
@@ -537,18 +537,18 @@ fn write_terminal_input(
     terminal_id: Word,
     terminal_shm: Word,
     input: &[u8],
-) -> Result<(), libnanami::RequestError> {
+) -> Result<(), nanami_runtime::RequestError> {
     unsafe {
         core::ptr::copy_nonoverlapping(input.as_ptr(), terminal_shm as *mut u8, input.len());
     }
-    let written = nanami_services::terminal::terminal_write_input(
+    let written = nanami_client::terminal::terminal_write_input(
         terminal_port,
         terminal_id,
         0,
         input.len() as Word,
     )?;
     if written != input.len() as Word {
-        return Err(libnanami::RequestError::InvalidArgument);
+        return Err(nanami_runtime::RequestError::InvalidArgument);
     }
     Ok(())
 }
@@ -559,10 +559,10 @@ fn wait_for_output(
     terminal_shm: Word,
     notification: Word,
     patterns: &mut [(&[u8], usize)],
-) -> Result<bool, libnanami::RequestError> {
+) -> Result<bool, nanami_runtime::RequestError> {
     loop {
         loop {
-            let bytes = nanami_services::terminal::terminal_read_output(
+            let bytes = nanami_client::terminal::terminal_read_output(
                 terminal_port,
                 terminal_id,
                 0,
@@ -585,8 +585,8 @@ fn wait_for_output(
             }
         }
 
-        let identifier = libnanami::ipc::notification_wait(notification)?;
-        if identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
+        let identifier = nanami_runtime::ipc::notification_wait(notification)?;
+        if identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
             return Ok(false);
         }
     }
@@ -599,12 +599,12 @@ fn wait_for_output_without_pattern(
     notification: Word,
     required: &[u8],
     forbidden: &[u8],
-) -> Result<bool, libnanami::RequestError> {
+) -> Result<bool, nanami_runtime::RequestError> {
     let mut required_matched = 0usize;
     let mut forbidden_matched = 0usize;
     loop {
         loop {
-            let bytes = nanami_services::terminal::terminal_read_output(
+            let bytes = nanami_client::terminal::terminal_read_output(
                 terminal_port,
                 terminal_id,
                 0,
@@ -626,8 +626,8 @@ fn wait_for_output_without_pattern(
             }
         }
 
-        let identifier = libnanami::ipc::notification_wait(notification)?;
-        if identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
+        let identifier = nanami_runtime::ipc::notification_wait(notification)?;
+        if identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
             return Ok(false);
         }
     }
@@ -644,15 +644,15 @@ fn advance_match(pattern: &[u8], matched: &mut usize, byte: u8) {
     }
 }
 
-fn fail(reason: &str, alter_port: Word, terminal_id: Word) -> libnanami::NanamiResult {
-    libnanami::println!("[alter-test] FAIL {}", reason);
+fn fail(reason: &str, alter_port: Word, terminal_id: Word) -> nanami_runtime::NanamiResult {
+    nanami_runtime::println!("[alter-test] FAIL {}", reason);
     cleanup(alter_port, terminal_id);
     Ok(())
 }
 
 fn cleanup(alter_port: Word, terminal_id: Word) {
     if terminal_id != 0 {
-        let _ = libnanami::call_service_port(
+        let _ = nanami_runtime::call_service_port(
             alter_port,
             ALTER_REQUEST_KILL_TERMINAL,
             terminal_id,
@@ -664,4 +664,4 @@ fn cleanup(alter_port: Word, terminal_id: Word) {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

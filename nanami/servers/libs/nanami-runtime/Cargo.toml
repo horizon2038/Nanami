@@ -1,0 +1,13 @@
+[package]
+name = "nanami-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanami-uapi = { path = "../../uapi" }
+a9n_abi = "0.6.0"
+a9n-types = { version = "0.3.0" }
+# The pinned inspection API is used only by heap_stats, never by alloc/free.
+rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
+
+[workspace]

@@ -1,7 +1,7 @@
 //! Configure PCI before spawning drivers: CF8/CFC is a global address latch,
 //! not an SMP-safe per-process register. USB never accesses it at runtime.
-use libnanami::{RequestError, Word};
-use nanami_services::device::UsbControllerResource;
+use nanami_runtime::{RequestError, Word};
+use nanami_client::device::UsbControllerResource;
 
 struct Pci {
     io: Word,
@@ -9,7 +9,7 @@ struct Pci {
 }
 impl Pci {
     fn select(&self, offset: u8) -> Result<(), RequestError> {
-        libnanami::io::io_write(
+        nanami_runtime::io::io_write(
             self.io,
             0xcf8,
             4,
@@ -18,16 +18,16 @@ impl Pci {
     }
     fn read(&self, offset: u8) -> Result<u32, RequestError> {
         self.select(offset)?;
-        Ok(libnanami::io::io_read(self.io, 0xcfc, 4)? as u32)
+        Ok(nanami_runtime::io::io_read(self.io, 0xcfc, 4)? as u32)
     }
     fn write(&self, offset: u8, value: u32) -> Result<(), RequestError> {
         self.select(offset)?;
-        libnanami::io::io_write(self.io, 0xcfc, 4, value as Word)
+        nanami_runtime::io::io_write(self.io, 0xcfc, 4, value as Word)
     }
     fn write16(&self, offset: u8, value: u16) -> Result<(), RequestError> {
         self.select(offset)?;
         // Do not write adjacent PCI status RW1C bits back while updating command.
-        libnanami::io::io_write(self.io, 0xcfc + (offset as Word & 2), 2, value as Word)
+        nanami_runtime::io::io_write(self.io, 0xcfc + (offset as Word & 2), 2, value as Word)
     }
 }
 
@@ -36,7 +36,7 @@ pub fn prepare(bdf: Word) -> Result<(UsbControllerResource, u8), RequestError> {
         return Err(RequestError::InvalidArgument);
     }
     let pci = Pci {
-        io: libnanami::ipc::process_slot_descriptor(super::SLOT_PCI_CONFIG),
+        io: nanami_runtime::ipc::process_slot_descriptor(super::SLOT_PCI_CONFIG),
         address: 0x8000_0000
             | ((bdf as u32 >> 16) << 16)
             | (((bdf as u32 >> 8) & 31) << 11)
@@ -118,7 +118,7 @@ pub fn prepare(bdf: Word) -> Result<(UsbControllerResource, u8), RequestError> {
         && option_env!("NANAMI_USB_ACPI_IRQ") != Some("1"))
     .then_some(line);
     pci.write16(4, (command | 6) & !(1 << 10))?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[driver-manager] USB PCI BAR={:#x} bytes={:#x} INTx={}",
         physical,
         bytes,

@@ -2,8 +2,8 @@
 #![no_main]
 
 use core::ptr;
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_VFS_SERVICE: Word = 23;
@@ -120,19 +120,19 @@ impl LaunchInfo {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[system-manager] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[system-manager] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()
         .map_err(|e| log_error("[system-manager] ipc tls failed: ", e))?;
-    libnanami::print!("[system-manager] bootstrap\n");
+    nanami_runtime::print!("[system-manager] bootstrap\n");
 
-    nanami_services::registry::register_exec_service()
+    nanami_client::registry::register_exec_service()
         .map_err(|e| log_error("[system-manager] exec-service register failed: ", e))?;
-    libnanami::print!("[system-manager] service registered: exec-service\n");
+    nanami_runtime::print!("[system-manager] service registered: exec-service\n");
 
     let mut vfs_client = match connect_vfs_client() {
         Ok(client) => Some(client),
@@ -145,7 +145,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     let manifest = match vfs_client.as_mut() {
         Some(client) => match read_manifest_from_vfs(client, SYSTEM_LIST_PATH) {
             Ok(manifest) => {
-                libnanami::print!("[system-manager] loaded /nanami/system-list\n");
+                nanami_runtime::print!("[system-manager] loaded /nanami/system-list\n");
                 manifest
             }
             Err(error) => {
@@ -157,16 +157,16 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
 
     let summary = spawn_system_entries(manifest.as_str(), &mut vfs_client);
-    libnanami::print!("[system-manager] spawn summary ok=");
-    libnanami::print!("{}", summary.spawned);
-    libnanami::print!(" failed=");
-    libnanami::print!("{}", summary.failed);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[system-manager] spawn summary ok=");
+    nanami_runtime::print!("{}", summary.spawned);
+    nanami_runtime::print!(" failed=");
+    nanami_runtime::print!("{}", summary.failed);
+    nanami_runtime::print!("\n");
 
     let session_manifest = match vfs_client.as_mut() {
         Some(client) => match read_manifest_from_vfs(client, SESSION_LIST_PATH) {
             Ok(manifest) => {
-                libnanami::print!("[system-manager] loaded /nanami/session-list\n");
+                nanami_runtime::print!("[system-manager] loaded /nanami/session-list\n");
                 manifest
             }
             Err(error) => {
@@ -178,11 +178,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
 
     let session_summary = spawn_system_entries(session_manifest.as_str(), &mut vfs_client);
-    libnanami::print!("[system-manager] session summary ok=");
-    libnanami::print!("{}", session_summary.spawned);
-    libnanami::print!(" failed=");
-    libnanami::print!("{}", session_summary.failed);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[system-manager] session summary ok=");
+    nanami_runtime::print!("{}", session_summary.spawned);
+    nanami_runtime::print!(" failed=");
+    nanami_runtime::print!("{}", session_summary.failed);
+    nanami_runtime::print!("\n");
 
     run_exec_service(ExecRuntime {
         clients: [ExecClient::EMPTY; MAX_EXEC_CLIENTS],
@@ -193,8 +193,8 @@ fn nanami_main() -> libnanami::NanamiResult {
 
 fn connect_vfs_client() -> Result<VfsClient, RequestError> {
     connect_vfs_service()?;
-    let vfs_port = libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
-    let (shm, shm_size) = nanami_services::vfs::vfs_attach_shared_memory(vfs_port, VFS_SHM_BYTES)?;
+    let vfs_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
+    let (shm, shm_size) = nanami_client::vfs::vfs_attach_shared_memory(vfs_port, VFS_SHM_BYTES)?;
     if shm_size < VFS_SHM_BYTES || shm == 0 {
         return Err(RequestError::Protocol);
     }
@@ -214,15 +214,15 @@ fn read_manifest_from_vfs(
     }
     write_shm_bytes(vfs.shm, PATH_OFFSET, path);
     let (_, size, kind) =
-        nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path.len() as Word)?;
-    if kind != nanami_services::vfs::VFS_FILE_TYPE_REGULAR {
+        nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path.len() as Word)?;
+    if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR {
         return Err(RequestError::InvalidArgument);
     }
-    let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path.len() as Word)?;
+    let handle = nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path.len() as Word)?;
     let len = (size as usize).min(MANIFEST_MAX_BYTES);
     let read =
-        nanami_services::vfs::vfs_read(vfs.port, handle, 0, len as Word, MANIFEST_OFFSET as Word);
-    let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+        nanami_client::vfs::vfs_read(vfs.port, handle, 0, len as Word, MANIFEST_OFFSET as Word);
+    let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
     let read = read? as usize;
 
     let mut buffer = ManifestBuffer::new();
@@ -240,7 +240,7 @@ fn connect_vfs_service() -> Result<(), RequestError> {
     let timer_port = connect_retry_timer();
     let mut tries = 0usize;
     loop {
-        match nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
+        match nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 tries += 1;
@@ -256,17 +256,17 @@ fn connect_vfs_service() -> Result<(), RequestError> {
 }
 
 fn connect_retry_timer() -> Option<Word> {
-    let timer_port = libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
+    let timer_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
     let mut tries = 0usize;
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
             Ok(()) => return Some(timer_port),
             Err(_) => {
                 tries += 1;
                 if tries >= CONNECT_RETRIES {
                     return None;
                 }
-                libnanami::yield_now();
+                nanami_runtime::yield_now();
             }
         }
     }
@@ -274,13 +274,13 @@ fn connect_retry_timer() -> Option<Word> {
 
 fn retry_delay(timer_port: Option<Word>) {
     if let Some(port) = timer_port {
-        if nanami_services::timer::timer_service_sleep_milliseconds(port, CONNECT_RETRY_DELAY_MS)
+        if nanami_client::timer::timer_service_sleep_milliseconds(port, CONNECT_RETRY_DELAY_MS)
             .is_ok()
         {
             return;
         }
     }
-    libnanami::yield_now();
+    nanami_runtime::yield_now();
 }
 
 fn spawn_system_entries(manifest: &str, vfs_client: &mut Option<VfsClient>) -> SpawnSummary {
@@ -311,23 +311,23 @@ fn spawn_system_entries(manifest: &str, vfs_client: &mut Option<VfsClient>) -> S
             match result {
                 Ok(pid) => {
                     summary.spawned += 1;
-                    libnanami::print!("[system-manager] spawned ");
-                    libnanami::print!("{}", entry.name);
-                    libnanami::print!(" pid=");
-                    libnanami::print!("{}", pid);
-                    libnanami::print!(" path=");
-                    libnanami::print!("{}", entry.path);
-                    libnanami::print!("\n");
+                    nanami_runtime::print!("[system-manager] spawned ");
+                    nanami_runtime::print!("{}", entry.name);
+                    nanami_runtime::print!(" pid=");
+                    nanami_runtime::print!("{}", pid);
+                    nanami_runtime::print!(" path=");
+                    nanami_runtime::print!("{}", entry.path);
+                    nanami_runtime::print!("\n");
                 }
                 Err(error) => {
                     summary.failed += 1;
-                    libnanami::print!("[system-manager] spawn failed name=");
-                    libnanami::print!("{}", entry.name);
-                    libnanami::print!(" path=");
-                    libnanami::print!("{}", entry.path);
-                    libnanami::print!(" ");
+                    nanami_runtime::print!("[system-manager] spawn failed name=");
+                    nanami_runtime::print!("{}", entry.name);
+                    nanami_runtime::print!(" path=");
+                    nanami_runtime::print!("{}", entry.path);
+                    nanami_runtime::print!(" ");
                     print_request_error(error);
-                    libnanami::print!("\n");
+                    nanami_runtime::print!("\n");
                 }
             }
         }
@@ -342,7 +342,7 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
         return Err(RequestError::InvalidArgument);
     }
     write_shm_bytes(vfs.shm, PATH_OFFSET, path);
-    libnanami::println!("[system-manager] loading {} path={}", entry.name, entry.path);
+    nanami_runtime::println!("[system-manager] loading {} path={}", entry.name, entry.path);
     spawn_vfs_path::<true>(vfs, path.len(), entry.priority)
 }
 
@@ -355,41 +355,41 @@ fn spawn_vfs_path<const BOOT_TRACE: bool>(
     priority: Word,
 ) -> Result<Word, RequestError> {
     if BOOT_TRACE {
-        libnanami::println!("[system-manager] load stage=stat");
+        nanami_runtime::println!("[system-manager] load stage=stat");
     }
     let (_, size, kind) =
-        nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
+        nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
             .map_err(|error| log_spawn_stage("stat", error))?;
-    if kind != nanami_services::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
+    if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
         return Err(RequestError::InvalidArgument);
     }
 
     if BOOT_TRACE {
-        libnanami::println!("[system-manager] load stage=heap bytes={:#x}", size);
+        nanami_runtime::println!("[system-manager] load stage=heap bytes={:#x}", size);
     }
     let (image_base, mapped_size) =
-        libnanami::request_heap(size).map_err(|error| log_spawn_stage("heap", error))?;
+        nanami_runtime::request_heap(size).map_err(|error| log_spawn_stage("heap", error))?;
     if image_base == 0 || mapped_size < size {
         return Err(RequestError::Protocol);
     }
 
     if BOOT_TRACE {
-        libnanami::println!("[system-manager] load stage=open");
+        nanami_runtime::println!("[system-manager] load stage=open");
     }
-    let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
+    let handle = nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
         .map_err(|error| log_spawn_stage("open", error))?;
     let mut offset = 0usize;
     while offset < size as usize {
         let remaining = size as usize - offset;
         let chunk = remaining.min(vfs.shm_size as usize);
         if BOOT_TRACE {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[system-manager] load stage=read offset={:#x} bytes={:#x}",
                 offset,
                 chunk
             );
         }
-        let read = match nanami_services::vfs::vfs_read(
+        let read = match nanami_client::vfs::vfs_read(
             vfs.port,
             handle,
             offset as Word,
@@ -398,12 +398,12 @@ fn spawn_vfs_path<const BOOT_TRACE: bool>(
         ) {
             Ok(read) => read as usize,
             Err(error) => {
-                let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+                let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
                 return Err(log_spawn_stage("read", error));
             }
         };
         if read == 0 {
-            let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+            let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
             return Err(RequestError::Protocol);
         }
         unsafe {
@@ -416,23 +416,23 @@ fn spawn_vfs_path<const BOOT_TRACE: bool>(
         offset += read;
     }
     if BOOT_TRACE {
-        libnanami::println!("[system-manager] load stage=close");
+        nanami_runtime::println!("[system-manager] load stage=close");
     }
-    let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+    let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
 
     if BOOT_TRACE {
-        libnanami::println!("[system-manager] load stage=spawn");
+        nanami_runtime::println!("[system-manager] load stage=spawn");
     }
-    libnanami::request_process_spawn_memory(image_base, size, priority)
+    nanami_runtime::request_process_spawn_memory(image_base, size, priority)
         .map_err(|error| log_spawn_stage("process", error))
 }
 
 fn log_spawn_stage(stage: &str, error: RequestError) -> RequestError {
-    libnanami::print!("[system-manager] spawn stage=");
-    libnanami::print!("{}", stage);
-    libnanami::print!(" error=");
+    nanami_runtime::print!("[system-manager] spawn stage=");
+    nanami_runtime::print!("{}", stage);
+    nanami_runtime::print!(" error=");
     print_request_error(error);
-    libnanami::print!("\n");
+    nanami_runtime::print!("\n");
     error
 }
 
@@ -443,22 +443,22 @@ fn spawn_vfs_path_with_launch(
     launch: LaunchInfo,
 ) -> Result<Word, RequestError> {
     let (_, size, kind) =
-        nanami_services::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
-    if kind != nanami_services::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
+        nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
+    if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
         return Err(RequestError::InvalidArgument);
     }
 
-    let (image_base, mapped_size) = libnanami::request_heap(size)?;
+    let (image_base, mapped_size) = nanami_runtime::request_heap(size)?;
     if image_base == 0 || mapped_size < size {
         return Err(RequestError::Protocol);
     }
 
-    let handle = nanami_services::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
+    let handle = nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
     let mut offset = 0usize;
     while offset < size as usize {
         let remaining = size as usize - offset;
         let chunk = remaining.min(vfs.shm_size as usize);
-        let read = nanami_services::vfs::vfs_read(
+        let read = nanami_client::vfs::vfs_read(
             vfs.port,
             handle,
             offset as Word,
@@ -466,7 +466,7 @@ fn spawn_vfs_path_with_launch(
             FILE_CHUNK_OFFSET as Word,
         )? as usize;
         if read == 0 {
-            let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+            let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
             return Err(RequestError::Protocol);
         }
         unsafe {
@@ -478,16 +478,16 @@ fn spawn_vfs_path_with_launch(
         }
         offset += read;
     }
-    let _ = nanami_services::vfs::vfs_close(vfs.port, handle);
+    let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
 
-    let pid = libnanami::request_process_spawn_memory_suspended(
+    let pid = nanami_runtime::request_process_spawn_memory_suspended(
         image_base,
         size,
         launch.priority,
         EXEC_CHILD_PCB_SLOT,
     )?;
     install_initial_stack(pid, client_shm, launch)?;
-    let pcb = libnanami::ipc::process_slot_descriptor(EXEC_CHILD_PCB_SLOT);
+    let pcb = nanami_runtime::ipc::process_slot_descriptor(EXEC_CHILD_PCB_SLOT);
     a9n_abi::arch::process_control_block::resume(pcb).map_err(|_| RequestError::Transport)?;
     Ok(pid)
 }
@@ -508,7 +508,7 @@ fn parse_exec_launch_block(
     launch.argc = read_shm_word(client.shm, offset + 8) as usize;
     launch.envc = read_shm_word(client.shm, offset + 16) as usize;
     if launch.diagnostics {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[system-manager] launch parse owner={} offset={:#x} len={:#x} priority={} argc={} envc={}",
             client.pid,
             offset,
@@ -609,7 +609,7 @@ fn install_initial_stack(
     if launch.diagnostics {
         let local_argc = read_word_from_buffer(&stack, sp);
         let local_argv0 = read_word_from_buffer(&stack, sp + core::mem::size_of::<Word>());
-        libnanami::println!(
+        nanami_runtime::println!(
             "[system-manager] argv local pid={} sp={:#x} argc={} argv0={:#x} bytes={:#x}",
             pid,
             guest_sp,
@@ -618,24 +618,24 @@ fn install_initial_stack(
             stack_bytes
         );
     }
-    libnanami::request_process_memory_write(
+    nanami_runtime::request_process_memory_write(
         pid,
         guest_sp,
         local + sp as Word,
         stack_bytes as Word,
     )?;
-    let pcb = libnanami::ipc::process_slot_descriptor(EXEC_CHILD_PCB_SLOT);
+    let pcb = nanami_runtime::ipc::process_slot_descriptor(EXEC_CHILD_PCB_SLOT);
     write_register_value(pcb, REG_STACK_POINTER, guest_sp)?;
     if launch.diagnostics {
         let stack_pointer = read_register_value(pcb, REG_STACK_POINTER).unwrap_or(0);
         let mut stack_argc = 0;
         let mut stack_argv0 = 0;
-        if libnanami::request_process_memory_read(pid, guest_sp, local, STACK_VERIFY_BYTES).is_ok()
+        if nanami_runtime::request_process_memory_read(pid, guest_sp, local, STACK_VERIFY_BYTES).is_ok()
         {
             stack_argc = read_word_from_buffer(&stack, 0);
             stack_argv0 = read_word_from_buffer(&stack, core::mem::size_of::<Word>());
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[system-manager] argv stack pid={} sp={:#x} argc={} argv0={:#x}",
             pid,
             stack_pointer,
@@ -718,16 +718,16 @@ fn find_nul(base: Word, mut cursor: usize, end: usize) -> Result<usize, RequestE
     Err(RequestError::InvalidArgument)
 }
 
-fn run_exec_service(mut runtime: ExecRuntime) -> libnanami::NanamiResult {
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+fn run_exec_service(mut runtime: ExecRuntime) -> nanami_runtime::NanamiResult {
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut pending = ExecReply::Drop;
 
     loop {
         let event = match pending {
             ExecReply::Send(status, detail0, detail1) => {
-                libnanami::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
+                nanami_runtime::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
             }
-            ExecReply::Drop => libnanami::ipc::service_receive_event(service_port),
+            ExecReply::Drop => nanami_runtime::ipc::service_receive_event(service_port),
         };
         let event = match event {
             Ok(event) => event,
@@ -749,34 +749,34 @@ enum ExecReply {
 
 fn handle_exec_request(runtime: &mut ExecRuntime, request: ServiceRequest) -> ExecReply {
     let (status, detail0, detail1) = match request.code {
-        nanami_services::exec::EXEC_REQUEST_CONTROL => handle_exec_control(runtime, request),
-        nanami_services::exec::EXEC_REQUEST_SPAWN_PATH => handle_exec_spawn_path(runtime, request),
-        nanami_services::exec::EXEC_REQUEST_SPAWN_PATH_ARGUMENTS => {
+        nanami_client::exec::EXEC_REQUEST_CONTROL => handle_exec_control(runtime, request),
+        nanami_client::exec::EXEC_REQUEST_SPAWN_PATH => handle_exec_spawn_path(runtime, request),
+        nanami_client::exec::EXEC_REQUEST_SPAWN_PATH_ARGUMENTS => {
             handle_exec_spawn_path_arguments(runtime, request)
         }
-        nanami_services::exec::EXEC_REQUEST_PROCESS_STATUS => {
+        nanami_client::exec::EXEC_REQUEST_PROCESS_STATUS => {
             handle_exec_process_status(runtime, request)
         }
-        nanami_services::exec::EXEC_REQUEST_PROCESS_REAP => {
+        nanami_client::exec::EXEC_REQUEST_PROCESS_REAP => {
             handle_exec_process_reap(runtime, request)
         }
-        nanami_services::exec::EXEC_REQUEST_PROCESS_KILL => {
+        nanami_client::exec::EXEC_REQUEST_PROCESS_KILL => {
             handle_exec_process_kill(runtime, request)
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
     ExecReply::Send(status, detail0, detail1)
 }
 
 fn handle_exec_control(runtime: &mut ExecRuntime, request: ServiceRequest) -> (Word, Word, Word) {
     match request.arg0 {
-        nanami_services::exec::EXEC_CONTROL_ATTACH_SHARED_MEMORY => {
+        nanami_client::exec::EXEC_CONTROL_ATTACH_SHARED_MEMORY => {
             let size = if request.arg1 == 0 {
-                nanami_services::exec::EXEC_DEFAULT_SHM_BYTES
+                nanami_client::exec::EXEC_DEFAULT_SHM_BYTES
             } else {
                 request.arg1
             };
-            match libnanami::request_shared_memory(request.identifier, size) {
+            match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => match exec_client_for_pid(runtime, request.identifier) {
                     Some(index) => {
                         runtime.clients[index] = ExecClient {
@@ -785,14 +785,14 @@ fn handle_exec_control(runtime: &mut ExecRuntime, request: ServiceRequest) -> (W
                             shm: local,
                             shm_size: size,
                         };
-                        (libnanami::OS_RESPONSE_OK, peer, size)
+                        (nanami_runtime::OS_RESPONSE_OK, peer, size)
                     }
-                    None => (libnanami::OS_RESPONSE_FATAL, 0, 0),
+                    None => (nanami_runtime::OS_RESPONSE_FATAL, 0, 0),
                 },
                 Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -801,7 +801,7 @@ fn handle_exec_spawn_path(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = find_exec_client(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let client = runtime.clients[index];
     let path_offset = request.arg0 as usize;
@@ -810,17 +810,17 @@ fn handle_exec_spawn_path(
         || path_offset >= client.shm_size as usize
         || path_len > client.shm_size as usize - path_offset
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     if runtime.vfs.is_none() {
         runtime.vfs = connect_vfs_client().ok();
     }
     let Some(vfs) = runtime.vfs.as_mut() else {
-        return (libnanami::OS_RESPONSE_FATAL, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
     };
     if path_len >= vfs.shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
@@ -834,7 +834,7 @@ fn handle_exec_spawn_path(
     match spawn_vfs_path::<false>(vfs, path_len, request.arg2) {
         Ok(pid) => {
             register_exec_child(runtime, request.identifier, pid);
-            (libnanami::OS_RESPONSE_OK, pid, 0)
+            (nanami_runtime::OS_RESPONSE_OK, pid, 0)
         }
         Err(error) => (map_request_error_to_status(error), 0, 0),
     }
@@ -845,7 +845,7 @@ fn handle_exec_spawn_path_arguments(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = find_exec_client(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let client = runtime.clients[index];
     let path_offset = request.arg0 as usize;
@@ -859,7 +859,7 @@ fn handle_exec_spawn_path_arguments(
         || path_len > client.shm_size as usize - path_offset
         || launch_len > client.shm_size as usize - launch_offset
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let launch = match parse_exec_launch_block(&client, launch_offset, launch_len) {
@@ -871,10 +871,10 @@ fn handle_exec_spawn_path_arguments(
         runtime.vfs = connect_vfs_client().ok();
     }
     let Some(vfs) = runtime.vfs.as_mut() else {
-        return (libnanami::OS_RESPONSE_FATAL, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
     };
     if path_len >= vfs.shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
@@ -888,7 +888,7 @@ fn handle_exec_spawn_path_arguments(
     match spawn_vfs_path_with_launch(vfs, path_len, client.shm, launch) {
         Ok(pid) => {
             register_exec_child(runtime, request.identifier, pid);
-            (libnanami::OS_RESPONSE_OK, pid, 0)
+            (nanami_runtime::OS_RESPONSE_OK, pid, 0)
         }
         Err(error) => (map_request_error_to_status(error), 0, 0),
     }
@@ -900,10 +900,10 @@ fn handle_exec_process_status(
 ) -> (Word, Word, Word) {
     let pid = request.arg0;
     if find_exec_child(runtime, request.identifier, pid).is_none() {
-        return (libnanami::OS_RESPONSE_OK, 1, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 1, 0);
     }
-    match libnanami::request_process_status(pid) {
-        Ok((exited, exit_status)) => (libnanami::OS_RESPONSE_OK, exited as Word, exit_status),
+    match nanami_runtime::request_process_status(pid) {
+        Ok((exited, exit_status)) => (nanami_runtime::OS_RESPONSE_OK, exited as Word, exit_status),
         Err(error) => (map_request_error_to_status(error), 0, 0),
     }
 }
@@ -914,16 +914,16 @@ fn handle_exec_process_reap(
 ) -> (Word, Word, Word) {
     let pid = request.arg0;
     let Some(index) = find_exec_child(runtime, request.identifier, pid) else {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     };
-    match libnanami::request_process_reap(pid) {
+    match nanami_runtime::request_process_reap(pid) {
         Ok(()) => {
             runtime.children[index] = ExecChild::EMPTY;
-            (libnanami::OS_RESPONSE_OK, 0, 0)
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
         }
         Err(_) => {
             runtime.children[index] = ExecChild::EMPTY;
-            (libnanami::OS_RESPONSE_OK, 0, 0)
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
         }
     }
 }
@@ -934,11 +934,11 @@ fn handle_exec_process_kill(
 ) -> (Word, Word, Word) {
     let pid = request.arg0;
     if find_exec_child(runtime, request.identifier, pid).is_none() {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
-    match libnanami::request_process_kill(pid, request.arg1) {
-        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
-        Err(_) => (libnanami::OS_RESPONSE_OK, 0, 0),
+    match nanami_runtime::request_process_kill(pid, request.arg1) {
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
+        Err(_) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
     }
 }
 
@@ -1119,38 +1119,38 @@ fn read_shm_word(base: Word, offset: usize) -> Word {
 }
 
 fn log_error(prefix: &str, error: RequestError) -> RequestError {
-    libnanami::print!("{}", prefix);
+    nanami_runtime::print!("{}", prefix);
     print_request_error(error);
-    libnanami::print!("\n");
+    nanami_runtime::print!("\n");
     error
 }
 
 fn log_request_error(prefix: &str, error: RequestError) {
-    libnanami::print!("{}", prefix);
+    nanami_runtime::print!("{}", prefix);
     print_request_error(error);
-    libnanami::print!("\n");
+    nanami_runtime::print!("\n");
 }
 
 fn map_request_error_to_status(error: RequestError) -> Word {
     match error {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(status) => status,
     }
 }
 
 fn print_request_error(error: RequestError) {
     match error {
-        RequestError::InvalidArgument => libnanami::print!("invalid-argument"),
-        RequestError::Unsupported => libnanami::print!("unsupported"),
-        RequestError::Transport => libnanami::print!("transport"),
-        RequestError::Protocol => libnanami::print!("protocol"),
+        RequestError::InvalidArgument => nanami_runtime::print!("invalid-argument"),
+        RequestError::Unsupported => nanami_runtime::print!("unsupported"),
+        RequestError::Transport => nanami_runtime::print!("transport"),
+        RequestError::Protocol => nanami_runtime::print!("protocol"),
         RequestError::Status(status) => {
-            libnanami::print!("status=");
-            libnanami::print!("{:#x}", status);
+            nanami_runtime::print!("status=");
+            nanami_runtime::print!("{:#x}", status);
         }
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

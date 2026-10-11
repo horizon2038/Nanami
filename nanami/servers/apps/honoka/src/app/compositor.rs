@@ -1,5 +1,5 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::background::BackgroundCache;
 use crate::constants::{
@@ -27,7 +27,7 @@ const CLOCK_TEXT_BYTES: usize = 8;
 const SHELL_ICON_RECT: Rect = Rect::new(12, 4, 28, MENU_BAR_HEIGHT - 8);
 const SHELL_PATH: &[u8] = b"/bin/shell";
 const SHELL_PRIORITY: Word = 16;
-const TITLE_TEXT_MAX: usize = nanami_services::gfx::honoka::HONOKA_WINDOW_TITLE_BYTES;
+const TITLE_TEXT_MAX: usize = nanami_client::gfx::honoka::HONOKA_WINDOW_TITLE_BYTES;
 const DEFAULT_WALLPAPER_PNM: &[u8] = include_bytes!("../../assets/wallpapers/default.pnm");
 
 #[derive(Clone, Copy)]
@@ -86,7 +86,7 @@ impl Window {
         width: 0,
         height: 0,
         visible: false,
-        opacity: nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
+        opacity: nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
         damage_queue: 0,
         local_fb: 0,
         fb_size: 0,
@@ -236,7 +236,7 @@ impl Compositor {
         i = 0;
         while i < count {
             if let Err(error) = self.framebuffer.present(self.dirty_rects[i]) {
-                libnanami::println!("[honoka] display present failed: {}", error);
+                nanami_runtime::println!("[honoka] display present failed: {}", error);
             }
             i += 1;
         }
@@ -316,10 +316,10 @@ impl Compositor {
         y: i32,
         content_width: i32,
         content_height: i32,
-    ) -> Result<Word, libnanami::RequestError> {
+    ) -> Result<Word, nanami_runtime::RequestError> {
         let index = self
             .find_free_window()
-            .ok_or(libnanami::RequestError::Unsupported)?;
+            .ok_or(nanami_runtime::RequestError::Unsupported)?;
         let max_content_width =
             (self.framebuffer.screen().width as i32 - CLIENT_PADDING * 2).max(1);
         let max_content_height =
@@ -340,7 +340,7 @@ impl Compositor {
         self.next_window_id = self.next_window_id.wrapping_add(1);
         let input_notify_slot = self
             .available_input_notification_slot()
-            .ok_or(libnanami::RequestError::Unsupported)?;
+            .ok_or(nanami_runtime::RequestError::Unsupported)?;
         self.windows[index] = Window {
             used: true,
             owner_pid,
@@ -350,7 +350,7 @@ impl Compositor {
             width,
             height,
             visible: true,
-            opacity: nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
+            opacity: nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
             damage_queue: 0,
             local_fb: 0,
             fb_size: 0,
@@ -378,7 +378,7 @@ impl Compositor {
         height: i32,
         title0: Word,
         title1: Word,
-    ) -> Result<Word, libnanami::RequestError> {
+    ) -> Result<Word, nanami_runtime::RequestError> {
         let id = self.create_window(owner_pid, x, y, width, height)?;
         let index = self.find_owned_window(owner_pid, id)?;
         let (title, len) = decode_title_chunks(&[title0, title1], id);
@@ -392,7 +392,7 @@ impl Compositor {
         &mut self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         self.remove_window(index);
         Ok(())
@@ -417,7 +417,7 @@ impl Compositor {
             let alive = if let Some(cached_index) = cached {
                 checked_alive[cached_index]
             } else {
-                let alive = libnanami::request_process_alive(window.owner_pid).unwrap_or(true);
+                let alive = nanami_runtime::request_process_alive(window.owner_pid).unwrap_or(true);
                 checked_pids[checked_count] = window.owner_pid;
                 checked_alive[checked_count] = alive;
                 checked_count += 1;
@@ -435,19 +435,19 @@ impl Compositor {
         &mut self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(Word, Word), libnanami::RequestError> {
+    ) -> Result<(Word, Word), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         if self.windows[index].local_fb != 0 {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
         let pixel_bytes = self.window_pixel_bytes(index)?;
         let size =
-            nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES.saturating_add(pixel_bytes);
-        let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(owner_pid, size)?;
+            nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES.saturating_add(pixel_bytes);
+        let (local_vaddr, peer_vaddr) = nanami_runtime::request_shared_memory(owner_pid, size)?;
         self.init_damage_queue(local_vaddr);
         self.windows[index].damage_queue = local_vaddr;
         self.windows[index].local_fb =
-            local_vaddr.saturating_add(nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
+            local_vaddr.saturating_add(nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES);
         self.windows[index].fb_size = pixel_bytes;
         let content = self.windows[index].content_rect();
         self.windows[index].fb_width = content.width as usize;
@@ -462,10 +462,10 @@ impl Compositor {
         owner_pid: Word,
         window_id: Word,
         target_pid: Word,
-    ) -> Result<(Word, Word), libnanami::RequestError> {
+    ) -> Result<(Word, Word), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         if target_pid == 0 || self.windows[index].local_fb != 0 {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
         // Reattaching a Linux fbdev mapping preserves the display mode even
         // when its viewport was resized while that mapping was detached.
@@ -480,8 +480,8 @@ impl Compositor {
             .checked_mul(height)
             .and_then(|v| v.checked_mul(4))
             .filter(|bytes| *bytes != 0)
-            .ok_or(libnanami::RequestError::InvalidArgument)?;
-        let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(target_pid, pixel_bytes)?;
+            .ok_or(nanami_runtime::RequestError::InvalidArgument)?;
+        let (local_vaddr, peer_vaddr) = nanami_runtime::request_shared_memory(target_pid, pixel_bytes)?;
         self.windows[index].damage_queue = 0;
         self.windows[index].local_fb = local_vaddr;
         self.windows[index].fb_size = pixel_bytes;
@@ -496,20 +496,20 @@ impl Compositor {
         &mut self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         let window = self.windows[index];
         if window.damage_queue != 0 || window.local_fb == 0 || window.fb_size == 0 {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
-        libnanami::request_mapping_release(window.local_fb, window.fb_size)?;
+        nanami_runtime::request_mapping_release(window.local_fb, window.fb_size)?;
         self.windows[index].local_fb = 0;
         self.windows[index].fb_size = 0;
         self.mark_dirty(window.rect());
         Ok(())
     }
 
-    fn window_pixel_bytes(&self, index: usize) -> Result<Word, libnanami::RequestError> {
+    fn window_pixel_bytes(&self, index: usize) -> Result<Word, nanami_runtime::RequestError> {
         let content = self.windows[index].content_rect();
         let bytes = content
             .width
@@ -517,7 +517,7 @@ impl Compositor {
             .saturating_mul(content.height.max(0))
             .saturating_mul(4) as Word;
         if bytes == 0 {
-            Err(libnanami::RequestError::InvalidArgument)
+            Err(nanami_runtime::RequestError::InvalidArgument)
         } else {
             Ok(bytes)
         }
@@ -527,7 +527,7 @@ impl Compositor {
         &self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(Word, Word), libnanami::RequestError> {
+    ) -> Result<(Word, Word), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         let content = self.windows[index].content_rect();
         Ok((content.width.max(0) as Word, content.height.max(0) as Word))
@@ -539,7 +539,7 @@ impl Compositor {
         window_id: Word,
         x: i32,
         y: i32,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         let old = self.windows[index].rect();
         self.windows[index].x = x;
@@ -556,7 +556,7 @@ impl Compositor {
         chunk0: Word,
         chunk1: Word,
         chunk2: Word,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         let (title, len) = decode_title_chunks(&[chunk0, chunk1, chunk2], window_id);
         self.windows[index].title = title;
@@ -569,14 +569,14 @@ impl Compositor {
         &mut self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(Word, Word), libnanami::RequestError> {
+    ) -> Result<(Word, Word), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         if self.windows[index].input_queue != 0 {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
-        let size = nanami_services::input::INPUT_EVENT_QUEUE_BYTES;
-        let (local_vaddr, peer_vaddr) = libnanami::request_shared_memory(owner_pid, size)?;
-        nanami_services::input::InputEventQueue::new(local_vaddr).init();
+        let size = nanami_client::input::INPUT_EVENT_QUEUE_BYTES;
+        let (local_vaddr, peer_vaddr) = nanami_runtime::request_shared_memory(owner_pid, size)?;
+        nanami_client::input::InputEventQueue::new(local_vaddr).init();
         self.windows[index].input_queue = local_vaddr;
         self.deliver_client_mouse_position(index);
         Ok((peer_vaddr, size))
@@ -586,22 +586,22 @@ impl Compositor {
         &mut self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         if self.windows[index].input_notify != 0 {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
         let slot = self.windows[index].input_notify_slot;
         if slot == 0 {
-            return Err(libnanami::RequestError::Unsupported);
+            return Err(nanami_runtime::RequestError::Unsupported);
         }
-        libnanami::request_notification_port_copy(
+        nanami_runtime::request_notification_port_copy(
             owner_pid,
-            libnanami::PROCESS_SLOT_NOTIFICATION,
+            nanami_runtime::PROCESS_SLOT_NOTIFICATION,
             slot,
-            nanami_services::gfx::honoka::HONOKA_NOTIFICATION_INPUT | (window_id & 0xffff_ffff),
+            nanami_client::gfx::honoka::HONOKA_NOTIFICATION_INPUT | (window_id & 0xffff_ffff),
         )?;
-        self.windows[index].input_notify = libnanami::ipc::process_slot_descriptor(slot);
+        self.windows[index].input_notify = nanami_runtime::ipc::process_slot_descriptor(slot);
         Ok(())
     }
 
@@ -610,7 +610,7 @@ impl Compositor {
         owner_pid: Word,
         window_id: Word,
         visible: bool,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         if self.windows[index].visible != visible {
             self.windows[index].visible = visible;
@@ -624,9 +624,9 @@ impl Compositor {
         owner_pid: Word,
         window_id: Word,
         opacity: Word,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         if opacity > u8::MAX as Word {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
         let index = self.find_owned_window(owner_pid, window_id)?;
         let opacity = opacity as u8;
@@ -645,7 +645,7 @@ impl Compositor {
         y: i32,
         width: i32,
         height: i32,
-    ) -> Result<(), libnanami::RequestError> {
+    ) -> Result<(), nanami_runtime::RequestError> {
         let index = self.find_owned_window(owner_pid, window_id)?;
         let content = self.windows[index].content_rect();
         let dirty = Rect::new(content.x + x, content.y + y, width, height);
@@ -717,10 +717,10 @@ impl Compositor {
                     if self.point_in_shell_icon(self.cursor_x, self.cursor_y) {
                         match self.spawn_shell() {
                             Ok(pid) => {
-                                libnanami::println!("[honoka] shell spawned pid={}", pid);
+                                nanami_runtime::println!("[honoka] shell spawned pid={}", pid);
                             }
                             Err(e) => {
-                                libnanami::println!("[honoka] shell spawn failed: {:?}", e);
+                                nanami_runtime::println!("[honoka] shell spawn failed: {:?}", e);
                             }
                         }
                         self.mark_dirty(SHELL_ICON_RECT);
@@ -934,7 +934,7 @@ impl Compositor {
             let window = self.windows[i];
             if window.used
                 && window.visible
-                && window.opacity == nanami_services::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE
+                && window.opacity == nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE
                 && contains_rect_fully(window.content_rect(), dirty)
             {
                 return i;
@@ -1048,7 +1048,7 @@ impl Compositor {
         &self,
         owner_pid: Word,
         window_id: Word,
-    ) -> Result<usize, libnanami::RequestError> {
+    ) -> Result<usize, nanami_runtime::RequestError> {
         let mut i = 0usize;
         while i < MAX_WINDOWS {
             let window = self.windows[i];
@@ -1057,7 +1057,7 @@ impl Compositor {
             }
             i += 1;
         }
-        Err(libnanami::RequestError::InvalidArgument)
+        Err(nanami_runtime::RequestError::InvalidArgument)
     }
 
     fn find_window_at(&self, x: i32, y: i32) -> Option<usize> {
@@ -1092,9 +1092,9 @@ impl Compositor {
         contains_rect(SHELL_ICON_RECT, x, y)
     }
 
-    fn spawn_shell(&self) -> Result<Word, libnanami::RequestError> {
+    fn spawn_shell(&self) -> Result<Word, nanami_runtime::RequestError> {
         if self.exec_shm == 0 || SHELL_PATH.len() > self.exec_shm_size as usize {
-            return Err(libnanami::RequestError::InvalidArgument);
+            return Err(nanami_runtime::RequestError::InvalidArgument);
         }
         unsafe {
             core::ptr::copy_nonoverlapping(
@@ -1103,7 +1103,7 @@ impl Compositor {
                 SHELL_PATH.len(),
             );
         }
-        nanami_services::exec::exec_spawn_path(
+        nanami_client::exec::exec_spawn_path(
             self.exec_port,
             0,
             SHELL_PATH.len() as Word,
@@ -1172,19 +1172,19 @@ impl Compositor {
             0,
             content.height.saturating_sub(1),
         );
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE,
             0,
             clamp_i16(local_x),
             clamp_i16(local_y),
-            nanami_services::gfx::honoka::HONOKA_INPUT_FLAG_ABSOLUTE,
+            nanami_client::gfx::honoka::HONOKA_INPUT_FLAG_ABSOLUTE,
         );
         self.deliver_client_event(index, packed);
     }
 
     fn deliver_client_button(&self, index: usize, code: Word, pressed: bool) {
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
             code,
             if pressed { 1 } else { 0 },
             0,
@@ -1194,8 +1194,8 @@ impl Compositor {
     }
 
     fn deliver_client_wheel(&self, index: usize, delta: i32) {
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL,
             0,
             clamp_i16(delta),
             0,
@@ -1205,8 +1205,8 @@ impl Compositor {
     }
 
     fn deliver_client_key(&self, index: usize, code: Word, pressed: bool) {
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_KEY,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_KEY,
             code,
             if pressed { 1 } else { 0 },
             0,
@@ -1216,8 +1216,8 @@ impl Compositor {
     }
 
     fn deliver_client_close(&self, index: usize) {
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_WINDOW_CLOSE,
             0,
             0,
             0,
@@ -1233,7 +1233,7 @@ impl Compositor {
         }
         push_raw_input_event(window.input_queue, packed);
         if window.input_notify != 0 {
-            let _ = libnanami::ipc::notification_notify(window.input_notify);
+            let _ = nanami_runtime::ipc::notification_notify(window.input_notify);
         }
     }
 
@@ -1264,19 +1264,19 @@ impl Compositor {
 
         self.windows[index] = Window::EMPTY;
         if let Some((base, bytes)) = window.retired_fb {
-            let _ = libnanami::request_mapping_release(base, bytes);
+            let _ = nanami_runtime::request_mapping_release(base, bytes);
         }
         if window.damage_queue != 0 {
-            let size = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES
+            let size = nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_BYTES
                 .saturating_add(window.fb_size);
-            let _ = libnanami::request_mapping_release(window.damage_queue, size);
+            let _ = nanami_runtime::request_mapping_release(window.damage_queue, size);
         } else if window.local_fb != 0 && window.fb_size != 0 {
-            let _ = libnanami::request_mapping_release(window.local_fb, window.fb_size);
+            let _ = nanami_runtime::request_mapping_release(window.local_fb, window.fb_size);
         }
         if window.input_queue != 0 {
-            let _ = libnanami::request_mapping_release(
+            let _ = nanami_runtime::request_mapping_release(
                 window.input_queue,
-                nanami_services::input::INPUT_EVENT_QUEUE_BYTES,
+                nanami_client::input::INPUT_EVENT_QUEUE_BYTES,
             );
         }
         self.mark_dirty(window.rect());
@@ -1287,12 +1287,12 @@ impl Compositor {
         write_word(
             base,
             0,
-            nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC,
+            nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC,
         );
         write_word(
             base,
             1,
-            nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY as Word,
+            nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY as Word,
         );
         write_word(base, 2, 0);
         write_word(base, 3, 0);
@@ -1311,7 +1311,7 @@ impl Compositor {
         }
         let mut merged = Rect::EMPTY;
         if read_word(window.damage_queue, 4) != 0 {
-            let entry = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS;
+            let entry = nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS;
             let rect = Rect::new(
                 read_word(window.damage_queue, entry) as i32,
                 read_word(window.damage_queue, entry + 1) as i32,
@@ -1334,7 +1334,7 @@ impl Compositor {
             }
         }
         let mut drained = 0usize;
-        while drained < nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
+        while drained < nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
             let Some(rect) = pop_damage_rect(window.damage_queue) else {
                 break;
             };
@@ -1358,11 +1358,11 @@ impl Compositor {
 }
 
 fn pop_damage_rect(base: Word) -> Option<Rect> {
-    if read_word(base, 0) != nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
+    if read_word(base, 0) != nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
         return None;
     }
     let capacity = read_word(base, 1) as usize;
-    if capacity == 0 || capacity > nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
+    if capacity == 0 || capacity > nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
         return None;
     }
     let head = (read_word(base, 2) as usize) % capacity;
@@ -1370,8 +1370,8 @@ fn pop_damage_rect(base: Word) -> Option<Rect> {
     if head == tail {
         return None;
     }
-    let entry = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS
-        + head * nanami_services::gfx::honoka::HONOKA_DAMAGE_ENTRY_WORDS;
+    let entry = nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS
+        + head * nanami_client::gfx::honoka::HONOKA_DAMAGE_ENTRY_WORDS;
     let rect = Rect::new(
         read_word(base, entry) as i32,
         read_word(base, entry + 1) as i32,
@@ -1383,11 +1383,11 @@ fn pop_damage_rect(base: Word) -> Option<Rect> {
 }
 
 fn push_raw_input_event(base: Word, packed: Word) {
-    if read_word(base, 0) != nanami_services::input::INPUT_EVENT_QUEUE_MAGIC {
+    if read_word(base, 0) != nanami_client::input::INPUT_EVENT_QUEUE_MAGIC {
         return;
     }
     let capacity = read_word(base, 1) as usize;
-    if capacity == 0 || capacity > nanami_services::input::INPUT_EVENT_QUEUE_CAPACITY {
+    if capacity == 0 || capacity > nanami_client::input::INPUT_EVENT_QUEUE_CAPACITY {
         return;
     }
     let head = (read_word(base, 2) as usize) % capacity;
@@ -1399,7 +1399,7 @@ fn push_raw_input_event(base: Word, packed: Word) {
     }
     write_word(
         base,
-        nanami_services::input::INPUT_EVENT_QUEUE_HEADER_WORDS + tail,
+        nanami_client::input::INPUT_EVENT_QUEUE_HEADER_WORDS + tail,
         packed,
     );
     write_word(base, 3, next_tail as Word);

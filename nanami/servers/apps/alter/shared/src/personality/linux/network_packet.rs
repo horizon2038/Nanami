@@ -54,7 +54,7 @@ pub(super) fn read_target_memory_to_network(
     if len > runtime.network_shm_size {
         return Err(EMSGSIZE);
     }
-    libnanami::request_process_memory_read(pid, user_ptr, runtime.network_shm, len)
+    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.network_shm, len)
         .map_err(map_request_error)
 }
 

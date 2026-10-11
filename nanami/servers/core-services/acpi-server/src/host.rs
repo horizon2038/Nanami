@@ -4,7 +4,7 @@ use acpi::{
 };
 use alloc::{rc::Rc, vec::Vec};
 use core::{cell::RefCell, mem, ptr::NonNull};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 const IO_SLOT: Word = 16;
 const TIMER_SLOT: Word = 22;
@@ -27,8 +27,8 @@ pub struct Host(Rc<RefCell<State>>);
 
 impl Host {
     pub fn new() -> Result<Self, RequestError> {
-        nanami_services::registry::connect_timer_service(TIMER_SLOT)?;
-        libnanami::request_io_port(0, 0xffff, IO_SLOT)?;
+        nanami_client::registry::connect_timer_service(TIMER_SLOT)?;
+        nanami_runtime::request_io_port(0, 0xffff, IO_SLOT)?;
         Ok(Self(Rc::new(RefCell::new(State {
             mappings: Vec::new(),
             pci: None,
@@ -57,7 +57,7 @@ impl Host {
             .expect("ACPI mapping overflow")
             & !(PAGE_SIZE - 1);
         let bytes = bytes - base;
-        let (_, virtual_address) = libnanami::request_mmio(base, bytes)
+        let (_, virtual_address) = nanami_runtime::request_mmio(base, bytes)
             .unwrap_or_else(|error| panic!("ACPI map {:#x}+{:#x}: {}", base, bytes, error));
         state.mappings.push(Mapping {
             physical: base,
@@ -73,8 +73,8 @@ impl Host {
     }
 
     fn io_read(&self, port: u16, width: usize) -> usize {
-        libnanami::io::io_read(
-            libnanami::ipc::process_slot_descriptor(IO_SLOT),
+        nanami_runtime::io::io_read(
+            nanami_runtime::ipc::process_slot_descriptor(IO_SLOT),
             port as Word,
             width,
         )
@@ -82,8 +82,8 @@ impl Host {
     }
 
     fn io_write(&self, port: u16, width: usize, value: usize) {
-        libnanami::io::io_write(
-            libnanami::ipc::process_slot_descriptor(IO_SLOT),
+        nanami_runtime::io::io_write(
+            nanami_runtime::ipc::process_slot_descriptor(IO_SLOT),
             port as Word,
             width,
             value,
@@ -189,8 +189,8 @@ impl Handler for Host {
     pci_access!(read_pci_u32, write_pci_u32, u32, read_u32, write_u32);
 
     fn nanos_since_boot(&self) -> u64 {
-        let (ticks, hz) = nanami_services::timer::timer_service_monotonic_ticks(
-            libnanami::ipc::process_slot_descriptor(TIMER_SLOT),
+        let (ticks, hz) = nanami_client::timer::timer_service_monotonic_ticks(
+            nanami_runtime::ipc::process_slot_descriptor(TIMER_SLOT),
         )
         .expect("ACPI timer unavailable");
         assert!(hz != 0);
@@ -206,8 +206,8 @@ impl Handler for Host {
     }
 
     fn sleep(&self, milliseconds: u64) {
-        nanami_services::timer::timer_service_sleep_milliseconds(
-            libnanami::ipc::process_slot_descriptor(TIMER_SLOT),
+        nanami_client::timer::timer_service_sleep_milliseconds(
+            nanami_runtime::ipc::process_slot_descriptor(TIMER_SLOT),
             milliseconds as Word,
         )
         .expect("ACPI sleep failed");

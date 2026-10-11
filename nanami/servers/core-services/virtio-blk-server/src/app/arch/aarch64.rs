@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 pub const MMIO_PHYSICAL_BASE: Word = 0x0a00_0000;
 pub const MMIO_REGION_BYTES: Word = 0x4000;

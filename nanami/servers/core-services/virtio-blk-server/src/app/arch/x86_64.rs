@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 pub const PCI_CFG_ADDR_PORT: Word = 0x0cf8;
 pub const PCI_CFG_DATA_PORT: Word = 0x0cfc;
@@ -24,7 +24,7 @@ pub const REG_INTERRUPT_STATUS: Word = 0x13;
 pub const REG_CONFIG_BASE: Word = 0x14;
 
 pub fn read(descriptor: Word, base: Word, offset: Word, width: Word) -> Result<Word, RequestError> {
-    libnanami::io::io_read(descriptor, base + offset, width)
+    nanami_runtime::io::io_read(descriptor, base + offset, width)
 }
 
 pub fn write(
@@ -34,7 +34,7 @@ pub fn write(
     width: Word,
     value: Word,
 ) -> Result<(), RequestError> {
-    libnanami::io::io_write(descriptor, base + offset, width, value)
+    nanami_runtime::io::io_write(descriptor, base + offset, width, value)
 }
 
 pub fn acknowledge_interrupt(descriptor: Word, base: Word) -> Result<(), RequestError> {

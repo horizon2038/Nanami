@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 fontdue = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
-libnanami = { path = "../../sdk/rust/libnanami" }
-nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
 
 [profile.dev]
 panic = "abort"

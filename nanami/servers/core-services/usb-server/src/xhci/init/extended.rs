@@ -1,6 +1,6 @@
 //! Initialization-only capability handling and BIOS/OS ownership handoff.
 use super::super::{capabilities, protocol, read, write};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 pub(super) struct Ports {
     pub slot_type: [u8; 256],
@@ -11,13 +11,13 @@ pub(super) struct Ports {
 
 fn malformed(error: capabilities::Error) -> RequestError {
     match error.value {
-        Some(value) => libnanami::println!(
+        Some(value) => nanami_runtime::println!(
             "[usb-server] xHCI extcap error offset={:#x} value={:#010x}: {}",
             error.offset,
             value,
             error.reason
         ),
-        None => libnanami::println!(
+        None => nanami_runtime::println!(
             "[usb-server] xHCI extcap error offset={:#x} (not read): {}",
             error.offset,
             error.reason
@@ -43,7 +43,7 @@ pub(super) fn configure(
     let mut read_cap = |offset| unsafe { read(base, offset) };
     let mut caps = capabilities::Capabilities::new(hcc, bytes);
     while let Some(cap) = caps.next(&mut read_cap).map_err(malformed)? {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] xHCI extcap offset={:#x} header={:#010x}",
             cap.offset,
             cap.header
@@ -61,7 +61,7 @@ pub(super) fn configure(
                     last = read_cap(cap.offset);
                 }
                 if last & (1 << 16) != 0 {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] xHCI BIOS handoff timeout offset={:#x} USBLEGSUP={:#010x}",
                         cap.offset,
                         last
@@ -76,14 +76,14 @@ pub(super) fn configure(
                 let protocol = cap
                     .protocol(&mut read_cap, &mut claimed[..=port_count])
                     .map_err(malformed)?;
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] xHCI protocol offset={:#x} name={:#010x} revision={:02x}.{:02x} ports={}..{} slot-type={} PSIC={}",
                     cap.offset, protocol.name, protocol.major, protocol.minor,
                     protocol.ports.start, protocol.ports.end, protocol.slot_type, protocol.psi_count
                 );
                 let entries = &protocol.psi[..protocol.psi_count];
                 for (index, value) in entries.iter().enumerate() {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] xHCI PSI offset={:#x} value={:#010x}",
                         cap.offset + 16 + index * 4,
                         value
@@ -93,7 +93,7 @@ pub(super) fn configure(
                     continue;
                 }
                 if protocol.name != 0x2042_5355 || !matches!(protocol.major, 2 | 3) {
-                    libnanami::println!("[usb-server] unsupported xHCI protocol; ports skipped");
+                    nanami_runtime::println!("[usb-server] unsupported xHCI protocol; ports skipped");
                     continue;
                 }
                 let speeds = protocol::Speeds::parse(
@@ -101,7 +101,7 @@ pub(super) fn configure(
                     protocol.minor,
                     entries,
                     |index, reason| {
-                        libnanami::println!(
+                        nanami_runtime::println!(
                             "[usb-server] xHCI PSI skipped offset={:#x} value={:#010x}: {}",
                             cap.offset + 16 + index * 4,
                             entries[index],
@@ -117,7 +117,7 @@ pub(super) fn configure(
                     })
                 })?;
                 if speeds.usb2 == 0 && speeds.usb3 == 0 {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] no supported speed definitions; ports skipped"
                     );
                     continue;

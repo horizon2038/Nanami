@@ -25,9 +25,9 @@ pub(super) fn sys_wait4(
                 return EmulationAction::Return(-(EFAULT as isize));
             }
         }
-        if let Err(error) = libnanami::request_process_reap(child_pid) {
+        if let Err(error) = nanami_runtime::request_process_reap(child_pid) {
             let errno = map_request_error(error);
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] wait4 reap failed parent={} child={} errno={}",
                 pid,
                 child_pid,
@@ -160,9 +160,9 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
             .is_err()
         {
             -(EFAULT as isize)
-        } else if let Err(error) = libnanami::request_process_reap(child_pid) {
+        } else if let Err(error) = nanami_runtime::request_process_reap(child_pid) {
             let errno = map_request_error(error);
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] wait4 wake reap failed parent={} child={} errno={}",
                 parent_pid,
                 child_pid,
@@ -181,7 +181,7 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
     };
 
     if write_syscall_return(parent_pcb, context, return_value).is_err() {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] waiter wake register write failed parent={} pcb={:#x}",
             parent_pid,
             parent_pcb
@@ -189,7 +189,7 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
         return;
     }
     if let Err(error) = a9n_abi::arch::process_control_block::resume(parent_pcb) {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] waiter wake resume failed parent={} pcb={:#x} err={:?}",
             parent_pid,
             parent_pcb,

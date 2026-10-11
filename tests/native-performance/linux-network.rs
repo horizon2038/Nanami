@@ -1,7 +1,7 @@
 //! Production Linux network ABI handlers; guest memory and native IPC mocked.
 #![allow(dead_code)]
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 type Word = usize;
 mod state {
     pub const LINUX_FD_MAX: usize = 64;
@@ -60,7 +60,7 @@ mod net {
     thread_local! { pub static MASK: std::cell::Cell<[u8; 4]> = const { std::cell::Cell::new([255, 255, 255, 0]) }; }
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../nanami/servers/sdk/rust/nanami-services/src/net/constants.rs"
+        "/../../nanami/servers/uapi/src/net.rs"
     ));
     pub fn net_service_ipv4_config(_: Word) -> Result<([u8; 4], [u8; 4], [u8; 4]), RequestError> {
         Ok(([192, 168, 1, 26], [192, 168, 1, 1], [192, 168, 1, 1]))

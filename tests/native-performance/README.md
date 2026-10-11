@@ -1,6 +1,6 @@
 # Native application heap performance
 
-`libnanami` now uses the no-std TLSF allocator from pinned `rlsf` 0.2.3.
+`nanami_runtime` now uses the no-std TLSF allocator from pinned `rlsf` 0.2.3.
 This affects native Rust applications/services, including the native Alter
 process. It does not replace a Linux guest's libc malloc, Alpha's allocator,
 or anything in A9N.
@@ -101,7 +101,7 @@ To compare with the original allocator without changing the working tree:
 
 ```sh
 baseline_dir=$(mktemp -d)
-git show 9e43161d0f42c6abdc2e2b7a892a24065cb66384:nanami/servers/sdk/rust/libnanami/src/heap.rs \
+git show 9e43161d0f42c6abdc2e2b7a892a24065cb66384:nanami/servers/libs/nanami-runtime/src/heap.rs \
   | sed '/^#\[global_allocator\]/d' > "$baseline_dir/heap.rs"
 NANAMI_HEAP_SOURCE="$baseline_dir/heap.rs" RUSTFLAGS='--cfg legacy_heap' \
   cargo test --release --manifest-path tests/native-performance/Cargo.toml \

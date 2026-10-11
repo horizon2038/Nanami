@@ -3,8 +3,8 @@
 Run `shutdown` in **Nanami Shell** to synchronize storage and enter ACPI S5.
 This is a Shell command, not an implementation of Linux's `reboot(2)` syscall.
 Rebuild both initramfs and rootfs to update acpi-server and Shell
-(`ROOTFS_REBUILD=1 make image`, or `ROOTFS_REBUILD=1 make run`). Do not overwrite
-an image while another QEMU instance is using it. `ROOTFS_REBUILD=1` recreates
+(`cargo xtask build --rebuild-rootfs`, or `cargo xtask run --build --rebuild-rootfs`). Do not overwrite
+an image while another QEMU instance is using it. `--rebuild-rootfs` recreates
 the rootfs: back up any files saved inside the old image first.
 
 The x86_64 driver-manager starts this server from initramfs and delegates the

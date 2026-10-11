@@ -44,6 +44,7 @@ impl Alpha {
         Err(CapabilityError::InvalidArgument)
     }
 
+    #[deny(unreachable_patterns)]
     pub(super) fn handle_nanami_info_request(
         &self,
         request: OsRequestEvent,

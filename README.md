@@ -106,156 +106,128 @@ architectural virtual timer is not enabled or exposed.
 
 ## Requirements
 
+- Supported build/run hosts: macOS and Linux
 - Rust nightly specified by `rust-toolchain.toml`, including `rust-src`
-- LLVM/Clang toolchain with `clang`, `clang++`, `llvm-ar`, and LLD
-- CMake
-- GNU Make
-- Python 3
-- QEMU with x86_64 and/or AArch64 system emulation
-- NASM for the x86_64 A9N HAL
-- Git with submodule support
+- LLVM/Clang: `clang`, `clang++`, `llvm-ar`, `llvm-objcopy`, `ld.lld`,
+  `llvm-config` on PATH
+- CMake 3.29+, Ninja, and NASM (x86_64)
+- QEMU for the selected architecture and Git with submodule support
+- Docker for AArch64 U-Boot builds
 
-OVMF firmware files used by the QEMU launcher are provided through the
-A9NLoader-rs submodule.
+Host orchestration, ext2 and initramfs generation are Rust. Bash, Python,
+cpio, GNU Make and host filesystem utilities are not required for the
+x86_64 build/run path. Makefiles are optional wrappers.
+A9N's unchanged toolchain requires `llvm-config`.
+AArch64 U-Boot uses a Linux Docker container, not a host shell script.
+OVMF is provided by the A9NLoader-rs submodule.
 
 ## Build
 
-Clone the repository together with SPENCER and its nested components:
-
-```bash
+```text
 git clone --recursive git@github.com:horizon2038/Nanami.git
 cd Nanami
-```
-
-If the repository was cloned without submodules:
-
-```bash
 git submodule update --init --recursive
+cargo xtask build
 ```
 
-Build the bootable release image:
+This builds native Rust/C++ services, generates the initramfs in Rust, creates
+the rootfs if missing, and calls SPENCER's Rust build library for A9N, Nanami,
+the loader and disk assembly. A9N uses CMake + Ninja. The default target is
+x86_64/pc99, release, with SMP enabled.
 
-```bash
-make image
-make image ARCH=aarch64
+```text
+cargo xtask build --arch aarch64 --no-linux-bins
+cargo xtask build --profile debug
+cargo xtask servers
+cargo xtask build --help
 ```
 
-This command performs the following steps:
-
-1. Builds Nanami core services and applications.
-2. Creates the boot initramfs and the ext2 root filesystem.
-3. Builds Nanami as an external Nun payload.
-4. Builds A9N with SMP enabled.
-5. Delegates A9NLoader-rs and disk-image assembly to SPENCER.
-
-The resulting boot images are written to:
+For AArch64, omit the default x86_64 `bin/` with `--no-linux-bins`, or
+supply an AArch64 directory with `--linux-bin-dir`. Architecture-specific
+startup manifests are selected automatically. Default boot disks:
 
 ```text
 spencer/out/x86_64-pc99-release/spencer.img
 spencer/out/aarch64-qemu-release/spencer.img
 ```
 
-The default Spencer platform is `pc99` for x86_64 (both QEMU and hardware),
-and `qemu` for AArch64. If setting `PLATFORM` explicitly, use these names;
-`PLATFORM=qemu` is no longer valid for x86_64.
+The x86_64 disk contains a FAT32 EFI partition plus a Nanami ext2 partition,
+identified by GPT type `6e616e61-6d69-4f53-a000-4e414e414d49`.
+AArch64 QEMU uses a separate root disk.
 
-The x86_64 `spencer.img` is a complete GPT disk image. It contains a FAT32 EFI
-System Partition with A9NLoader, A9N, and Nanami, followed by a Nanami ext2 root
-partition. The storage driver discovers the root partition by its GPT type GUID
-(`6e616e61-6d69-4f53-a000-4e414e414d49`), so the boot and root filesystems do not
-need separate drives.
+Create or intentionally regenerate the rootfs:
 
-The ext2 root filesystem can also be created explicitly:
-
-```bash
-make fs-image SIZE_MB=64 OUT=out/ext2.img
-make fs-image ARCH=aarch64 SIZE_MB=64
+```text
+cargo xtask rootfs --rootfs out/new-ext2.img --size-mib 64
+cargo xtask build --rebuild-rootfs
 ```
 
-Without `OUT`, the AArch64 rootfs is written to `out/ext2-aarch64.img`.
+Existing staging rootfs images are reused unless `--rebuild-rootfs` is
+supplied; `rootfs` refuses to overwrite one without that flag.
+Building still replaces the boot disk: x86_64 guest writes are in
+`spencer.img`, not `out/ext2.img`. Back up saved guest data before rebuilding.
+Use `--output-image out/test-boot.img --rootfs out/test-rootfs.img` for an
+isolated build.
 
 ## Run with QEMU
 
-Build the system, create or refresh the ext2 root filesystem, and launch QEMU:
+Run an existing image without rebuilding:
 
-```bash
-make run
-make run ARCH=aarch64
+```text
+cargo xtask run
+cargo xtask run --snapshot
+cargo xtask run --build --rebuild-rootfs
+cargo xtask run --arch aarch64 --net none
 ```
 
-The AArch64 QEMU profile is currently headless and uses `NET_MODE=none`. It does
-not start a user session until platform timer, display, and input drivers are
-available.
+`--snapshot` prevents guest writes from changing disks. AArch64 is headless
+and currently has no native timer/display/input/network stack.
 
-On Linux, user-mode networking is selected by default. On macOS, bridged
-`vmnet` networking is selected and the default IPv4 interface is detected
-automatically.
+User networking is the x86_64 default, forwarding guest HTTP port 80 to
+`127.0.0.1:1234`. Select a bridge explicitly:
 
-Use QEMU user networking explicitly:
-
-```bash
-NET_MODE=user make run
+```text
+cargo xtask run --bridge-if en0 --sudo
+cargo xtask run --bridge-if br0
+cargo xtask run --net user --hostfwd tcp:127.0.0.1:8080-:80
 ```
 
-Use bridged networking on a selected host interface:
+macOS uses vmnet (`en0` example); `--sudo` elevates only QEMU, never the
+build. Linux needs an existing bridge (`br0` example) and bridge-helper
+permissions. Bridge setup is not automatic.
+`BRIDGE_IF` and `NET_MODE` remain supported; explicit `--net` wins.
 
-```bash
-NET_MODE=bridged BRIDGE_IF=en0 make run
-```
-
-Useful run-time options include:
-
-| Variable | Default | Purpose |
+| Option | Default | Purpose |
 | --- | --- | --- |
-| `NET_MODE` | host default on x86_64; `none` on AArch64 | `user`, `bridged`, or `none` |
-| `NET_DEVICE` | `virtio` | `virtio` or `e1000` |
-| `QEMU_MEMORY` | `4G` | Guest memory size |
-| `QEMU_SMP` | `4` | Guest CPU count (1–64) |
-| `QEMU_ACCEL` | `auto` | QEMU accelerator, or `none` |
-| `QEMU_HPET` | `on` | x86_64 HPET exposure; use `off` to test the PIT fallback |
-| `USB_INPUT` | `off` | x86_64: `on` adds xHCI with a USB boot keyboard/mouse; PS/2 remains available |
-| `STORAGE_DEVICE` | `ahci` | x86_64 root disk controller: `ahci`, `virtio`, or `usb` (xHCI/BOT) |
-| `BLOCK_IMAGE` | `out/ext2.img` or `out/ext2-aarch64.img` | ext2 staging image; on x86_64 it is embedded in `spencer.img` |
-| `SIZE_MB` | `64` | Default root filesystem size |
-| `PCAP` | `out/net0.pcap` | Bridged network capture, or `none` |
+| `--storage` | `usb` | Root controller: `usb`, `ahci`, `virtio` |
+| `--no-usb-input` | off | Omit USB keyboard/mouse; PS/2 remains available |
+| `--no-hpet` | off | Exercise PIT fallback |
+| `--memory` / `--smp` | `4G` / `4` | RAM / CPU count (1–64) |
+| `--accel` | `auto` | Native KVM/HVF where applicable; otherwise TCG |
+| `--net` | `user` on x86_64 | `user`, `bridged`, `none` |
+| `--pcap` | none | Optional packet capture |
+| `--image` | target boot disk | Boot another existing disk |
+| `--headless` / `--gdb` | off | No display / paused GDB server |
+| `--print-command` | off | JSON argv; no launch or firmware writes |
+| `--dry-run` | off | Show actions without executing them |
 
-With user networking, guest TCP port 80 is forwarded to
-`127.0.0.1:1234` by default. This can be changed with `HOSTFWD_HTTP`.
-`QEMU_ACCEL=auto` uses KVM on Linux when available, HVF on Intel macOS, and
-software emulation for x86_64 guests on Apple Silicon.
+Extra QEMU arguments follow `--`, without shell expansion:
 
-To use an emulated USB keyboard and mouse:
-
-```bash
-USB_INPUT=on QEMU_HPET=on STORAGE_DEVICE=ahci make run
+```text
+cargo xtask run --storage ahci -- -no-reboot
+cargo xtask run --storage usb --net none
+cargo xtask run --help
 ```
 
-Driver Manager discovers/configures PCI xHCI before starting hardware drivers;
-`usb-server` enumerates USB 1.x/2.0 HID Boot Protocol devices on root ports and
-forwards events to `input-server`. Multiple USB devices and PS/2 can coexist.
-USB 2.0/3.x SCSI Bulk-Only Transport storage is also supported. Enumeration and
-root discovery run before input-service, so the rootfs can live on the USB boot
-medium itself. To exercise that path in QEMU:
-
-```bash
-STORAGE_DEVICE=usb USB_INPUT=on QEMU_HPET=on make run
-```
-
-The implementation excludes external hubs, EHCI/OHCI/UHCI, report-only
-HID/NKRO, wheel reports, keyboard LEDs, UAS and AArch64 USB. Storage requires
-512-byte logical sectors and a valid Nanami GPT root partition.
-
-Nanami lazily creates physical frame ranges for both RAM and MMIO. It retains
-unused prefixes as large generics instead of materializing
-every intervening frame-capability chunk. Firmware-assigned 64-bit controller
-BARs are supported without relocation. The QEMU launcher retains its low-BAR
-firmware profile; the USB tests also cover default high BARs.
-Physical hardware is not yet validated; connect compatible
-devices directly to xHCI-controlled ports. See [USB validation and limits](tests/usb/README.md).
+Apple Silicon uses software emulation for x86_64.
+The launcher creates xHCI before USB children. Rootfs enumeration precedes
+input-service. USB storage requires 512-byte sectors and a valid Nanami GPT root
+partition. External hubs, UAS and AArch64 USB are unsupported.
+See [USB validation and limits](tests/usb/README.md).
 
 ## Boot on x86_64 hardware
 
-`make image` produces the complete disk image at
+`cargo xtask build` produces the complete disk image at
 `spencer/out/x86_64-pc99-release/spencer.img`. Write that one image to a whole,
 dedicated SATA/AHCI disk or compatible USB memory connected directly to xHCI,
 then select its UEFI boot entry. Both the EFI partition and initial rootfs are
@@ -287,10 +259,18 @@ kernel-supplied architecture, platform, and available core count.
 The root filesystem builder can install external binaries for Alter. For
 example:
 
-```bash
-EXTRA_LINUX_BINS="/path/to/busybox /path/to/iwasm" make fs-image
-EXTRA_FREEBSD_BINS="/path/to/sh" make fs-image
+```text
+cargo xtask rootfs --rootfs out/custom-ext2.img --linux-bin-dir "path/to/linux binaries"
+cargo xtask rootfs --rootfs out/freebsd-ext2.img --freebsd-bin "path/to/sh"
 ```
+
+All regular files in the selected Linux directory are collected recursively,
+including hidden/data files, without a hard-coded executable list. The default
+is `bin/`; `LINUX_BIN_DIR` is also accepted. Basenames are used and a trailing
+`.elf` is removed. Duplicate names, host links and special files are errors.
+Use repeatable `--linux-bin` / `--freebsd-bin` for extra files,
+`--no-linux-bins` to omit the default directory, and `--linux-rootfs-dir`
+for an additional tree under `/alter/linux`.
 
 Linux binaries are installed under `/alter/linux/bin`; FreeBSD binaries are
 installed under `/alter/freebsd/bin`. Alter/Linux selects x86_64 or AArch64
@@ -309,11 +289,14 @@ on the syscalls and flags used by each program.
 │   └── servers/
 │       ├── core-services/      # Boot-critical initramfs services
 │       ├── apps/               # Rootfs services and applications
-│       └── sdk/                # Rust and C++ user-space SDKs
-├── scripts/                    # Image, rootfs, and QEMU orchestration
+│       ├── uapi/               # ABI/protocol definitions and C++ headers
+│       ├── libs/               # nanami-runtime, nanami-client and implementation crates
+│       └── targets/            # Native targets and linker scripts
+├── crates/ext2-image/           # Reusable Rust ext2 image builder
+├── xtask/                      # Portable build, rootfs, initramfs and QEMU commands
 ├── spencer/                    # SPENCER, A9N, Nun, and A9NLoader-rs
 ├── targets/                    # Nanami Rust target specifications
-└── Makefile                    # Top-level build interface
+└── Makefile                    # Optional cargo xtask wrapper
 ```
 
 ## Documentation
@@ -322,7 +305,7 @@ on the syscalls and flags used by each program.
 - [Application Guide](./nanami/docs/application.md)
 - [Coding Guidelines](./nanami/docs/coding-guideline.md)
 - [Refactoring Guidelines](./nanami/docs/refactor-guideline.md)
-- [User SDK](./nanami/servers/README.md)
+- [User-space API and libraries](./nanami/servers/README.md)
 - [Alter/Linux supported syscalls](./nanami/servers/apps/alter/linux/linux-supported-syscalls.md)
 - [Alter/FreeBSD supported syscalls](./nanami/servers/apps/alter/freebsd/freebsd-supported-syscalls.md)
 

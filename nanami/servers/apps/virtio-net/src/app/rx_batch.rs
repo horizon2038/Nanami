@@ -1,7 +1,7 @@
 //! Batch only the transport between driver and network server. Packets remain
 //! independent and every consumed NIC chain is returned after its data is copied.
 use super::*;
-use nanami_services::net::{
+use nanami_client::net::{
     NET_DEVICE_RX_BATCH_MAX, NET_DEVICE_RX_FRAME_MAX, NET_DEVICE_RX_SLOT_STRIDE,
 };
 

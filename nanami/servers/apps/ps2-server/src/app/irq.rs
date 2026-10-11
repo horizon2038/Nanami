@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 pub fn ack_waited_irqs(
     waited: Word,
@@ -8,10 +8,10 @@ pub fn ack_waited_irqs(
     let (ack_irq1, ack_irq12) = classify_irq_notification(waited);
 
     if ack_irq1 {
-        libnanami::ipc::interrupt_ack(irq1_desc)?;
+        nanami_runtime::ipc::interrupt_ack(irq1_desc)?;
     }
     if ack_irq12 {
-        libnanami::ipc::interrupt_ack(irq12_desc)?;
+        nanami_runtime::ipc::interrupt_ack(irq12_desc)?;
     }
     Ok(())
 }

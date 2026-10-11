@@ -29,7 +29,7 @@ pub mod server;
 #[path = "app/services.rs"]
 pub mod services;
 
-use libnanami::ipc::ServiceEvent;
+use nanami_runtime::ipc::ServiceEvent;
 
 use crate::compositor::Compositor;
 use crate::constants::{
@@ -45,15 +45,15 @@ const THEME_DATA_MAX: usize = 0x800;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[honoka] panic: {}", info);
-    let _ = libnanami::request_exit();
+    nanami_runtime::println!("[honoka] panic: {}", info);
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    let (used, remaining, total) = libnanami::heap::heap_stats();
-    libnanami::println!(
+    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
+    nanami_runtime::println!(
         "[honoka] allocation failed size={:#x} align={:#x} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
         layout.size(),
         layout.align(),
@@ -61,42 +61,42 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
         remaining,
         total
     );
-    let _ = libnanami::request_exit();
+    let _ = nanami_runtime::request_exit();
     loop {
         core::hint::spin_loop();
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[honoka] start\n");
-    libnanami::ipc::init_ipc_tls().map_err(|e| log_error("[honoka] ipc tls init failed: ", e))?;
-    libnanami::print!("[honoka] ipc ready\n");
-    let (heap_base, heap_size) = libnanami::heap::init_heap(9 * 1024 * 1024)
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[honoka] start\n");
+    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[honoka] ipc tls init failed: ", e))?;
+    nanami_runtime::print!("[honoka] ipc ready\n");
+    let (heap_base, heap_size) = nanami_runtime::heap::init_heap(9 * 1024 * 1024)
         .map_err(|e| log_error("[honoka] heap init failed: ", e))?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[honoka] heap ready vaddr={:#x} bytes={:#x}",
         heap_base,
         heap_size
     );
     let text = TextRenderer::new();
 
-    nanami_services::registry::register_honoka_service()
+    nanami_client::registry::register_honoka_service()
         .map_err(|e| log_error("[honoka] service register failed: ", e))?;
-    libnanami::print!("[honoka] service registered: honoka-service\n");
+    nanami_runtime::print!("[honoka] service registered: honoka-service\n");
 
-    let notification = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
-    libnanami::ipc::bind_current_thread_notification(notification)
+    let notification = nanami_runtime::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
+    nanami_runtime::ipc::bind_current_thread_notification(notification)
         .map_err(|e| log_error("[honoka] bind notification failed: ", e))?;
-    libnanami::print!("[honoka] notification bound\n");
+    nanami_runtime::print!("[honoka] notification bound\n");
 
-    libnanami::print!("[honoka] connect services start\n");
+    nanami_runtime::print!("[honoka] connect services start\n");
     let ports = connect_services()?;
-    libnanami::print!("[honoka] services connected\n");
+    nanami_runtime::print!("[honoka] services connected\n");
     let framebuffer = prepare_framebuffer(ports.display)?;
     log_framebuffer_ready(&framebuffer);
     let (input_queue_vaddr, input_queue_bytes) = subscribe_input(ports.input)?;
-    libnanami::print!("[honoka] input subscribed\n");
-    libnanami::println!(
+    nanami_runtime::print!("[honoka] input subscribed\n");
+    nanami_runtime::println!(
         "[honoka] input queue vaddr={:#x} bytes={:#x}",
         input_queue_vaddr,
         input_queue_bytes
@@ -104,7 +104,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 
     let mut theme_data = [0u8; THEME_DATA_MAX];
     let theme_len = load_honoka_theme(&ports, &mut theme_data)?;
-    libnanami::println!("[honoka] theme loaded bytes={:#x}", theme_len);
+    nanami_runtime::println!("[honoka] theme loaded bytes={:#x}", theme_len);
     let mut compositor = Compositor::new(
         framebuffer,
         text,
@@ -116,27 +116,27 @@ fn nanami_main() -> libnanami::NanamiResult {
         services::load_desktop_info(),
     )
     .ok_or_else(|| {
-        libnanami::print!("[honoka] invalid theme file\n");
-        libnanami::NanamiError::INVALID_ARGUMENT
+        nanami_runtime::print!("[honoka] invalid theme file\n");
+        nanami_runtime::NanamiError::INVALID_ARGUMENT
     })?;
     refresh_clock(ports.rtc, &mut compositor);
     start_clock_timer(ports.timer);
-    libnanami::print!("[honoka] initial render start\n");
+    nanami_runtime::print!("[honoka] initial render start\n");
     while compositor.render_if_needed() {}
-    libnanami::print!("[honoka] initial render done\n");
+    nanami_runtime::print!("[honoka] initial render done\n");
 
-    libnanami::print!("[honoka] online\n");
-    let mut input_queue = nanami_services::input::InputEventQueue::new(input_queue_vaddr);
+    nanami_runtime::print!("[honoka] online\n");
+    let mut input_queue = nanami_client::input::InputEventQueue::new(input_queue_vaddr);
     run_event_loop(ports.rtc, &mut compositor, &mut input_queue)
 }
 
 fn run_event_loop(
-    rtc_port: libnanami::Word,
+    rtc_port: nanami_runtime::Word,
     compositor: &mut Compositor,
-    input_queue: &mut nanami_services::input::InputEventQueue,
-) -> libnanami::NanamiResult {
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
-    let mut pending_reply = (libnanami::OS_RESPONSE_OK, 0, 0);
+    input_queue: &mut nanami_client::input::InputEventQueue,
+) -> nanami_runtime::NanamiResult {
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let mut pending_reply = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
 
     loop {
@@ -152,7 +152,7 @@ fn run_event_loop(
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
             has_pending_reply = false;
-            libnanami::ipc::service_reply_receive_event(
+            nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending_reply.0,
                 pending_reply.1,
@@ -160,7 +160,7 @@ fn run_event_loop(
             )
             .map_err(|e| log_error("[honoka] reply_receive failed: ", e))?
         } else {
-            libnanami::ipc::service_receive_event(service_port)
+            nanami_runtime::ipc::service_receive_event(service_port)
                 .map_err(|e| log_error("[honoka] receive failed: ", e))?
         };
 
@@ -177,16 +177,16 @@ fn run_event_loop(
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::println!("[honoka] fault id={} reason={:#x}", identifier, reason);
+                nanami_runtime::println!("[honoka] fault id={} reason={:#x}", identifier, reason);
             }
         }
     }
 }
 
 fn handle_notification(
-    identifier: libnanami::Word,
-    rtc_port: libnanami::Word,
-    input_queue: &mut nanami_services::input::InputEventQueue,
+    identifier: nanami_runtime::Word,
+    rtc_port: nanami_runtime::Word,
+    input_queue: &mut nanami_client::input::InputEventQueue,
     compositor: &mut Compositor,
 ) -> usize {
     if is_present_notification(identifier) {
@@ -200,32 +200,32 @@ fn handle_notification(
     pump_input(input_queue, compositor)
 }
 
-fn start_clock_timer(timer_port: libnanami::Word) {
-    if let Err(e) = nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+fn start_clock_timer(timer_port: nanami_runtime::Word) {
+    if let Err(e) = nanami_client::timer::timer_service_interval_on_notification_milliseconds(
         timer_port,
         1000,
         SLOT_NOTIFICATION,
     ) {
-        libnanami::println!("[honoka] clock timer start failed: {:?}", e);
+        nanami_runtime::println!("[honoka] clock timer start failed: {:?}", e);
     }
 }
 
-fn refresh_clock(rtc_port: libnanami::Word, compositor: &mut Compositor) {
-    match nanami_services::rtc::rtc_service_read(rtc_port) {
+fn refresh_clock(rtc_port: nanami_runtime::Word, compositor: &mut Compositor) {
+    match nanami_client::rtc::rtc_service_read(rtc_port) {
         Ok(dt) => compositor.set_clock(dt.hour, dt.minute, dt.second),
-        Err(e) => libnanami::println!("[honoka] rtc read failed: {:?}", e),
+        Err(e) => nanami_runtime::println!("[honoka] rtc read failed: {:?}", e),
     }
 }
 
-fn is_timer_notification(identifier: libnanami::Word) -> bool {
-    (identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0
+fn is_timer_notification(identifier: nanami_runtime::Word) -> bool {
+    (identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0
 }
 
-fn is_present_notification(identifier: libnanami::Word) -> bool {
-    (identifier & nanami_services::gfx::honoka::HONOKA_NOTIFICATION_PRESENT) != 0
+fn is_present_notification(identifier: nanami_runtime::Word) -> bool {
+    (identifier & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_PRESENT) != 0
 }
 
-fn present_window_id(identifier: libnanami::Word) -> libnanami::Word {
+fn present_window_id(identifier: nanami_runtime::Word) -> nanami_runtime::Word {
     identifier & 0xffff_ffff
 }
 
@@ -235,7 +235,7 @@ fn render_until_idle(compositor: &mut Compositor) {
 
 fn log_framebuffer_ready(framebuffer: &crate::framebuffer::Framebuffer) {
     let screen = framebuffer.screen();
-    libnanami::println!(
+    nanami_runtime::println!(
         "[honoka] framebuffer ready vaddr={:#x} bytes={:#x} size={}x{} stride={} bpp={}",
         framebuffer.vaddr(),
         framebuffer.bytes(),
@@ -247,7 +247,7 @@ fn log_framebuffer_ready(framebuffer: &crate::framebuffer::Framebuffer) {
 }
 
 fn pump_input(
-    input_queue: &mut nanami_services::input::InputEventQueue,
+    input_queue: &mut nanami_client::input::InputEventQueue,
     compositor: &mut Compositor,
 ) -> usize {
     let mut processed = 0usize;
@@ -290,4 +290,4 @@ fn flush_mouse_move(compositor: &mut Compositor, dx: &mut i32, dy: &mut i32) {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

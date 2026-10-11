@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 
 use fontdue::{Font, FontSettings};
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use super::{COLS, FONT_W};
 
@@ -50,17 +50,17 @@ impl TextRenderer {
         log_heap_stats("[shell] font init begin");
         let mut glyphs = allocate_glyph_cache();
         let use_fontdue = if !ENABLE_FONTDUE {
-            libnanami::println!("[shell] fontdue disabled; using bitmap fallback");
+            nanami_runtime::println!("[shell] fontdue disabled; using bitmap fallback");
             false
         } else if FONT_BYTES.is_empty() {
-            libnanami::println!("[shell] font missing; using bitmap fallback");
+            nanami_runtime::println!("[shell] font missing; using bitmap fallback");
             false
         } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
-            libnanami::println!("[shell] fontdue ready bytes={:#x}", FONT_BYTES.len());
+            nanami_runtime::println!("[shell] fontdue ready bytes={:#x}", FONT_BYTES.len());
             prerasterize_glyph_cache(&mut glyphs, &font);
             true
         } else {
-            libnanami::println!("[shell] fontdue parse failed; using bitmap fallback");
+            nanami_runtime::println!("[shell] fontdue parse failed; using bitmap fallback");
             false
         };
         log_heap_stats("[shell] font init end");
@@ -162,8 +162,8 @@ fn font_settings() -> FontSettings {
 }
 
 fn log_heap_stats(prefix: &str) {
-    let (used, remaining, total) = libnanami::heap::heap_stats();
-    libnanami::println!(
+    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
+    nanami_runtime::println!(
         "{} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
         prefix,
         used,

@@ -64,7 +64,7 @@ ownership, O_SYNC forwarding and one-shot/fallback behavior.
 
 The freestanding x86-64 guest fixture `tests/alter-linux/writeback.c` can be built
 without libc (command in its header). Add the output named `writeback-test` to
-`EXTRA_LINUX_BINS` and rebuild the image. Then:
+repeatable `--linux-bin` options and rebuild the image. Then:
 
 ```sh
 python3 tests/usb/qemu-hid.py \

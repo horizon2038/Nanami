@@ -1,5 +1,5 @@
-use libnanami::ipc::ServiceRequest;
-use libnanami::Word;
+use nanami_runtime::ipc::ServiceRequest;
+use nanami_runtime::Word;
 
 use crate::abi::*;
 use crate::arch::PLATFORM_NUL;
@@ -38,14 +38,14 @@ impl LaunchInfo {
 
 pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     if runtime.client_shm == 0 {
-        return ReplyAction::Reply(libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let Some(info) = parse_launch_info(runtime, request.arg0 as usize, request.arg1 as usize, request.arg3)
     else {
-        return ReplyAction::Reply(libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Ok(image_name) = ::core::str::from_utf8(&info.image_name[..info.image_name_len]) else {
-        return ReplyAction::Reply(libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     if request.arg2 != 0 {
         if let Err(status) = ensure_terminal_client(runtime, request.arg2) {
@@ -54,7 +54,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
         crate::cleanup_exited_processes(runtime);
     }
     let Some(pcb_slot) = runtime.next_pcb_slot() else {
-        return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
     let personality = personality_from_flags(request.arg3);
     let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
@@ -71,13 +71,13 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
         );
     }
 
-    match libnanami::request_process_spawn_fault_handler_suspended(image_name, pcb_slot) {
+    match nanami_runtime::request_process_spawn_fault_handler_suspended(image_name, pcb_slot) {
         Ok(pid) => {
-            let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
+            let pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
             if let Err(status) =
                 prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics, None, None)
             {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=stack image={} pid={} status={}",
                     image_name,
                     pid,
@@ -93,22 +93,22 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
                 request.arg2,
                 &info.image_name[..info.image_name_len],
             ) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=install image={} pid={}",
                     image_name,
                     pid
                 );
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             if !register_linux_stack_mappings(runtime, pid) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=stack-track image={} pid={}",
                     image_name,
                     pid
                 );
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
@@ -116,7 +116,7 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
             let _ = runtime.configure_graphics(pid, graphics, info.framebuffer_size);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=resume image={} pid={} pcb={:#x}",
                     image_name,
                     pid,
@@ -124,18 +124,18 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
                 );
                 runtime.remove_process(pid);
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_FATAL, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
             }
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter] managed process image={} pid={} pcb={:#x}",
                 image_name,
                 pid,
                 pcb
             );
-            ReplyAction::Reply(libnanami::OS_RESPONSE_OK, pid, pcb)
+            ReplyAction::Reply(nanami_runtime::OS_RESPONSE_OK, pid, pcb)
         }
         Err(e) => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter] spawn failed stage=kernel-spawn image={} err={:?}",
                 image_name,
                 e
@@ -165,7 +165,7 @@ fn spawn_rootfs_linux_image(
     };
 
     if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
-        return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     let interpreter = match crate::common::dynamic::prepare(runtime, &loaded) {
         Ok(image) => image,
@@ -173,14 +173,14 @@ fn spawn_rootfs_linux_image(
             return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0)
         }
     };
-    match libnanami::request_process_spawn_memory_fault_handler_suspended(
+    match nanami_runtime::request_process_spawn_memory_fault_handler_suspended(
         loaded.address,
         loaded.size,
         4,
         pcb_slot,
     ) {
         Ok(pid) => {
-            let pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
+            let pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
             let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
             let graphics = (request.arg3 & ALTER_LAUNCH_FLAG_GRAPHICS) != 0;
             if let Some(interpreter) = interpreter.as_ref() {
@@ -199,7 +199,7 @@ fn spawn_rootfs_linux_image(
                 Some(loaded.metadata),
                 interpreter.as_ref(),
             ) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-stack image={} pid={} status={}",
                     image_name,
                     pid,
@@ -215,25 +215,25 @@ fn spawn_rootfs_linux_image(
                 request.arg2,
                 &info.image_name[..info.image_name_len],
             ) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-install image={} pid={}",
                     image_name,
                     pid
                 );
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             if !register_linux_stack_mappings(runtime, pid)
                 || !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref())
             {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-stack-track image={} pid={}",
                     image_name,
                     pid
                 );
                 runtime.remove_process(pid);
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             let trace_enabled = (request.arg3 & ALTER_LAUNCH_FLAG_STRACE) != 0;
             let _ = runtime.set_trace_enabled(pid, trace_enabled);
@@ -241,7 +241,7 @@ fn spawn_rootfs_linux_image(
             let _ = runtime.configure_graphics(pid, graphics, info.framebuffer_size);
             let _ = runtime.set_personality(pid, personality);
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-resume image={} pid={} pcb={:#x}",
                     image_name,
                     pid,
@@ -249,9 +249,9 @@ fn spawn_rootfs_linux_image(
                 );
                 runtime.remove_process(pid);
                 discard_spawned_process(pid);
-                return ReplyAction::Reply(libnanami::OS_RESPONSE_FATAL, 0, 0);
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
             }
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/{}] managed rootfs process image={} pid={} pcb={:#x} entry={:#x} bytes={:#x}",
                 personality::name(personality),
                 image_name,
@@ -260,10 +260,10 @@ fn spawn_rootfs_linux_image(
                 loaded.metadata.entry_point,
                 loaded.size
             );
-            ReplyAction::Reply(libnanami::OS_RESPONSE_OK, pid, pcb)
+            ReplyAction::Reply(nanami_runtime::OS_RESPONSE_OK, pid, pcb)
         }
         Err(error) => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter] spawn failed stage=rootfs-kernel image={} err={:?}",
                 image_name,
                 error
@@ -278,8 +278,8 @@ fn personality_from_flags(_flags: Word) -> OsPersonality {
 }
 
 fn discard_spawned_process(pid: Word) {
-    let _ = libnanami::request_process_kill(pid, 1);
-    let _ = libnanami::request_process_reap(pid);
+    let _ = nanami_runtime::request_process_kill(pid, 1);
+    let _ = nanami_runtime::request_process_reap(pid);
 }
 
 fn ensure_terminal_client(runtime: &mut Runtime, _terminal_id: Word) -> Result<(), Word> {
@@ -287,11 +287,11 @@ fn ensure_terminal_client(runtime: &mut Runtime, _terminal_id: Word) -> Result<(
         return Ok(());
     }
 
-    nanami_services::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
+    nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
         .map_err(map_request_error_to_status)?;
-    let terminal_port = libnanami::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
+    let terminal_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
     let (terminal_shm, terminal_shm_size) =
-        nanami_services::terminal::terminal_attach_shared_memory(
+        nanami_client::terminal::terminal_attach_shared_memory(
             terminal_port,
             ALTER_DEFAULT_SHM_BYTES,
         )
@@ -372,17 +372,17 @@ fn prepare_initial_stack(
         .map(target_elf_metadata_from_loaded)
         .unwrap_or_else(|| read_target_elf_metadata(runtime, pid));
     if elf.has_interpreter && interpreter.is_none() {
-        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+        return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
     if runtime.exec_stack_buffer_size < LINUX_INITIAL_STACK_BYTES as Word {
-        let (address, size) = libnanami::request_heap(LINUX_INITIAL_STACK_BYTES as Word)
+        let (address, size) = nanami_runtime::request_heap(LINUX_INITIAL_STACK_BYTES as Word)
             .map_err(map_request_error_to_status)?;
         if size < LINUX_INITIAL_STACK_BYTES as Word {
-            let _ = libnanami::request_mapping_release(address, size);
-            return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+            let _ = nanami_runtime::request_mapping_release(address, size);
+            return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
         }
         if runtime.exec_stack_buffer != 0 {
-            let _ = libnanami::request_mapping_release(
+            let _ = nanami_runtime::request_mapping_release(
                 runtime.exec_stack_buffer,
                 runtime.exec_stack_buffer_size,
             );
@@ -459,7 +459,7 @@ fn prepare_initial_stack(
     let table_bytes = word_count * ::core::mem::size_of::<Word>();
     let aligned_cursor = align_down_usize(string_cursor, 16);
     if aligned_cursor < table_bytes + 16 {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let sp_offset = initial_stack_table_offset(aligned_cursor, table_bytes, personality)?;
     let mut out = sp_offset;
@@ -510,7 +510,7 @@ fn prepare_initial_stack(
     if diagnostics {
         let local_argc = read_word_from_buffer(stack_buffer, sp_offset);
         let local_argv0 = read_word_from_buffer(stack_buffer, sp_offset + 8);
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/{}] stack pid={} sp={:#x} argc={} argv0={:#x} local_argc={} local_argv0={:#x} phdr={:#x} phnum={}",
             personality::name(personality),
             pid,
@@ -523,7 +523,7 @@ fn prepare_initial_stack(
             elf.program_header_count
         );
     }
-    libnanami::request_process_memory_write(
+    nanami_runtime::request_process_memory_write(
         pid,
         stack_base,
         stack_buffer,
@@ -532,25 +532,25 @@ fn prepare_initial_stack(
     .map_err(map_request_error_to_status)?;
     if personality == OsPersonality::FreeBsd {
         let fs_base = install_freebsd_initial_tls(runtime, pid, &elf)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         write_exec_registers(pcb, elf.entry_point, guest_sp, fs_base, 0, guest_sp, 0, 0)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         let _ = runtime.set_fs_base(pid, fs_base);
     } else {
         let entry = interpreter.map_or(elf.entry_point, |image| image.entry);
         write_exec_registers(pcb, entry, guest_sp, 0, 0, 0, 0, 0)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     }
     if diagnostics {
         let pc = read_register_value(pcb, REG_PC).unwrap_or(0);
         let rsp = read_register_value(pcb, REG_RSP).unwrap_or(0);
         let mut stack_argc = 0;
         let mut stack_argv0 = 0;
-        if libnanami::request_process_memory_read(pid, guest_sp, stack_buffer, 16).is_ok() {
+        if nanami_runtime::request_process_memory_read(pid, guest_sp, stack_buffer, 16).is_ok() {
             stack_argc = read_word_from_buffer(stack_buffer, 0);
             stack_argv0 = read_word_from_buffer(stack_buffer, 8);
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/{}] stack verify pid={} pc={:#x} rsp={:#x} argc={} argv0={:#x} personality={}",
             personality::name(personality),
             pid,
@@ -579,13 +579,13 @@ fn initial_stack_table_offset(
     personality: OsPersonality,
 ) -> Result<usize, Word> {
     if aligned_cursor < table_bytes + 16 {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let offset = align_down_usize(aligned_cursor - table_bytes, 16);
     if personality == OsPersonality::FreeBsd {
         offset
             .checked_sub(8)
-            .ok_or(libnanami::OS_RESPONSE_INVALID_ARGUMENT)
+            .ok_or(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)
     } else {
         Ok(offset)
     }
@@ -635,9 +635,9 @@ fn contains_slash(runtime: &Runtime, offset: usize, len: usize) -> bool {
 
 fn linux_argv0(runtime: &Runtime, info: &LaunchInfo) -> Result<(usize, usize), Word> {
     let (offset, mut len) = basename(runtime, info.argv_offsets[0], info.argv_lens[0])
-        .ok_or(libnanami::OS_RESPONSE_INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)?;
     if len == 0 {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
 
     if len > 4
@@ -649,7 +649,7 @@ fn linux_argv0(runtime: &Runtime, info: &LaunchInfo) -> Result<(usize, usize), W
         len -= 4;
     }
     if len == 0 {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     Ok((offset, len))
 }
@@ -679,7 +679,7 @@ fn push_client_string(
 ) -> Result<usize, Word> {
     let mut next = cursor
         .checked_sub(len + 1)
-        .ok_or(libnanami::OS_RESPONSE_INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)?;
     unsafe {
         ::core::ptr::copy_nonoverlapping(
             (runtime.client_shm as usize + offset) as *const u8,
@@ -702,7 +702,7 @@ fn push_raw_bytes(
 ) -> Result<usize, Word> {
     let mut next = cursor
         .checked_sub(bytes.len())
-        .ok_or(libnanami::OS_RESPONSE_INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)?;
     unsafe {
         ::core::ptr::copy_nonoverlapping(
             bytes.as_ptr(),
@@ -810,7 +810,7 @@ fn read_target_elf_metadata_at(
     let mut out = TargetElfMetadata {
         ..TargetElfMetadata::EMPTY
     };
-    if libnanami::request_process_memory_read(
+    if nanami_runtime::request_process_memory_read(
         pid,
         image_base,
         runtime.posix_shm,
@@ -890,7 +890,7 @@ fn install_freebsd_initial_tls(
         return Err(());
     }
     let (tls_base, mapped) =
-        libnanami::request_process_map_anonymous(pid, total).map_err(|_| ())?;
+        nanami_runtime::request_process_map_anonymous(pid, total).map_err(|_| ())?;
     if mapped < total {
         return Err(());
     }
@@ -898,7 +898,7 @@ fn install_freebsd_initial_tls(
         ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, total as usize);
     }
     if elf.tls_file_size != 0 {
-        libnanami::request_process_memory_read(
+        nanami_runtime::request_process_memory_read(
             pid,
             elf.tls_vaddr,
             runtime.posix_shm,
@@ -913,9 +913,9 @@ fn install_freebsd_initial_tls(
             fs_base,
         );
     }
-    libnanami::request_process_memory_write(pid, tls_base, runtime.posix_shm, total)
+    nanami_runtime::request_process_memory_write(pid, tls_base, runtime.posix_shm, total)
         .map_err(|_| ())?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter/freebsd] tls pid={} base={:#x} fs={:#x} file={:#x} mem={:#x}",
         pid,
         tls_base,

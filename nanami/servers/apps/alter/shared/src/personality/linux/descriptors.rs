@@ -34,7 +34,7 @@ fn open_current_path(
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     let fd = match (posix::posix_open(runtime.posix_port, 0, vfs_len, flags), fallback) {
         (
-            Err(libnanami::RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Err(nanami_runtime::RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)),
             Some(node),
         ) if linux_flags & (super::LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_TRUNC) == 0 => {
             return super::open_virtual_node(runtime, pid, node, linux_flags);
@@ -69,7 +69,7 @@ pub(super) fn sys_openat(
 pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
     let file = runtime.clear_linux_file(pid, fd).ok_or(EBADF)?;
     if fd <= 2 {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] close stdio pid={} fd={} kind={}",
             pid,
             fd,
@@ -123,7 +123,7 @@ pub(super) fn sys_dup2(
     new_file.flags &= !LINUX_FD_CLOEXEC;
     if runtime.set_linux_file(pid, new_fd, new_file) {
         if new_fd <= 2 {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] dup2 stdio pid={} old_fd={} new_fd={} kind={}",
                 pid,
                 old_fd,

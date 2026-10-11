@@ -1,8 +1,8 @@
 //! Configure events propose content dimensions. The owner's synchronous
 //! acknowledgement commits geometry and a matching surface together.
 use super::*;
-use libnanami::RequestError;
-use nanami_services::gfx::honoka::{publish_resize, HONOKA_DAMAGE_QUEUE_BYTES};
+use nanami_runtime::RequestError;
+use nanami_client::gfx::honoka::{publish_resize, HONOKA_DAMAGE_QUEUE_BYTES};
 
 impl Compositor {
     pub(super) fn resize_edges(&self, index: usize) -> u8 {
@@ -45,7 +45,7 @@ impl Compositor {
         }
         publish_resize(w.input_queue, width, height);
         if w.input_notify != 0 {
-            let _ = libnanami::ipc::notification_notify(w.input_notify);
+            let _ = nanami_runtime::ipc::notification_notify(w.input_notify);
         }
     }
 
@@ -87,7 +87,7 @@ impl Compositor {
             return Err(RequestError::InvalidArgument);
         }
         if let Some((base, bytes)) = old.retired_fb {
-            libnanami::request_mapping_release(base, bytes)?;
+            nanami_runtime::request_mapping_release(base, bytes)?;
             self.windows[index].retired_fb = None;
         }
         let pixels = width
@@ -95,7 +95,7 @@ impl Compositor {
             .and_then(|v| v.checked_mul(4))
             .ok_or(RequestError::InvalidArgument)?;
         let bytes = pixels + HONOKA_DAMAGE_QUEUE_BYTES;
-        let (local, peer) = libnanami::request_shared_memory(owner, bytes)?;
+        let (local, peer) = nanami_runtime::request_shared_memory(owner, bytes)?;
         self.init_damage_queue(local);
         self.clear_logical_framebuffer(local + HONOKA_DAMAGE_QUEUE_BYTES, pixels);
         let w = &mut self.windows[index];
@@ -106,7 +106,7 @@ impl Compositor {
         w.fb_height = height;
         self.commit_size(index, width, height);
         let old_bytes = old.fb_size + HONOKA_DAMAGE_QUEUE_BYTES;
-        if libnanami::request_mapping_release(old.damage_queue, old_bytes).is_err() {
+        if nanami_runtime::request_mapping_release(old.damage_queue, old_bytes).is_err() {
             self.windows[index].retired_fb = Some((old.damage_queue, old_bytes));
         }
         // Each side releases its own mapping. Do not revoke a client's pages

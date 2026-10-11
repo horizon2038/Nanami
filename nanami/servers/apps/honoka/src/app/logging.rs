@@ -1,10 +1,10 @@
-use libnanami::RequestError;
+use nanami_runtime::RequestError;
 
 pub fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
-pub fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+pub fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }

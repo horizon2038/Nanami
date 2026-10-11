@@ -13,7 +13,7 @@ pub(super) fn read_file(
         .filter(|end| *end <= session.shm_size as usize)
         .is_none()
     {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let file_size = inode.size as usize;
     if file_offset >= file_size || len == 0 {
@@ -24,7 +24,7 @@ pub(super) fn read_file(
     while remaining > 0 {
         let logical_block = (file_offset + copied) / runtime.block_size;
         let Ok(physical_block) = get_data_block(runtime, inode, logical_block) else {
-            return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+            return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
         };
         let block_offset = (file_offset + copied) % runtime.block_size;
         if physical_block == 0 {
@@ -42,7 +42,7 @@ pub(super) fn read_file(
         }
         let block_capacity = runtime.block_shm_size as usize / runtime.block_size;
         if block_capacity == 0 {
-            return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+            return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
         }
         let needed_blocks =
             (block_offset + remaining + runtime.block_size - 1) / runtime.block_size;
@@ -83,11 +83,11 @@ pub(super) fn write_file(
     input_offset: usize,
 ) -> Result<usize, Word> {
     if file_offset.checked_add(len).is_none() {
-        return Err(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let end = file_offset + len;
     if end > runtime.block_size * max_file_blocks(runtime) {
-        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+        return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
     let mut copied = 0usize;
     let mut inode_dirty = false;
@@ -96,7 +96,7 @@ pub(super) fn write_file(
         let block_offset = (file_offset + copied) % runtime.block_size;
         let mut n = min(len - copied, runtime.block_size - block_offset);
         let existing = get_data_block(runtime, *inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         if existing == 0 {
             ensure_data_block_with(runtime, inode, logical_block, |runtime, block| {
                 // Initialize new blocks with their payload in one cached write.
@@ -113,7 +113,7 @@ pub(super) fn write_file(
                 }
                 write_blocks(runtime, block, 1)
             })
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
             inode_dirty = true;
             copied += n;
             continue;
@@ -139,7 +139,7 @@ pub(super) fn write_file(
             n = run_blocks * runtime.block_size;
         } else {
             read_block(runtime, physical_block)
-                .map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+                .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
         }
         unsafe {
             ptr::copy_nonoverlapping(
@@ -149,7 +149,7 @@ pub(super) fn write_file(
             );
         }
         write_blocks(runtime, physical_block, run_blocks)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         copied += n;
     }
     if end > inode.size as usize {
@@ -157,7 +157,7 @@ pub(super) fn write_file(
         inode_dirty = true;
     }
     if inode_dirty {
-        write_inode(runtime, inode_no, *inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        write_inode(runtime, inode_no, *inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     }
     Ok(copied)
 }

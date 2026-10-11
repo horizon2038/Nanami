@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const SYS_GETCWD: Word = 17;
 pub const SYS_IOCTL: Word = 29;

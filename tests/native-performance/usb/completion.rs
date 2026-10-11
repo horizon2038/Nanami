@@ -1,8 +1,8 @@
 //! Production event-ring handshake and completion waits, with W1C MMIO and
 //! scripted IRQ/timer delivery. No mouse or hotplug wakeups are supplied.
 #![allow(dead_code)]
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 pub use std::println;
 use std::{cell::RefCell, collections::VecDeque};
 pub type Word = usize;

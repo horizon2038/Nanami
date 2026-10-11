@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 pub use std::println;
 pub type Word = usize;
 #[derive(Debug)]

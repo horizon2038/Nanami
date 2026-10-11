@@ -6,8 +6,8 @@ use crate::{
     usb::mass_storage,
     xhci::{Controller, Disk},
 };
-use libnanami::{ipc::ServiceRequest, RequestError, Word};
-use nanami_services::block::*;
+use nanami_runtime::{ipc::ServiceRequest, RequestError, Word};
+use nanami_client::block::*;
 
 struct Root {
     controller: usize,
@@ -44,12 +44,12 @@ impl Storage {
         input: &mut Input,
     ) -> (Word, Word, Word) {
         match self.handle(request, controllers, input) {
-            Ok((value, extra)) => (libnanami::OS_RESPONSE_OK, value, extra),
+            Ok((value, extra)) => (nanami_runtime::OS_RESPONSE_OK, value, extra),
             Err(error) => (
                 match error {
-                    RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
+                    RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
                     RequestError::Status(status) => status,
-                    _ => libnanami::OS_RESPONSE_FATAL,
+                    _ => nanami_runtime::OS_RESPONSE_FATAL,
                 },
                 0,
                 0,
@@ -67,7 +67,7 @@ impl Storage {
         let controller = &mut controllers[root.controller];
         if !controller.disk_present(root.disk) {
             self.root = None;
-            libnanami::print!("[usb-server] root device detached; I/O disabled\n");
+            nanami_runtime::print!("[usb-server] root device detached; I/O disabled\n");
             return Err(RequestError::Transport);
         }
         if request.code == BLOCK_DEVICE_REQUEST_CONTROL {
@@ -88,13 +88,13 @@ impl Storage {
                     if let Some(session) = &self.session {
                         if session.pid != request.identifier || session.bytes != bytes {
                             return Err(RequestError::Status(
-                                libnanami::OS_RESPONSE_PERMISSION_DENIED,
+                                nanami_runtime::OS_RESPONSE_PERMISSION_DENIED,
                             ));
                         }
                         return Ok((session.peer, session.bytes));
                     }
                     let (local, peer) =
-                        libnanami::request_shared_memory(request.identifier, bytes)?;
+                        nanami_runtime::request_shared_memory(request.identifier, bytes)?;
                     self.session = Some(Session {
                         pid: request.identifier,
                         local,

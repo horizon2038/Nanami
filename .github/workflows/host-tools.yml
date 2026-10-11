@@ -1,0 +1,21 @@
+name: Host tools (macOS/Linux)
+
+on: [push, pull_request]
+
+jobs:
+  host-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install pinned toolchain
+        run: rustup toolchain install nightly-2026-03-25 --profile minimal --component rust-src
+      - name: Test filesystem builder, UAPI and xtask
+        run: cargo test --locked -p ext2-image -p nanami-uapi -p nanami-xtask
+      - name: Check QEMU argv without launching
+        run: cargo xtask run --print-command --net none --accel tcg

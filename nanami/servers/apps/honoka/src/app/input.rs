@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 #[derive(Clone, Copy)]
 pub enum InputEvent {
@@ -10,21 +10,21 @@ pub enum InputEvent {
 }
 
 pub fn decode_input_event(packed: Word) -> InputEvent {
-    let (kind, code, value0, value1, _) = nanami_services::input::unpack_input_event(packed);
+    let (kind, code, value0, value1, _) = nanami_client::input::unpack_input_event(packed);
     match kind {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => InputEvent::Key {
+        nanami_client::input::INPUT_EVENT_KIND_KEY => InputEvent::Key {
             code,
             pressed: value0 != 0,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE => InputEvent::MouseMove {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE => InputEvent::MouseMove {
             dx: value0 as i32,
             dy: value1 as i32,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON => InputEvent::MouseButton {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON => InputEvent::MouseButton {
             code,
             pressed: value0 != 0,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => InputEvent::MouseWheel {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL => InputEvent::MouseWheel {
             delta: value0 as i32,
         },
         _ => InputEvent::Unknown,

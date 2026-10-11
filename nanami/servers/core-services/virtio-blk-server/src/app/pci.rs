@@ -27,8 +27,8 @@ fn pci_cfg_read32(
     offset: u8,
 ) -> Result<u32, RequestError> {
     let addr = pci_cfg_addr(bus, dev, func, offset);
-    libnanami::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
-    let data = libnanami::io::io_read(io_desc, PCI_CFG_DATA_PORT, 4)? as u32;
+    nanami_runtime::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
+    let data = nanami_runtime::io::io_read(io_desc, PCI_CFG_DATA_PORT, 4)? as u32;
     Ok(data)
 }
 
@@ -65,8 +65,8 @@ fn pci_cfg_write32(
     value: u32,
 ) -> Result<(), RequestError> {
     let addr = pci_cfg_addr(bus, dev, func, offset);
-    libnanami::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
-    libnanami::io::io_write(io_desc, PCI_CFG_DATA_PORT, 4, value as Word)
+    nanami_runtime::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
+    nanami_runtime::io::io_write(io_desc, PCI_CFG_DATA_PORT, 4, value as Word)
 }
 
 fn pci_cfg_write16(
@@ -104,11 +104,11 @@ pub(crate) fn configure_pci_command_for_intx(
         PCI_CFG_INTERRUPT_PIN_OFFSET,
     )?;
 
-    libnanami::print!("[virtio-blk] pci cmd before=");
-    libnanami::print!("{:#x}", cmd_before);
-    libnanami::print!(" int-pin=");
-    libnanami::print!("{}", int_pin as usize);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[virtio-blk] pci cmd before=");
+    nanami_runtime::print!("{:#x}", cmd_before);
+    nanami_runtime::print!(" int-pin=");
+    nanami_runtime::print!("{}", int_pin as usize);
+    nanami_runtime::print!("\n");
 
     let mut cmd_after = cmd_before | PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER;
     cmd_after &= !PCI_COMMAND_INTX_DISABLE;
@@ -131,9 +131,9 @@ pub(crate) fn configure_pci_command_for_intx(
         found.func,
         PCI_CFG_COMMAND_OFFSET,
     )?;
-    libnanami::print!("[virtio-blk] pci cmd after =");
-    libnanami::print!("{:#x}", cmd_verify);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[virtio-blk] pci cmd after =");
+    nanami_runtime::print!("{:#x}", cmd_verify);
+    nanami_runtime::print!("\n");
     Ok(())
 }
 
@@ -149,7 +149,7 @@ pub(crate) fn disable_pci_msi_capabilities(
         PCI_CFG_STATUS_OFFSET,
     )?;
     if (status & PCI_STATUS_CAP_LIST) == 0 {
-        libnanami::print!("[virtio-blk] pci caps: none\n");
+        nanami_runtime::print!("[virtio-blk] pci caps: none\n");
         return Ok(());
     }
 
@@ -173,22 +173,22 @@ pub(crate) fn disable_pci_msi_capabilities(
             if next != ctrl {
                 pci_cfg_write16(io_desc, found.bus, found.dev, found.func, cap + 2, next)?;
             }
-            libnanami::print!("[virtio-blk] pci msi ctrl=");
-            libnanami::print!("{:#x}", ctrl);
-            libnanami::print!(" -> ");
-            libnanami::print!("{:#x}", next);
-            libnanami::print!("\n");
+            nanami_runtime::print!("[virtio-blk] pci msi ctrl=");
+            nanami_runtime::print!("{:#x}", ctrl);
+            nanami_runtime::print!(" -> ");
+            nanami_runtime::print!("{:#x}", next);
+            nanami_runtime::print!("\n");
         } else if cap_id == PCI_CAP_ID_MSIX {
             let ctrl = pci_cfg_read16(io_desc, found.bus, found.dev, found.func, cap + 2)?;
             let next = (ctrl & !PCI_MSIX_CONTROL_ENABLE) & !PCI_MSIX_CONTROL_MASKALL;
             if next != ctrl {
                 pci_cfg_write16(io_desc, found.bus, found.dev, found.func, cap + 2, next)?;
             }
-            libnanami::print!("[virtio-blk] pci msix ctrl=");
-            libnanami::print!("{:#x}", ctrl);
-            libnanami::print!(" -> ");
-            libnanami::print!("{:#x}", next);
-            libnanami::print!("\n");
+            nanami_runtime::print!("[virtio-blk] pci msix ctrl=");
+            nanami_runtime::print!("{:#x}", ctrl);
+            nanami_runtime::print!(" -> ");
+            nanami_runtime::print!("{:#x}", next);
+            nanami_runtime::print!("\n");
         }
 
         if cap_next == 0 || cap_next == cap {
@@ -271,16 +271,16 @@ pub(crate) fn resolve_irq_number(
         let pirq_index = (pci_intx + slot_addend) & 0x03;
 
         if let Some(routed_irq) = read_piix3_pirq_route(io_desc, pirq_index)? {
-            libnanami::print!("[virtio-blk] irq routing: PIRQ");
-            libnanami::print!("{}", pirq_index as usize);
-            libnanami::print!(" -> irq=");
-            libnanami::print!("{}", routed_irq as usize);
+            nanami_runtime::print!("[virtio-blk] irq routing: PIRQ");
+            nanami_runtime::print!("{}", pirq_index as usize);
+            nanami_runtime::print!(" -> irq=");
+            nanami_runtime::print!("{}", routed_irq as usize);
             if let Some(line) = line_irq {
-                libnanami::print!(" (line=");
-                libnanami::print!("{}", line as usize);
-                libnanami::print!(")");
+                nanami_runtime::print!(" (line=");
+                nanami_runtime::print!("{}", line as usize);
+                nanami_runtime::print!(")");
             }
-            libnanami::print!("\n");
+            nanami_runtime::print!("\n");
             return Ok(Some(routed_irq as Word));
         }
     }

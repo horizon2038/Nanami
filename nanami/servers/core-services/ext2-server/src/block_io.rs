@@ -77,7 +77,7 @@ fn read_blocks_uncached(
     let mut attempt = 0;
     let read = loop {
         if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[vfs.trace] block-read begin block={} count={} attempt={}",
                 block,
                 count,
@@ -85,9 +85,9 @@ fn read_blocks_uncached(
             );
         }
         let result =
-            nanami_services::block::block_device_read(runtime.block_port, block, count, offset);
+            nanami_client::block::block_device_read(runtime.block_port, block, count, offset);
         if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[vfs.trace] block-read end block={} result={:?}",
                 block,
                 result
@@ -101,17 +101,17 @@ fn read_blocks_uncached(
                         error,
                         RequestError::Transport
                             | RequestError::Protocol
-                            | RequestError::Status(libnanami::OS_RESPONSE_FATAL)
+                            | RequestError::Status(nanami_runtime::OS_RESPONSE_FATAL)
                     ) =>
             {
                 attempt += 1;
-                libnanami::print!(
+                nanami_runtime::print!(
                     "[ext2-server] retry block read attempt={} block={} count={}\n",
                     attempt + 1,
                     block,
                     count
                 );
-                libnanami::yield_now();
+                nanami_runtime::yield_now();
             }
             Err(error) => return Err(error),
         }

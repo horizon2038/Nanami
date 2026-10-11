@@ -1,8 +1,8 @@
 //! Production USB storage discovery/probing with a fake SCSI bus and manager IPC.
 #![allow(dead_code)]
 extern crate alloc;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::cell::RefCell;
 pub use std::{print, println};
 pub type Word = usize;
@@ -42,7 +42,7 @@ pub fn request_shared_memory(_: Word, _: Word) -> Result<(Word, Word), RequestEr
 fn delay(_: Word, _: Word) -> Result<(), RequestError> {
     Ok(())
 }
-#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/block/constants.rs"]
+#[path = "../../../nanami/servers/uapi/src/block.rs"]
 pub mod block;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/mass_storage.rs"]
 pub mod mass_storage;

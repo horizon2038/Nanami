@@ -2,8 +2,8 @@
 #![allow(dead_code)]
 extern crate alloc;
 extern crate self as a9n_abi;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::cell::RefCell;
 pub use std::println;
 pub type Word = usize;
@@ -50,15 +50,15 @@ pub mod timer {
 }
 mod input_api {
     pub mod constants {
-        include!("../../../nanami/servers/sdk/rust/nanami-services/src/input/constants.rs");
+        include!("../../../nanami/servers/uapi/src/input.rs");
     }
     pub mod service {
-        include!("../../../nanami/servers/sdk/rust/nanami-services/src/input/service.rs");
+        include!("../../../nanami/servers/libs/nanami-client/src/input/service.rs");
     }
     pub use constants::*;
     pub use service::*;
 }
-#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/gfx/honoka.rs"]
+#[path = "../../../nanami/servers/libs/nanami-client/src/gfx/honoka.rs"]
 pub mod honoka_api;
 pub mod input {
     pub use super::input_api::*;

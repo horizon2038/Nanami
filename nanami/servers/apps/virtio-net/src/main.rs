@@ -5,8 +5,8 @@ use core::cmp::min;
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use libnanami::ipc::ServiceEvent;
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::ServiceEvent;
+use nanami_runtime::{self, RequestError, Word};
 
 #[path = "app/arch.rs"]
 mod arch;
@@ -61,7 +61,7 @@ const VIRTIO_STATUS_DRIVER: u8 = 2;
 const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 const VIRTIO_STATUS_FAILED: u8 = 128;
 
-const NET_MAX_PACKET_BYTES: usize = nanami_services::net::NET_DEVICE_RX_FRAME_MAX;
+const NET_MAX_PACKET_BYTES: usize = nanami_client::net::NET_DEVICE_RX_FRAME_MAX;
 const QUEUE_MEM_BYTES: usize = 16384;
 const QUEUE_RX_INDEX: u16 = 0;
 const QUEUE_TX_INDEX: u16 = 1;
@@ -146,7 +146,7 @@ static mut RX_SOFTQ_COUNT: usize = 0;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[virtio-net] panic\n");
+    nanami_runtime::print!("[virtio-net] panic\n");
     loop {}
 }
 
@@ -155,20 +155,20 @@ fn log_device_error(
     err: RequestError,
     io_desc: Word,
     io_base: Word,
-) -> libnanami::NanamiError {
+) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     fail_device(io_desc, io_base);
     err.into()
 }
 
-fn log_device_failure(msg: &str, io_desc: Word, io_base: Word) -> libnanami::NanamiError {
-    libnanami::print!(msg);
+fn log_device_failure(msg: &str, io_desc: Word, io_base: Word) -> nanami_runtime::NanamiError {
+    nanami_runtime::print!(msg);
     fail_device(io_desc, io_base);
-    libnanami::NanamiError::UNKNOWN
+    nanami_runtime::NanamiError::UNKNOWN
 }
 
 fn vio_read(io_desc: Word, io_base: Word, offset: Word, width: Word) -> Result<Word, RequestError> {
-    libnanami::io::io_read(io_desc, io_base + offset, width)
+    nanami_runtime::io::io_read(io_desc, io_base + offset, width)
 }
 
 fn vio_write(
@@ -178,7 +178,7 @@ fn vio_write(
     width: Word,
     value: Word,
 ) -> Result<(), RequestError> {
-    libnanami::io::io_write(io_desc, io_base + offset, width, value)
+    nanami_runtime::io::io_write(io_desc, io_base + offset, width, value)
 }
 
 fn notify_queue(io_desc: Word, io_base: Word, queue_index: u16) -> Result<(), RequestError> {
@@ -236,7 +236,7 @@ fn init_virtio_legacy_queues(
         return Err(RequestError::Unsupported);
     }
 
-    let (dma_paddr, dma_vaddr) = libnanami::request_dma(DMA_TOTAL_BYTES)?;
+    let (dma_paddr, dma_vaddr) = nanami_runtime::request_dma(DMA_TOTAL_BYTES)?;
     let dma_paddr = dma_paddr as usize;
     let dma_vaddr = dma_vaddr as usize;
     let rx_queue_vaddr = dma_vaddr + DMA_QUEUE0_OFFSET;
@@ -334,9 +334,9 @@ fn init_virtio_legacy_queues(
         (VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_DRIVER_OK) as Word,
     )?;
     let status_after = read_device_status(io_desc, io_base)?;
-    libnanami::print!("[virtio-net] status after DRIVER_OK=");
-    libnanami::print!("{:#x}", status_after);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[virtio-net] status after DRIVER_OK=");
+    nanami_runtime::print!("{:#x}", status_after);
+    nanami_runtime::print!("\n");
 
     Ok(QueueInitResult {
         rx_qsize,
@@ -490,18 +490,18 @@ fn read_device_mac(io_desc: Word, io_base: Word) -> Result<[u8; 6], RequestError
 fn handle_net_request(
     runtime: &mut NetRuntime,
     _irq_desc: Word,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::net::NET_DEVICE_REQUEST_SEND => {
+        nanami_client::net::NET_DEVICE_REQUEST_SEND => {
             if !runtime.queue_ready || !runtime.link_up {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             if request.arg1 == 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             if request.arg1 > NET_MAX_PACKET_BYTES {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             let send_result = if runtime.shared_vaddr != 0 && runtime.shared_size != 0 {
                 copy_from_shared_and_submit(runtime, request.arg0, request.arg1)
@@ -509,142 +509,142 @@ fn handle_net_request(
                 submit_tx(runtime, request.arg1)
             };
             match send_result {
-                Ok(n) => (libnanami::OS_RESPONSE_OK, n, 0),
-                Err(_) => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                Ok(n) => (nanami_runtime::OS_RESPONSE_OK, n, 0),
+                Err(_) => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
             }
         }
-        nanami_services::net::NET_DEVICE_REQUEST_RECV => {
+        nanami_client::net::NET_DEVICE_REQUEST_RECV => {
             if !runtime.queue_ready || !runtime.link_up {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             if request.arg1 == 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             if runtime.shared_vaddr != 0 && runtime.shared_size != 0 {
                 if softq_is_empty() {
                     match recv_direct_to_shared(runtime, request.arg0, request.arg1) {
-                        Ok(Some(n)) => return (libnanami::OS_RESPONSE_OK, n, 0),
+                        Ok(Some(n)) => return (nanami_runtime::OS_RESPONSE_OK, n, 0),
                         Ok(None) => {}
                         Err(RequestError::InvalidArgument) => {
-                            return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+                            return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
                         }
-                        Err(_) => return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                        Err(_) => return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
                     }
                 }
                 match softq_pop_to_shared(runtime, request.arg0, request.arg1) {
-                    Ok(n) => (libnanami::OS_RESPONSE_OK, n, 0),
+                    Ok(n) => (nanami_runtime::OS_RESPONSE_OK, n, 0),
                     Err(RequestError::InvalidArgument) => {
-                        (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+                        (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
                     }
-                    Err(_) => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                    Err(_) => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
                 }
             } else {
                 if softq_is_empty() {
                     drain_rx_to_softq(runtime, RX_POLL_BURST);
                 }
                 let n = softq_pop_len(request.arg1);
-                (libnanami::OS_RESPONSE_OK, n, 0)
+                (nanami_runtime::OS_RESPONSE_OK, n, 0)
             }
         }
-        nanami_services::net::NET_DEVICE_REQUEST_RECV_BATCH => {
+        nanami_client::net::NET_DEVICE_REQUEST_RECV_BATCH => {
             if !runtime.queue_ready || !runtime.link_up {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             match rx_batch::recv_batch_to_shared(runtime, request.arg0, request.arg1) {
-                Ok(count) => (libnanami::OS_RESPONSE_OK, count, 0),
-                Err(_) => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+                Ok(count) => (nanami_runtime::OS_RESPONSE_OK, count, 0),
+                Err(_) => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
             }
         }
-        nanami_services::net::NET_DEVICE_REQUEST_CONTROL => match request.arg0 {
-            nanami_services::net::NET_DEVICE_CONTROL_GET_FEATURES => (
-                libnanami::OS_RESPONSE_OK,
-                nanami_services::net::NET_DEVICE_FEATURE_RECV_BATCH,
+        nanami_client::net::NET_DEVICE_REQUEST_CONTROL => match request.arg0 {
+            nanami_client::net::NET_DEVICE_CONTROL_GET_FEATURES => (
+                nanami_runtime::OS_RESPONSE_OK,
+                nanami_client::net::NET_DEVICE_FEATURE_RECV_BATCH,
                 0,
             ),
-            nanami_services::net::NET_DEVICE_CONTROL_LINK_UP => match set_link_state(runtime, true)
+            nanami_client::net::NET_DEVICE_CONTROL_LINK_UP => match set_link_state(runtime, true)
             {
-                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                 Err(RequestError::InvalidArgument) => {
-                    (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+                    (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
                 }
-                Err(_) => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                Err(_) => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
             },
-            nanami_services::net::NET_DEVICE_CONTROL_LINK_DOWN => {
+            nanami_client::net::NET_DEVICE_CONTROL_LINK_DOWN => {
                 match set_link_state(runtime, false) {
-                    Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                    Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                     Err(RequestError::InvalidArgument) => {
-                        (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+                        (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
                     }
-                    Err(_) => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                    Err(_) => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
                 }
             }
-            nanami_services::net::NET_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
+            nanami_client::net::NET_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
                 // NET_DEVICE_REQUEST_CONTROL layout:
                 // arg0=control_code, arg1=control_arg0(vaddr), arg2=control_arg1(size)
                 if request.arg1 == 0 || request.arg2 == 0 {
-                    return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
                 runtime.shared_vaddr = request.arg1;
                 runtime.shared_size = request.arg2;
-                libnanami::print!("[virtio-net] shared memory attached vaddr=");
-                libnanami::print!("{:#x}", runtime.shared_vaddr);
-                libnanami::print!(" size=");
-                libnanami::print!("{:#x}", runtime.shared_size);
-                libnanami::print!("\n");
-                (libnanami::OS_RESPONSE_OK, 0, 0)
+                nanami_runtime::print!("[virtio-net] shared memory attached vaddr=");
+                nanami_runtime::print!("{:#x}", runtime.shared_vaddr);
+                nanami_runtime::print!(" size=");
+                nanami_runtime::print!("{:#x}", runtime.shared_size);
+                nanami_runtime::print!("\n");
+                (nanami_runtime::OS_RESPONSE_OK, 0, 0)
             }
-            nanami_services::net::NET_DEVICE_CONTROL_GET_MAC => {
+            nanami_client::net::NET_DEVICE_CONTROL_GET_MAC => {
                 let packed = (runtime.mac_addr[0] as Word)
                     | ((runtime.mac_addr[1] as Word) << 8)
                     | ((runtime.mac_addr[2] as Word) << 16)
                     | ((runtime.mac_addr[3] as Word) << 24)
                     | ((runtime.mac_addr[4] as Word) << 32)
                     | ((runtime.mac_addr[5] as Word) << 40);
-                (libnanami::OS_RESPONSE_OK, packed, 0)
+                (nanami_runtime::OS_RESPONSE_OK, packed, 0)
             }
-            nanami_services::net::NET_DEVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
+            nanami_client::net::NET_DEVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
                 let source_slot = if request.arg1 == 0 {
-                    libnanami::PROCESS_SLOT_NOTIFICATION
+                    nanami_runtime::PROCESS_SLOT_NOTIFICATION
                 } else {
                     request.arg1
                 };
-                match libnanami::request_notification_port_copy(
+                match nanami_runtime::request_notification_port_copy(
                     request.identifier,
                     source_slot,
                     SLOT_CLIENT_RX_NOTIFICATION,
-                    nanami_services::net::NET_NOTIFICATION_RX,
+                    nanami_client::net::NET_NOTIFICATION_RX,
                 ) {
                     Ok(()) => {
                         runtime.client_rx_notification =
-                            libnanami::ipc::process_slot_descriptor(SLOT_CLIENT_RX_NOTIFICATION);
-                        (libnanami::OS_RESPONSE_OK, runtime.irq_enabled as Word, 0)
+                            nanami_runtime::ipc::process_slot_descriptor(SLOT_CLIENT_RX_NOTIFICATION);
+                        (nanami_runtime::OS_RESPONSE_OK, runtime.irq_enabled as Word, 0)
                     }
                     Err(error) => (
                         match error {
                             RequestError::InvalidArgument => {
-                                libnanami::OS_RESPONSE_INVALID_ARGUMENT
+                                nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT
                             }
                             RequestError::Status(status) => status,
-                            _ => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+                            _ => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
                         },
                         0,
                         0,
                     ),
                 }
             }
-            _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+            _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
         },
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_notification(runtime: &mut NetRuntime, irq_desc: Word, identifier: Word, value: Word) {
     if ENABLE_IRQ_EVENT_LOG {
-        libnanami::print!("[virtio-net] notification id=");
-        libnanami::print!("{}", identifier as usize);
-        libnanami::print!(" value=");
-        libnanami::print!("{:#x}", value as u32);
-        libnanami::print!("\n");
+        nanami_runtime::print!("[virtio-net] notification id=");
+        nanami_runtime::print!("{}", identifier as usize);
+        nanami_runtime::print!(" value=");
+        nanami_runtime::print!("{:#x}", value as u32);
+        nanami_runtime::print!("\n");
     }
 
     if runtime.irq_enabled {
@@ -653,9 +653,9 @@ fn handle_notification(runtime: &mut NetRuntime, irq_desc: Word, identifier: Wor
         match vio_read(runtime.io_desc, runtime.io_base, VIRTIO_PCI_ISR_STATUS, 1) {
             Ok(isr) => {
                 if ENABLE_IRQ_RX_PACKET_DEBUG {
-                    libnanami::print!("[virtio-net][irq.dbg] isr=");
-                    libnanami::print!("{:#x}", isr as u8);
-                    libnanami::print!("\n");
+                    nanami_runtime::print!("[virtio-net][irq.dbg] isr=");
+                    nanami_runtime::print!("{:#x}", isr as u8);
+                    nanami_runtime::print!("\n");
                 }
             }
             Err(e) => {
@@ -664,7 +664,7 @@ fn handle_notification(runtime: &mut NetRuntime, irq_desc: Word, identifier: Wor
         }
 
         let mut rx_count = drain_rx_to_softq(runtime, RX_SOFTQ_CAP);
-        if let Err(e) = libnanami::ipc::interrupt_ack(irq_desc) {
+        if let Err(e) = nanami_runtime::ipc::interrupt_ack(irq_desc) {
             log_request_error("[virtio-net] irq re-arm failed: ", e);
         }
 
@@ -672,23 +672,23 @@ fn handle_notification(runtime: &mut NetRuntime, irq_desc: Word, identifier: Wor
         // Rechecking after the ack closes that masked-interrupt window.
         rx_count += drain_rx_to_softq(runtime, RX_SOFTQ_CAP);
         if rx_count != 0 && runtime.client_rx_notification != 0 {
-            let _ = libnanami::ipc::notification_notify(runtime.client_rx_notification);
+            let _ = nanami_runtime::ipc::notification_notify(runtime.client_rx_notification);
         }
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[virtio-net] bootstrap start\n");
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[virtio-net] bootstrap start\n");
 
-    let service_port_desc = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
-    let pci_io_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_PCI_CFG);
-    let mut dev_io_desc = libnanami::ipc::process_slot_descriptor(SLOT_IO_VIRTIO);
-    let notif_desc = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
-    let irq_desc = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT);
+    let service_port_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let pci_io_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_IO_PCI_CFG);
+    let mut dev_io_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_IO_VIRTIO);
+    let notif_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
+    let irq_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_INTERRUPT);
 
-    libnanami::print!("[virtio-net] step: register service\n");
-    match nanami_services::registry::register_net_device() {
-        Ok(()) => libnanami::print!("[virtio-net] service registered: net-device\n"),
+    nanami_runtime::print!("[virtio-net] step: register service\n");
+    match nanami_client::registry::register_net_device() {
+        Ok(()) => nanami_runtime::print!("[virtio-net] service registered: net-device\n"),
         Err(e) => {
             return Err(log_device_error(
                 "[virtio-net] service registration failed: ",
@@ -700,14 +700,14 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 
     let mut full_io_granted = false;
-    match libnanami::request_io_port(0x0000, 0xffff, SLOT_IO_PCI_CFG) {
+    match nanami_runtime::request_io_port(0x0000, 0xffff, SLOT_IO_PCI_CFG) {
         Ok(()) => {
-            libnanami::print!("[virtio-net] full io range granted\n");
+            nanami_runtime::print!("[virtio-net] full io range granted\n");
             full_io_granted = true;
             dev_io_desc = pci_io_desc;
         }
-        Err(_) => match libnanami::request_io_port(0x0cf8, 0x0cff, SLOT_IO_PCI_CFG) {
-            Ok(()) => libnanami::print!("[virtio-net] pci cfg io ports granted\n"),
+        Err(_) => match nanami_runtime::request_io_port(0x0cf8, 0x0cff, SLOT_IO_PCI_CFG) {
+            Ok(()) => nanami_runtime::print!("[virtio-net] pci cfg io ports granted\n"),
             Err(e) => {
                 return Err(log_device_error(
                     "[virtio-net] failed to request PCI cfg io ports: ",
@@ -719,7 +719,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         },
     }
 
-    libnanami::print!("[virtio-net] step: scan pci\n");
+    nanami_runtime::print!("[virtio-net] step: scan pci\n");
     let found = match scan_virtio_net(pci_io_desc) {
         Ok(v) => v,
         Err(_) => {
@@ -731,23 +731,23 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    libnanami::print!("[virtio-net] found pci bus=");
-    libnanami::print!("{}", found.bus as usize);
-    libnanami::print!(" dev=");
-    libnanami::print!("{}", found.dev as usize);
-    libnanami::print!(" func=");
-    libnanami::print!("{}", found.func as usize);
-    libnanami::print!(" vid=");
-    libnanami::print!("{:#x}", found.vendor_id);
-    libnanami::print!(" did=");
-    libnanami::print!("{:#x}", found.device_id);
-    libnanami::print!(" io=");
-    libnanami::print!("{:#x}", found.io_base);
-    libnanami::print!(" irq=");
-    libnanami::print!("{}", found.irq_line as usize);
-    libnanami::print!(" pin=");
-    libnanami::print!("{}", found.irq_pin as usize);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[virtio-net] found pci bus=");
+    nanami_runtime::print!("{}", found.bus as usize);
+    nanami_runtime::print!(" dev=");
+    nanami_runtime::print!("{}", found.dev as usize);
+    nanami_runtime::print!(" func=");
+    nanami_runtime::print!("{}", found.func as usize);
+    nanami_runtime::print!(" vid=");
+    nanami_runtime::print!("{:#x}", found.vendor_id);
+    nanami_runtime::print!(" did=");
+    nanami_runtime::print!("{:#x}", found.device_id);
+    nanami_runtime::print!(" io=");
+    nanami_runtime::print!("{:#x}", found.io_base);
+    nanami_runtime::print!(" irq=");
+    nanami_runtime::print!("{}", found.irq_line as usize);
+    nanami_runtime::print!(" pin=");
+    nanami_runtime::print!("{}", found.irq_pin as usize);
+    nanami_runtime::print!("\n");
     if let Err(e) = configure_pci_command_for_intx(pci_io_desc, found) {
         return Err(log_device_error(
             "[virtio-net] pci command configure failed: ",
@@ -765,14 +765,14 @@ fn nanami_main() -> libnanami::NanamiResult {
         ));
     }
 
-    libnanami::print!("[virtio-net] step: request virtio io range\n");
+    nanami_runtime::print!("[virtio-net] step: request virtio io range\n");
     let io_min = found.io_base as Word;
     let io_max = io_min + 0xff;
-    match libnanami::request_io_port(io_min, io_max, SLOT_IO_VIRTIO) {
-        Ok(()) => libnanami::print!("[virtio-net] virtio io range granted\n"),
+    match nanami_runtime::request_io_port(io_min, io_max, SLOT_IO_VIRTIO) {
+        Ok(()) => nanami_runtime::print!("[virtio-net] virtio io range granted\n"),
         Err(e) => {
             if full_io_granted {
-                libnanami::print!("[virtio-net] virtio io range already covered by full range\n",);
+                nanami_runtime::print!("[virtio-net] virtio io range already covered by full range\n",);
             } else {
                 return Err(log_device_error(
                     "[virtio-net] failed to request virtio io range: ",
@@ -784,7 +784,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
-    libnanami::print!("[virtio-net] step: request irq\n");
+    nanami_runtime::print!("[virtio-net] step: request irq\n");
     let mut irq_enabled = false;
     let selected_irq = match resolve_irq_number(pci_io_desc, found) {
         Ok(v) => v,
@@ -799,19 +799,19 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
 
     if let Some(irq_number) = selected_irq {
-        libnanami::print!("[virtio-net] request irq number=");
-        libnanami::print!("{}", irq_number as usize);
-        libnanami::print!(" (line=");
-        libnanami::print!("{}", found.irq_line as usize);
-        libnanami::print!(", pin=");
-        libnanami::print!("{}", found.irq_pin as usize);
-        libnanami::print!(")\n");
-        match libnanami::request_irq(irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT) {
+        nanami_runtime::print!("[virtio-net] request irq number=");
+        nanami_runtime::print!("{}", irq_number as usize);
+        nanami_runtime::print!(" (line=");
+        nanami_runtime::print!("{}", found.irq_line as usize);
+        nanami_runtime::print!(", pin=");
+        nanami_runtime::print!("{}", found.irq_pin as usize);
+        nanami_runtime::print!(")\n");
+        match nanami_runtime::request_irq(irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT) {
             Ok(()) => {
                 irq_enabled = true;
-                libnanami::print!("[virtio-net] irq granted\n");
-                match libnanami::ipc::bind_current_thread_notification(notif_desc) {
-                    Ok(()) => libnanami::print!("[virtio-net] tcb notification bound\n"),
+                nanami_runtime::print!("[virtio-net] irq granted\n");
+                match nanami_runtime::ipc::bind_current_thread_notification(notif_desc) {
+                    Ok(()) => nanami_runtime::print!("[virtio-net] tcb notification bound\n"),
                     Err(e) => {
                         return Err(log_device_error(
                             "[virtio-net] tcb notification bind failed: ",
@@ -821,8 +821,8 @@ fn nanami_main() -> libnanami::NanamiResult {
                         ));
                     }
                 }
-                match libnanami::ipc::interrupt_ack(irq_desc) {
-                    Ok(()) => libnanami::print!("[virtio-net] irq armed\n"),
+                match nanami_runtime::ipc::interrupt_ack(irq_desc) {
+                    Ok(()) => nanami_runtime::print!("[virtio-net] irq armed\n"),
                     Err(e) => {
                         return Err(log_device_error(
                             "[virtio-net] irq arm failed: ",
@@ -838,10 +838,10 @@ fn nanami_main() -> libnanami::NanamiResult {
             }
         }
     } else {
-        libnanami::print!("[virtio-net] device irq unavailable, fallback polling\n");
+        nanami_runtime::print!("[virtio-net] device irq unavailable, fallback polling\n");
     }
 
-    libnanami::print!("[virtio-net] step: init queues\n");
+    nanami_runtime::print!("[virtio-net] step: init queues\n");
     let io_base = found.io_base as Word;
     let queue_init = match init_virtio_legacy_queues(dev_io_desc, io_base) {
         Ok(v) => v,
@@ -854,11 +854,11 @@ fn nanami_main() -> libnanami::NanamiResult {
             ));
         }
     };
-    libnanami::print!("[virtio-net] queues init done rx=");
-    libnanami::print!("{}", queue_init.rx_qsize as usize);
-    libnanami::print!(" tx=");
-    libnanami::print!("{}", queue_init.tx_qsize as usize);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[virtio-net] queues init done rx=");
+    nanami_runtime::print!("{}", queue_init.rx_qsize as usize);
+    nanami_runtime::print!(" tx=");
+    nanami_runtime::print!("{}", queue_init.tx_qsize as usize);
+    nanami_runtime::print!("\n");
     let mac_addr = match read_device_mac(dev_io_desc, io_base) {
         Ok(m) => m,
         Err(_) => [0; 6],
@@ -892,8 +892,8 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
 
     if runtime.irq_enabled {
-        match libnanami::ipc::interrupt_ack(irq_desc) {
-            Ok(()) => libnanami::print!("[virtio-net] irq re-armed before loop\n"),
+        match nanami_runtime::ipc::interrupt_ack(irq_desc) {
+            Ok(()) => nanami_runtime::print!("[virtio-net] irq re-armed before loop\n"),
             Err(e) => {
                 return Err(log_device_error(
                     "[virtio-net] irq re-arm before loop failed: ",
@@ -905,8 +905,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
-    libnanami::print!("[virtio-net] step: enter service loop\n");
-    let mut pending_status = (libnanami::OS_RESPONSE_OK, 0, 0);
+    nanami_runtime::print!("[virtio-net] step: enter service loop\n");
+    let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
 
     loop {
@@ -915,7 +915,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port_desc,
                 pending_status.0,
                 pending_status.1,
@@ -932,7 +932,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port_desc) {
+            match nanami_runtime::ipc::service_receive_event(service_port_desc) {
                 Ok(e) => e,
                 Err(e) => {
                     return Err(log_device_error(
@@ -959,15 +959,15 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[virtio-net] fault event id=");
-                libnanami::print!("{}", identifier as usize);
-                libnanami::print!(" reason=");
-                libnanami::print!("{:#x}", reason as u32);
-                libnanami::print!("\n");
+                nanami_runtime::print!("[virtio-net] fault event id=");
+                nanami_runtime::print!("{}", identifier as usize);
+                nanami_runtime::print!(" reason=");
+                nanami_runtime::print!("{:#x}", reason as u32);
+                nanami_runtime::print!("\n");
                 has_pending_reply = false;
             }
         }
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

@@ -1,4 +1,4 @@
-const CAPACITY: usize = nanami_services::net::NET_ARP_MAX_ENTRIES;
+const CAPACITY: usize = nanami_client::net::NET_ARP_MAX_ENTRIES;
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -31,7 +31,7 @@ impl ArpCache {
     }
 
     pub(super) fn snapshot(&self, out: &mut [u8]) -> Option<usize> {
-        use nanami_services::net::NET_ARP_ENTRY_BYTES;
+        use nanami_client::net::NET_ARP_ENTRY_BYTES;
         let bytes = self.len * NET_ARP_ENTRY_BYTES;
         let out = out.get_mut(..bytes)?;
         for (entry, record) in self.entries[..self.len]

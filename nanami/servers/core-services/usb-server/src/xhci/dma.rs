@@ -1,4 +1,4 @@
-use libnanami::RequestError;
+use nanami_runtime::RequestError;
 
 /// Mappings deliberately have no Drop: a timeout must never free storage that
 /// a controller may still DMA into. Slot pages are reused only after Disable
@@ -15,8 +15,8 @@ impl Dma {
             .checked_add(4095)
             .ok_or(RequestError::InvalidArgument)?
             & !4095;
-        let (physical, virtual_address) = libnanami::request_dma(bytes).map_err(|error| {
-            libnanami::println!(
+        let (physical, virtual_address) = nanami_runtime::request_dma(bytes).map_err(|error| {
+            nanami_runtime::println!(
                 "[usb-server] DMA allocation bytes={:#x} failed: {}",
                 bytes,
                 error

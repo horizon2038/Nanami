@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 a9n_abi = "0.6.0"
-libnanami = { path = "../../sdk/rust/libnanami" }
-nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
 
 [profile.dev]
 panic = "abort"

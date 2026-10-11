@@ -94,9 +94,14 @@ dependencies = [
  "a9n-types",
  "fontdue",
  "nanami-gpt",
+ "nanami-uapi",
  "rlsf",
  "uefi",
 ]
+
+[[package]]
+name = "nanami-uapi"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

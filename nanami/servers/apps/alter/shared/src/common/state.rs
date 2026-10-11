@@ -13,7 +13,7 @@ mod waiters;
 #[path = "state/readiness.rs"]
 pub mod readiness;
 
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 use crate::abi::{
     ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PATH_MAX, ALTER_PROCESS_MAPPING_MAX,

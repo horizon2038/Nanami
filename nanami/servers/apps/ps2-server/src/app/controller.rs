@@ -2,11 +2,11 @@ use crate::constants::{MAX_PS2_BYTES_PER_DRAIN, PS2_DATA_PORT, PS2_STATUS_PORT};
 use crate::logging::log_request_error;
 use crate::state::{DrainState, Ps2Server};
 
-pub fn read_status(io_desc: libnanami::Word) -> Result<libnanami::Word, libnanami::RequestError> {
-    let status = libnanami::io::io_read(io_desc, PS2_STATUS_PORT, 1)?;
+pub fn read_status(io_desc: nanami_runtime::Word) -> Result<nanami_runtime::Word, nanami_runtime::RequestError> {
+    let status = nanami_runtime::io::io_read(io_desc, PS2_STATUS_PORT, 1)?;
     // An unimplemented I/O port reads as all ones; it is not buffered PS/2 data.
     if status == 0xff {
-        return Err(libnanami::RequestError::Unsupported);
+        return Err(nanami_runtime::RequestError::Unsupported);
     }
     Ok(status)
 }
@@ -29,7 +29,7 @@ pub fn drain_controller(server: &mut Ps2Server) -> DrainState {
             return DrainState::Empty;
         }
 
-        let data = match libnanami::io::io_read(server.io_desc, PS2_DATA_PORT, 1) {
+        let data = match nanami_runtime::io::io_read(server.io_desc, PS2_DATA_PORT, 1) {
             Ok(v) => v as u8,
             Err(e) => {
                 log_request_error("[ps2-server] data read failed: ", e);

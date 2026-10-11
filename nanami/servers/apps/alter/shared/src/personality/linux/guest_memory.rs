@@ -59,7 +59,7 @@ pub(super) fn read_target_memory(
     if len == 0 {
         return Ok(());
     }
-    libnanami::request_process_memory_read(pid, user_ptr, runtime.posix_shm, len)
+    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, len)
         .map_err(map_request_error)
 }
 
@@ -81,7 +81,7 @@ pub(super) fn write_target_memory_from(
     if len == 0 {
         return Ok(());
     }
-    libnanami::request_process_memory_write(pid, user_ptr, source, len).map_err(map_request_error)
+    nanami_runtime::request_process_memory_write(pid, user_ptr, source, len).map_err(map_request_error)
 }
 
 pub(super) fn write_u32_to_target(

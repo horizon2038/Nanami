@@ -28,9 +28,9 @@ services, applications, SDK crates, and reusable libraries.
 
 ## Crate Boundaries
 
-- `libnanami` contains low-level Nanami core calls, process startup, IPC
+- `nanami_runtime` contains low-level Nanami core calls, process startup, IPC
   primitives, heap support, and architecture entry code.
-- `nanami-services` contains typed service names, request constants, message
+- `nanami-client` contains typed service names, request constants, message
   layouts, and client wrappers.
 - A service implementation owns its policy and server state.
 - Alpha must not depend on application, filesystem, network, desktop, POSIX, or
@@ -40,8 +40,8 @@ services, applications, SDK crates, and reusable libraries.
 
 ## Application Entry
 
-- Native applications use `libnanami::nanami_entry!`.
-- The entry function returns `libnanami::NanamiResult`.
+- Native applications use `nanami_runtime::nanami_entry!`.
+- The entry function returns `nanami_runtime::NanamiResult`.
 - Initialize IPC TLS before issuing Nanami or service requests.
 - Initialize the heap before using allocation.
 - Return the final result and let `nanami_entry!` report exit status.

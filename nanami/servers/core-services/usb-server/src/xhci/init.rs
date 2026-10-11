@@ -10,7 +10,7 @@ impl Controller {
         irq_slot: Word,
     ) -> Result<Self, RequestError> {
         if resource.bytes < 0x20 {
-            libnanami::println!("[usb-server] xHCI BAR too short: {:#x}", resource.bytes);
+            nanami_runtime::println!("[usb-server] xHCI BAR too short: {:#x}", resource.bytes);
             return Err(RequestError::Protocol);
         }
         let base = resource.mmio;
@@ -23,7 +23,7 @@ impl Controller {
         let slots = (hcs1 as u8 as usize).min(MAX_SLOTS);
         let doorbells = unsafe { read(base, 0x14) } as usize & !3;
         let runtime = unsafe { read(base, 0x18) } as usize & !31;
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] xHCI cap={:#010x} hcs1={:#010x} hcs2={:#010x} hcc={:#010x} dboff={:#x} rtsoff={:#x} bytes={:#x}",
             cap, hcs1, hcs2, hcc, doorbells, runtime, resource.bytes
         );
@@ -35,14 +35,14 @@ impl Controller {
             || doorbells + (slots + 1) * 4 > resource.bytes
             || runtime + 0x40 > resource.bytes
         {
-            libnanami::println!("[usb-server] unsupported xHCI register layout/version");
+            nanami_runtime::println!("[usb-server] unsupported xHCI register layout/version");
             return Err(RequestError::Unsupported);
         }
         let op = base + op_offset;
         let address64 = hcc & 1 != 0;
         let page_size = unsafe { read(op, 8) };
         if page_size & 1 == 0 {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[usb-server] unsupported xHCI page-size mask={:#x}",
                 page_size
             );
@@ -108,9 +108,9 @@ impl Controller {
         controller.wait_register(USBCMD, 2, 0, 1000)?;
         controller.wait_register(USBSTS, 1 << 11, 0, 1000)?;
         if let Some(line) = resource.irq {
-            match libnanami::request_irq(line, libnanami::PROCESS_SLOT_NOTIFICATION, irq_slot) {
-                Ok(()) => controller.irq = Some(libnanami::ipc::process_slot_descriptor(irq_slot)),
-                Err(error) => libnanami::println!(
+            match nanami_runtime::request_irq(line, nanami_runtime::PROCESS_SLOT_NOTIFICATION, irq_slot) {
+                Ok(()) => controller.irq = Some(nanami_runtime::ipc::process_slot_descriptor(irq_slot)),
+                Err(error) => nanami_runtime::println!(
                     "[usb-server] IRQ {} unavailable: {}; timer polling fallback",
                     line,
                     error
@@ -141,7 +141,7 @@ impl Controller {
             let value = unsafe { read(op, offset) };
             unsafe { write(op, offset, port_controls(value) | PORT_POWER) };
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] xHCI ports={} slots={} context={} scratch={} irq={}",
             ports,
             slots,

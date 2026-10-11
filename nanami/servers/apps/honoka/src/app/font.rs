@@ -48,14 +48,14 @@ impl TextRenderer {
         log_heap_stats("[honoka] title font init begin");
         let mut glyphs = allocate_glyph_cache();
         let use_fontdue = if FONT_BYTES.is_empty() {
-            libnanami::println!("[honoka] title font missing; using bitmap fallback");
+            nanami_runtime::println!("[honoka] title font missing; using bitmap fallback");
             false
         } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
-            libnanami::println!("[honoka] title fontdue ready bytes={:#x}", FONT_BYTES.len());
+            nanami_runtime::println!("[honoka] title fontdue ready bytes={:#x}", FONT_BYTES.len());
             prerasterize_glyph_cache(&mut glyphs, &font);
             true
         } else {
-            libnanami::println!("[honoka] title fontdue parse failed; using bitmap fallback");
+            nanami_runtime::println!("[honoka] title fontdue parse failed; using bitmap fallback");
             false
         };
         log_heap_stats("[honoka] title font init end");
@@ -138,8 +138,8 @@ fn font_settings() -> FontSettings {
 }
 
 fn log_heap_stats(prefix: &str) {
-    let (used, remaining, total) = libnanami::heap::heap_stats();
-    libnanami::println!(
+    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
+    nanami_runtime::println!(
         "{} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
         prefix,
         used,

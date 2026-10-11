@@ -1,8 +1,8 @@
 //! Production ext2 transfer/cache loops; block IPC and inode mapping are mocked.
 #![allow(dead_code)]
 extern crate alloc;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::{cell::RefCell, cmp::min, ptr};
 pub use std::{print, println};
 pub type Word = usize;

@@ -1,14 +1,14 @@
-use libnanami::RequestError;
+use nanami_runtime::RequestError;
 
 use super::super::TimerSelection;
 
-pub fn usb_controller(_index: usize) -> Result<Option<libnanami::Word>, RequestError> {
+pub fn usb_controller(_index: usize) -> Result<Option<nanami_runtime::Word>, RequestError> {
     Ok(None) // PCI host resource discovery for this platform is deferred.
 }
 
 pub fn prepare_usb_controller(
     _: usize,
-) -> Result<(nanami_services::device::UsbControllerResource, u8), RequestError> {
+) -> Result<(nanami_client::device::UsbControllerResource, u8), RequestError> {
     Err(RequestError::Unsupported)
 }
 

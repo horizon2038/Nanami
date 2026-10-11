@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 /// Opt-in service-wall-time measurements; no timer IPC in normal builds.
 #[derive(Default)]
@@ -17,9 +17,9 @@ impl Profile {
     pub fn new() -> Self {
         let mut profile = Self::default();
         if option_env!("NANAMI_FB_PROFILE") == Some("1")
-            && nanami_services::registry::connect_timer_service(24).is_ok()
+            && nanami_client::registry::connect_timer_service(24).is_ok()
         {
-            profile.port = Some(libnanami::ipc::process_slot_descriptor(24));
+            profile.port = Some(nanami_runtime::ipc::process_slot_descriptor(24));
             profile.start = profile.now().unwrap_or(0);
         }
         profile
@@ -29,7 +29,7 @@ impl Profile {
         if option_env!("NANAMI_FB_PROFILE") != Some("1") {
             return None;
         }
-        let (ticks, hz) = nanami_services::timer::timer_service_monotonic_ticks(self.port?).ok()?;
+        let (ticks, hz) = nanami_client::timer::timer_service_monotonic_ticks(self.port?).ok()?;
         (hz != 0).then(|| (ticks as u128 * 1_000_000_000 / hz as u128) as u64)
     }
 
@@ -46,7 +46,7 @@ impl Profile {
         self.longest = self.longest.max(elapsed);
         let interval = after.saturating_sub(self.start);
         if interval >= 2_000_000_000 {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[fb.perf] interval-ms={} presents={} changed={} requested-kib={} written-kib={} service-us={} max-us={}",
                 interval / 1_000_000, self.presents, self.changed, self.requested / 1024,
                 self.written / 1024, self.elapsed / 1000, self.longest / 1000

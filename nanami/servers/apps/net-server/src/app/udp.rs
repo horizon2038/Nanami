@@ -11,7 +11,7 @@ pub(crate) fn emit_udp_from_session(
 ) -> Result<Word, RequestError> {
     let Some(session) = session_for(runtime, owner_id) else {
         return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
     };
     let payload_len = min(payload_len as usize, UDP_PAYLOAD_MAX);
@@ -37,7 +37,7 @@ pub(crate) fn emit_udp_from_session(
     } else {
         let _ = emit_arp_request(runtime, next_hop);
         return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
     };
 
@@ -114,10 +114,10 @@ pub(crate) fn try_queue_udp(
 
 pub(crate) fn handle_udp_recv_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
 
     let meta_offset = request.arg0;
@@ -136,14 +136,14 @@ pub(crate) fn handle_udp_recv_request(
         requested_port
     };
     let Some(entry) = runtime.udp_rx.pop_for(session.caller_id, local_port) else {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     };
 
     let copy_len = min(entry.len, max_len);
     if meta_offset + UDP_RX_META_LEN as Word > session.shm_size
         || payload_offset + copy_len as Word > session.shm_size
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
@@ -181,5 +181,5 @@ pub(crate) fn handle_udp_recv_request(
         ptr::copy_nonoverlapping(entry.payload.as_ptr(), payload, copy_len);
     }
 
-    (libnanami::OS_RESPONSE_OK, copy_len as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, copy_len as Word, 0)
 }

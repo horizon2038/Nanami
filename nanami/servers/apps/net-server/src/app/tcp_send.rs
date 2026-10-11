@@ -2,23 +2,23 @@ use super::*;
 
 pub(super) fn handle_tcp_send_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
     let Some(connection_index) =
         active_tcp_connection_index(runtime, request.identifier, request.arg3)
     else {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
 
     let payload_offset = request.arg0;
     let payload_len = request.arg1 as usize;
     let flags = (request.arg2 & 0xff) as u8;
     if payload_offset + payload_len as Word > session.shm_size {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let peer_ip = runtime.tcp_connections[connection_index].peer_ip;
@@ -28,7 +28,7 @@ pub(super) fn handle_tcp_send_request(
     } else {
         let _ = emit_arp_request(runtime, next_hop);
         // No payload or FIN was consumed. The caller retains it until ARP resolves.
-        return (nanami_services::net::NET_SERVICE_RESPONSE_WOULD_BLOCK, 0, 0);
+        return (nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK, 0, 0);
     };
 
     let mut total_payload_sent = 0usize;
@@ -60,7 +60,7 @@ pub(super) fn handle_tcp_send_request(
                     };
                 }
                 stats.tcp_tx = stats.tcp_tx.wrapping_add(1);
-                return (libnanami::OS_RESPONSE_OK, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
             }
             Err(e) => return (map_request_error_to_status(e), 0, 0),
         }
@@ -117,5 +117,5 @@ pub(super) fn handle_tcp_send_request(
         }
     }
 
-    (libnanami::OS_RESPONSE_OK, total_payload_sent as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, total_payload_sent as Word, 0)
 }

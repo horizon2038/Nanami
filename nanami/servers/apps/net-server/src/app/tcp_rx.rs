@@ -133,11 +133,11 @@ impl TcpRxQueue {
 
 pub(super) fn handle_tcp_recv_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
     let meta_offset = request.arg0;
     let payload_offset = request.arg1;
@@ -147,10 +147,10 @@ pub(super) fn handle_tcp_recv_request(
         || payload_offset > session.shm_size
         || max_len > session.shm_size - payload_offset
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if max_len == 0 {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
     let payload = unsafe {
         core::slice::from_raw_parts_mut((session.shm_local + payload_offset) as *mut u8, max_len)
@@ -179,7 +179,7 @@ pub(super) fn handle_tcp_recv_request(
             // If ARP or this ACK is lost, the peer's zero-window probe receives
             // the current window as well; it is not dependent on new app TX.
         }
-        return (libnanami::OS_RESPONSE_OK, len, conn.connection_id);
+        return (nanami_runtime::OS_RESPONSE_OK, len, conn.connection_id);
     }
     for conn in &mut runtime.tcp_connections {
         if conn.active
@@ -192,8 +192,8 @@ pub(super) fn handle_tcp_recv_request(
             if request.arg3 == 0 {
                 conn.eof_pending = false;
             }
-            return (libnanami::OS_RESPONSE_OK, 0, conn.connection_id);
+            return (nanami_runtime::OS_RESPONSE_OK, 0, conn.connection_id);
         }
     }
-    (libnanami::OS_RESPONSE_OK, 0, 0)
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }

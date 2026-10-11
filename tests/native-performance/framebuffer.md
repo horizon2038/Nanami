@@ -58,9 +58,9 @@ machine-code checks.
 ## Physical-machine measurements
 
 Build with `NANAMI_FB_PROFILE=1` in the environment, retaining the normal image
-options and setting `ROOTFS_REBUILD=1` so the new fb-server reaches rootfs. For
-example, prefix the existing `make image` / `make run` command with
-`NANAMI_FB_PROFILE=1 ROOTFS_REBUILD=1`.
+options and setting `--rebuild-rootfs` so the new fb-server reaches rootfs. For
+example, prefix the existing `cargo xtask build --rebuild-rootfs` / `cargo xtask run` command with
+`NANAMI_FB_PROFILE=1` (and pass `--rebuild-rootfs` to build).
 
 After boot, `unchanged-pixel cache bytes=...` confirms whether the shadow exists.
 `[fb.perf]` reports a batch approximately every two seconds **when presents arrive**:

@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 use crate::terminal::Terminal;
 use crate::{append_bytes, append_decimal, copy_bytes, COLS};
@@ -99,12 +99,12 @@ impl ForegroundApp {
         if self.connected {
             return true;
         }
-        if nanami_services::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE).is_err() {
+        if nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE).is_err() {
             out.push_bytes(b"terminal-service unavailable");
             return false;
         }
-        self.terminal_port = libnanami::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
-        match nanami_services::terminal::terminal_attach_shared_memory(
+        self.terminal_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
+        match nanami_client::terminal::terminal_attach_shared_memory(
             self.terminal_port,
             TERMINAL_SHM_BYTES,
         ) {
@@ -120,17 +120,17 @@ impl ForegroundApp {
                 return false;
             }
         }
-        match nanami_services::terminal::terminal_create(
+        match nanami_client::terminal::terminal_create(
             self.terminal_port,
             self.terminal.cols() as Word,
             self.terminal.rows() as Word,
         ) {
             Ok(id) => {
                 self.terminal_id = id;
-                if let Err(error) = nanami_services::terminal::terminal_attach_output_notification(
+                if let Err(error) = nanami_client::terminal::terminal_attach_output_notification(
                     self.terminal_port,
                     self.terminal_id,
-                    libnanami::PROCESS_SLOT_NOTIFICATION,
+                    nanami_runtime::PROCESS_SLOT_NOTIFICATION,
                 ) {
                     out.push_line(format_request_error_line(
                         b"terminal notification attach failed ",
@@ -159,8 +159,8 @@ impl ForegroundApp {
         self.wake_reader();
         self.cleanup_alter_terminal_processes();
         match self.lifecycle_port().and_then(|port| {
-            nanami_services::exec::exec_process_kill(port, pid, 1)?;
-            nanami_services::exec::exec_process_reap(port, pid)?;
+            nanami_client::exec::exec_process_kill(port, pid, 1)?;
+            nanami_client::exec::exec_process_reap(port, pid)?;
             Ok(())
         }) {
             Ok(()) => {
@@ -184,11 +184,11 @@ impl ForegroundApp {
         self.wake_reader();
         self.cleanup_alter_terminal_processes();
         if let Ok(port) = self.lifecycle_port() {
-            let _ = nanami_services::exec::exec_process_kill(port, pid, 1);
-            let _ = nanami_services::exec::exec_process_reap(port, pid);
+            let _ = nanami_client::exec::exec_process_kill(port, pid, 1);
+            let _ = nanami_client::exec::exec_process_reap(port, pid);
         } else {
-            let _ = libnanami::request_process_kill(pid, 1);
-            let _ = libnanami::request_process_reap(pid);
+            let _ = nanami_runtime::request_process_kill(pid, 1);
+            let _ = nanami_runtime::request_process_reap(pid);
         }
         self.active_pid = 0;
         self.reset_terminal_session_state();
@@ -203,11 +203,11 @@ impl ForegroundApp {
     }
 
     fn cleanup_alter_terminal_processes_for_service(&self, service_name: &str) {
-        if libnanami::connect_service_by_name(service_name, SLOT_ALTER_SERVICE).is_err() {
+        if nanami_runtime::connect_service_by_name(service_name, SLOT_ALTER_SERVICE).is_err() {
             return;
         }
-        let port = libnanami::ipc::process_slot_descriptor(SLOT_ALTER_SERVICE);
-        let _ = libnanami::call_service_port(
+        let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_ALTER_SERVICE);
+        let _ = nanami_runtime::call_service_port(
             port,
             ALTER_REQUEST_KILL_TERMINAL,
             self.terminal_id,
@@ -237,7 +237,7 @@ impl ForegroundApp {
             );
         }
         matches!(
-            nanami_services::terminal::terminal_write_input(
+            nanami_client::terminal::terminal_write_input(
                 self.terminal_port,
                 self.terminal_id,
                 0,
@@ -250,13 +250,13 @@ impl ForegroundApp {
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.terminal.resize(cols, rows);
         if self.connected {
-            if let Err(error) = nanami_services::terminal::terminal_set_size(
+            if let Err(error) = nanami_client::terminal::terminal_set_size(
                 self.terminal_port,
                 self.terminal_id,
                 self.terminal.cols(),
                 self.terminal.rows(),
             ) {
-                libnanami::println!("[shell] terminal resize failed: {}", error);
+                nanami_runtime::println!("[shell] terminal resize failed: {}", error);
             }
         }
     }
@@ -313,7 +313,7 @@ impl ForegroundApp {
     }
 
     fn refill_pending(&mut self) -> Result<bool, ()> {
-        let bytes = nanami_services::terminal::terminal_read_output(
+        let bytes = nanami_client::terminal::terminal_read_output(
             self.terminal_port,
             self.terminal_id,
             0,
@@ -350,7 +350,7 @@ impl ForegroundApp {
             Err(_) => return,
         };
         let (exited, exit_status) =
-            match nanami_services::exec::exec_process_status(lifecycle_port, pid) {
+            match nanami_client::exec::exec_process_status(lifecycle_port, pid) {
                 Ok(status) => status,
                 Err(_) => return,
             };
@@ -362,8 +362,8 @@ impl ForegroundApp {
         }
         self.active_pid = 0;
         // Keep the final screen until Shell has copied it into scrollback.
-        if nanami_services::exec::exec_process_reap(lifecycle_port, pid).is_err() {
-            let _ = libnanami::request_process_reap(pid);
+        if nanami_client::exec::exec_process_reap(lifecycle_port, pid).is_err() {
+            let _ = nanami_runtime::request_process_reap(pid);
         }
         let mut line = [0u8; COLS];
         let mut pos = append_bytes(&mut line, 0, b"exited status=");
@@ -376,8 +376,8 @@ impl ForegroundApp {
         if self.lifecycle_port != 0 {
             return Ok(self.lifecycle_port);
         }
-        nanami_services::registry::connect_exec_service(SLOT_EXEC_SERVICE)?;
-        Ok(libnanami::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE))
+        nanami_client::registry::connect_exec_service(SLOT_EXEC_SERVICE)?;
+        Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE))
     }
 
     fn reset_terminal_session_state(&mut self) {
@@ -385,18 +385,18 @@ impl ForegroundApp {
         if !self.connected || self.terminal_id == 0 {
             return;
         }
-        let _ = nanami_services::terminal::terminal_clear(
+        let _ = nanami_client::terminal::terminal_clear(
             self.terminal_port,
             self.terminal_id,
-            nanami_services::terminal::TERMINAL_CLEAR_INPUT
-                | nanami_services::terminal::TERMINAL_CLEAR_OUTPUT,
+            nanami_client::terminal::TERMINAL_CLEAR_INPUT
+                | nanami_client::terminal::TERMINAL_CLEAR_OUTPUT,
         );
-        let _ = nanami_services::terminal::terminal_set_echo(
+        let _ = nanami_client::terminal::terminal_set_echo(
             self.terminal_port,
             self.terminal_id,
             true,
         );
-        let _ = nanami_services::terminal::terminal_set_output_crlf(
+        let _ = nanami_client::terminal::terminal_set_output_crlf(
             self.terminal_port,
             self.terminal_id,
             true,
@@ -415,14 +415,14 @@ impl ForegroundApp {
     fn drain_terminal_ring(&mut self, input: bool) {
         loop {
             let bytes = if input {
-                nanami_services::terminal::terminal_read_input(
+                nanami_client::terminal::terminal_read_input(
                     self.terminal_port,
                     self.terminal_id,
                     0,
                     256,
                 )
             } else {
-                nanami_services::terminal::terminal_read_output(
+                nanami_client::terminal::terminal_read_output(
                     self.terminal_port,
                     self.terminal_id,
                     0,
@@ -444,7 +444,7 @@ impl ForegroundApp {
         unsafe {
             core::ptr::write(self.terminal_shm as *mut u8, b'\n');
         }
-        let _ = nanami_services::terminal::terminal_write_input(
+        let _ = nanami_client::terminal::terminal_write_input(
             self.terminal_port,
             self.terminal_id,
             0,

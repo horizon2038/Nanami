@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const PCI_CFG_ADDR_PORT: Word = 0x0cf8;
 pub const PCI_CFG_DATA_PORT: Word = 0x0cfc;

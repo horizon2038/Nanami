@@ -8,8 +8,8 @@ mod profile;
 use presentation::present_shared_framebuffer;
 
 use core::sync::atomic::{fence, Ordering};
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const PAGE_SIZE: Word = 4096;
@@ -57,23 +57,23 @@ struct DisplayState {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[fb-server] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[fb-server] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    if let Err(e) = libnanami::ipc::init_ipc_tls() {
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    if let Err(e) = nanami_runtime::ipc::init_ipc_tls() {
         return Err(log_error("[fb-server] ipc tls init failed: ", e));
     }
 
-    if let Err(e) = nanami_services::registry::register_display_service() {
+    if let Err(e) = nanami_client::registry::register_display_service() {
         return Err(log_error("[fb-server] service register failed: ", e));
     }
-    libnanami::print!("[fb-server] service registered: display_service\n");
+    nanami_runtime::print!("[fb-server] service registered: display_service\n");
 
-    let (fb_phys, fb_size) = match libnanami::request_initial_framebuffer_information(
-        libnanami::FRAMEBUFFER_INFORMATION_REGION,
+    let (fb_phys, fb_size) = match nanami_runtime::request_initial_framebuffer_information(
+        nanami_runtime::FRAMEBUFFER_INFORMATION_REGION,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -84,8 +84,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let (fb_width, fb_height) = match libnanami::request_initial_framebuffer_information(
-        libnanami::FRAMEBUFFER_INFORMATION_GEOMETRY,
+    let (fb_width, fb_height) = match nanami_runtime::request_initial_framebuffer_information(
+        nanami_runtime::FRAMEBUFFER_INFORMATION_GEOMETRY,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -96,8 +96,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let (fb_stride, fb_bpp) = match libnanami::request_initial_framebuffer_information(
-        libnanami::FRAMEBUFFER_INFORMATION_FORMAT,
+    let (fb_stride, fb_bpp) = match nanami_runtime::request_initial_framebuffer_information(
+        nanami_runtime::FRAMEBUFFER_INFORMATION_FORMAT,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -108,8 +108,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let (display_id, color_info) = match libnanami::request_initial_framebuffer_information(
-        libnanami::FRAMEBUFFER_INFORMATION_COLOR_AND_ID,
+    let (display_id, color_info) = match nanami_runtime::request_initial_framebuffer_information(
+        nanami_runtime::FRAMEBUFFER_INFORMATION_COLOR_AND_ID,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -134,7 +134,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     let fb_offset = fb_phys - fb_base;
     let map_size = align_up(fb_offset.saturating_add(fb_size), PAGE_SIZE);
 
-    let (_, mapped_base) = match libnanami::request_mmio(fb_base, map_size) {
+    let (_, mapped_base) = match nanami_runtime::request_mmio(fb_base, map_size) {
         Ok(v) => v,
         Err(e) => return Err(log_error("[fb-server] framebuffer mmio map failed: ", e)),
     };
@@ -142,7 +142,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     let mapped_fb = mapped_base.saturating_add(fb_offset);
     let framebuffer_bytes = fb_size;
     let stride_bytes = normalize_stride_bytes(fb_stride, fb_width, fb_bpp)
-        .ok_or(libnanami::NanamiError::INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::NanamiError::INVALID_ARGUMENT)?;
     let visible_bytes = stride_bytes.checked_mul(fb_height);
     if visible_bytes.is_none_or(|bytes| bytes > framebuffer_bytes) {
         return Err(log_error(
@@ -166,15 +166,15 @@ fn nanami_main() -> libnanami::NanamiResult {
         framebuffer_bytes,
     };
 
-    libnanami::print!("[fb-server] framebuffer mapped paddr=");
-    libnanami::print!("{:#x}", fb_phys);
-    libnanami::print!(" vaddr=");
-    libnanami::print!("{:#x}", mapped_fb);
-    libnanami::print!(" bytes=");
-    libnanami::print!("{:#x}", framebuffer_bytes);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[fb-server] framebuffer mapped paddr=");
+    nanami_runtime::print!("{:#x}", fb_phys);
+    nanami_runtime::print!(" vaddr=");
+    nanami_runtime::print!("{:#x}", mapped_fb);
+    nanami_runtime::print!(" bytes=");
+    nanami_runtime::print!("{:#x}", framebuffer_bytes);
+    nanami_runtime::print!("\n");
 
-    libnanami::println!(
+    nanami_runtime::println!(
         "[fb-server] resolution={}x{}, R={}:{}, G={}:{}, B={}:{}",
         screen_info.width,
         screen_info.height,
@@ -186,8 +186,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         screen_info.blue_position + screen_info.blue_size
     );
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
-    let mut pending_status = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
 
     fill_screen(&screen_info, mapped_fb);
@@ -202,7 +202,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         },
         profile: profile::Profile::new(),
     };
-    libnanami::println!(
+    nanami_runtime::println!(
         "[fb-server] unchanged-pixel cache bytes={:#x}",
         if display.shadow.is_some() {
             visible_bytes.unwrap()
@@ -214,7 +214,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     loop {
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending_status.0,
                 pending_status.1,
@@ -224,7 +224,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 Err(e) => return Err(log_error("[fb-server] reply_receive failed: ", e)),
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port) {
+            match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(e) => e,
                 Err(e) => return Err(log_error("[fb-server] receive failed: ", e)),
             }
@@ -242,11 +242,11 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[fb-server] fault id=");
-                libnanami::print!("{}", identifier);
-                libnanami::print!(" reason=");
-                libnanami::print!("{:#x}", reason);
-                libnanami::print!("\n");
+                nanami_runtime::print!("[fb-server] fault id=");
+                nanami_runtime::print!("{}", identifier);
+                nanami_runtime::print!(" reason=");
+                nanami_runtime::print!("{:#x}", reason);
+                nanami_runtime::print!("\n");
             }
         }
     }
@@ -270,27 +270,27 @@ fn fill_screen(screen_info: &ScreenInfo, mapped_address: usize) {
 
 fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {
+        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {
             let detail0 = pack_screen_info_detail0(&display.screen);
             let detail1 = pack_screen_info_detail1(&display.screen);
-            (libnanami::OS_RESPONSE_OK, detail0, detail1)
+            (nanami_runtime::OS_RESPONSE_OK, detail0, detail1)
         }
-        nanami_services::gfx::DISPLAY_SERVICE_REQUEST_PREPARE_SHARED_FRAMEBUFFER => {
+        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_PREPARE_SHARED_FRAMEBUFFER => {
             if request.identifier == 0 {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
             if display.shared.owner_pid == request.identifier {
                 return (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     display.shared.peer_vaddr,
                     display.shared.bytes,
                 );
             }
             if display.shared.owner_pid != 0 {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
 
-            match libnanami::request_shared_memory(
+            match nanami_runtime::request_shared_memory(
                 request.identifier,
                 display.screen.framebuffer_bytes,
             ) {
@@ -308,14 +308,14 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
                         peer_vaddr,
                         bytes: display.screen.framebuffer_bytes,
                     };
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[fb-server] shared framebuffer ready pid={} vaddr={:#x} bytes={:#x}",
                         request.identifier,
                         peer_vaddr,
                         display.screen.framebuffer_bytes
                     );
                     (
-                        libnanami::OS_RESPONSE_OK,
+                        nanami_runtime::OS_RESPONSE_OK,
                         peer_vaddr,
                         display.screen.framebuffer_bytes,
                     )
@@ -323,19 +323,19 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
                 Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
-        nanami_services::gfx::DISPLAY_SERVICE_REQUEST_PRESENT => {
+        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_PRESENT => {
             let before = display.profile.now();
             let result =
                 present_shared_framebuffer(display, request.identifier, request.arg0, request.arg1);
             match result {
                 Ok((pixels, written)) => {
                     display.profile.record(before, pixels, written);
-                    (libnanami::OS_RESPONSE_OK, pixels, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, pixels, 0)
                 }
                 Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -394,20 +394,20 @@ fn normalize_stride_bytes(stride: Word, width: Word, bits_per_pixel: Word) -> Op
 
 fn map_request_error_to_status(err: RequestError) -> Word {
     match err {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(code) => code,
     }
 }
 
-fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

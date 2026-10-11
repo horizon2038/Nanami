@@ -1,7 +1,7 @@
 use super::*;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use libnanami;
+use nanami_runtime;
 
 const ICMP_ECHO_REQUEST: u8 = 8;
 const ICMP_ECHO_REPLY: u8 = 0;
@@ -10,13 +10,13 @@ const ICMP_LOG_EVERY: usize = 16;
 static ICMP_RX_LOG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn write_ipv4(ip: [u8; 4]) {
-    libnanami::print!("{}", ip[0] as usize);
-    libnanami::debug::print_char('.');
-    libnanami::print!("{}", ip[1] as usize);
-    libnanami::debug::print_char('.');
-    libnanami::print!("{}", ip[2] as usize);
-    libnanami::debug::print_char('.');
-    libnanami::print!("{}", ip[3] as usize);
+    nanami_runtime::print!("{}", ip[0] as usize);
+    nanami_runtime::debug::print_char('.');
+    nanami_runtime::print!("{}", ip[1] as usize);
+    nanami_runtime::debug::print_char('.');
+    nanami_runtime::print!("{}", ip[2] as usize);
+    nanami_runtime::debug::print_char('.');
+    nanami_runtime::print!("{}", ip[3] as usize);
 }
 
 fn log_icmp_packet(src_ip: [u8; 4], dst_ip: [u8; 4], icmp: &[u8]) {
@@ -33,21 +33,21 @@ fn log_icmp_packet(src_ip: [u8; 4], dst_ip: [u8; 4], icmp: &[u8]) {
         0
     };
 
-    libnanami::print!("[net-server][icmp] rx src=");
+    nanami_runtime::print!("[net-server][icmp] rx src=");
     write_ipv4(src_ip);
-    libnanami::print!(" dst=");
+    nanami_runtime::print!(" dst=");
     write_ipv4(dst_ip);
-    libnanami::print!(" type=");
-    libnanami::print!("{}", icmp_type as usize);
-    libnanami::print!(" code=");
-    libnanami::print!("{}", icmp_code as usize);
-    libnanami::print!(" id=");
-    libnanami::print!("{}", identifier as usize);
-    libnanami::print!(" seq=");
-    libnanami::print!("{}", sequence as usize);
-    libnanami::print!(" len=");
-    libnanami::print!("{}", icmp.len());
-    libnanami::print!("\n");
+    nanami_runtime::print!(" type=");
+    nanami_runtime::print!("{}", icmp_type as usize);
+    nanami_runtime::print!(" code=");
+    nanami_runtime::print!("{}", icmp_code as usize);
+    nanami_runtime::print!(" id=");
+    nanami_runtime::print!("{}", identifier as usize);
+    nanami_runtime::print!(" seq=");
+    nanami_runtime::print!("{}", sequence as usize);
+    nanami_runtime::print!(" len=");
+    nanami_runtime::print!("{}", icmp.len());
+    nanami_runtime::print!("\n");
 }
 
 fn should_log_icmp() -> bool {
@@ -152,7 +152,7 @@ pub(crate) fn emit_icmp_echo_from_session(
 ) -> Result<Word, RequestError> {
     let Some(index) = session_index(runtime, owner_id) else {
         return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
     };
     let session = runtime.sessions[index];
@@ -194,7 +194,7 @@ pub(crate) fn emit_icmp_echo_from_session(
         write_u16_be(&mut payload[2..4], checksum);
         runtime.icmp_rx.push(entry);
         if session.rx_notification != 0 {
-            let _ = libnanami::ipc::notification_notify(session.rx_notification);
+            let _ = nanami_runtime::ipc::notification_notify(session.rx_notification);
         }
         return Ok(payload_len);
     }
@@ -204,7 +204,7 @@ pub(crate) fn emit_icmp_echo_from_session(
     } else {
         let _ = emit_arp_request(runtime, next_hop);
         return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
         ));
     };
 
@@ -263,22 +263,22 @@ pub(crate) fn emit_icmp_echo_from_session(
 
 pub(crate) fn handle_icmp_recv_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
     let Some(entry) = runtime
         .icmp_rx
         .pop_for(request.identifier, request.arg3 as u16)
     else {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     };
     let copy_len = min(entry.len, request.arg2 as usize);
     if request.arg0 + ICMP_RX_META_LEN as Word > session.shm_size
         || request.arg1 + copy_len as Word > session.shm_size
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     unsafe {
@@ -296,5 +296,5 @@ pub(crate) fn handle_icmp_recv_request(
         );
         ptr::copy_nonoverlapping(entry.payload.as_ptr(), payload, copy_len);
     }
-    (libnanami::OS_RESPONSE_OK, copy_len as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, copy_len as Word, 0)
 }

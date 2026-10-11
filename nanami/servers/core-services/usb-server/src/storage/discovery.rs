@@ -54,9 +54,9 @@ impl Storage {
             Err(_) => 2,
         };
         let selected =
-            nanami_services::device::select_storage_root_on_port(discovery.manager, roots);
+            nanami_client::device::select_storage_root_on_port(discovery.manager, roots);
         if matches!((&probed, &selected), (Ok(None), Ok(false))) {
-            libnanami::print!("[usb-server] no root yet; watching storage connections\n");
+            nanami_runtime::print!("[usb-server] no root yet; watching storage connections\n");
             return Ok(());
         }
         // Keep this finished even if the mounted disk later detaches. Reusing
@@ -66,11 +66,11 @@ impl Storage {
             (Ok(Some(root)), Ok(true)) => {
                 self.root = Some(root);
                 // usb-service and block-device deliberately alias the same port.
-                nanami_services::registry::register_block_device()?;
-                libnanami::print!("[usb-server] service registered: block-device\n");
+                nanami_client::registry::register_block_device()?;
+                nanami_runtime::print!("[usb-server] service registered: block-device\n");
             }
             (Err(error), _) | (_, Err(error)) => {
-                libnanami::println!("[usb-server] root probe/selection failed: {}", error);
+                nanami_runtime::println!("[usb-server] root probe/selection failed: {}", error);
             }
             _ => {}
         }

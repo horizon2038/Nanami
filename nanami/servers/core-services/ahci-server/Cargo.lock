@@ -22,9 +22,9 @@ dependencies = [
 name = "ahci_server"
 version = "0.1.0"
 dependencies = [
- "libnanami",
+ "nanami-client",
  "nanami-gpt",
- "nanami-services",
+ "nanami-runtime",
 ]
 
 [[package]]
@@ -52,12 +52,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libnanami"
+name = "nanami-client"
 version = "0.1.0"
 dependencies = [
- "a9n-types",
  "a9n_abi",
- "rlsf",
+ "nanami-runtime",
+ "nanami-uapi",
 ]
 
 [[package]]
@@ -65,12 +65,18 @@ name = "nanami-gpt"
 version = "0.1.0"
 
 [[package]]
-name = "nanami-services"
+name = "nanami-runtime"
 version = "0.1.0"
 dependencies = [
+ "a9n-types",
  "a9n_abi",
- "libnanami",
+ "nanami-uapi",
+ "rlsf",
 ]
+
+[[package]]
+name = "nanami-uapi"
+version = "0.1.0"
 
 [[package]]
 name = "rlsf"

@@ -18,8 +18,8 @@ zig cc -target x86_64-linux-musl -O2 -static -Wl,--image-base=0x400000 \
   tests/alter-linux/framebuffer.c -o out/fb-size-test
 ```
 
-Add `./out/fb-size-test` to the existing `EXTRA_LINUX_BINS` list and rebuild with
-`ROOTFS_REBUILD=1`. Retain the usual Doom, WAD, bash and busybox files. Then run:
+Add `./out/fb-size-test` to the existing repeatable `--linux-bin` options list and rebuild with
+`--rebuild-rootfs`. Retain the usual Doom, WAD, bash and busybox files. Then run:
 
 ```sh
 python3 tests/usb/qemu-hid.py --image spencer/out/x86_64-pc99-release/spencer.img \

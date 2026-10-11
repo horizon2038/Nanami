@@ -156,6 +156,7 @@ name = "mmio-requests"
 path = "mmio-requests.rs"
 
 [dependencies]
+nanami-uapi = { path = "../../nanami/servers/uapi" }
 nanami-gpt = { path = "../../nanami/servers/libs/gpt" }
 a9n-types = "0.3.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }

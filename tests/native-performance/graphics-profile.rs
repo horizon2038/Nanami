@@ -1,6 +1,6 @@
 //! Exercise the real opt-in compositor profiler, not an alternate implementation.
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::cell::RefCell;
 type Word = usize;
 

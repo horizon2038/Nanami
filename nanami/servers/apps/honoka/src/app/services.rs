@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::constants::{
     CONNECT_RETRY_MS, SLOT_DISPLAY_SERVICE, SLOT_EXEC_SERVICE, SLOT_INPUT_SERVICE,
@@ -28,30 +28,30 @@ const HONOKA_THEME_SUFFIX: &[u8] = b".theme";
 const HONOKA_THEME_PATH_MAX: usize = 128;
 const HONOKA_CONFIG_MAX: usize = 256;
 
-pub fn connect_services() -> Result<ServicePorts, libnanami::NanamiError> {
-    libnanami::println!("[honoka] connect: timer-service");
+pub fn connect_services() -> Result<ServicePorts, nanami_runtime::NanamiError> {
+    nanami_runtime::println!("[honoka] connect: timer-service");
     let timer = connect_timer_service();
-    libnanami::println!("[honoka] connect: display_service");
+    nanami_runtime::println!("[honoka] connect: display_service");
     let display = connect_display_service(timer)?;
-    libnanami::println!("[honoka] connect: input-service");
+    nanami_runtime::println!("[honoka] connect: input-service");
     let input = connect_input_service(timer)?;
-    libnanami::println!("[honoka] connect: rtc-service");
+    nanami_runtime::println!("[honoka] connect: rtc-service");
     let rtc = connect_rtc_service(timer)?;
-    libnanami::println!("[honoka] connect: exec-service");
+    nanami_runtime::println!("[honoka] connect: exec-service");
     let exec = connect_exec_service(timer)?;
     // Registration precedes system-manager's receive loop. An attach here
     // can wait for the remaining system/session images to finish loading.
-    libnanami::println!("[honoka] connect: exec shm attach");
-    let (exec_shm, exec_shm_size) = nanami_services::exec::exec_attach_shared_memory(
+    nanami_runtime::println!("[honoka] connect: exec shm attach");
+    let (exec_shm, exec_shm_size) = nanami_client::exec::exec_attach_shared_memory(
         exec,
-        nanami_services::exec::EXEC_DEFAULT_SHM_BYTES,
+        nanami_client::exec::EXEC_DEFAULT_SHM_BYTES,
     )
     .map_err(|e| log_error("[honoka] exec shm attach failed: ", e))?;
-    libnanami::println!("[honoka] connect: vfs-service");
+    nanami_runtime::println!("[honoka] connect: vfs-service");
     let vfs = connect_vfs_service(timer)?;
-    libnanami::println!("[honoka] connect: vfs shm attach");
+    nanami_runtime::println!("[honoka] connect: vfs shm attach");
     let (vfs_shm, vfs_shm_size) =
-        nanami_services::vfs::vfs_attach_shared_memory(vfs, VFS_SHM_BYTES)
+        nanami_client::vfs::vfs_attach_shared_memory(vfs, VFS_SHM_BYTES)
             .map_err(|e| log_error("[honoka] vfs shm attach failed: ", e))?;
 
     Ok(ServicePorts {
@@ -71,7 +71,7 @@ pub fn connect_services() -> Result<ServicePorts, libnanami::NanamiError> {
 pub fn load_honoka_theme(
     ports: &ServicePorts,
     output: &mut [u8],
-) -> Result<usize, libnanami::NanamiError> {
+) -> Result<usize, nanami_runtime::NanamiError> {
     let mut config = [0u8; HONOKA_CONFIG_MAX];
     let config_len = read_vfs_file(
         ports.vfs,
@@ -81,13 +81,13 @@ pub fn load_honoka_theme(
         &mut config,
     )?;
     let theme_name = configured_theme_name(&config[..config_len])
-        .ok_or(libnanami::NanamiError::INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::NanamiError::INVALID_ARGUMENT)?;
     let mut path = [0u8; HONOKA_THEME_PATH_MAX];
     let path_len = HONOKA_THEME_DIRECTORY
         .len()
         .checked_add(theme_name.len())
         .filter(|len| *len <= path.len())
-        .ok_or(libnanami::NanamiError::INVALID_ARGUMENT)?;
+        .ok_or(nanami_runtime::NanamiError::INVALID_ARGUMENT)?;
     path[..HONOKA_THEME_DIRECTORY.len()].copy_from_slice(HONOKA_THEME_DIRECTORY);
     path[HONOKA_THEME_DIRECTORY.len()..path_len].copy_from_slice(theme_name);
     read_vfs_file(
@@ -105,28 +105,28 @@ fn read_vfs_file(
     vfs_shm_size: Word,
     path: &[u8],
     output: &mut [u8],
-) -> Result<usize, libnanami::NanamiError> {
+) -> Result<usize, nanami_runtime::NanamiError> {
     if path.is_empty() || path.len() > VFS_READ_OFFSET || VFS_READ_OFFSET >= vfs_shm_size as usize {
-        return Err(libnanami::NanamiError::INVALID_ARGUMENT);
+        return Err(nanami_runtime::NanamiError::INVALID_ARGUMENT);
     }
     unsafe {
         core::ptr::copy_nonoverlapping(path.as_ptr(), vfs_shm as *mut u8, path.len());
     }
-    let handle = nanami_services::vfs::vfs_open(vfs_port, 0, path.len() as Word)
+    let handle = nanami_client::vfs::vfs_open(vfs_port, 0, path.len() as Word)
         .map_err(|e| log_error("[honoka] theme open failed: ", e))?;
     let read_capacity = output.len().min(vfs_shm_size as usize - VFS_READ_OFFSET);
-    let read_result = nanami_services::vfs::vfs_read(
+    let read_result = nanami_client::vfs::vfs_read(
         vfs_port,
         handle,
         0,
         read_capacity as Word,
         VFS_READ_OFFSET as Word,
     );
-    let close_result = nanami_services::vfs::vfs_close(vfs_port, handle);
+    let close_result = nanami_client::vfs::vfs_close(vfs_port, handle);
     let bytes = read_result.map_err(|e| log_error("[honoka] theme read failed: ", e))? as usize;
     close_result.map_err(|e| log_error("[honoka] theme close failed: ", e))?;
     if bytes == 0 || bytes > read_capacity {
-        return Err(libnanami::NanamiError::INVALID_ARGUMENT);
+        return Err(nanami_runtime::NanamiError::INVALID_ARGUMENT);
     }
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -178,40 +178,40 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
     value
 }
 
-pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, libnanami::NanamiError> {
-    let (detail0, detail1) = nanami_services::gfx::display_service_get_screen_info(display_port)
+pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, nanami_runtime::NanamiError> {
+    let (detail0, detail1) = nanami_client::gfx::display_service_get_screen_info(display_port)
         .map_err(|e| log_error("[honoka] get screen info failed: ", e))?;
     let screen = parse_screen_info(detail0, detail1);
 
     if screen.bits_per_pixel != 32 {
-        libnanami::println!("[honoka] unsupported bpp={}", screen.bits_per_pixel);
-        return Err(libnanami::NanamiError::UNSUPPORTED);
+        nanami_runtime::println!("[honoka] unsupported bpp={}", screen.bits_per_pixel);
+        return Err(nanami_runtime::NanamiError::UNSUPPORTED);
     }
 
     let (framebuffer_vaddr, framebuffer_size) =
-        nanami_services::gfx::display_service_prepare_shared_framebuffer(display_port)
+        nanami_client::gfx::display_service_prepare_shared_framebuffer(display_port)
             .map_err(|e| log_error("[honoka] prepare shared framebuffer failed: ", e))?;
 
     Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen)
 }
 
-pub fn subscribe_input(input_port: Word) -> Result<(Word, Word), libnanami::NanamiError> {
-    nanami_services::input::input_service_subscribe_shared(
+pub fn subscribe_input(input_port: Word) -> Result<(Word, Word), nanami_runtime::NanamiError> {
+    nanami_client::input::input_service_subscribe_shared(
         input_port,
-        nanami_services::input::INPUT_SUBSCRIBE_ALL,
+        nanami_client::input::INPUT_SUBSCRIBE_ALL,
     )
     .map_err(|e| log_error("[honoka] input subscribe failed: ", e))
 }
 
 pub fn sleep_ms(timer_port: Word, milliseconds: Word) {
-    let _ = nanami_services::timer::timer_service_sleep_milliseconds(timer_port, milliseconds);
+    let _ = nanami_client::timer::timer_service_sleep_milliseconds(timer_port, milliseconds);
 }
 
-fn connect_display_service(timer_port: Word) -> Result<Word, libnanami::NanamiError> {
+fn connect_display_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
-        match nanami_services::registry::connect_display_service(SLOT_DISPLAY_SERVICE) {
+        match nanami_client::registry::connect_display_service(SLOT_DISPLAY_SERVICE) {
             Ok(()) => {
-                return Ok(libnanami::ipc::process_slot_descriptor(
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
                     SLOT_DISPLAY_SERVICE,
                 ))
             }
@@ -223,10 +223,10 @@ fn connect_display_service(timer_port: Word) -> Result<Word, libnanami::NanamiEr
     }
 }
 
-fn connect_input_service(timer_port: Word) -> Result<Word, libnanami::NanamiError> {
+fn connect_input_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
-        match nanami_services::registry::connect_input_service(SLOT_INPUT_SERVICE) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE)),
+        match nanami_client::registry::connect_input_service(SLOT_INPUT_SERVICE) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE)),
             Err(e) => {
                 log_request_error("[honoka] waiting input-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -235,10 +235,10 @@ fn connect_input_service(timer_port: Word) -> Result<Word, libnanami::NanamiErro
     }
 }
 
-fn connect_rtc_service(timer_port: Word) -> Result<Word, libnanami::NanamiError> {
+fn connect_rtc_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
-        match nanami_services::registry::connect_rtc_service(SLOT_RTC_SERVICE) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_RTC_SERVICE)),
+        match nanami_client::registry::connect_rtc_service(SLOT_RTC_SERVICE) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_RTC_SERVICE)),
             Err(e) => {
                 log_request_error("[honoka] waiting rtc-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -247,10 +247,10 @@ fn connect_rtc_service(timer_port: Word) -> Result<Word, libnanami::NanamiError>
     }
 }
 
-fn connect_exec_service(timer_port: Word) -> Result<Word, libnanami::NanamiError> {
+fn connect_exec_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
-        match nanami_services::registry::connect_exec_service(SLOT_EXEC_SERVICE) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE)),
+        match nanami_client::registry::connect_exec_service(SLOT_EXEC_SERVICE) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE)),
             Err(e) => {
                 log_request_error("[honoka] waiting exec-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -259,10 +259,10 @@ fn connect_exec_service(timer_port: Word) -> Result<Word, libnanami::NanamiError
     }
 }
 
-fn connect_vfs_service(timer_port: Word) -> Result<Word, libnanami::NanamiError> {
+fn connect_vfs_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
-        match nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
-            Ok(()) => return Ok(libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE)),
+        match nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
+            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE)),
             Err(e) => {
                 log_request_error("[honoka] waiting vfs-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -273,8 +273,8 @@ fn connect_vfs_service(timer_port: Word) -> Result<Word, libnanami::NanamiError>
 
 fn connect_timer_service() -> Word {
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-            Ok(()) => return libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
             Err(e) => {
                 log_request_error("[honoka] waiting timer-service: ", e);
                 busy_delay();
@@ -288,27 +288,27 @@ fn connect_timer_service() -> Word {
 pub fn load_desktop_info() -> [alloc::string::String; 4] {
     use alloc::format;
     let mut buffer = [0; 256];
-    let kernel = match libnanami::request_kernel_version(&mut buffer) {
+    let kernel = match nanami_runtime::request_kernel_version(&mut buffer) {
         Ok(version) => format!("Kernel Version: A9N v{}", version),
         Err(error) => {
-            libnanami::println!("[honoka] kernel version unavailable: {}", error);
+            nanami_runtime::println!("[honoka] kernel version unavailable: {}", error);
             format!("Kernel Version: unavailable")
         }
     };
-    let nanami = match libnanami::request_nanami_version(&mut buffer) {
+    let nanami = match nanami_runtime::request_nanami_version(&mut buffer) {
         Ok(version) => format!("Nanami Version: {}", version),
         Err(error) => {
-            libnanami::println!("[honoka] Nanami version unavailable: {}", error);
+            nanami_runtime::println!("[honoka] Nanami version unavailable: {}", error);
             format!("Nanami Version: unavailable")
         }
     };
-    let (architecture, platform) = match libnanami::request_nanami_info_platform() {
+    let (architecture, platform) = match nanami_runtime::request_nanami_info_platform() {
         Ok(info) => (
             format!("Architecture: {}", info.architecture_name()),
             format!("Platform: {}", info.platform_name()),
         ),
         Err(error) => {
-            libnanami::println!("[honoka] platform info unavailable: {}", error);
+            nanami_runtime::println!("[honoka] platform info unavailable: {}", error);
             (
                 format!("Architecture: unavailable"),
                 format!("Platform: unavailable"),

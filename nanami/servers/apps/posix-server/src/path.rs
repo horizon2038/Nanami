@@ -1,7 +1,7 @@
 use core::ptr;
 
-use libnanami::Word;
-use nanami_services::posix::*;
+use nanami_runtime::Word;
+use nanami_client::posix::*;
 
 use crate::state::{FdKind, Runtime, MAX_COMPONENTS, PATH_MAX};
 
@@ -153,8 +153,8 @@ pub(crate) fn path_basename(path: &[u8]) -> &[u8] {
 
 pub(crate) fn vfs_kind_to_posix(kind: Word) -> Word {
     match kind {
-        nanami_services::vfs::VFS_FILE_TYPE_REGULAR => POSIX_FILE_TYPE_REGULAR,
-        nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY => POSIX_FILE_TYPE_DIRECTORY,
+        nanami_client::vfs::VFS_FILE_TYPE_REGULAR => POSIX_FILE_TYPE_REGULAR,
+        nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY => POSIX_FILE_TYPE_DIRECTORY,
         _ => POSIX_FILE_TYPE_UNKNOWN,
     }
 }

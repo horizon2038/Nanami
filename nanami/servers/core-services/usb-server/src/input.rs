@@ -1,6 +1,6 @@
 use crate::usb::hid::Event;
-use libnanami::{RequestError, Word};
-use nanami_services::input::*;
+use nanami_runtime::{RequestError, Word};
+use nanami_client::input::*;
 
 pub struct Input {
     queue: Option<InputEventQueue>,
@@ -25,8 +25,8 @@ impl Input {
         self.queue.is_some()
     }
     pub fn connect(&mut self) -> Result<(), RequestError> {
-        let pid = nanami_services::registry::connect_input_service_with_pid(22)?;
-        let port = libnanami::ipc::process_slot_descriptor(22);
+        let pid = nanami_client::registry::connect_input_service_with_pid(22)?;
+        let port = nanami_runtime::ipc::process_slot_descriptor(22);
         input_service_attach_driver(port, INPUT_DRIVER_KEYBOARD)?;
         input_service_attach_driver(port, INPUT_DRIVER_MOUSE)?;
         let (base, bytes) = input_service_attach_driver_shared(port, INPUT_DRIVER_KEYBOARD)?;
@@ -34,13 +34,13 @@ impl Input {
         if bytes < INPUT_EVENT_QUEUE_BYTES || !queue.is_valid() {
             return Err(RequestError::Protocol);
         }
-        libnanami::request_notification_port_copy(
+        nanami_runtime::request_notification_port_copy(
             pid,
-            libnanami::PROCESS_SLOT_NOTIFICATION,
+            nanami_runtime::PROCESS_SLOT_NOTIFICATION,
             23,
             INPUT_DRIVER_NOTIFICATION_IDENTIFIER,
         )?;
-        self.notification = libnanami::ipc::process_slot_descriptor(23);
+        self.notification = nanami_runtime::ipc::process_slot_descriptor(23);
         self.queue = Some(queue);
         // Reports may have arrived while input-server was still starting.
         for code in 0..self.keys.len() {
@@ -63,7 +63,7 @@ impl Input {
                 });
             }
         }
-        libnanami::print!("[usb-server] input attached\n");
+        nanami_runtime::print!("[usb-server] input attached\n");
         Ok(())
     }
     pub fn emit(&mut self, event: Event) {
@@ -97,7 +97,7 @@ impl Input {
     }
     pub fn flush(&mut self) {
         if self.pending {
-            if libnanami::ipc::notification_notify(self.notification).is_ok() {
+            if nanami_runtime::ipc::notification_notify(self.notification).is_ok() {
                 self.pending = false;
             }
         }

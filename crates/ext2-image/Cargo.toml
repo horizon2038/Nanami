@@ -1,0 +1,8 @@
+[package]
+name = "ext2-image"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Deterministic, host-independent ext2 filesystem image construction"
+
+[dependencies]

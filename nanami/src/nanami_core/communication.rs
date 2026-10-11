@@ -1,4 +1,5 @@
 use crate::*;
+pub use nanami_uapi::os::*;
 use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource};
 
 const MAX_SERVICES: usize = 64;
@@ -18,68 +19,6 @@ const RESPONSE_STATUS_MR: usize = 4;
 const RESPONSE_DETAIL0_MR: usize = 5;
 const RESPONSE_DETAIL1_MR: usize = 6;
 const RESPONSE_MESSAGE_LENGTH: u8 = 3;
-
-pub const OS_REQUEST_IRQ_CONTROL: usize = 0x1001;
-pub const OS_REQUEST_IO_PORT_CONTROL: usize = 0x1002;
-pub const OS_REQUEST_SERVICE_REGISTER: usize = 0x1003;
-pub const OS_REQUEST_PAGE_ALLOC: usize = 0x1004;
-pub const OS_REQUEST_SERVICE_CONNECT: usize = 0x1005;
-pub const OS_REQUEST_DMA_REQUEST: usize = 0x1006;
-pub const OS_REQUEST_MMIO_REQUEST: usize = 0x1007;
-pub const OS_REQUEST_SHARED_MEMORY_CREATE: usize = 0x1008;
-pub const OS_REQUEST_SELF_PID: usize = 0x1009;
-pub const OS_REQUEST_EXIT: usize = 0x100a;
-pub const OS_REQUEST_INITIAL_FRAMEBUFFER_INFORMATION: usize = 0x100b;
-pub const OS_REQUEST_NOTIFICATION_PORT_CREATE: usize = 0x100c;
-pub const OS_REQUEST_NOTIFICATION_PORT_COPY: usize = 0x100d;
-pub const OS_REQUEST_SHARED_FRAMEBUFFER_CREATE: usize = 0x100e;
-pub const OS_REQUEST_HEAP_ALLOC: usize = 0x100f;
-pub const OS_REQUEST_SERVICE_LIST: usize = 0x1010;
-pub const OS_REQUEST_PROCESS_SPAWN: usize = 0x1011;
-pub const OS_REQUEST_PROCESS_STATUS: usize = 0x1012;
-pub const OS_REQUEST_PROCESS_REAP: usize = 0x1013;
-pub const OS_REQUEST_MAPPING_RELEASE: usize = 0x1014;
-pub const OS_REQUEST_PROCESS_KILL: usize = 0x1015;
-pub const OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER: usize = 0x1016;
-pub const OS_REQUEST_PROCESS_MEMORY_READ: usize = 0x1017;
-pub const OS_REQUEST_PROCESS_MEMORY_WRITE: usize = 0x1018;
-pub const OS_REQUEST_PROCESS_MAP_ANONYMOUS: usize = 0x1019;
-pub const OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER_SUSPENDED: usize = 0x101a;
-pub const OS_REQUEST_NANAMI_CONTROL: usize = 0x101b;
-pub const OS_REQUEST_PROCESS_SPAWN_MEMORY: usize = 0x101c;
-pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED: usize = 0x101d;
-pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED: usize = 0x101e;
-pub const OS_REQUEST_PROCESS_EXEC_MEMORY: usize = 0x101f;
-pub const OS_REQUEST_PROCESS_MEMORY_CLONE: usize = 0x1020;
-pub const OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN: usize = 0x1021;
-pub const OS_REQUEST_PROCESS_ALIVE: usize = 0x1022;
-pub const OS_REQUEST_NANAMI_INFO: usize = 0x1023;
-pub const OS_REQUEST_DRIVER_PLATFORM_INFO: usize = 0x1024;
-pub const OS_REQUEST_DEBUG_PING: usize = 0x10ff;
-
-pub const DRIVER_PLATFORM_INFO_RSDP_ADDRESS: usize = 1;
-
-pub const OS_RESPONSE_OK: usize = 0;
-pub const OS_RESPONSE_INVALID_ARGUMENT: usize = 1;
-pub const OS_RESPONSE_PERMISSION_DENIED: usize = 2;
-pub const OS_RESPONSE_INVALID_DESCRIPTOR: usize = 3;
-pub const OS_RESPONSE_ILLEGAL_OPERATION: usize = 4;
-pub const OS_RESPONSE_FATAL: usize = 5;
-pub const OS_RESPONSE_PONG_MAGIC: usize = 0x504f4e47;
-
-pub const OS_SERVICE_NET_DEVICE: usize = 1;
-pub const OS_SERVICE_NETWORK_SERVICE: usize = 2;
-pub const OS_SERVICE_TIMER_SERVICE: usize = 3;
-pub const OS_SERVICE_DISPLAY_SERVICE: usize = 4;
-pub const OS_SERVICE_INPUT_SERVICE: usize = 5;
-pub const OS_SERVICE_HONOKA_SERVICE: usize = 6;
-pub const OS_SERVICE_RTC_SERVICE: usize = 7;
-pub const OS_SERVICE_BLOCK_DEVICE: usize = 8;
-pub const OS_SERVICE_VFS_SERVICE: usize = 9;
-pub const OS_SERVICE_POSIX_SERVICE: usize = 10;
-pub const OS_SERVICE_TERMINAL_SERVICE: usize = 11;
-pub const OS_SERVICE_EXEC_SERVICE: usize = 12;
-
 #[derive(Clone, Copy)]
 pub struct ServiceEntry {
     used: bool,

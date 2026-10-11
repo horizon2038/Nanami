@@ -4,8 +4,8 @@
 use core::cmp::min;
 use core::ptr;
 
-use libnanami::ipc::ServiceEvent;
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::ServiceEvent;
+use nanami_runtime::{self, RequestError, Word};
 use net_wire::{checksum16, ipv4_checksum, read_u16_be, read_u32_be, write_u16_be, write_u32_be};
 
 #[path = "app/arp.rs"]
@@ -64,8 +64,8 @@ use util::{log_request_error, map_request_error_to_status};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[net-server] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[net-server] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
@@ -506,7 +506,7 @@ fn cleanup_client_session(runtime: &mut NetRuntime, index: usize) {
         }
     }
     if session.shm_local != 0 && session.shm_size != 0 {
-        let _ = libnanami::request_mapping_release(session.shm_local, session.shm_size);
+        let _ = nanami_runtime::request_mapping_release(session.shm_local, session.shm_size);
     }
     runtime.sessions[index] = ClientSession::EMPTY;
 }
@@ -517,7 +517,7 @@ fn cleanup_stale_client_sessions(runtime: &mut NetRuntime) {
         let session = runtime.sessions[index];
         if session.active
             && matches!(
-                libnanami::request_process_alive(session.caller_id),
+                nanami_runtime::request_process_alive(session.caller_id),
                 Ok(false)
             )
         {
@@ -575,7 +575,7 @@ fn get_backend_shm_ptr(runtime: &NetRuntime, offset: Word) -> *mut u8 {
 }
 
 fn emit_frame(runtime: &NetRuntime, frame_len: usize) -> Result<Word, RequestError> {
-    nanami_services::net::net_device_send(
+    nanami_client::net::net_device_send(
         runtime.net_device_port,
         BACKEND_TX_OFFSET,
         frame_len as Word,
@@ -585,7 +585,7 @@ fn emit_frame(runtime: &NetRuntime, frame_len: usize) -> Result<Word, RequestErr
 fn notify_client_sessions(runtime: &NetRuntime) {
     for session in runtime.sessions {
         if session.active && session.rx_notification != 0 {
-            let _ = libnanami::ipc::notification_notify(session.rx_notification);
+            let _ = nanami_runtime::ipc::notification_notify(session.rx_notification);
         }
     }
 }
@@ -593,13 +593,13 @@ fn notify_client_sessions(runtime: &NetRuntime) {
 
 fn handle_tcp_accept_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(session) = session_for(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     };
     if request.arg0 + TCP_RX_META_LEN as Word > session.shm_size {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let mut index = 0usize;
@@ -632,23 +632,23 @@ fn handle_tcp_accept_request(
                 );
             }
             return (
-                libnanami::OS_RESPONSE_OK,
+                nanami_runtime::OS_RESPONSE_OK,
                 conn.connection_id,
                 pack_ipv4(conn.peer_ip) as Word,
             );
         }
         index += 1;
     }
-    (libnanami::OS_RESPONSE_OK, 0, 0)
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }
 
 fn handle_tcp_connect_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     if session_for(runtime, request.identifier).is_none() {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     }
     let peer_ip = [
         ((request.arg0 >> 24) & 0xff) as u8,
@@ -659,7 +659,7 @@ fn handle_tcp_connect_request(
     let local_port = ((request.arg1 >> 16) & 0xffff) as u16;
     let peer_port = (request.arg1 & 0xffff) as u16;
     if local_port == 0 || peer_port == 0 || peer_ip == [0; 4] {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     for conn in &runtime.tcp_connections {
@@ -674,17 +674,17 @@ fn handle_tcp_connect_request(
             } else {
                 0
             };
-            return (libnanami::OS_RESPONSE_OK, id, 0);
+            return (nanami_runtime::OS_RESPONSE_OK, id, 0);
         }
     }
 
     let next_hop = next_hop_ip(runtime, peer_ip);
     let Some(dst_mac) = arp_lookup(runtime, next_hop) else {
         let _ = emit_arp_request(runtime, next_hop);
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
     let Some(index) = tcp::allocate_tcp_connection(runtime) else {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     };
     let iss = 0x414c_5445u32.wrapping_add((index as u32) << 12);
     tcp::tcp_reset(runtime, index);
@@ -720,7 +720,7 @@ fn handle_tcp_connect_request(
     ) {
         Ok(_) => {
             stats.tcp_tx = stats.tcp_tx.wrapping_add(1);
-            (libnanami::OS_RESPONSE_OK, 0, 0)
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
         }
         Err(error) => {
             tcp::tcp_reset(runtime, index);
@@ -731,20 +731,20 @@ fn handle_tcp_connect_request(
 
 fn handle_network_request(
     runtime: &mut NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => arp::handle_snapshot_request(runtime, request),
-        nanami_services::net::NET_SERVICE_REQUEST_READINESS => readiness::handle_readiness_request(runtime, request),
-        nanami_services::net::NET_SERVICE_REQUEST_SEND => {
+        nanami_client::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => arp::handle_snapshot_request(runtime, request),
+        nanami_client::net::NET_SERVICE_REQUEST_READINESS => readiness::handle_readiness_request(runtime, request),
+        nanami_client::net::NET_SERVICE_REQUEST_SEND => {
             // Raw L2 frame send: arg0=client shm offset, arg1=len
             let Some(session) = session_for(runtime, request.identifier) else {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             };
             let n = request.arg1 as usize;
             if n == 0 || request.arg0 + request.arg1 > session.shm_size {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             unsafe {
                 let src = (session.shm_local + request.arg0) as *const u8;
@@ -755,25 +755,25 @@ fn handle_network_request(
                 Ok(sent) => {
                     stats.tx_packets = stats.tx_packets.wrapping_add(1);
                     stats.tx_bytes = stats.tx_bytes.wrapping_add(sent);
-                    (libnanami::OS_RESPONSE_OK, sent, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, sent, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::net::NET_SERVICE_REQUEST_RECV => {
+        nanami_client::net::NET_SERVICE_REQUEST_RECV => {
             // Raw L2 recv: arg0=client shm offset, arg1=max len
             let Some(index) = session_index(runtime, request.identifier) else {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             };
             runtime.sessions[index].raw_rx_enabled = true;
             let session = runtime.sessions[index];
             let _ = pump_backend(runtime, stats);
             let Some(entry) = runtime.raw_rx.pop_for(request.identifier) else {
-                return (libnanami::OS_RESPONSE_OK, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
             };
             let n = min(entry.len, request.arg1 as usize);
             if request.arg0 + n as Word > session.shm_size {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             if n > 0 {
                 unsafe {
@@ -781,73 +781,73 @@ fn handle_network_request(
                     ptr::copy_nonoverlapping(entry.payload.as_ptr(), dst, n);
                 }
             }
-            (libnanami::OS_RESPONSE_OK, n as Word, 0)
+            (nanami_runtime::OS_RESPONSE_OK, n as Word, 0)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_CONTROL => match request.arg0 {
-            nanami_services::net::NET_SERVICE_CONTROL_LINK_UP => {
-                match nanami_services::net::net_device_control(
+        nanami_client::net::NET_SERVICE_REQUEST_CONTROL => match request.arg0 {
+            nanami_client::net::NET_SERVICE_CONTROL_LINK_UP => {
+                match nanami_client::net::net_device_control(
                     runtime.net_device_port,
-                    nanami_services::net::NET_DEVICE_CONTROL_LINK_UP,
+                    nanami_client::net::NET_DEVICE_CONTROL_LINK_UP,
                     request.arg1,
                     request.arg2,
                 ) {
-                    Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                    Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                     Err(e) => (map_request_error_to_status(e), 0, 0),
                 }
             }
-            nanami_services::net::NET_SERVICE_CONTROL_LINK_DOWN => {
-                match nanami_services::net::net_device_control(
+            nanami_client::net::NET_SERVICE_CONTROL_LINK_DOWN => {
+                match nanami_client::net::net_device_control(
                     runtime.net_device_port,
-                    nanami_services::net::NET_DEVICE_CONTROL_LINK_DOWN,
+                    nanami_client::net::NET_DEVICE_CONTROL_LINK_DOWN,
                     request.arg1,
                     request.arg2,
                 ) {
-                    Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                    Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                     Err(e) => (map_request_error_to_status(e), 0, 0),
                 }
             }
-            nanami_services::net::NET_SERVICE_CONTROL_POLL => {
+            nanami_client::net::NET_SERVICE_CONTROL_POLL => {
                 let polled = pump_backend(runtime, stats);
                 (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     polled,
                     runtime.udp_rx.count as Word,
                 )
             }
-            nanami_services::net::NET_SERVICE_CONTROL_GET_IPV4_CONFIG => {
+            nanami_client::net::NET_SERVICE_CONTROL_GET_IPV4_CONFIG => {
                 let ip = pack_ipv4(runtime.ip);
                 let gateway = pack_ipv4(runtime.gateway_ip);
                 let dns = pack_ipv4(runtime.dns_ip);
                 (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     ((ip as Word) << 32) | gateway as Word,
                     dns as Word,
                 )
             }
-            nanami_services::net::NET_SERVICE_CONTROL_GET_MAC => {
-                (libnanami::OS_RESPONSE_OK, pack_mac(runtime.mac), 0)
+            nanami_client::net::NET_SERVICE_CONTROL_GET_MAC => {
+                (nanami_runtime::OS_RESPONSE_OK, pack_mac(runtime.mac), 0)
             }
-            nanami_services::net::NET_SERVICE_CONTROL_GET_IPV4_NETMASK => {
-                (libnanami::OS_RESPONSE_OK, pack_ipv4(runtime.subnet_mask) as Word, 0)
+            nanami_client::net::NET_SERVICE_CONTROL_GET_IPV4_NETMASK => {
+                (nanami_runtime::OS_RESPONSE_OK, pack_ipv4(runtime.subnet_mask) as Word, 0)
             }
-            nanami_services::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY => {
+            nanami_client::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY => {
                 cleanup_stale_client_sessions(runtime);
                 let peer_pid = request.arg1;
                 if peer_pid == 0 {
-                    return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
                 let size = if request.arg2 == 0 {
                     CLIENT_DEFAULT_SHM_BYTES
                 } else {
                     request.arg2
                 };
-                match libnanami::request_shared_memory(peer_pid, size) {
+                match nanami_runtime::request_shared_memory(peer_pid, size) {
                     Ok((local, peer)) => {
                         let index = session_index(runtime, request.identifier).or_else(|| {
                             runtime.sessions.iter().position(|session| !session.active)
                         });
                         let Some(index) = index else {
-                            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
                         };
                         runtime.sessions[index] = ClientSession {
                             active: true,
@@ -860,110 +860,110 @@ fn handle_network_request(
                             raw_rx_enabled: false,
                             rx_notification: 0,
                         };
-                        libnanami::print!("[net-server] client shm attached pid=");
-                        libnanami::print!("{}", peer_pid as usize);
-                        libnanami::print!(" local=");
-                        libnanami::print!("{:#x}", local);
-                        libnanami::print!(" peer=");
-                        libnanami::print!("{:#x}", peer);
-                        libnanami::print!("\n");
-                        (libnanami::OS_RESPONSE_OK, peer, size)
+                        nanami_runtime::print!("[net-server] client shm attached pid=");
+                        nanami_runtime::print!("{}", peer_pid as usize);
+                        nanami_runtime::print!(" local=");
+                        nanami_runtime::print!("{:#x}", local);
+                        nanami_runtime::print!(" peer=");
+                        nanami_runtime::print!("{:#x}", peer);
+                        nanami_runtime::print!("\n");
+                        (nanami_runtime::OS_RESPONSE_OK, peer, size)
                     }
                     Err(e) => (map_request_error_to_status(e), 0, 0),
                 }
             }
-            nanami_services::net::NET_SERVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
+            nanami_client::net::NET_SERVICE_CONTROL_ATTACH_RX_NOTIFICATION => {
                 let Some(index) = session_index(runtime, request.identifier) else {
-                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
                 };
                 let source_slot = if request.arg1 == 0 {
-                    libnanami::PROCESS_SLOT_NOTIFICATION
+                    nanami_runtime::PROCESS_SLOT_NOTIFICATION
                 } else {
                     request.arg1
                 };
                 let destination_slot = SLOT_CLIENT_RX_NOTIFICATION_BASE + index as Word;
-                match libnanami::request_notification_port_copy(
+                match nanami_runtime::request_notification_port_copy(
                     request.identifier,
                     source_slot,
                     destination_slot,
-                    nanami_services::net::NET_NOTIFICATION_RX,
+                    nanami_client::net::NET_NOTIFICATION_RX,
                 ) {
                     Ok(()) => {
                         runtime.sessions[index].rx_notification =
-                            libnanami::ipc::process_slot_descriptor(destination_slot);
-                        (libnanami::OS_RESPONSE_OK, 0, 0)
+                            nanami_runtime::ipc::process_slot_descriptor(destination_slot);
+                        (nanami_runtime::OS_RESPONSE_OK, 0, 0)
                     }
                     Err(error) => (map_request_error_to_status(error), 0, 0),
                 }
             }
-            nanami_services::net::NET_SERVICE_CONTROL_UDP_BIND => {
+            nanami_client::net::NET_SERVICE_CONTROL_UDP_BIND => {
                 let Some(index) = session_index(runtime, request.identifier) else {
-                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
                 };
                 let port = request.arg1 as u16;
                 if port == 0 {
-                    return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
                 if runtime.sessions.iter().enumerate().any(|(other, session)| {
                     other != index && session.active && session.udp_ports.contains(&port)
                 }) {
-                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
                 }
                 if !bind_port(&mut runtime.sessions[index].udp_ports, port) {
-                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
                 }
-                libnanami::print!("[net-server] udp bind port=");
-                libnanami::print!("{}", port as usize);
-                libnanami::print!("\n");
-                (libnanami::OS_RESPONSE_OK, port as Word, 0)
+                nanami_runtime::print!("[net-server] udp bind port=");
+                nanami_runtime::print!("{}", port as usize);
+                nanami_runtime::print!("\n");
+                (nanami_runtime::OS_RESPONSE_OK, port as Word, 0)
             }
-            nanami_services::net::NET_SERVICE_CONTROL_TCP_BIND => {
+            nanami_client::net::NET_SERVICE_CONTROL_TCP_BIND => {
                 let Some(index) = session_index(runtime, request.identifier) else {
-                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
                 };
                 let port = request.arg1 as u16;
                 if port == 0 {
-                    return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
                 }
                 if runtime.sessions.iter().enumerate().any(|(other, session)| {
                     other != index && session.active && session.tcp_ports.contains(&port)
                 }) {
-                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
                 }
                 if !bind_port(&mut runtime.sessions[index].tcp_ports, port) {
-                    return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
                 }
-                libnanami::print!("[net-server] tcp bind port=");
-                libnanami::print!("{}", port as usize);
-                libnanami::print!("\n");
-                (libnanami::OS_RESPONSE_OK, port as Word, 0)
+                nanami_runtime::print!("[net-server] tcp bind port=");
+                nanami_runtime::print!("{}", port as usize);
+                nanami_runtime::print!("\n");
+                (nanami_runtime::OS_RESPONSE_OK, port as Word, 0)
             }
-            nanami_services::net::NET_SERVICE_CONTROL_UDP_UNBIND => {
+            nanami_client::net::NET_SERVICE_CONTROL_UDP_UNBIND => {
                 let Some(index) = session_index(runtime, request.identifier) else {
-                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
                 };
                 let removed =
                     unbind_port(&mut runtime.sessions[index].udp_ports, request.arg1 as u16);
-                (libnanami::OS_RESPONSE_OK, removed as Word, 0)
+                (nanami_runtime::OS_RESPONSE_OK, removed as Word, 0)
             }
-            nanami_services::net::NET_SERVICE_CONTROL_TCP_UNBIND => {
+            nanami_client::net::NET_SERVICE_CONTROL_TCP_UNBIND => {
                 let Some(index) = session_index(runtime, request.identifier) else {
-                    return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
                 };
                 let removed =
                     unbind_port(&mut runtime.sessions[index].tcp_ports, request.arg1 as u16);
-                (libnanami::OS_RESPONSE_OK, removed as Word, 0)
+                (nanami_runtime::OS_RESPONSE_OK, removed as Word, 0)
             }
-            _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+            _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
         },
-        nanami_services::net::NET_SERVICE_REQUEST_STATS => (
-            libnanami::OS_RESPONSE_OK,
+        nanami_client::net::NET_SERVICE_REQUEST_STATS => (
+            nanami_runtime::OS_RESPONSE_OK,
             stats.rx_packets,
             stats.tx_packets,
         ),
-        nanami_services::net::NET_SERVICE_REQUEST_UDP_SEND => {
+        nanami_client::net::NET_SERVICE_REQUEST_UDP_SEND => {
             if session_for(runtime, request.identifier).is_none() {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
             match emit_udp_from_session(
                 runtime,
@@ -977,22 +977,22 @@ fn handle_network_request(
                     stats.tx_packets = stats.tx_packets.wrapping_add(1);
                     stats.tx_bytes = stats.tx_bytes.wrapping_add(sent);
                     stats.udp_tx = stats.udp_tx.wrapping_add(1);
-                    (libnanami::OS_RESPONSE_OK, sent, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, sent, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::net::NET_SERVICE_REQUEST_UDP_RECV => {
+        nanami_client::net::NET_SERVICE_REQUEST_UDP_RECV => {
             if runtime.udp_rx.count == 0 {
                 let _ = pump_backend(runtime, stats);
             }
             let rsp = handle_udp_recv_request(runtime, request);
-            if rsp.0 == libnanami::OS_RESPONSE_OK && rsp.1 > 0 {
+            if rsp.0 == nanami_runtime::OS_RESPONSE_OK && rsp.1 > 0 {
                 stats.udp_rx = stats.udp_rx.wrapping_add(1);
             }
             rsp
         }
-        nanami_services::net::NET_SERVICE_REQUEST_ICMP_SEND => {
+        nanami_client::net::NET_SERVICE_REQUEST_ICMP_SEND => {
             match emit_icmp_echo_from_session(
                 runtime,
                 request.identifier,
@@ -1004,44 +1004,44 @@ fn handle_network_request(
                 Ok(sent) => {
                     stats.tx_packets = stats.tx_packets.wrapping_add(1);
                     stats.tx_bytes = stats.tx_bytes.wrapping_add(sent);
-                    (libnanami::OS_RESPONSE_OK, request.arg1, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, request.arg1, 0)
                 }
                 Err(error) => (map_request_error_to_status(error), 0, 0),
             }
         }
-        nanami_services::net::NET_SERVICE_REQUEST_ICMP_RECV => {
+        nanami_client::net::NET_SERVICE_REQUEST_ICMP_RECV => {
             if runtime.icmp_rx.count == 0 {
                 let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
             }
             handle_icmp_recv_request(runtime, request)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_TCP_RECV => {
+        nanami_client::net::NET_SERVICE_REQUEST_TCP_RECV => {
             if runtime.tcp_rx.count == 0 {
                 let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
             }
             handle_tcp_recv_request(runtime, request, stats)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_TCP_SEND => {
+        nanami_client::net::NET_SERVICE_REQUEST_TCP_SEND => {
             handle_tcp_send_request(runtime, request, stats)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_TCP_ACCEPT => {
+        nanami_client::net::NET_SERVICE_REQUEST_TCP_ACCEPT => {
             let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
             handle_tcp_accept_request(runtime, request)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_TCP_CONNECT => {
+        nanami_client::net::NET_SERVICE_REQUEST_TCP_CONNECT => {
             let _ = pump_backend_with_budget(runtime, stats, REQUEST_PUMP_BURST);
             handle_tcp_connect_request(runtime, request, stats)
         }
-        nanami_services::net::NET_SERVICE_REQUEST_DNS_QUERY => {
+        nanami_client::net::NET_SERVICE_REQUEST_DNS_QUERY => {
             handle_dns_query_request(runtime, request, stats, DNS_QUERY_TIMEOUT_MS)
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 pub(crate) fn sleep_ms(timer_port: Option<Word>, milliseconds: Word) {
     if let Some(port) = timer_port {
-        let _ = nanami_services::timer::timer_service_sleep_milliseconds(port, milliseconds);
+        let _ = nanami_client::timer::timer_service_sleep_milliseconds(port, milliseconds);
         return;
     }
     let mut remaining = milliseconds as usize;
@@ -1058,10 +1058,10 @@ pub(crate) fn sleep_ms(timer_port: Option<Word>, milliseconds: Word) {
 fn connect_timer_service() -> Option<Word> {
     let mut retry = 0usize;
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE_PORT) {
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE_PORT) {
             Ok(()) => {
-                libnanami::print!("[net-server] timer connected\n");
-                return Some(libnanami::ipc::process_slot_descriptor(
+                nanami_runtime::print!("[net-server] timer connected\n");
+                return Some(nanami_runtime::ipc::process_slot_descriptor(
                     SLOT_TIMER_SERVICE_PORT,
                 ));
             }
@@ -1080,16 +1080,16 @@ fn connect_timer_service() -> Option<Word> {
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[net-server] bootstrap start\n");
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[net-server] bootstrap start\n");
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let notification =
-        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
-    libnanami::ipc::bind_current_thread_notification(notification)?;
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
+    nanami_runtime::ipc::bind_current_thread_notification(notification)?;
 
-    match nanami_services::registry::register_network_service() {
-        Ok(()) => libnanami::print!("[net-server] service registered: network-service\n"),
+    match nanami_client::registry::register_network_service() {
+        Ok(()) => nanami_runtime::print!("[net-server] service registered: network-service\n"),
         Err(e) => {
             log_request_error("[net-server] register failed: ", e);
             return Err(e.into());
@@ -1097,13 +1097,13 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
     let timer_port = connect_timer_service();
 
-    libnanami::print!("[net-server] connect backend: net-device\n");
+    nanami_runtime::print!("[net-server] connect backend: net-device\n");
     let backend_pid = loop {
-        match nanami_services::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT) {
+        match nanami_client::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT) {
             Ok(pid) => {
-                libnanami::print!("[net-server] backend connected pid=");
-                libnanami::print!("{:#x}", pid);
-                libnanami::print!("\n");
+                nanami_runtime::print!("[net-server] backend connected pid=");
+                nanami_runtime::print!("{:#x}", pid);
+                nanami_runtime::print!("\n");
                 break pid;
             }
             Err(e) => {
@@ -1113,9 +1113,9 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let net_device_port = libnanami::ipc::process_slot_descriptor(SLOT_NET_DEVICE_PORT);
+    let net_device_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NET_DEVICE_PORT);
     let (backend_local_vaddr, backend_peer_vaddr) = loop {
-        match libnanami::request_shared_memory(backend_pid, BACKEND_SHM_BYTES) {
+        match nanami_runtime::request_shared_memory(backend_pid, BACKEND_SHM_BYTES) {
             Ok(v) => break v,
             Err(e) => {
                 log_request_error("[net-server] backend shm create failed: ", e);
@@ -1125,14 +1125,14 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
 
     loop {
-        match nanami_services::net::net_device_control(
+        match nanami_client::net::net_device_control(
             net_device_port,
-            nanami_services::net::NET_DEVICE_CONTROL_ATTACH_SHARED_MEMORY,
+            nanami_client::net::NET_DEVICE_CONTROL_ATTACH_SHARED_MEMORY,
             backend_peer_vaddr,
             BACKEND_SHM_BYTES,
         ) {
             Ok(()) => {
-                libnanami::print!("[net-server] backend shm attached\n");
+                nanami_runtime::print!("[net-server] backend shm attached\n");
                 break;
             }
             Err(e) => {
@@ -1142,9 +1142,9 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     }
 
-    let irq_driven = match nanami_services::net::net_device_attach_rx_notification(
+    let irq_driven = match nanami_client::net::net_device_attach_rx_notification(
         net_device_port,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
     ) {
         Ok(irq_driven) => irq_driven,
         Err(error) => {
@@ -1156,25 +1156,25 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let mac = match nanami_services::net::net_device_control_ex(
+    let mac = match nanami_client::net::net_device_control_ex(
         net_device_port,
-        nanami_services::net::NET_DEVICE_CONTROL_GET_MAC,
+        nanami_client::net::NET_DEVICE_CONTROL_GET_MAC,
         0,
         0,
     ) {
-        Ok((status, detail0, _)) if status == libnanami::OS_RESPONSE_OK => unpack_mac(detail0),
+        Ok((status, detail0, _)) if status == nanami_runtime::OS_RESPONSE_OK => unpack_mac(detail0),
         _ => [0; 6],
     };
 
     loop {
-        match nanami_services::net::net_device_control(
+        match nanami_client::net::net_device_control(
             net_device_port,
-            nanami_services::net::NET_DEVICE_CONTROL_LINK_UP,
+            nanami_client::net::NET_DEVICE_CONTROL_LINK_UP,
             0,
             0,
         ) {
             Ok(()) => {
-                libnanami::print!("[net-server] backend link-up ok\n");
+                nanami_runtime::print!("[net-server] backend link-up ok\n");
                 break;
             }
             Err(e) => {
@@ -1185,14 +1185,14 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 
     let backend_rx_batch = matches!(
-        nanami_services::net::net_device_control_ex(
+        nanami_client::net::net_device_control_ex(
             net_device_port,
-            nanami_services::net::NET_DEVICE_CONTROL_GET_FEATURES,
+            nanami_client::net::NET_DEVICE_CONTROL_GET_FEATURES,
             0,
             0,
         ),
-        Ok((libnanami::OS_RESPONSE_OK, features, _))
-            if features & nanami_services::net::NET_DEVICE_FEATURE_RECV_BATCH != 0
+        Ok((nanami_runtime::OS_RESPONSE_OK, features, _))
+            if features & nanami_client::net::NET_DEVICE_FEATURE_RECV_BATCH != 0
     );
     let mut runtime = NetRuntime {
         net_device_port,
@@ -1227,29 +1227,29 @@ fn nanami_main() -> libnanami::NanamiResult {
         dns_answer_valid: false,
         dns_answer_ip: [0; 4],
     };
-    let mut pending_status = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
     let mut stats = NetStats::new();
     dhcp_bootstrap(&mut runtime, &mut stats);
 
     if !irq_driven {
         if let Some(timer_port) = runtime.timer_port {
-            nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+            nanami_client::timer::timer_service_interval_on_notification_milliseconds(
                 timer_port,
                 RX_MAINTENANCE_INTERVAL_MS,
-                libnanami::PROCESS_SLOT_NOTIFICATION,
+                nanami_runtime::PROCESS_SLOT_NOTIFICATION,
             )?;
-            libnanami::print!("[net-server] rx fallback polling enabled\n");
+            nanami_runtime::print!("[net-server] rx fallback polling enabled\n");
         } else {
-            libnanami::print!("[net-server] rx polling unavailable\n");
+            nanami_runtime::print!("[net-server] rx polling unavailable\n");
         }
     }
 
-    libnanami::print!("[net-server] enter service loop\n");
+    nanami_runtime::print!("[net-server] enter service loop\n");
     loop {
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending_status.0,
                 pending_status.1,
@@ -1262,7 +1262,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port) {
+            match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(e) => e,
                 Err(e) => {
                     log_request_error("[net-server] receive failed: ", e);
@@ -1286,15 +1286,15 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[net-server] fault id=");
-                libnanami::print!("{:#x}", identifier);
-                libnanami::print!(" reason=");
-                libnanami::print!("{:#x}", reason);
-                libnanami::print!("\n");
+                nanami_runtime::print!("[net-server] fault id=");
+                nanami_runtime::print!("{:#x}", identifier);
+                nanami_runtime::print!(" reason=");
+                nanami_runtime::print!("{:#x}", reason);
+                nanami_runtime::print!("\n");
                 has_pending_reply = false;
             }
         }
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

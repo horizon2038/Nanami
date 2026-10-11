@@ -67,7 +67,7 @@ fn notify_subscribers(state: &InputState, mut pending: Word) {
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
         let _ =
-            libnanami::ipc::notification_notify(state.subscribers[index].notification_descriptor);
+            nanami_runtime::ipc::notification_notify(state.subscribers[index].notification_descriptor);
         pending &= pending - 1;
     }
 }
@@ -75,13 +75,13 @@ fn notify_subscribers(state: &InputState, mut pending: Word) {
 fn distribute_local_event(subscriber: &mut Subscriber, event_kind: Word, packed: Word) -> bool {
     let was_empty = subscriber.queue.count == 0;
     subscriber.queue.push_with_event_kind(event_kind, packed);
-    event_kind != nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE || was_empty
+    event_kind != nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE || was_empty
 }
 
 fn distribute_shared_event(subscriber: &mut Subscriber, event_kind: Word, packed: Word) -> bool {
     push_shared_event_with_kind(subscriber.shared_queue_local, event_kind, packed);
 
-    if event_kind != nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE {
+    if event_kind != nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE {
         subscriber.shared_mouse_since_notify = 0;
         return true;
     }
@@ -92,13 +92,13 @@ fn distribute_shared_event(subscriber: &mut Subscriber, event_kind: Word, packed
 
 pub(super) fn mask_for_event_kind(event_kind: Word) -> Word {
     match event_kind {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => {
-            nanami_services::input::INPUT_SUBSCRIBE_KEYBOARD
+        nanami_client::input::INPUT_EVENT_KIND_KEY => {
+            nanami_client::input::INPUT_SUBSCRIBE_KEYBOARD
         }
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE
-        | nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
-            nanami_services::input::INPUT_SUBSCRIBE_MOUSE
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON
+        | nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE
+        | nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL => {
+            nanami_client::input::INPUT_SUBSCRIBE_MOUSE
         }
         _ => 0,
     }

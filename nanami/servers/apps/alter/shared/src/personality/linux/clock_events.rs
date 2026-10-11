@@ -26,9 +26,9 @@ pub(super) fn arm_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
         .chain(runtime.framebuffer_deadline)
         .min();
     if runtime.clock_deadline != deadline {
-        nanami_services::timer::timer_service_set_alarm_ticks(
+        nanami_client::timer::timer_service_set_alarm_ticks(
             runtime.timer_port,
-            libnanami::PROCESS_SLOT_NOTIFICATION,
+            nanami_runtime::PROCESS_SLOT_NOTIFICATION,
             deadline,
         )
         .map_err(map_request_error)?;
@@ -47,12 +47,12 @@ fn next_frame(runtime: &Runtime) -> Word {
 }
 
 pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
-    if identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT == 0 {
+    if identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT == 0 {
         return;
     }
     if let Err(errno) = refresh_clock(runtime) {
         // Do not fabricate elapsed time on clocksource failure.
-        libnanami::println!("[alter/linux] timer clock failed errno={}", errno);
+        nanami_runtime::println!("[alter/linux] timer clock failed errno={}", errno);
         return;
     }
     // A queued notification can outlive replacement/cancellation of its alarm.
@@ -96,6 +96,6 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
     }
     super::wake_readiness_waiters(runtime, crate::state::readiness::READY_TIMER);
     if let Err(errno) = arm_clock_timer(runtime) {
-        libnanami::println!("[alter/linux] timer alarm failed errno={}", errno);
+        nanami_runtime::println!("[alter/linux] timer alarm failed errno={}", errno);
     }
 }

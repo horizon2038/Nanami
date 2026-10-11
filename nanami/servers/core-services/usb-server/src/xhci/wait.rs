@@ -1,7 +1,7 @@
 //! Slow completion waits use IRQ-or-deadline, not a minimum-duration sleep.
 use super::{poll::CompletionPoll, registers::*, ring, Controller, Input, Trb};
-use libnanami::{ipc, RequestError, Word, PROCESS_SLOT_NOTIFICATION};
-use nanami_services::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
+use nanami_runtime::{ipc, RequestError, Word, PROCESS_SLOT_NOTIFICATION};
+use nanami_client::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
 
 impl Controller {
     /// The same completion/interrupt handshake serves command, control and bulk
@@ -31,7 +31,7 @@ impl Controller {
                     // The clock RPC can be delayed while the HC completes the TD.
                     // Always drain once after observing expiry before declaring a
                     // timeout. Keep this bounded even under continuous HID input.
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] completion timeout after {} ms",
                         milliseconds
                     );
@@ -48,7 +48,7 @@ impl Controller {
                     if self.interrupts_enabled {
                         if let Some(irq) = self.irq {
                             ipc::interrupt_ack(irq).inspect_err(|error| {
-                                libnanami::println!(
+                                nanami_runtime::println!(
                                     "[usb-server] completion IRQ ack failed: {}",
                                     error
                                 );
@@ -101,7 +101,7 @@ impl CompletionWait {
     /// False means the deadline expired; the caller must recheck the event ring.
     pub fn prepare(&mut self, interrupt_driven: bool) -> Result<bool, RequestError> {
         let (now, hz) = timer_service_monotonic_ticks(self.timer).inspect_err(|error| {
-            libnanami::println!("[usb-server] completion clock query failed: {}", error);
+            nanami_runtime::println!("[usb-server] completion clock query failed: {}", error);
         })?;
         if hz == 0 {
             return Err(RequestError::Protocol);
@@ -124,7 +124,7 @@ impl CompletionWait {
         if self.alarm != Some(alarm) {
             timer_service_set_alarm_ticks(self.timer, PROCESS_SLOT_NOTIFICATION, Some(alarm))
                 .inspect_err(|error| {
-                    libnanami::println!("[usb-server] completion alarm failed: {}", error);
+                    nanami_runtime::println!("[usb-server] completion alarm failed: {}", error);
                 })?;
             self.alarm = Some(alarm);
         }
@@ -136,7 +136,7 @@ impl CompletionWait {
         // means recheck the event ring, never assume the transfer has completed.
         ipc::notification_wait(ipc::process_slot_descriptor(PROCESS_SLOT_NOTIFICATION))
             .inspect_err(|error| {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] completion notification wait failed: {}",
                     error
                 );
@@ -148,7 +148,7 @@ impl CompletionWait {
         if self.alarm.take().is_some() {
             timer_service_set_alarm_ticks(self.timer, PROCESS_SLOT_NOTIFICATION, None)
                 .inspect_err(|error| {
-                    libnanami::println!("[usb-server] completion alarm cancel failed: {}", error);
+                    nanami_runtime::println!("[usb-server] completion alarm cancel failed: {}", error);
                 })?;
         }
         Ok(())

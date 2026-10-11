@@ -1,6 +1,6 @@
 use core::ptr;
-use libnanami::{ipc::ServiceRequest, RequestError, Word};
-use nanami_services::posix::*;
+use nanami_runtime::{ipc::ServiceRequest, RequestError, Word};
+use nanami_client::posix::*;
 
 use super::{process::find_session, state::*};
 
@@ -21,7 +21,7 @@ pub(crate) fn handle_read_with_mode(
     direct: bool,
 ) -> (Word, Word, Word) {
     let Some(index) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     let out_offset = request.arg1 as usize;
@@ -30,33 +30,33 @@ pub(crate) fn handle_read_with_mode(
     // stdin/stdout/stderr
     match fd {
         0 => {
-            libnanami::println!("[posix-server] read from stdin not supported");
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            nanami_runtime::println!("[posix-server] read from stdin not supported");
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         1 | 2 => {
-            libnanami::println!("[posix-server] read from stdout/stderr not supported");
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            nanami_runtime::println!("[posix-server] read from stdout/stderr not supported");
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         _ => {}
     }
 
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let output_size = if direct {
         if runtime.sessions[index].direct_vfs_delegate == 0 {
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         runtime.sessions[index].direct_io_size
     } else {
         runtime.sessions[index].shm_size
     };
     if out_offset.saturating_add(len) > output_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let open_index = runtime.sessions[index].fds[fd].open_file;
     if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = &runtime.open_files[open_index];
     let positioned = matches!(
@@ -69,10 +69,10 @@ pub(crate) fn handle_read_with_mode(
         entry.offset
     };
     match entry.kind {
-        FdKind::DevNull => (libnanami::OS_RESPONSE_OK, 0, 0),
+        FdKind::DevNull => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         FdKind::DevZero => {
             if direct {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             unsafe {
                 ptr::write_bytes(
@@ -81,7 +81,7 @@ pub(crate) fn handle_read_with_mode(
                     len,
                 );
             }
-            (libnanami::OS_RESPONSE_OK, len as Word, 0)
+            (nanami_runtime::OS_RESPONSE_OK, len as Word, 0)
         }
         FdKind::Regular => {
             let chunk = if direct {
@@ -90,10 +90,10 @@ pub(crate) fn handle_read_with_mode(
                 len.min(runtime.vfs_shm_size.saturating_sub(VFS_IO_OFFSET as Word) as usize)
             };
             if chunk == 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             let read = if direct {
-                nanami_services::vfs::vfs_read_delegated(
+                nanami_client::vfs::vfs_read_delegated(
                     runtime.vfs_port,
                     entry.vfs_handle,
                     file_offset,
@@ -102,7 +102,7 @@ pub(crate) fn handle_read_with_mode(
                     out_offset as Word,
                 )
             } else {
-                nanami_services::vfs::vfs_read(
+                nanami_client::vfs::vfs_read(
                     runtime.vfs_port,
                     entry.vfs_handle,
                     file_offset,
@@ -125,12 +125,12 @@ pub(crate) fn handle_read_with_mode(
                     if !positioned {
                         runtime.open_files[open_index].offset = file_offset.saturating_add(bytes);
                     }
-                    (libnanami::OS_RESPONSE_OK, bytes, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, bytes, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
     }
 }
 
@@ -151,7 +151,7 @@ fn handle_write_with_mode(
     direct: bool,
 ) -> (Word, Word, Word) {
     let Some(index) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     let input_offset = request.arg1 as usize;
@@ -160,7 +160,7 @@ fn handle_write_with_mode(
     let session = &runtime.sessions[index];
     let input_size = if direct {
         if session.direct_vfs_delegate == 0 {
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         session.direct_io_size
     } else {
@@ -172,17 +172,17 @@ fn handle_write_with_mode(
         .filter(|end| *end <= input_size)
         .is_none()
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     match fd {
         0 => {
-            libnanami::println!("[posix-server] write to stdin not supported");
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            nanami_runtime::println!("[posix-server] write to stdin not supported");
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         1 | 2 => {
             if direct {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             let input = unsafe {
                 core::slice::from_raw_parts(
@@ -191,20 +191,20 @@ fn handle_write_with_mode(
                 )
             };
             let Ok(s) = core::str::from_utf8(input) else {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             };
-            libnanami::print!("Guest stdout/err: {}", s);
-            return (libnanami::OS_RESPONSE_OK, len as Word, 0);
+            nanami_runtime::print!("Guest stdout/err: {}", s);
+            return (nanami_runtime::OS_RESPONSE_OK, len as Word, 0);
         }
         _ => {}
     }
 
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let open_index = runtime.sessions[index].fds[fd].open_file;
     if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = &runtime.open_files[open_index];
     let positioned = matches!(
@@ -212,7 +212,7 @@ fn handle_write_with_mode(
         POSIX_REQUEST_PWRITE | POSIX_REQUEST_PWRITE_DIRECT
     );
     let file_offset = if entry.kind == FdKind::Regular && entry.status_flags & POSIX_O_APPEND != 0 {
-        match nanami_services::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
+        match nanami_client::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
             Ok((_, size, _)) => size,
             Err(error) => return (map_request_error_to_status(error), 0, 0),
         }
@@ -222,7 +222,7 @@ fn handle_write_with_mode(
         entry.offset
     };
     match entry.kind {
-        FdKind::DevNull => (libnanami::OS_RESPONSE_OK, len as Word, 0),
+        FdKind::DevNull => (nanami_runtime::OS_RESPONSE_OK, len as Word, 0),
         FdKind::Regular => {
             let chunk = if direct {
                 len
@@ -230,10 +230,10 @@ fn handle_write_with_mode(
                 len.min(runtime.vfs_shm_size.saturating_sub(VFS_IO_OFFSET as Word) as usize)
             };
             if chunk == 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             let write = if direct {
-                nanami_services::vfs::vfs_write_delegated(
+                nanami_client::vfs::vfs_write_delegated(
                     runtime.vfs_port,
                     entry.vfs_handle,
                     file_offset,
@@ -249,7 +249,7 @@ fn handle_write_with_mode(
                         chunk,
                     );
                 }
-                nanami_services::vfs::vfs_write(
+                nanami_client::vfs::vfs_write(
                     runtime.vfs_port,
                     entry.vfs_handle,
                     file_offset,
@@ -260,19 +260,19 @@ fn handle_write_with_mode(
             match write {
                 Ok(bytes) => {
                     if entry.status_flags & POSIX_O_SYNC != 0 {
-                        if let Err(error) = nanami_services::vfs::vfs_fsync(runtime.vfs_port, entry.vfs_handle) {
+                        if let Err(error) = nanami_client::vfs::vfs_fsync(runtime.vfs_port, entry.vfs_handle) {
                             return (map_request_error_to_status(error), 0, 0);
                         }
                     }
                     if !positioned {
                         runtime.open_files[open_index].offset = file_offset.saturating_add(bytes);
                     }
-                    (libnanami::OS_RESPONSE_OK, bytes, 0)
+                    (nanami_runtime::OS_RESPONSE_OK, bytes, 0)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
     }
 }
 
@@ -281,26 +281,26 @@ pub(crate) fn handle_read_dir(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     let max_entries = request.arg1;
     let out_offset = request.arg2 as usize;
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let open_index = runtime.sessions[index].fds[fd].open_file;
     if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = runtime.open_files[open_index];
     if entry.kind != FdKind::Directory {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     if out_offset > runtime.sessions[index].shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    let record_bytes = nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+    let record_bytes = nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
     let client_capacity = runtime.sessions[index]
         .shm_size
         .saturating_sub(out_offset as Word) as usize
@@ -312,12 +312,12 @@ pub(crate) fn handle_read_dir(
         .min(vfs_capacity) as Word;
     let bytes = (capped_entries as usize).saturating_mul(record_bytes);
     if out_offset.saturating_add(bytes) > runtime.sessions[index].shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if capped_entries == 0 {
-        return (libnanami::OS_RESPONSE_OK, 0, entry.offset);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, entry.offset);
     }
-    match nanami_services::vfs::vfs_read_dir(
+    match nanami_client::vfs::vfs_read_dir(
         runtime.vfs_port,
         entry.vfs_handle,
         entry.offset,
@@ -334,7 +334,7 @@ pub(crate) fn handle_read_dir(
                 );
             }
             runtime.open_files[open_index].offset = next_index;
-            (libnanami::OS_RESPONSE_OK, entries, next_index)
+            (nanami_runtime::OS_RESPONSE_OK, entries, next_index)
         }
         Err(e) => (map_request_error_to_status(e), 0, 0),
     }
@@ -342,15 +342,15 @@ pub(crate) fn handle_read_dir(
 
 pub(crate) fn handle_seek(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
     if fd >= MAX_FDS || !runtime.sessions[index].fds[fd].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let open_index = runtime.sessions[index].fds[fd].open_file;
     if open_index >= runtime.open_files.len() || !runtime.open_files[open_index].active {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = runtime.open_files[open_index];
     let base = match request.arg2 {
@@ -358,26 +358,26 @@ pub(crate) fn handle_seek(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
         POSIX_SEEK_CUR => entry.offset,
         POSIX_SEEK_END => match entry.kind {
             FdKind::Regular | FdKind::Directory => {
-                match nanami_services::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
+                match nanami_client::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
                     Ok((_, size, _)) => size,
                     Err(e) => return (map_request_error_to_status(e), 0, 0),
                 }
             }
             FdKind::DevNull | FdKind::DevZero => 0,
-            FdKind::Empty => return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0),
+            FdKind::Empty => return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0),
         },
-        _ => return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
     let new_offset = base.saturating_add(request.arg1);
     runtime.open_files[open_index].offset = new_offset;
-    (libnanami::OS_RESPONSE_OK, new_offset, 0)
+    (nanami_runtime::OS_RESPONSE_OK, new_offset, 0)
 }
 
 pub(crate) fn map_request_error_to_status(error: RequestError) -> Word {
     match error {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
         RequestError::Status(status) => status,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
     }
 }

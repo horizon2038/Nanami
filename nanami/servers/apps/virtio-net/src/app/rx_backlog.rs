@@ -31,22 +31,22 @@ pub(super) fn drain_rx_to_softq(runtime: &mut NetRuntime, burst: usize) -> usize
         drained += 1;
 
         if ENABLE_IRQ_RX_PACKET_DEBUG && runtime.rx_pending_len > 0 {
-            libnanami::print!("[virtio-net][irq.dbg] rx#");
-            libnanami::print!("{}", drained);
-            libnanami::print!(" bytes=");
-            libnanami::print!("{}", runtime.rx_pending_len);
-            libnanami::print!(" head=");
+            nanami_runtime::print!("[virtio-net][irq.dbg] rx#");
+            nanami_runtime::print!("{}", drained);
+            nanami_runtime::print!(" bytes=");
+            nanami_runtime::print!("{}", runtime.rx_pending_len);
+            nanami_runtime::print!(" head=");
             let mut i = 0usize;
             let snap_len = unsafe { RX_SNAPSHOT_LEN };
             while i < min(snap_len, 16) {
                 if i != 0 {
-                    libnanami::debug::print_char(' ');
+                    nanami_runtime::debug::print_char(' ');
                 }
                 let b = unsafe { ptr::read((ptr::addr_of!(RX_SNAPSHOT) as *const u8).add(i)) };
-                libnanami::print!("{:#x}", b);
+                nanami_runtime::print!("{:#x}", b);
                 i += 1;
             }
-            libnanami::print!("\n");
+            nanami_runtime::print!("\n");
         }
     }
     if drained != 0 {

@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const SLOT_IO_PORT: Word = 16;
 pub const SLOT_NOTIFICATION: Word = 18;

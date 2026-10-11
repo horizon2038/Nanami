@@ -167,8 +167,8 @@ use errors::*;
 mod constants;
 use constants::*;
 
-use libnanami::{RequestError, Word};
-use nanami_services::{gfx::honoka, input, net, posix, vfs};
+use nanami_runtime::{RequestError, Word};
+use nanami_client::{gfx::honoka, input, net, posix, vfs};
 
 use crate::abi::{
     ALTER_DEFAULT_SHM_BYTES, ALTER_IO_OFFSET, ALTER_LAUNCH_MAX_ARGS, ALTER_LAUNCH_MAX_ENVS,
@@ -561,7 +561,7 @@ pub fn dispatch_syscall(
                 .map(|process| (process.last_syscall, process.last_syscall_return))
                 .unwrap_or((0, 0));
             if process_trace_enabled(runtime, native_pid) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] exit pid={} syscall={} status={} last_syscall={} last_ret={}",
                     native_pid,
                     context.number,

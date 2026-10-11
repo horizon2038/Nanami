@@ -117,7 +117,7 @@ pub(super) fn sys_sendfile(
         }
         LinuxFileKind::Terminal => {
             copy_bytes(source, runtime.terminal_shm, bytes);
-            nanami_services::terminal::terminal_write_output(
+            nanami_client::terminal::terminal_write_output(
                 runtime.terminal_port,
                 terminal_id,
                 0,

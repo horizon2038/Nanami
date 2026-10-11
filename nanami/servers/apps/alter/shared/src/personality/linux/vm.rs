@@ -112,10 +112,10 @@ pub(super) fn sys_mmap(
             }
             return Ok(requested_addr);
         }
-        let (base, granted) = libnanami::request_process_map_anonymous_at(pid, fixed_base, mapped)
+        let (base, granted) = nanami_runtime::request_process_map_anonymous_at(pid, fixed_base, mapped)
             .map_err(|err| {
                 let errno = map_request_error(err);
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] mmap fixed failed pid={} addr={:#x} base={:#x} len={:#x} mapped={:#x} prot={:#x} flags={:#x} fd={:#x} off={:#x} errno={}",
                     pid,
                     requested_addr,
@@ -142,7 +142,7 @@ pub(super) fn sys_mmap(
     }
 
     let (base, _) = map_anonymous_tracked(runtime, pid, len, _prot).map_err(|errno| {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] mmap failed pid={} addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={:#x} off={:#x} errno={}",
             pid,
             requested_addr,
@@ -426,7 +426,7 @@ pub(super) fn release_present_mapping_pages(
         let mapping = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
         let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
         if mapping.prot != LINUX_PROT_NONE {
-            libnanami::request_process_mapping_release(pid, cursor, next - cursor)
+            nanami_runtime::request_process_mapping_release(pid, cursor, next - cursor)
                 .map_err(map_request_error)?;
         }
         cursor = next;
@@ -447,7 +447,7 @@ pub(super) fn ensure_present_mapping_pages(
         let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
         if mapping.prot == LINUX_PROT_NONE {
             let (mapped_base, mapped) =
-                libnanami::request_process_map_anonymous_at(pid, cursor, next - cursor)
+                nanami_runtime::request_process_map_anonymous_at(pid, cursor, next - cursor)
                     .map_err(map_request_error)?;
             if mapped_base != cursor || mapped < next - cursor {
                 return Err(ENOMEM);
@@ -499,7 +499,7 @@ pub(super) fn sys_mremap(
     let extra = new_mapped - old_mapped;
     if (flags & LINUX_MREMAP_FIXED) == 0 {
         if let Ok((base, granted)) =
-            libnanami::request_process_map_anonymous_at(pid, old_end, extra)
+            nanami_runtime::request_process_map_anonymous_at(pid, old_end, extra)
                 .map_err(map_request_error)
         {
             if base == old_end && granted >= extra && runtime.add_mapping(pid, base, granted, prot)
@@ -554,7 +554,7 @@ pub(super) fn map_anonymous_tracked(
     prot: Word,
 ) -> Result<(Word, Word), i32> {
     let (base, mapped) =
-        libnanami::request_process_map_anonymous(pid, len).map_err(map_request_error)?;
+        nanami_runtime::request_process_map_anonymous(pid, len).map_err(map_request_error)?;
     if !runtime.add_mapping(pid, base, mapped, prot) {
         return Err(ENOMEM);
     }

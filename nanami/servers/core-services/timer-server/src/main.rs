@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
 
 #[path = "arch.rs"]
 mod arch;
@@ -23,13 +23,13 @@ const MAX_PENDING_ASYNC_TIMERS: usize = 512;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[timer-server] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[timer-server] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    if let Err(e) = libnanami::ipc::init_ipc_tls() {
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    if let Err(e) = nanami_runtime::ipc::init_ipc_tls() {
         return Err(log_error("[timer-server] ipc tls init failed: ", e));
     }
 
@@ -37,34 +37,34 @@ fn nanami_main() -> libnanami::NanamiResult {
         .map_err(|e| log_error("[timer-server] timer prepare failed: ", e))?;
 
     if let Err(e) =
-        libnanami::request_irq(prepared_timer.irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT)
+        nanami_runtime::request_irq(prepared_timer.irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT)
     {
         return Err(log_error("[timer-server] request timer irq failed: ", e));
     }
 
-    let notif_desc = libnanami::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
-    let irq_desc = libnanami::ipc::process_slot_descriptor(SLOT_INTERRUPT);
-    if let Err(e) = libnanami::ipc::bind_current_thread_notification(notif_desc) {
+    let notif_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
+    let irq_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_INTERRUPT);
+    if let Err(e) = nanami_runtime::ipc::bind_current_thread_notification(notif_desc) {
         return Err(log_error("[timer-server] bind notification failed: ", e));
     }
 
-    nanami_services::registry::register_timer_service()
+    nanami_client::registry::register_timer_service()
         .map_err(|e| log_error("[timer-server] service register failed: ", e))?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[timer-server] ready mode={} tick-hz={}",
         arch::MODE,
         arch::TICK_HZ
     );
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut state = TimerState::new();
-    let mut pending_status = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
 
     loop {
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending_status.0,
                 pending_status.1,
@@ -78,7 +78,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port) {
+            match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(e) => e,
                 Err(e) => return Err(log_error("[timer-server] receive failed: ", e)),
             }
@@ -100,11 +100,11 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[timer-server] fault id=");
-                libnanami::print!("{}", identifier);
-                libnanami::print!(" reason=");
-                libnanami::print!("{:#x}", reason);
-                libnanami::print!("\n");
+                nanami_runtime::print!("[timer-server] fault id=");
+                nanami_runtime::print!("{}", identifier);
+                nanami_runtime::print!(" reason=");
+                nanami_runtime::print!("{:#x}", reason);
+                nanami_runtime::print!("\n");
             }
         }
         complete_event(&mut state, &mut prepared_timer)
@@ -119,8 +119,8 @@ fn handle_request(
     irq_desc: Word,
 ) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::timer::TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS
-        | nanami_services::timer::TIMER_SERVICE_REQUEST_SLEEP_ASYNC_MILLISECONDS => {
+        nanami_client::timer::TIMER_SERVICE_REQUEST_SLEEP_MILLISECONDS
+        | nanami_client::timer::TIMER_SERVICE_REQUEST_SLEEP_ASYNC_MILLISECONDS => {
             match schedule_timer(
                 state,
                 timer,
@@ -130,11 +130,11 @@ fn handle_request(
                 request.arg0 as u64,
                 0,
             ) {
-                Ok(()) => (libnanami::OS_RESPONSE_OK, request.arg0, 0),
+                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, request.arg0, 0),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::timer::TIMER_SERVICE_REQUEST_INTERVAL_MILLISECONDS => {
+        nanami_client::timer::TIMER_SERVICE_REQUEST_INTERVAL_MILLISECONDS => {
             match schedule_timer(
                 state,
                 timer,
@@ -144,21 +144,21 @@ fn handle_request(
                 request.arg0 as u64,
                 request.arg0 as u64,
             ) {
-                Ok(()) => (libnanami::OS_RESPONSE_OK, request.arg0, 0),
+                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, request.arg0, 0),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::timer::TIMER_SERVICE_REQUEST_MONOTONIC_TICKS => {
+        nanami_client::timer::TIMER_SERVICE_REQUEST_MONOTONIC_TICKS => {
             match refresh_clock(state, timer, irq_desc) {
                 Ok(()) => (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     state.ticks as Word,
                     arch::TICK_HZ as Word,
                 ),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::timer::TIMER_SERVICE_REQUEST_ALARM_TICKS => {
+        nanami_client::timer::TIMER_SERVICE_REQUEST_ALARM_TICKS => {
             match set_alarm(
                 state,
                 timer,
@@ -167,11 +167,11 @@ fn handle_request(
                 request.arg1,
                 (request.arg2 != 0).then_some(request.arg0 as u64),
             ) {
-                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -180,27 +180,27 @@ fn handle_notification(
     timer: &mut arch::PreparedTimer,
 ) -> Result<(), RequestError> {
     timer.on_interrupt();
-    libnanami::ipc::interrupt_ack(irq_desc)?;
+    nanami_runtime::ipc::interrupt_ack(irq_desc)?;
     Ok(())
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
 fn map_request_error_to_status(err: RequestError) -> Word {
     match err {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Transport => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Transport => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(status) => status,
     }
 }
 
-fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

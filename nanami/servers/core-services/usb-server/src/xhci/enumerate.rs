@@ -35,7 +35,7 @@ impl Controller {
                 continue;
             }
             if let Err(error) = self.attach(port as u8, input) {
-                libnanami::println!("[usb-server] port {} skipped: {}", port, error);
+                nanami_runtime::println!("[usb-server] port {} skipped: {}", port, error);
             }
         }
     }
@@ -59,7 +59,7 @@ impl Controller {
             {
                 self.fail(input); // Do not reuse a slot whose DMA ownership is uncertain.
             }
-            libnanami::println!("[usb-server] detached port={} slot={}", device.port, slot);
+            nanami_runtime::println!("[usb-server] detached port={} slot={}", device.port, slot);
         }
     }
 
@@ -108,7 +108,7 @@ impl Controller {
             3 => 64,
             4 => 512,
             _ => {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] port {} unsupported speed-id={} PORTSC={:#010x}",
                     port,
                     speed,
@@ -169,7 +169,7 @@ impl Controller {
             }
             return Err(error);
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] device port={} slot={} vid={:04x} pid={:04x} boot-hid={} storage={}",
             port,
             slot,

@@ -1,6 +1,6 @@
 //! Device teardown must never touch I/O before a device has been discovered.
 #![allow(dead_code)]
-extern crate self as libnanami;
+extern crate self as nanami_runtime;
 use std::cell::RefCell;
 pub use std::println;
 pub type Word = usize;

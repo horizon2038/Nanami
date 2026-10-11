@@ -90,7 +90,7 @@ pub(super) fn sys_virtual_read(
     let mut resolver_text;
     let image_name;
     let bytes = if node == VirtualNode::ProcMemInfo {
-        let info = libnanami::request_nanami_info_memory().map_err(map_request_error)?;
+        let info = nanami_runtime::request_nanami_info_memory().map_err(map_request_error)?;
         (memory_text, memory_text_len) = format_proc_meminfo(info.total_bytes, info.free_bytes);
         &memory_text[..memory_text_len]
     } else if node == VirtualNode::ProcNetArp {

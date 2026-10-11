@@ -46,7 +46,7 @@ kernel.
 ### Nun
 
 Nun provides the Rust entry environment and A9N ABI integration used by Alpha.
-Native applications use `libnanami`, which builds on the same A9N ABI but
+Native applications use `nanami_runtime`, which builds on the same A9N ABI but
 exposes Nanami OS requests and process startup conventions.
 
 ### Alpha
@@ -155,7 +155,7 @@ metadata records virtual ranges, backing allocations, frame slots, and mapping
 kind. This supports anonymous mappings, fixed mappings, process memory copies,
 memory cloning, shared memory, MMIO, DMA, and explicit mapping release.
 
-Native heaps request anonymous regions from Alpha. `libnanami` manages multiple
+Native heaps request anonymous regions from Alpha. `nanami_runtime` manages multiple
 heap regions and can grow the allocator without assuming a single fixed heap.
 
 ### Process Exit and Reaping
@@ -302,11 +302,16 @@ Canonical syscall lists are maintained beside each personality implementation.
 
 Nanami delegates final image construction to SPENCER:
 
-- `scripts/build-image.sh` builds user-space components and the initramfs, then
-  invokes SPENCER with Nanami as an external OS payload;
-- `scripts/create-ext2-image.sh` builds the root filesystem image;
-- `scripts/run-qemu.sh` configures OVMF, block devices, networking, capture,
-  acceleration, and QEMU execution.
+- `cargo xtask build` builds native components and invokes SPENCER's Rust
+  library with Nanami as the external OS payload;
+- `cargo xtask rootfs` uses the reusable Rust `ext2-image` crate;
+- the boot initramfs is generated as newc in Rust, without host cpio;
+- `cargo xtask run` selects firmware, storage, networking, acceleration and
+  launches QEMU directly with a structured argument vector.
+
+ABI definitions are centralized in the dependency-free `nanami-uapi` crate.
+`nanami-runtime` provides execution/IPC/allocation; `nanami-client` contains
+typed service operations. See [user-space libraries](../servers/README.md).
 
 See the repository [README](../../README.md) for supported commands and runtime
 options.

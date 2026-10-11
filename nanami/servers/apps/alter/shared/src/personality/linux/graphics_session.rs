@@ -28,8 +28,8 @@ pub(super) fn ensure_input(runtime: &mut Runtime, pid: Word) -> Result<(), i32> 
     if runtime.input_port != 0 && runtime.input_queue != 0 {
         return Ok(());
     }
-    nanami_services::registry::connect_input_service(SLOT_INPUT_SERVICE).map_err(|_| ENODEV)?;
-    let port = libnanami::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE);
+    nanami_client::registry::connect_input_service(SLOT_INPUT_SERVICE).map_err(|_| ENODEV)?;
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE);
     let (queue, bytes) = input::input_service_subscribe_shared(
         port,
         input::INPUT_SUBSCRIBE_KEYBOARD | input::INPUT_SUBSCRIBE_MOUSE,
@@ -68,9 +68,9 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
     };
     if runtime.honoka_port == 0 {
         runtime.honoka_pid =
-            nanami_services::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE)
+            nanami_client::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE)
                 .map_err(|_| ENODEV)?;
-        runtime.honoka_port = libnanami::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE);
+        runtime.honoka_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE);
     }
     let honoka_pid = runtime.honoka_pid;
     let port = runtime.honoka_port;
@@ -95,16 +95,16 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
         }
     };
     let present_slot = SLOT_HONOKA_PRESENT_NOTIFICATION_BASE + index as Word;
-    if let Err(error) = libnanami::request_notification_port_copy(
+    if let Err(error) = nanami_runtime::request_notification_port_copy(
         honoka_pid,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
         present_slot,
         honoka::HONOKA_NOTIFICATION_PRESENT | (window & 0xffff_ffff),
     ) {
         let _ = honoka::honoka_destroy_window(port, window);
         return Err(map_request_error(error));
     }
-    let present_notification = libnanami::ipc::process_slot_descriptor(present_slot);
+    let present_notification = nanami_runtime::ipc::process_slot_descriptor(present_slot);
     let (input_queue, _) = match honoka::honoka_attach_input_queue(port, window) {
         Ok(attached) => attached,
         Err(error) => {
@@ -113,7 +113,7 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
         }
     };
     if let Err(error) = honoka::honoka_attach_input_notification(port, window) {
-        let _ = libnanami::request_mapping_release(input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+        let _ = nanami_runtime::request_mapping_release(input_queue, input::INPUT_EVENT_QUEUE_BYTES);
         let _ = honoka::honoka_destroy_window(port, window);
         return Err(map_request_error(error));
     }
@@ -189,7 +189,7 @@ pub(super) fn cleanup_graphics_for_process(runtime: &mut Runtime, pid: Word) {
     let _ = honoka::honoka_destroy_window(session.honoka_port, session.window_id);
     if session.input_queue != 0 {
         let _ =
-            libnanami::request_mapping_release(session.input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+            nanami_runtime::request_mapping_release(session.input_queue, input::INPUT_EVENT_QUEUE_BYTES);
     }
     runtime.graphics[index] = crate::state::GraphicsSession::EMPTY;
 }

@@ -28,11 +28,11 @@ mod tls {
         Ok(())
     }
 }
-#[path = "../../../nanami/servers/sdk/rust/libnanami/src/ipc/ports.rs"]
+#[path = "../../../nanami/servers/libs/nanami-runtime/src/ipc/ports.rs"]
 mod ports;
-#[path = "../../../nanami/servers/sdk/rust/libnanami/src/ipc/service.rs"]
+#[path = "../../../nanami/servers/libs/nanami-runtime/src/ipc/service.rs"]
 mod service;
-#[path = "../../../nanami/servers/sdk/rust/libnanami/src/ipc/types.rs"]
+#[path = "../../../nanami/servers/libs/nanami-runtime/src/ipc/types.rs"]
 mod types;
 
 mod tests;

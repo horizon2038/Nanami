@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
-use nanami_services::posix::*;
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
+use nanami_client::posix::*;
 
 mod control;
 use control::*;
@@ -29,23 +29,23 @@ use state::*;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[posix-server] panic\n");
+    nanami_runtime::print!("[posix-server] panic\n");
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[posix-server] bootstrap\n");
-    libnanami::ipc::init_ipc_tls()
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[posix-server] bootstrap\n");
+    nanami_runtime::ipc::init_ipc_tls()
         .map_err(|e| log_error("[posix-server] ipc tls init failed: ", e))?;
 
     let vfs_port = connect_vfs_service();
     let (vfs_shm, vfs_shm_size) =
-        nanami_services::vfs::vfs_attach_shared_memory(vfs_port, VFS_SHM_BYTES)
+        nanami_client::vfs::vfs_attach_shared_memory(vfs_port, VFS_SHM_BYTES)
             .map_err(|e| log_error("[posix-server] vfs shm attach failed: ", e))?;
 
-    nanami_services::registry::register_posix_service()
+    nanami_client::registry::register_posix_service()
         .map_err(|e| log_error("[posix-server] service register failed: ", e))?;
-    libnanami::print!("[posix-server] service registered: posix-service\n");
+    nanami_runtime::print!("[posix-server] service registered: posix-service\n");
 
     let mut runtime = Runtime {
         vfs_port,
@@ -58,14 +58,14 @@ fn nanami_main() -> libnanami::NanamiResult {
         cached_session_index: INVALID_SESSION_INDEX,
     };
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut pending = ReplyAction::DropReply;
 
     loop {
         let event = match pending {
             ReplyAction::Reply(status, detail0, detail1) => {
                 pending = ReplyAction::DropReply;
-                match libnanami::ipc::service_reply_receive_event(
+                match nanami_runtime::ipc::service_reply_receive_event(
                     service_port,
                     status,
                     detail0,
@@ -75,7 +75,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                     Err(e) => return Err(log_error("[posix-server] reply_receive failed: ", e)),
                 }
             }
-            ReplyAction::DropReply => match libnanami::ipc::service_receive_event(service_port) {
+            ReplyAction::DropReply => match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(e) => e,
                 Err(e) => return Err(log_error("[posix-server] receive failed: ", e)),
             },
@@ -89,7 +89,7 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[posix-server] fault id={} reason={:#x}",
                     identifier,
                     reason
@@ -102,14 +102,14 @@ fn nanami_main() -> libnanami::NanamiResult {
 fn connect_vfs_service() -> Word {
     let mut tries = 0usize;
     loop {
-        match nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
-            Ok(()) => return libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE),
+        match nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
+            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE),
             Err(e) => {
                 if tries == 0 {
                     log_request_error("[posix-server] waiting vfs-service: ", e);
                 }
                 tries += 1;
-                libnanami::yield_now();
+                nanami_runtime::yield_now();
             }
         }
     }
@@ -120,11 +120,11 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_CONTROL => handle_control(runtime, request),
         POSIX_REQUEST_GETPID => match session_for_pid(runtime, request.identifier) {
             Some(index) => (
-                libnanami::OS_RESPONSE_OK,
+                nanami_runtime::OS_RESPONSE_OK,
                 runtime.sessions[index].posix_pid,
                 0,
             ),
-            None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+            None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
         },
         POSIX_REQUEST_GETCWD => handle_getcwd(runtime, request),
         POSIX_REQUEST_CHDIR => handle_chdir(runtime, request),
@@ -172,19 +172,19 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_FORK => handle_fork(runtime, request),
         POSIX_REQUEST_EXEC => return handle_exec(runtime, request),
         POSIX_REQUEST_KILL => return handle_kill(runtime, request),
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
     ReplyAction::Reply(reply.0, reply.1, reply.2)
 }
 
-fn log_error(prefix: &str, error: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, error: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, error);
-    libnanami::NanamiError::from(error)
+    nanami_runtime::NanamiError::from(error)
 }
 
 pub(crate) fn log_request_error(prefix: &str, error: RequestError) {
-    libnanami::print!("{}", prefix);
-    libnanami::println!("{:?}", error);
+    nanami_runtime::print!("{}", prefix);
+    nanami_runtime::println!("{:?}", error);
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

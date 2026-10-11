@@ -81,7 +81,7 @@ transfers show no improvement; no across-the-board speedup is claimed.
 Build an image with the existing Linux fixtures, then run:
 
 ```sh
-LINUX_ROOTFS_DIR="$PWD/out/alter-glibc-root" make image
+LINUX_ROOTFS_DIR="$PWD/out/alter-glibc-root" cargo xtask build --rebuild-rootfs
 python3 tests/alter-linux/qemu-smoke.py \
   --image spencer/out/x86_64-pc99-release/spencer.img --smp 4 --ui-stress
 python3 tests/alter-linux/qemu-smoke.py \

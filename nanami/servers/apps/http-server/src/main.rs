@@ -3,7 +3,7 @@
 
 use core::cmp::min;
 use core::ptr;
-use libnanami::Word;
+use nanami_runtime::Word;
 
 mod reactor;
 use reactor::run_http_reactor;
@@ -82,25 +82,25 @@ impl ResponseCache {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[http-server] panic\n");
+    nanami_runtime::print!("[http-server] panic\n");
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[http-server] bootstrap\n");
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[http-server] bootstrap\n");
 
     let notification =
-        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
-    libnanami::ipc::bind_current_thread_notification(notification).map_err(|e| {
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
+    nanami_runtime::ipc::bind_current_thread_notification(notification).map_err(|e| {
         log_request_error("[http-server] bind notification failed: ", e);
         e
     })?;
 
-    let net_desc = libnanami::ipc::process_slot_descriptor(NET_SLOT);
+    let net_desc = nanami_runtime::ipc::process_slot_descriptor(NET_SLOT);
     let timer_desc = connect_timer_service();
     wait_network_service(timer_desc);
 
-    let self_pid = match libnanami::get_self_pid() {
+    let self_pid = match nanami_runtime::get_self_pid() {
         Ok(pid) => pid,
         Err(e) => {
             log_request_error("[http-server] get_self_pid failed: ", e);
@@ -108,9 +108,9 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let (status, shm_vaddr, shm_size) = match nanami_services::net::net_service_control_ex(
+    let (status, shm_vaddr, shm_size) = match nanami_client::net::net_service_control_ex(
         net_desc,
-        nanami_services::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY,
+        nanami_client::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY,
         self_pid,
         SHM_SIZE,
     ) {
@@ -120,16 +120,16 @@ fn nanami_main() -> libnanami::NanamiResult {
             return Err(e.into());
         }
     };
-    if status != libnanami::OS_RESPONSE_OK {
-        libnanami::print!("[http-server] attach shm status=");
-        libnanami::print!("{:#x}", status);
-        libnanami::print!("\n");
-        return Err(libnanami::NanamiError(status));
+    if status != nanami_runtime::OS_RESPONSE_OK {
+        nanami_runtime::print!("[http-server] attach shm status=");
+        nanami_runtime::print!("{:#x}", status);
+        nanami_runtime::print!("\n");
+        return Err(nanami_runtime::NanamiError(status));
     }
 
-    let rx_notification = match nanami_services::net::net_service_attach_rx_notification(
+    let rx_notification = match nanami_client::net::net_service_attach_rx_notification(
         net_desc,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
     ) {
         Ok(()) => Some(notification),
         Err(e) => {
@@ -138,15 +138,15 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
 
-    let _ = nanami_services::net::net_service_control(
+    let _ = nanami_client::net::net_service_control(
         net_desc,
-        nanami_services::net::NET_SERVICE_CONTROL_LINK_UP,
+        nanami_client::net::NET_SERVICE_CONTROL_LINK_UP,
         0,
         0,
     );
-    nanami_services::net::net_service_control(
+    nanami_client::net::net_service_control(
         net_desc,
-        nanami_services::net::NET_SERVICE_CONTROL_TCP_BIND,
+        nanami_client::net::NET_SERVICE_CONTROL_TCP_BIND,
         80,
         0,
     )
@@ -154,7 +154,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         log_request_error("[http-server] tcp bind failed: ", e);
         e
     })?;
-    libnanami::print!("[http-server] tcp listen port=80\n");
+    nanami_runtime::print!("[http-server] tcp listen port=80\n");
 
     run_http_reactor(net_desc, timer_desc, rx_notification, shm_vaddr, shm_size)
 }
@@ -162,9 +162,9 @@ fn nanami_main() -> libnanami::NanamiResult {
 fn wait_network_service(timer_desc: Option<Word>) {
     let mut retry = 0usize;
     loop {
-        match nanami_services::registry::connect_network_service(NET_SLOT) {
+        match nanami_client::registry::connect_network_service(NET_SLOT) {
             Ok(()) => {
-                libnanami::print!("[http-server] connected network-service\n");
+                nanami_runtime::print!("[http-server] connected network-service\n");
                 return;
             }
             Err(e) => {
@@ -186,17 +186,17 @@ fn wait_network_service(timer_desc: Option<Word>) {
     }
 }
 
-fn log_request_error(prefix: &str, err: libnanami::RequestError) {
-    libnanami::print!(prefix);
+fn log_request_error(prefix: &str, err: nanami_runtime::RequestError) {
+    nanami_runtime::print!(prefix);
     match err {
-        libnanami::RequestError::InvalidArgument => libnanami::print!("invalid-arg\n"),
-        libnanami::RequestError::Unsupported => libnanami::print!("unsupported\n"),
-        libnanami::RequestError::Transport => libnanami::print!("transport\n"),
-        libnanami::RequestError::Protocol => libnanami::print!("protocol\n"),
-        libnanami::RequestError::Status(code) => {
-            libnanami::print!("status=");
-            libnanami::print!("{:#x}", code);
-            libnanami::print!("\n");
+        nanami_runtime::RequestError::InvalidArgument => nanami_runtime::print!("invalid-arg\n"),
+        nanami_runtime::RequestError::Unsupported => nanami_runtime::print!("unsupported\n"),
+        nanami_runtime::RequestError::Transport => nanami_runtime::print!("transport\n"),
+        nanami_runtime::RequestError::Protocol => nanami_runtime::print!("protocol\n"),
+        nanami_runtime::RequestError::Status(code) => {
+            nanami_runtime::print!("status=");
+            nanami_runtime::print!("{:#x}", code);
+            nanami_runtime::print!("\n");
         }
     }
 }
@@ -480,8 +480,8 @@ fn build_response_cache() -> ResponseCache {
 }
 
 fn connect_timer_service() -> Option<Word> {
-    match nanami_services::registry::connect_timer_service(TIMER_SLOT) {
-        Ok(()) => Some(libnanami::ipc::process_slot_descriptor(TIMER_SLOT)),
+    match nanami_client::registry::connect_timer_service(TIMER_SLOT) {
+        Ok(()) => Some(nanami_runtime::ipc::process_slot_descriptor(TIMER_SLOT)),
         Err(e) => {
             log_request_error("[http-server] timer connect failed: ", e);
             None
@@ -491,7 +491,7 @@ fn connect_timer_service() -> Option<Word> {
 
 fn sleep_ms(timer_desc: Option<Word>, ms: Word) {
     if let Some(desc) = timer_desc {
-        let _ = nanami_services::timer::timer_service_sleep_milliseconds(desc, ms);
+        let _ = nanami_client::timer::timer_service_sleep_milliseconds(desc, ms);
     }
 }
 
@@ -505,4 +505,4 @@ fn tx_capacity(shm_size: Word) -> usize {
     TX_SIZE
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

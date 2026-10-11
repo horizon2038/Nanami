@@ -1,21 +1,21 @@
 //! Initialization waits must block: PS/2 runs above the filesystem's priority.
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 const SLOT_TIMER: Word = 26;
 const SLOT_DELAY: Word = 27;
 
 pub fn initialize() -> Result<(), RequestError> {
-    nanami_services::registry::connect_timer_service(SLOT_TIMER)?;
+    nanami_client::registry::connect_timer_service(SLOT_TIMER)?;
     // Keep timer completion separate from keyboard/mouse IRQ notifications.
-    libnanami::request_notification_port_create(
+    nanami_runtime::request_notification_port_create(
         SLOT_DELAY,
-        nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+        nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
     )
 }
 
 pub fn sleep(milliseconds: Word) -> Result<(), RequestError> {
-    nanami_services::timer::timer_service_sleep_on_notification_milliseconds(
-        libnanami::ipc::process_slot_descriptor(SLOT_TIMER),
+    nanami_client::timer::timer_service_sleep_on_notification_milliseconds(
+        nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER),
         milliseconds,
         SLOT_DELAY,
     )
@@ -37,8 +37,8 @@ impl Wait {
     }
 
     pub fn pause(&mut self, status: Word) -> Result<(), RequestError> {
-        let (now, hz) = nanami_services::timer::timer_service_monotonic_ticks(
-            libnanami::ipc::process_slot_descriptor(SLOT_TIMER),
+        let (now, hz) = nanami_client::timer::timer_service_monotonic_ticks(
+            nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER),
         )?;
         if hz == 0 {
             return Err(RequestError::Protocol);
@@ -50,7 +50,7 @@ impl Wait {
             )
         });
         if now.wrapping_sub(start) >= limit {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[ps2-server] timeout stage={} status={:#x}",
                 self.stage,
                 status

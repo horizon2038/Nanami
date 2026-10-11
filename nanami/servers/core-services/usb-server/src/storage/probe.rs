@@ -11,7 +11,7 @@ pub(super) fn probe(
     for (index, controller) in controllers.iter_mut().enumerate() {
         for disk in controller.storage_disks(input)? {
             if let Some(partition) = probe_disk(controller, disk, input, timer)? {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] root controller={} slot={} lun={} LBA={} sectors={}",
                     index,
                     disk.slot,
@@ -27,7 +27,7 @@ pub(super) fn probe(
                     })
                     .is_some()
                 {
-                    libnanami::print!(
+                    nanami_runtime::print!(
                         "[usb-server] multiple Nanami USB roots; refusing selection\n"
                     );
                     return Err(RequestError::Protocol);
@@ -101,7 +101,7 @@ fn probe_disk(
     // The common GPT/block API currently describes 512-byte logical sectors.
     // Reject 4Kn instead of interpreting its LBAs as byte offsets incorrectly.
     if sector_bytes != 512 || sectors < 3 {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] unsupported medium slot={} lun={} sector-bytes={}",
             disk.slot,
             disk.lun,

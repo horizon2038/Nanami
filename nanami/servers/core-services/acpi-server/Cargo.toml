@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 acpi = "=6.1.1"
-libnanami = { path = "../../sdk/rust/libnanami" }
-nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
 
 [patch.crates-io]
 acpi = { path = "../../vendor/acpi" }

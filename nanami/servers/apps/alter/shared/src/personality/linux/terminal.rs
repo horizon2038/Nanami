@@ -39,7 +39,7 @@ pub(super) fn sys_terminal_read_now(
     };
     if let Some(bytes) = bytes {
         if bytes != 0 {
-            libnanami::request_process_memory_write(pid, user_buffer, runtime.terminal_shm, bytes)
+            nanami_runtime::request_process_memory_write(pid, user_buffer, runtime.terminal_shm, bytes)
                 .map_err(map_request_error)?;
         }
         return Ok(Some(bytes));
@@ -52,7 +52,7 @@ pub(super) fn drain_terminal_raw_input(
     terminal_id: Word,
     max_len: Word,
 ) -> Result<Option<Word>, i32> {
-    let bytes = nanami_services::terminal::terminal_read_input(
+    let bytes = nanami_client::terminal::terminal_read_input(
         runtime.terminal_port,
         terminal_id,
         0,
@@ -81,7 +81,7 @@ fn fill_terminal_canonical_line(runtime: &mut Runtime, pid: Word) -> Result<(), 
     }
     let terminal_id = terminal_id_for_pid(runtime, pid)?;
     loop {
-        let bytes = nanami_services::terminal::terminal_read_input(
+        let bytes = nanami_client::terminal::terminal_read_input(
             runtime.terminal_port,
             terminal_id,
             0,
@@ -107,7 +107,7 @@ pub(super) fn terminal_readable(runtime: &mut Runtime, pid: Word) -> Result<bool
         Ok(runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready)
     } else {
         // A zero-length service read reports queued bytes without consuming.
-        nanami_services::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 0)
+        nanami_client::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 0)
             .map(|bytes| bytes != 0).map_err(map_request_error)
     }
 }
@@ -195,10 +195,10 @@ pub(super) fn ensure_terminal_input_notification(
     if runtime.terminal_input_notification_id == terminal_id {
         return Ok(());
     }
-    nanami_services::terminal::terminal_attach_input_notification(
+    nanami_client::terminal::terminal_attach_input_notification(
         runtime.terminal_port,
         terminal_id,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
     )
     .map_err(map_request_error)?;
     runtime.terminal_input_notification_id = terminal_id;
@@ -215,14 +215,14 @@ pub(super) fn sys_terminal_write(
     let mut done = 0;
     while done < len {
         let chunk = terminal_bounded_len(runtime, len - done)?;
-        libnanami::request_process_memory_read(
+        nanami_runtime::request_process_memory_read(
             pid,
             user_buffer + done,
             runtime.terminal_shm,
             chunk,
         )
         .map_err(map_request_error)?;
-        let written = nanami_services::terminal::terminal_write_output(
+        let written = nanami_client::terminal::terminal_write_output(
             runtime.terminal_port,
             terminal_id,
             0,
@@ -300,13 +300,13 @@ pub(super) fn sys_ioctl(
                 }
             }
         }
-        nanami_services::terminal::terminal_set_output_crlf(runtime.terminal_port, terminal_id,
+        nanami_client::terminal::terminal_set_output_crlf(runtime.terminal_port, terminal_id,
             oflag & LINUX_OPOST != 0 && oflag & LINUX_ONLCR != 0).map_err(map_request_error)?;
         if request == LINUX_TCSETSF {
-            nanami_services::terminal::terminal_clear(runtime.terminal_port, terminal_id,
-                nanami_services::terminal::TERMINAL_CLEAR_INPUT).map_err(map_request_error)?;
+            nanami_client::terminal::terminal_clear(runtime.terminal_port, terminal_id,
+                nanami_client::terminal::TERMINAL_CLEAR_INPUT).map_err(map_request_error)?;
         }
-        nanami_services::terminal::terminal_set_echo(
+        nanami_client::terminal::terminal_set_echo(
             runtime.terminal_port,
             terminal_id,
             echo_enabled,
@@ -320,7 +320,7 @@ pub(super) fn sys_ioctl(
         }
         let terminal_id = terminal_id_for_pid(runtime, pid)?;
         let (columns, rows) =
-            nanami_services::terminal::terminal_get_size(runtime.terminal_port, terminal_id)
+            nanami_client::terminal::terminal_get_size(runtime.terminal_port, terminal_id)
                 .map_err(map_request_error)?;
         unsafe {
             write_u16(runtime.posix_shm, rows as u16);
@@ -337,7 +337,7 @@ pub(super) fn sys_ioctl(
         let rows = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const u16) };
         let cols = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 2) as *const u16) };
         let terminal_id = terminal_id_for_pid(runtime, pid)?;
-        nanami_services::terminal::terminal_set_size(runtime.terminal_port, terminal_id, cols as Word, rows as Word)
+        nanami_client::terminal::terminal_set_size(runtime.terminal_port, terminal_id, cols as Word, rows as Word)
             .map_err(map_request_error)?;
         return Ok(0);
     }
@@ -422,7 +422,7 @@ pub fn wake_terminal_readers(runtime: &mut Runtime) {
         )
         .is_err()
         {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/{}] terminal wake register write failed pid={} pcb={:#x}",
                 personality::name(process.personality),
                 process.pid,
@@ -432,7 +432,7 @@ pub fn wake_terminal_readers(runtime: &mut Runtime) {
             continue;
         }
         if let Err(error) = a9n_abi::arch::process_control_block::resume(process.pcb) {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] terminal wake resume failed pid={} pcb={:#x} err={:?}",
                 process.pid,
                 process.pcb,
@@ -454,7 +454,7 @@ pub(super) fn ensure_standard_terminal_fd(runtime: &mut Runtime, pid: Word, fd: 
         return;
     }
     if runtime.set_linux_file(pid, fd, LinuxFile::terminal()) {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] restored terminal stdio pid={} fd={}",
             pid,
             fd

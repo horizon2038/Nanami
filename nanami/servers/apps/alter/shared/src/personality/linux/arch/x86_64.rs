@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 pub const SYS_READ: Word = 0;
 pub const SYS_WRITE: Word = 1;

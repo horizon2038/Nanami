@@ -7,8 +7,8 @@ compile_error!("ahci-server is an x86_64 platform driver");
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{RequestError, Word};
 
 const SLOT_PCI_CONFIG: Word = 16;
 const SLOT_SERVICE_PORT: Word = 20;
@@ -63,12 +63,12 @@ const DMA_COMMAND_LIST_OFFSET: usize = 0x0000;
 const DMA_RECEIVED_FIS_OFFSET: usize = 0x0400;
 const DMA_COMMAND_TABLE_OFFSET: usize = 0x0500;
 const DMA_DATA_OFFSET: usize = 0x1000;
-const DMA_DATA_BYTES: usize = nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES as usize;
+const DMA_DATA_BYTES: usize = nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES as usize;
 const DMA_TOTAL_BYTES: usize = DMA_DATA_OFFSET + DMA_DATA_BYTES;
 const COMMAND_TABLE_PRDT_OFFSET: usize = 0x80;
 const AHCI_MMIO_BYTES: Word = 0x2000;
 const SECTOR_BYTES: usize = 512;
-const BLOCK_BYTES: usize = nanami_services::block::BLOCK_DEVICE_BLOCK_SIZE as usize;
+const BLOCK_BYTES: usize = nanami_client::block::BLOCK_DEVICE_BLOCK_SIZE as usize;
 const POLL_LIMIT: usize = 10_000_000;
 const MAX_AHCI_CONTROLLERS: usize = 16;
 
@@ -120,15 +120,15 @@ struct AhciRuntime {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[ahci-server] panic\n");
+    nanami_runtime::print!("[ahci-server] panic\n");
     retain_dma()
 }
 
 fn retain_dma() -> ! {
     let notification =
-        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
     loop {
-        let _ = libnanami::ipc::notification_wait(notification);
+        let _ = nanami_runtime::ipc::notification_wait(notification);
     }
 }
 
@@ -147,13 +147,13 @@ fn pci_read32(
     function: u8,
     offset: u8,
 ) -> Result<u32, RequestError> {
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         descriptor,
         PCI_CONFIG_ADDRESS,
         4,
         config_address(bus, device, function, offset) as Word,
     )?;
-    Ok(libnanami::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
+    Ok(nanami_runtime::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
 }
 
 fn pci_write32(
@@ -162,13 +162,13 @@ fn pci_write32(
     offset: u8,
     value: u32,
 ) -> Result<(), RequestError> {
-    libnanami::io::io_write(
+    nanami_runtime::io::io_write(
         descriptor,
         PCI_CONFIG_ADDRESS,
         4,
         config_address(address.bus, address.device, address.function, offset) as Word,
     )?;
-    libnanami::io::io_write(descriptor, PCI_CONFIG_DATA, 4, value as Word)
+    nanami_runtime::io::io_write(descriptor, PCI_CONFIG_DATA, 4, value as Word)
 }
 
 fn find_controllers(
@@ -269,7 +269,7 @@ fn wait_clear(base: Word, offset: usize, mask: u32) -> Result<(), RequestError> 
             return Err(RequestError::Transport);
         }
         if spin & 0x3fff == 0 {
-            libnanami::yield_now();
+            nanami_runtime::yield_now();
         }
     }
     Ok(())
@@ -424,7 +424,7 @@ fn submit(runtime: &AhciRuntime) -> Result<(), RequestError> {
             return Err(RequestError::Transport);
         }
         if spin & 0x3fff == 0 {
-            libnanami::yield_now();
+            nanami_runtime::yield_now();
         }
     }
 }
@@ -554,13 +554,13 @@ fn handle_control(
     runtime: &AhciRuntime,
 ) -> (Word, Word, Word) {
     match request.arg0 {
-        nanami_services::block::BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
+        nanami_client::block::BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
             let size = if request.arg1 == 0 {
-                nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
+                nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
             } else {
                 request.arg1
             };
-            match libnanami::request_shared_memory(request.identifier, size) {
+            match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => {
                     *session = ClientSession {
                         active: true,
@@ -568,17 +568,17 @@ fn handle_control(
                         shared_memory: local,
                         shared_size: size,
                     };
-                    (libnanami::OS_RESPONSE_OK, peer, size)
+                    (nanami_runtime::OS_RESPONSE_OK, peer, size)
                 }
                 Err(error) => (status(error), 0, 0),
             }
         }
-        nanami_services::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
-            libnanami::OS_RESPONSE_OK,
+        nanami_client::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
+            nanami_runtime::OS_RESPONSE_OK,
             BLOCK_BYTES as Word,
             (runtime.partition_sectors / (BLOCK_BYTES / SECTOR_BYTES) as u64) as Word,
         ),
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -589,11 +589,11 @@ fn handle_transfer(
     write: bool,
 ) -> (Word, Word, Word) {
     if !session.active || session.pid != request.identifier {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let bytes = match (request.arg1 as usize).checked_mul(BLOCK_BYTES) {
         Some(bytes) => bytes,
-        None => return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        None => return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
     let offset = request.arg2 as usize;
     if request.arg1 == 0
@@ -602,7 +602,7 @@ fn handle_transfer(
             .map_or(true, |end| end > session.shared_size)
         || bytes > DMA_DATA_BYTES
     {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let dma_data = runtime.dma_virtual as usize + DMA_DATA_OFFSET;
@@ -626,7 +626,7 @@ fn handle_transfer(
                     )
                 };
             }
-            (libnanami::OS_RESPONSE_OK, bytes, 0)
+            (nanami_runtime::OS_RESPONSE_OK, bytes, 0)
         }
         Err(error) => (status(error), 0, 0),
     }
@@ -638,18 +638,18 @@ fn handle_request(
     runtime: &AhciRuntime,
 ) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::block::BLOCK_DEVICE_REQUEST_CONTROL => {
+        nanami_client::block::BLOCK_DEVICE_REQUEST_CONTROL => {
             handle_control(request, session, runtime)
         }
-        nanami_services::block::BLOCK_DEVICE_REQUEST_READ => {
+        nanami_client::block::BLOCK_DEVICE_REQUEST_READ => {
             handle_transfer(request, session, runtime, false)
         }
-        nanami_services::block::BLOCK_DEVICE_REQUEST_WRITE => {
+        nanami_client::block::BLOCK_DEVICE_REQUEST_WRITE => {
             handle_transfer(request, session, runtime, true)
         }
-        nanami_services::block::BLOCK_DEVICE_REQUEST_FLUSH => {
+        nanami_client::block::BLOCK_DEVICE_REQUEST_FLUSH => {
             if !session.active || session.pid != request.identifier {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             let result = if runtime.flush_command == 0 {
                 Err(RequestError::Unsupported)
@@ -658,28 +658,28 @@ fn handle_request(
                     .and_then(|()| submit(runtime))
             };
             match result {
-                Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
                 Err(error) => (status(error), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn status(error: RequestError) -> Word {
     match error {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
         RequestError::Status(value) => value,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
     }
 }
 
 fn initialize() -> Result<AhciRuntime, RequestError> {
-    libnanami::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
-    let pci = libnanami::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
+    nanami_runtime::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
+    let pci = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
     let (controllers, controller_count) = find_controllers(pci)?;
-    let (dma_physical, dma_virtual) = libnanami::request_dma(DMA_TOTAL_BYTES)?;
+    let (dma_physical, dma_virtual) = nanami_runtime::request_dma(DMA_TOTAL_BYTES)?;
     unsafe { ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_TOTAL_BYTES) };
     let mut selected: Option<(AhciRuntime, PciAddress)> = None;
 
@@ -693,7 +693,7 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
             (command_status & 0xffff_0000) | command as u32,
         )?;
 
-        let (_, abar) = libnanami::request_mmio(address.abar, AHCI_MMIO_BYTES)?;
+        let (_, abar) = nanami_runtime::request_mmio(address.abar, AHCI_MMIO_BYTES)?;
         bios_handoff(abar)?;
         unsafe { mmio_write32(abar, HBA_GHC, mmio_read32(abar, HBA_GHC) | HBA_GHC_AE) };
         let implemented = unsafe { mmio_read32(abar, HBA_PI) };
@@ -729,7 +729,7 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
             runtime.partition_start_sector = partition.first_lba;
             runtime.partition_sectors = partition.sector_count;
             if selected.is_some() {
-                libnanami::print!("[ahci-server] multiple Nanami root partitions found\n");
+                nanami_runtime::print!("[ahci-server] multiple Nanami root partitions found\n");
                 return Err(RequestError::Protocol);
             }
             selected = Some((runtime, address));
@@ -737,7 +737,7 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
     }
 
     let (runtime, address) = selected.ok_or(RequestError::Unsupported)?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[ahci-server] root PCI {:02x}:{:02x}.{} abar={:#x} port={} LBA={} sectors={}",
         address.bus,
         address.device,
@@ -750,10 +750,10 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
     Ok(runtime)
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
     if let Err(error) = serve() {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[ahci-server] stopped status={:#x}; DMA mappings retained",
             error.0
         );
@@ -762,37 +762,37 @@ fn nanami_main() -> libnanami::NanamiResult {
     Ok(())
 }
 
-fn serve() -> libnanami::NanamiResult {
+fn serve() -> nanami_runtime::NanamiResult {
     let runtime = match initialize() {
         Ok(runtime) => runtime,
         Err(error) => {
-            libnanami::println!("[ahci-server] root probe: {}", error);
+            nanami_runtime::println!("[ahci-server] root probe: {}", error);
             let count = if matches!(error, RequestError::Unsupported) {
                 0
             } else {
                 2
             };
-            let _ = nanami_services::device::select_storage_root(count);
+            let _ = nanami_client::device::select_storage_root(count);
             return Err(error.into());
         }
     };
-    if !nanami_services::device::select_storage_root(1)? {
+    if !nanami_client::device::select_storage_root(1)? {
         return Err(RequestError::Unsupported.into());
     }
     configure_port(&runtime)?;
-    nanami_services::registry::register_block_device()?;
-    libnanami::print!("[ahci-server] service registered: block-device\n");
+    nanami_client::registry::register_block_device()?;
+    nanami_runtime::print!("[ahci-server] service registered: block-device\n");
 
-    let port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut session = ClientSession::EMPTY;
-    let mut reply = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let mut reply = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_reply = false;
     loop {
         let event = if has_reply {
             has_reply = false;
-            libnanami::ipc::service_reply_receive_event(port, reply.0, reply.1, reply.2)?
+            nanami_runtime::ipc::service_reply_receive_event(port, reply.0, reply.1, reply.2)?
         } else {
-            libnanami::ipc::service_receive_event(port)?
+            nanami_runtime::ipc::service_receive_event(port)?
         };
         match event {
             ServiceEvent::Request(request) => {
@@ -804,4 +804,4 @@ fn serve() -> libnanami::NanamiResult {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

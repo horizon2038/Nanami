@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::linux::{self, EmulationAction};
 use crate::process::{write_register_value, LinuxSyscallContext, REG_FS_BASE};
@@ -143,7 +143,7 @@ pub fn dispatch_syscall(
     }
 
     let Some(mut translated) = translate_syscall_context(context) else {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/freebsd] unsupported syscall {}, returning -ENOSYS",
             context.number
         );
@@ -289,7 +289,7 @@ fn sys_sysctl(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContext) ->
             write_sysctl_bytes(runtime, pid, old_ptr, old_len_ptr, b"/bin:/usr/bin\0")
         }
         _ => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/freebsd] unsupported sysctl mib={}.{}",
                 mib[0],
                 mib[1]
@@ -345,7 +345,7 @@ fn write_sysctl_bytes(
     unsafe {
         ::core::ptr::copy_nonoverlapping(bytes.as_ptr(), runtime.posix_shm as *mut u8, copy_len);
     }
-    match libnanami::request_process_memory_write(pid, old_ptr, runtime.posix_shm, copy_len as Word)
+    match nanami_runtime::request_process_memory_write(pid, old_ptr, runtime.posix_shm, copy_len as Word)
     {
         Ok(()) => 0,
         Err(_) => -FREEBSD_EFAULT,
@@ -414,7 +414,7 @@ fn read_user_word(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Wo
     if user_ptr == 0 {
         return Err(());
     }
-    libnanami::request_process_memory_read(pid, user_ptr, runtime.posix_shm, 8).map_err(|_| ())?;
+    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, 8).map_err(|_| ())?;
     Ok(unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const Word) })
 }
 
@@ -422,7 +422,7 @@ fn read_user_bytes(runtime: &mut Runtime, pid: Word, user_ptr: Word, len: usize)
     if user_ptr == 0 {
         return Err(());
     }
-    libnanami::request_process_memory_read(pid, user_ptr, runtime.posix_shm, len as Word)
+    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, len as Word)
         .map_err(|_| ())
 }
 
@@ -433,7 +433,7 @@ fn write_user_word(runtime: &mut Runtime, pid: Word, user_ptr: Word, value: Word
     unsafe {
         ::core::ptr::write_unaligned(runtime.posix_shm as *mut Word, value);
     }
-    match libnanami::request_process_memory_write(pid, user_ptr, runtime.posix_shm, 8) {
+    match nanami_runtime::request_process_memory_write(pid, user_ptr, runtime.posix_shm, 8) {
         Ok(()) => 0,
         Err(_) => -FREEBSD_EFAULT,
     }

@@ -1,0 +1,338 @@
+pub use nanami_uapi::gfx::honoka::*;
+
+use a9n_abi::CapabilityDescriptor;
+
+use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
+
+#[path = "honoka/client.rs"]
+mod client;
+pub use client::*;
+
+pub fn honoka_resize_viewport(
+    port: Word,
+    window: Word,
+    width: Word,
+    height: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        port,
+        HONOKA_REQUEST_RESIZE_VIEWPORT,
+        window,
+        width,
+        height,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_create_window(
+    honoka_port: CapabilityDescriptor,
+    x: Word,
+    y: Word,
+    width: Word,
+    height: Word,
+) -> Result<Word, RequestError> {
+    let (status, window_id, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_CREATE_WINDOW,
+        x,
+        y,
+        width,
+        height,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(window_id)
+}
+
+pub fn honoka_destroy_window(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_DESTROY_WINDOW,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_create_window_with_title(
+    honoka_port: CapabilityDescriptor,
+    x: Word,
+    y: Word,
+    width: Word,
+    height: Word,
+    title: &[u8],
+) -> Result<Word, RequestError> {
+    let geom0 = (x & 0xffff_ffff) | ((y & 0xffff_ffff) << 32);
+    let geom1 = (width & 0xffff_ffff) | ((height & 0xffff_ffff) << 32);
+    let mut chunks = [0usize; 2];
+    let limit = title.len().min(HONOKA_CREATE_WINDOW_TITLE_BYTES);
+    let mut i = 0usize;
+    while i < limit {
+        let chunk = i / 8;
+        let shift = (i % 8) * 8;
+        chunks[chunk] |= (title[i] as Word) << shift;
+        i += 1;
+    }
+    let (status, window_id, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_CREATE_WINDOW_WITH_TITLE,
+        geom0,
+        geom1,
+        chunks[0],
+        chunks[1],
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(window_id)
+}
+
+pub fn honoka_attach_logical_framebuffer(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, client_vaddr, size_bytes) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((client_vaddr, size_bytes))
+}
+
+pub fn honoka_attach_logical_framebuffer_to_process(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    target_pid: Word,
+) -> Result<(Word, Word), RequestError> {
+    if target_pid == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, target_vaddr, size_bytes) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_ATTACH_LOGICAL_FRAMEBUFFER_TO_PROCESS,
+        window_id,
+        target_pid,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((target_vaddr, size_bytes))
+}
+
+pub fn honoka_detach_logical_framebuffer(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_DETACH_LOGICAL_FRAMEBUFFER,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_get_window_content_size(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, packed_size, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_GET_WINDOW_CONTENT_SIZE,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((packed_size & 0xffff_ffff, (packed_size >> 32) & 0xffff_ffff))
+}
+
+pub fn honoka_move_window(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    x: Word,
+    y: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_MOVE_WINDOW,
+        window_id,
+        x,
+        y,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_set_window_visible(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    visible: bool,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_SET_WINDOW_VISIBLE,
+        window_id,
+        if visible { 1 } else { 0 },
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_set_window_opacity(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    opacity: u8,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_SET_WINDOW_OPACITY,
+        window_id,
+        opacity as Word,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_attach_input_queue(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, queue_vaddr, queue_bytes) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_ATTACH_INPUT_QUEUE,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((queue_vaddr, queue_bytes))
+}
+
+pub fn honoka_attach_input_notification(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_ATTACH_INPUT_NOTIFICATION,
+        window_id,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_set_window_title(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    title: &[u8],
+) -> Result<(), RequestError> {
+    let mut chunks = [0usize; 3];
+    let limit = title.len().min(HONOKA_WINDOW_TITLE_BYTES);
+    let mut i = 0usize;
+    while i < limit {
+        let chunk = i / 8;
+        let shift = (i % 8) * 8;
+        chunks[chunk] |= (title[i] as Word) << shift;
+        i += 1;
+    }
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_SET_WINDOW_TITLE,
+        window_id,
+        chunks[0],
+        chunks[1],
+        chunks[2],
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn honoka_invalidate_logical_framebuffer(
+    honoka_port: CapabilityDescriptor,
+    window_id: Word,
+    x: Word,
+    y: Word,
+    width: Word,
+    height: Word,
+) -> Result<(), RequestError> {
+    let packed_xy = (x & 0xffff_ffff) | ((y & 0xffff_ffff) << 32);
+    let packed_wh = (width & 0xffff_ffff) | ((height & 0xffff_ffff) << 32);
+    let (status, _, _) = call_port(
+        honoka_port,
+        HONOKA_REQUEST_INVALIDATE_LOGICAL_FRAMEBUFFER,
+        window_id,
+        packed_xy,
+        packed_wh,
+        0,
+        4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}

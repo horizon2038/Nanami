@@ -7,7 +7,7 @@ fn main() {
         ),
         (
             "NANAMI_HEAP_SOURCE",
-            "../../nanami/servers/sdk/rust/libnanami/src/heap.rs",
+            "../../nanami/servers/libs/nanami-runtime/src/heap.rs",
         ),
         (
             "NANAMI_PROCESS_SOURCE",

@@ -1,9 +1,10 @@
 [package]
 name = "nanami"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
+nanami-uapi = { path = "servers/uapi" }
 nun = { path = "../spencer/Nun" }
 a9n_abi = "=0.7.0"
 crabtime = { version = "1.1.4", default-features = false }

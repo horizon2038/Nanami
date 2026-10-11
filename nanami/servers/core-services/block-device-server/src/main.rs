@@ -3,8 +3,8 @@
 
 use core::cmp::min;
 use core::ptr;
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const BLOCK_SIZE: usize = 1024;
@@ -45,24 +45,24 @@ impl ClientSession {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[block-device] panic\n");
+    nanami_runtime::print!("[block-device] panic\n");
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
+fn nanami_main() -> nanami_runtime::NanamiResult {
     unsafe { init_ramdisk() };
-    nanami_services::registry::register_block_device().map_err(log_reg_error)?;
-    libnanami::print!("[block-device] service registered: block-device\n");
+    nanami_client::registry::register_block_device().map_err(log_reg_error)?;
+    nanami_runtime::print!("[block-device] service registered: block-device\n");
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut session = ClientSession::EMPTY;
-    let mut pending = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let mut pending = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_reply = false;
 
     loop {
         let event = if has_reply {
             has_reply = false;
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending.0,
                 pending.1,
@@ -75,7 +75,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port) {
+            match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(event) => event,
                 Err(e) => return Err(log_error("[block-device] receive failed: ", e)),
             }
@@ -90,8 +90,8 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[block-device] fault id={}", identifier);
-                libnanami::print!(" reason={:#x}\n", reason);
+                nanami_runtime::print!("[block-device] fault id={}", identifier);
+                nanami_runtime::print!(" reason={:#x}\n", reason);
             }
         }
     }
@@ -99,30 +99,30 @@ fn nanami_main() -> libnanami::NanamiResult {
 
 fn handle_request(request: ServiceRequest, session: &mut ClientSession) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::block::BLOCK_DEVICE_REQUEST_CONTROL => handle_control(request, session),
-        nanami_services::block::BLOCK_DEVICE_REQUEST_READ => handle_read(request, session),
-        nanami_services::block::BLOCK_DEVICE_REQUEST_WRITE => handle_write(request, session),
-        nanami_services::block::BLOCK_DEVICE_REQUEST_FLUSH => {
+        nanami_client::block::BLOCK_DEVICE_REQUEST_CONTROL => handle_control(request, session),
+        nanami_client::block::BLOCK_DEVICE_REQUEST_READ => handle_read(request, session),
+        nanami_client::block::BLOCK_DEVICE_REQUEST_WRITE => handle_write(request, session),
+        nanami_client::block::BLOCK_DEVICE_REQUEST_FLUSH => {
             if !session.active || session.pid != request.identifier {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             // RAM is this device's backing store: writes already reach it.
             // Like any ramdisk, its contents do not survive a power cycle.
-            (libnanami::OS_RESPONSE_OK, 0, 0)
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_control(request: ServiceRequest, session: &mut ClientSession) -> (Word, Word, Word) {
     match request.arg0 {
-        nanami_services::block::BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
+        nanami_client::block::BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
             let size = if request.arg1 == 0 {
-                nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
+                nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
             } else {
                 request.arg1
             };
-            match libnanami::request_shared_memory(request.identifier, size) {
+            match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => {
                     *session = ClientSession {
                         active: true,
@@ -130,35 +130,35 @@ fn handle_control(request: ServiceRequest, session: &mut ClientSession) -> (Word
                         shm_local: local,
                         shm_size: size,
                     };
-                    libnanami::print!("[block-device] shm attached pid={}", request.identifier);
-                    libnanami::print!(" local={:#x} peer={:#x}\n", local, peer);
-                    (libnanami::OS_RESPONSE_OK, peer, size)
+                    nanami_runtime::print!("[block-device] shm attached pid={}", request.identifier);
+                    nanami_runtime::print!(" local={:#x} peer={:#x}\n", local, peer);
+                    (nanami_runtime::OS_RESPONSE_OK, peer, size)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
-            libnanami::OS_RESPONSE_OK,
+        nanami_client::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
+            nanami_runtime::OS_RESPONSE_OK,
             BLOCK_SIZE as Word,
             BLOCK_COUNT as Word,
         ),
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_read(request: ServiceRequest, session: &ClientSession) -> (Word, Word, Word) {
     if !session.active || session.pid != request.identifier {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let block = request.arg0 as usize;
     let count = request.arg1 as usize;
     let offset = request.arg2 as usize;
     if count == 0 || block >= BLOCK_COUNT || block + count > BLOCK_COUNT {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let bytes = count * BLOCK_SIZE;
     if offset + bytes > session.shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     unsafe {
         ptr::copy_nonoverlapping(
@@ -167,22 +167,22 @@ fn handle_read(request: ServiceRequest, session: &ClientSession) -> (Word, Word,
             bytes,
         );
     }
-    (libnanami::OS_RESPONSE_OK, bytes as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, bytes as Word, 0)
 }
 
 fn handle_write(request: ServiceRequest, session: &ClientSession) -> (Word, Word, Word) {
     if !session.active || session.pid != request.identifier {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let block = request.arg0 as usize;
     let count = request.arg1 as usize;
     let offset = request.arg2 as usize;
     if count == 0 || block >= BLOCK_COUNT || block + count > BLOCK_COUNT {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let bytes = count * BLOCK_SIZE;
     if offset + bytes > session.shm_size as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     unsafe {
         ptr::copy_nonoverlapping(
@@ -191,7 +191,7 @@ fn handle_write(request: ServiceRequest, session: &ClientSession) -> (Word, Word
             bytes,
         );
     }
-    (libnanami::OS_RESPONSE_OK, bytes as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, bytes as Word, 0)
 }
 
 unsafe fn init_ramdisk() {
@@ -341,27 +341,27 @@ unsafe fn w32(offset: usize, value: u32) {
     RAMDISK[offset + 3] = (value >> 24) as u8;
 }
 
-fn log_reg_error(e: RequestError) -> libnanami::NanamiError {
+fn log_reg_error(e: RequestError) -> nanami_runtime::NanamiError {
     log_request_error("[block-device] register failed: ", e);
     e.into()
 }
 
-fn log_error(prefix: &str, e: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, e: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, e);
     e.into()
 }
 
 fn log_request_error(prefix: &str, e: RequestError) {
-    libnanami::print!("{}{}\n", prefix, e);
+    nanami_runtime::print!("{}{}\n", prefix, e);
 }
 
 fn map_request_error_to_status(e: RequestError) -> Word {
     match e {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(status) => status,
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

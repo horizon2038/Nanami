@@ -20,8 +20,8 @@ mod truncate;
 
 use core::cmp::min;
 use core::ptr;
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{self, RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{self, RequestError, Word};
 
 mod block_connection;
 use block_connection::connect_block_device;
@@ -29,7 +29,7 @@ use block_connection::connect_block_device;
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
-const BLOCK_SHM_BYTES: Word = nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES;
+const BLOCK_SHM_BYTES: Word = nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES;
 const BLOCK_READ_RETRY_LIMIT: usize = 4;
 const MAX_SESSIONS: usize = 16;
 const MAX_DELEGATED_SESSIONS: usize = 16;
@@ -211,18 +211,18 @@ struct Ext2Runtime {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[ext2-server] panic\n");
+    nanami_runtime::print!("[ext2-server] panic\n");
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[ext2-server] bootstrap\n");
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[ext2-server] bootstrap\n");
     let (block_port, timer_port) = connect_block_device()
         .map_err(|e| log_error("[ext2-server] block-device unavailable: ", e))?;
     let (block_shm, block_shm_size) =
-        nanami_services::block::block_device_attach_shared_memory(block_port, BLOCK_SHM_BYTES)
+        nanami_client::block::block_device_attach_shared_memory(block_port, BLOCK_SHM_BYTES)
             .map_err(|e| log_error("[ext2-server] block shm attach failed: ", e))?;
-    let (block_size, block_count) = nanami_services::block::block_device_info(block_port)
+    let (block_size, block_count) = nanami_client::block::block_device_info(block_port)
         .map_err(|e| log_error("[ext2-server] block info failed: ", e))?;
     if block_size == 0 || block_size > block_shm_size || block_shm_size > EXT2_BLOCK_CACHE_BUDGET {
         return Err(log_error(
@@ -264,25 +264,25 @@ fn nanami_main() -> libnanami::NanamiResult {
     writeback::initialize(&mut runtime)
         .map_err(|e| log_error("[ext2-server] writeback init failed: ", e))?;
 
-    nanami_services::registry::register_vfs_service()
+    nanami_client::registry::register_vfs_service()
         .map_err(|e| log_error("[ext2-server] register failed: ", e))?;
-    libnanami::print!("[ext2-server] service registered: vfs-service\n");
+    nanami_runtime::print!("[ext2-server] service registered: vfs-service\n");
 
-    let service_port = libnanami::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
-    let mut pending = (libnanami::OS_RESPONSE_OK, 0, 0);
+    let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
+    let mut pending = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_reply = false;
     let mut request_sequence = 0usize;
     loop {
         let event = if has_reply {
             has_reply = false;
             if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[vfs.trace] reply-receive seq={} status={:#x}",
                     request_sequence,
                     pending.0
                 );
             }
-            match libnanami::ipc::service_reply_receive_event(
+            match nanami_runtime::ipc::service_reply_receive_event(
                 service_port,
                 pending.0,
                 pending.1,
@@ -295,7 +295,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
             }
         } else {
-            match libnanami::ipc::service_receive_event(service_port) {
+            match nanami_runtime::ipc::service_receive_event(service_port) {
                 Ok(event) => event,
                 Err(e) => return Err(log_error("[ext2-server] receive failed: ", e)),
             }
@@ -305,7 +305,7 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Request(request) => {
                 if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
                     request_sequence = request_sequence.wrapping_add(1);
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[vfs.trace] request seq={} pid={} code={:#x} arg0={:#x} arg1={:#x}",
                         request_sequence,
                         request.identifier,
@@ -316,7 +316,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 }
                 pending = handle_request(request, &mut runtime);
                 if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[vfs.trace] handled seq={} status={:#x}",
                         request_sequence,
                         pending.0
@@ -336,8 +336,8 @@ fn nanami_main() -> libnanami::NanamiResult {
             ServiceEvent::Fault {
                 identifier, reason, ..
             } => {
-                libnanami::print!("[ext2-server] fault id={}", identifier);
-                libnanami::print!(" reason={:#x}\n", reason);
+                nanami_runtime::print!("[ext2-server] fault id={}", identifier);
+                nanami_runtime::print!(" reason={:#x}\n", reason);
             }
         }
     }
@@ -346,59 +346,59 @@ fn nanami_main() -> libnanami::NanamiResult {
 fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     if matches!(
         request.code,
-        nanami_services::vfs::VFS_REQUEST_OPEN_COMPOUND
-            | nanami_services::vfs::VFS_REQUEST_CREATE
-            | nanami_services::vfs::VFS_REQUEST_MKDIR
-            | nanami_services::vfs::VFS_REQUEST_WRITE
-            | nanami_services::vfs::VFS_REQUEST_WRITE_DELEGATED
-            | nanami_services::vfs::VFS_REQUEST_REMOVE
-            | nanami_services::vfs::VFS_REQUEST_LINK
-            | nanami_services::vfs::VFS_REQUEST_RENAME
-            | nanami_services::vfs::VFS_REQUEST_FTRUNCATE
+        nanami_client::vfs::VFS_REQUEST_OPEN_COMPOUND
+            | nanami_client::vfs::VFS_REQUEST_CREATE
+            | nanami_client::vfs::VFS_REQUEST_MKDIR
+            | nanami_client::vfs::VFS_REQUEST_WRITE
+            | nanami_client::vfs::VFS_REQUEST_WRITE_DELEGATED
+            | nanami_client::vfs::VFS_REQUEST_REMOVE
+            | nanami_client::vfs::VFS_REQUEST_LINK
+            | nanami_client::vfs::VFS_REQUEST_RENAME
+            | nanami_client::vfs::VFS_REQUEST_FTRUNCATE
     ) {
         if let Err(error) = writeback::check_writable(runtime) {
             return (map_request_error_to_status(error), 0, 0);
         }
     }
     match request.code {
-        nanami_services::vfs::VFS_REQUEST_FREEZE | nanami_services::vfs::VFS_REQUEST_THAW => {
+        nanami_client::vfs::VFS_REQUEST_FREEZE | nanami_client::vfs::VFS_REQUEST_THAW => {
             writeback::handle_freeze(request, runtime)
         }
-        nanami_services::vfs::VFS_REQUEST_FSYNC | nanami_services::vfs::VFS_REQUEST_SYNC => {
+        nanami_client::vfs::VFS_REQUEST_FSYNC | nanami_client::vfs::VFS_REQUEST_SYNC => {
             writeback::handle_sync(request, runtime)
         }
-        nanami_services::vfs::VFS_REQUEST_CONTROL => handle_control(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_OPEN => handle_open(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_OPEN_COMPOUND => handle_open_compound(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_READ => handle_read(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_READ_DELEGATED => handle_read_delegated(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_STAT => handle_stat(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_CLOSE => handle_close(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_READ_DIR => handle_read_dir(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_FSTAT => handle_fstat(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_CREATE => handle_create(request, runtime, false),
-        nanami_services::vfs::VFS_REQUEST_MKDIR => handle_create(request, runtime, true),
-        nanami_services::vfs::VFS_REQUEST_WRITE => handle_write_file(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_WRITE_DELEGATED => {
+        nanami_client::vfs::VFS_REQUEST_CONTROL => handle_control(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_OPEN => handle_open(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_OPEN_COMPOUND => handle_open_compound(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ => handle_read(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_DELEGATED => handle_read_delegated(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_STAT => handle_stat(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_CLOSE => handle_close(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_DIR => handle_read_dir(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_FSTAT => handle_fstat(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_CREATE => handle_create(request, runtime, false),
+        nanami_client::vfs::VFS_REQUEST_MKDIR => handle_create(request, runtime, true),
+        nanami_client::vfs::VFS_REQUEST_WRITE => handle_write_file(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_WRITE_DELEGATED => {
             handle_write_delegated(request, runtime)
         }
-        nanami_services::vfs::VFS_REQUEST_REMOVE => handle_remove(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_LINK => handle_link(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_RENAME => handle_rename(request, runtime),
-        nanami_services::vfs::VFS_REQUEST_FTRUNCATE => handle_ftruncate(request, runtime),
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        nanami_client::vfs::VFS_REQUEST_REMOVE => handle_remove(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_LINK => handle_link(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_RENAME => handle_rename(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_FTRUNCATE => handle_ftruncate(request, runtime),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_control(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     match request.arg0 {
-        nanami_services::vfs::VFS_CONTROL_ATTACH_SHARED_MEMORY => {
+        nanami_client::vfs::VFS_CONTROL_ATTACH_SHARED_MEMORY => {
             let size = if request.arg1 == 0 {
-                nanami_services::vfs::VFS_DEFAULT_SHM_BYTES
+                nanami_client::vfs::VFS_DEFAULT_SHM_BYTES
             } else {
                 request.arg1
             };
-            match libnanami::request_shared_memory(request.identifier, size) {
+            match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => match session_for_pid(runtime, request.identifier) {
                     Some(index) => {
                         runtime.sessions[index] = ClientSession {
@@ -407,33 +407,33 @@ fn handle_control(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
                             shm_local: local,
                             shm_size: size,
                         };
-                        (libnanami::OS_RESPONSE_OK, peer, size)
+                        (nanami_runtime::OS_RESPONSE_OK, peer, size)
                     }
-                    None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+                    None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
                 },
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        nanami_services::vfs::VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY => {
+        nanami_client::vfs::VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY => {
             if request.arg1 == 0 || find_session(runtime, request.identifier).is_none() {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             let size = if request.arg2 == 0 {
-                nanami_services::vfs::VFS_DEFAULT_SHM_BYTES
+                nanami_client::vfs::VFS_DEFAULT_SHM_BYTES
             } else {
                 request.arg2
             };
-            if size > nanami_services::vfs::VFS_DELEGATE_VALUE_MASK {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            if size > nanami_client::vfs::VFS_DELEGATE_VALUE_MASK {
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             if let Some(index) = find_delegated_session(runtime, request.identifier, request.arg1) {
                 let session = runtime.delegated_sessions[index];
                 return delegated_attach_response(index, session.peer_vaddr, session.shm_size);
             }
             let Some(index) = free_delegated_session(runtime) else {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             };
-            match libnanami::request_shared_memory(request.arg1, size) {
+            match nanami_runtime::request_shared_memory(request.arg1, size) {
                 Ok((local, peer)) => {
                     runtime.delegated_sessions[index] = DelegatedSession {
                         active: true,
@@ -448,20 +448,20 @@ fn handle_control(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn delegated_attach_response(index: usize, peer_vaddr: Word, size: Word) -> (Word, Word, Word) {
     let delegate_id = index as Word + 1;
-    let packed = (delegate_id << nanami_services::vfs::VFS_DELEGATE_ID_SHIFT)
-        | (size & nanami_services::vfs::VFS_DELEGATE_VALUE_MASK);
-    (libnanami::OS_RESPONSE_OK, peer_vaddr, packed)
+    let packed = (delegate_id << nanami_client::vfs::VFS_DELEGATE_ID_SHIFT)
+        | (size & nanami_client::vfs::VFS_DELEGATE_VALUE_MASK);
+    (nanami_runtime::OS_RESPONSE_OK, peer_vaddr, packed)
 }
 
 fn handle_open(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some(inode_no) = lookup_path(
         runtime,
@@ -469,60 +469,60 @@ fn handle_open(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let Ok(inode) = read_inode(runtime, inode_no) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     match alloc_handle(runtime, request.identifier, inode_no, inode) {
-        Some(handle) => (libnanami::OS_RESPONSE_OK, handle as Word, 0),
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        Some(handle) => (nanami_runtime::OS_RESPONSE_OK, handle as Word, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_open_compound(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let flags = request.arg2;
-    let supported_flags = nanami_services::vfs::VFS_OPEN_CREATE
-        | nanami_services::vfs::VFS_OPEN_TRUNCATE
-        | nanami_services::vfs::VFS_OPEN_DIRECTORY;
+    let supported_flags = nanami_client::vfs::VFS_OPEN_CREATE
+        | nanami_client::vfs::VFS_OPEN_TRUNCATE
+        | nanami_client::vfs::VFS_OPEN_DIRECTORY;
     if (flags & !supported_flags) != 0 || !has_available_handle(runtime) {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let path_offset = request.arg0 as usize;
     let path_len = request.arg1 as usize;
     let inode_no = match lookup_path(runtime, session, path_offset, path_len) {
         Some(inode_no) => inode_no,
-        None if (flags & nanami_services::vfs::VFS_OPEN_CREATE) != 0 => {
-            if (flags & nanami_services::vfs::VFS_OPEN_DIRECTORY) != 0 {
-                return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        None if (flags & nanami_client::vfs::VFS_OPEN_CREATE) != 0 => {
+            if (flags & nanami_client::vfs::VFS_OPEN_DIRECTORY) != 0 {
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             let Some((parent_inode, name_ptr, name_len)) =
                 lookup_parent_path(runtime, session, path_offset, path_len)
             else {
-                return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
             };
             match create_node(runtime, parent_inode, name_ptr, name_len, false) {
                 Ok(inode_no) => inode_no,
                 Err(status) => return (status, 0, 0),
             }
         }
-        None => return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0),
+        None => return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0),
     };
     let Ok(mut inode) = read_inode(runtime, inode_no) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let kind = file_kind(inode.mode);
-    if (flags & nanami_services::vfs::VFS_OPEN_DIRECTORY) != 0
-        && kind != nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY
+    if (flags & nanami_client::vfs::VFS_OPEN_DIRECTORY) != 0
+        && kind != nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY
     {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
-    if (flags & nanami_services::vfs::VFS_OPEN_TRUNCATE) != 0 {
-        if kind == nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY {
-            return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    if (flags & nanami_client::vfs::VFS_OPEN_TRUNCATE) != 0 {
+        if kind == nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY {
+            return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
         }
         if let Err(error) = truncate::resize_inode(runtime, inode_no, &mut inode, 0) {
             return (map_request_error_to_status(error), 0, 0);
@@ -530,24 +530,24 @@ fn handle_open_compound(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (
     }
     match alloc_handle(runtime, request.identifier, inode_no, inode) {
         Some(handle) => {
-            let opened = ((inode_no as Word) << nanami_services::vfs::VFS_OPEN_INODE_SHIFT)
-                | (handle as Word & nanami_services::vfs::VFS_OPEN_HANDLE_MASK);
+            let opened = ((inode_no as Word) << nanami_client::vfs::VFS_OPEN_INODE_SHIFT)
+                | (handle as Word & nanami_client::vfs::VFS_OPEN_HANDLE_MASK);
             (
-                libnanami::OS_RESPONSE_OK,
+                nanami_runtime::OS_RESPONSE_OK,
                 opened,
                 pack_stat(inode.size as Word, kind),
             )
         }
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 fn handle_stat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-        libnanami::println!("[vfs.trace] stat lookup begin");
+        nanami_runtime::println!("[vfs.trace] stat lookup begin");
     }
     let Some(inode_no) = lookup_path(
         runtime,
@@ -555,16 +555,16 @@ fn handle_stat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
-        libnanami::println!("[vfs.trace] stat inode begin inode={}", inode_no);
+        nanami_runtime::println!("[vfs.trace] stat inode begin inode={}", inode_no);
     }
     let Ok(inode) = read_inode(runtime, inode_no) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     (
-        libnanami::OS_RESPONSE_OK,
+        nanami_runtime::OS_RESPONSE_OK,
         inode_no as Word,
         pack_stat(inode.size as Word, file_kind(inode.mode)),
     )
@@ -576,11 +576,11 @@ fn handle_fstat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wo
         || !runtime.handles[handle].active
         || runtime.handles[handle].owner_pid != request.identifier
     {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let file = runtime.handles[handle];
     (
-        libnanami::OS_RESPONSE_OK,
+        nanami_runtime::OS_RESPONSE_OK,
         file.inode as Word,
         pack_stat(file.size as Word, file_kind(file.mode)),
     )
@@ -592,7 +592,7 @@ fn handle_create(
     is_directory: bool,
 ) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((parent_inode, name_ptr, name_len)) = lookup_parent_path(
         runtime,
@@ -600,20 +600,20 @@ fn handle_create(
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     if unsafe { lookup_in_directory(runtime, parent_inode, name_ptr, name_len).is_some() } {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     match create_node(runtime, parent_inode, name_ptr, name_len, is_directory) {
-        Ok(inode) => (libnanami::OS_RESPONSE_OK, inode as Word, 0),
+        Ok(inode) => (nanami_runtime::OS_RESPONSE_OK, inode as Word, 0),
         Err(status) => (status, 0, 0),
     }
 }
 
 fn handle_remove(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((parent_inode, name_ptr, name_len)) = lookup_parent_path(
         runtime,
@@ -621,17 +621,17 @@ fn handle_remove(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, W
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     match remove_node(runtime, parent_inode, name_ptr, name_len) {
-        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         Err(status) => (status, 0, 0),
     }
 }
 
 fn handle_link(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((old_parent, old_name, old_name_len)) = lookup_parent_path(
         runtime,
@@ -639,7 +639,7 @@ fn handle_link(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let Some((new_parent, new_name, new_name_len)) = lookup_parent_path(
         runtime,
@@ -647,10 +647,10 @@ fn handle_link(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
         request.arg2 as usize,
         request.arg3 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     if unsafe { lookup_in_directory(runtime, new_parent, new_name, new_name_len).is_some() } {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     match link_node(
         runtime,
@@ -661,14 +661,14 @@ fn handle_link(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
         new_name,
         new_name_len,
     ) {
-        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         Err(status) => (status, 0, 0),
     }
 }
 
 fn handle_rename(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
     let Some(session) = find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((old_parent, old_name, old_name_len)) = lookup_parent_path(
         runtime,
@@ -676,7 +676,7 @@ fn handle_rename(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, W
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let Some((new_parent, new_name, new_name_len)) = lookup_parent_path(
         runtime,
@@ -684,16 +684,16 @@ fn handle_rename(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, W
         request.arg2 as usize,
         request.arg3 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     if old_parent == new_parent
         && old_name_len == new_name_len
         && unsafe { bytes_eq(old_name, new_name, old_name_len) }
     {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
     if unsafe { lookup_in_directory(runtime, new_parent, new_name, new_name_len).is_some() } {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     match rename_node(
         runtime,
@@ -704,7 +704,7 @@ fn handle_rename(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, W
         new_name,
         new_name_len,
     ) {
-        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         Err(status) => (status, 0, 0),
     }
 }
@@ -760,8 +760,8 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
         };
         group += 1;
     }
-    libnanami::print!("[ext2-server] mounted ext2 block-size={}", block_size);
-    libnanami::print!(
+    nanami_runtime::print!("[ext2-server] mounted ext2 block-size={}", block_size);
+    nanami_runtime::print!(
         " groups={} inode-table={}\n",
         runtime.group_count,
         runtime.groups[0].inode_table_block as usize
@@ -1145,7 +1145,7 @@ fn read_directory(
     max_entries: usize,
     out_offset: usize,
 ) -> Result<(usize, usize), Word> {
-    let record_bytes = nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+    let record_bytes = nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
     let max_by_buffer = if out_offset <= session.shm_size as usize {
         (session.shm_size as usize - out_offset) / record_bytes
     } else {
@@ -1160,12 +1160,12 @@ fn read_directory(
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) && written < limit_entries {
         let block = get_data_block(runtime, inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
         if block == 0 {
             break;
         }
         if read_block(runtime, block as usize).is_err() {
-            return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+            return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
         }
         let block_file_offset = logical_block * runtime.block_size;
         if block_file_offset >= inode.size as usize {
@@ -1177,7 +1177,7 @@ fn read_directory(
             let Some(entry) =
                 parse_directory_entry(runtime.block_shm as usize + offset, block_limit - offset)
             else {
-                return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
             };
             if entry.inode != 0 {
                 if seen >= start_index {
@@ -1224,32 +1224,32 @@ fn parse_directory_entry(addr: usize, available: usize) -> Option<Ext2DirectoryE
 
 unsafe fn write_vfs_dirent(dst: *mut u8, entry: Ext2DirectoryEntry) {
     write_word(
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET),
         entry.inode as Word,
     );
     write_word(
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET),
         ext2_dirent_file_type_to_vfs(entry.file_type),
     );
     write_word(
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET),
         entry.name_len as Word,
     );
     write_word(
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_LEN_OFFSET),
-        nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES as Word,
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_LEN_OFFSET),
+        nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES as Word,
     );
     ptr::write_bytes(
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
         0,
-        nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
+        nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
     );
     ptr::copy_nonoverlapping(
         entry.name_ptr,
-        dst.add(nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
         min(
             entry.name_len,
-            nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
+            nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
         ),
     );
 }
@@ -1261,7 +1261,7 @@ fn create_node(
     name_len: usize,
     is_directory: bool,
 ) -> Result<u32, Word> {
-    let inode_no = alloc_inode(runtime).map_err(|_| libnanami::OS_RESPONSE_FATAL)? as u32;
+    let inode_no = alloc_inode(runtime).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as u32;
     let mut inode = Ext2Inode {
         mode: if is_directory { 0x41ed } else { 0x81a4 },
         size: if is_directory {
@@ -1273,9 +1273,9 @@ fn create_node(
         block: [0; EXT2_INODE_BLOCK_POINTERS],
     };
     if is_directory {
-        let block = alloc_block(runtime).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        let block = alloc_block(runtime).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         inode.block[0] = block as u32;
-        read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         unsafe {
             ptr::write_bytes(runtime.block_shm as *mut u8, 0, runtime.block_size);
         }
@@ -1295,9 +1295,9 @@ fn create_node(
             EXT2_FT_DIR,
             b"..",
         );
-        write_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        write_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     }
-    write_inode(runtime, inode_no, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    write_inode(runtime, inode_no, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     insert_directory_entry(
         runtime,
         parent_inode,
@@ -1320,25 +1320,25 @@ fn remove_node(
     name_len: usize,
 ) -> Result<(), Word> {
     let (inode_no, block, offset) = find_directory_entry(runtime, parent_inode, name, name_len)
-        .ok_or(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     let mut inode =
-        read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        read_inode(runtime, inode_no).map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (inode.mode & EXT2_S_IFDIR) == EXT2_S_IFDIR && !is_directory_empty(runtime, inode)? {
-        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+        return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
-    read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     w32_mem(runtime.block_shm as usize + offset, 0);
-    write_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    write_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     unsafe {
         invalidate_cached_dentry(runtime, parent_inode, name, name_len);
         store_cached_dentry(runtime, parent_inode, name, name_len, None);
     }
     if (inode.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR && inode.links_count > 1 {
         inode.links_count -= 1;
-        write_inode(runtime, inode_no, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        write_inode(runtime, inode_no, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     } else {
-        free_inode_blocks(runtime, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-        free_inode(runtime, inode_no as usize).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        free_inode_blocks(runtime, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
+        free_inode(runtime, inode_no as usize).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         invalidate_cached_inode(runtime, inode_no);
         invalidate_cached_dentries_for_inode(runtime, inode_no);
     }
@@ -1355,17 +1355,17 @@ fn link_node(
     new_name_len: usize,
 ) -> Result<(), Word> {
     let (inode_no, _, _) = find_directory_entry(runtime, old_parent, old_name, old_name_len)
-        .ok_or(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     let mut inode =
-        read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        read_inode(runtime, inode_no).map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (inode.mode & EXT2_S_IFDIR) == EXT2_S_IFDIR {
-        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+        return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
     inode.links_count = inode
         .links_count
         .checked_add(1)
-        .ok_or(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)?;
-    write_inode(runtime, inode_no, inode).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        .ok_or(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)?;
+    write_inode(runtime, inode_no, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     if let Err(status) = insert_directory_entry(
         runtime,
         new_parent,
@@ -1392,16 +1392,16 @@ fn rename_node(
 ) -> Result<(), Word> {
     let (inode_no, old_block, old_offset) =
         find_directory_entry(runtime, old_parent, old_name, old_name_len)
-            .ok_or(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+            .ok_or(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     let inode =
-        read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        read_inode(runtime, inode_no).map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     let file_type = if (inode.mode & EXT2_S_IFDIR) == EXT2_S_IFDIR {
         EXT2_FT_DIR
     } else {
         EXT2_FT_REG_FILE
     };
     if file_type == EXT2_FT_DIR && is_directory_ancestor(runtime, inode_no, new_parent)? {
-        return Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION);
+        return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
     insert_directory_entry(
         runtime,
@@ -1411,9 +1411,9 @@ fn rename_node(
         new_name_len,
         file_type,
     )?;
-    read_block(runtime, old_block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    read_block(runtime, old_block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     w32_mem(runtime.block_shm as usize + old_offset, 0);
-    write_block(runtime, old_block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+    write_block(runtime, old_block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     unsafe {
         invalidate_cached_dentry(runtime, old_parent, old_name, old_name_len);
         store_cached_dentry(runtime, old_parent, old_name, old_name_len, None);
@@ -1461,23 +1461,23 @@ fn insert_directory_entry(
     file_type: u8,
 ) -> Result<(), Word> {
     let mut dir_inode =
-        read_inode(runtime, dir_inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        read_inode(runtime, dir_inode_no).map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (dir_inode.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR || dir_inode.block[0] == 0 {
-        return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
     }
     let needed = align4(8 + name_len);
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
         let mut block = get_data_block(runtime, dir_inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?
+            .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?
             as usize;
         if block == 0 {
             block = ensure_data_block(runtime, &mut dir_inode, logical_block)
-                .map_err(|_| libnanami::OS_RESPONSE_FATAL)? as usize;
+                .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
             dir_inode.size = ((logical_block + 1) * runtime.block_size) as u32;
             write_inode(runtime, dir_inode_no, dir_inode)
-                .map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
-            read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+                .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
+            read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
             unsafe {
                 write_ext2_directory_entry_from_ptr(
                     runtime.block_shm as usize,
@@ -1488,21 +1488,21 @@ fn insert_directory_entry(
                     name,
                 );
             }
-            write_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+            write_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
             unsafe {
                 invalidate_cached_dentry(runtime, dir_inode_no, name, name_len);
                 store_cached_dentry(runtime, dir_inode_no, name, name_len, Some(child_inode));
             }
             return Ok(());
         }
-        read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         let mut offset = 0usize;
         while offset < runtime.block_size {
             let Some(entry) = parse_directory_entry(
                 runtime.block_shm as usize + offset,
                 runtime.block_size - offset,
             ) else {
-                return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
             };
             let actual = if entry.inode == 0 {
                 8
@@ -1533,7 +1533,7 @@ fn insert_directory_entry(
                         name,
                     );
                 }
-                write_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+                write_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
                 unsafe {
                     invalidate_cached_dentry(runtime, dir_inode_no, name, name_len);
                     store_cached_dentry(runtime, dir_inode_no, name, name_len, Some(child_inode));
@@ -1544,7 +1544,7 @@ fn insert_directory_entry(
         }
         logical_block += 1;
     }
-    Err(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)
+    Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)
 }
 
 fn find_directory_entry(
@@ -1587,18 +1587,18 @@ fn is_directory_empty(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<boo
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
         let block = get_data_block(runtime, inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)? as usize;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
         }
-        read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         let mut offset = 0usize;
         while offset < runtime.block_size {
             let Some(entry) = parse_directory_entry(
                 runtime.block_shm as usize + offset,
                 runtime.block_size - offset,
             ) else {
-                return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
             };
             if entry.inode != 0
                 && !(entry.name_len == 1 && unsafe { *entry.name_ptr == b'.' })
@@ -1620,33 +1620,33 @@ fn update_parent_directory_entry(
     new_parent_inode_no: u32,
 ) -> Result<(), Word> {
     let inode = read_inode(runtime, directory_inode_no)
-        .map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (inode.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR {
-        return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
     }
     let name = b"..";
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
         let block = get_data_block(runtime, inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)? as usize;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
         }
-        read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         let mut offset = 0usize;
         while offset < runtime.block_size {
             let Some(entry) = parse_directory_entry(
                 runtime.block_shm as usize + offset,
                 runtime.block_size - offset,
             ) else {
-                return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
             };
             if entry.inode != 0
                 && entry.name_len == name.len()
                 && unsafe { bytes_eq(entry.name_ptr, name.as_ptr(), name.len()) }
             {
                 w32_mem(runtime.block_shm as usize + offset, new_parent_inode_no);
-                write_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+                write_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
                 unsafe {
                     invalidate_cached_dentry(
                         runtime,
@@ -1668,7 +1668,7 @@ fn update_parent_directory_entry(
         }
         logical_block += 1;
     }
-    Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)
+    Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)
 }
 
 fn is_directory_ancestor(
@@ -1687,31 +1687,31 @@ fn is_directory_ancestor(
         inode_no = parent_directory_inode(runtime, inode_no)?;
         depth += 1;
     }
-    Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)
+    Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)
 }
 
 fn parent_directory_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<u32, Word> {
     let inode =
-        read_inode(runtime, inode_no).map_err(|_| libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+        read_inode(runtime, inode_no).map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
     if (inode.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR {
-        return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+        return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
     }
     let name = b"..";
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
         let block = get_data_block(runtime, inode, logical_block)
-            .map_err(|_| libnanami::OS_RESPONSE_FATAL)? as usize;
+            .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
         }
-        read_block(runtime, block).map_err(|_| libnanami::OS_RESPONSE_FATAL)?;
+        read_block(runtime, block).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         let mut offset = 0usize;
         while offset < runtime.block_size {
             let Some(entry) = parse_directory_entry(
                 runtime.block_shm as usize + offset,
                 runtime.block_size - offset,
             ) else {
-                return Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR);
+                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
             };
             if entry.inode != 0
                 && entry.name_len == name.len()
@@ -1723,7 +1723,7 @@ fn parent_directory_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<u3
         }
         logical_block += 1;
     }
-    Err(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)
+    Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)
 }
 
 fn alloc_inode(runtime: &mut Ext2Runtime) -> Result<usize, RequestError> {
@@ -1962,25 +1962,25 @@ fn has_available_handle(runtime: &Ext2Runtime) -> bool {
 
 fn file_kind(mode: u16) -> Word {
     if (mode & EXT2_S_IFDIR) == EXT2_S_IFDIR {
-        nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY
+        nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY
     } else if (mode & EXT2_S_IFREG) == EXT2_S_IFREG {
-        nanami_services::vfs::VFS_FILE_TYPE_REGULAR
+        nanami_client::vfs::VFS_FILE_TYPE_REGULAR
     } else {
-        nanami_services::vfs::VFS_FILE_TYPE_UNKNOWN
+        nanami_client::vfs::VFS_FILE_TYPE_UNKNOWN
     }
 }
 
 fn ext2_dirent_file_type_to_vfs(file_type: u8) -> Word {
     match file_type {
-        1 => nanami_services::vfs::VFS_FILE_TYPE_REGULAR,
-        2 => nanami_services::vfs::VFS_FILE_TYPE_DIRECTORY,
-        _ => nanami_services::vfs::VFS_FILE_TYPE_UNKNOWN,
+        1 => nanami_client::vfs::VFS_FILE_TYPE_REGULAR,
+        2 => nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY,
+        _ => nanami_client::vfs::VFS_FILE_TYPE_UNKNOWN,
     }
 }
 
 fn pack_stat(size: Word, kind: Word) -> Word {
-    (size & nanami_services::vfs::VFS_STAT_SIZE_MASK)
-        | (kind << nanami_services::vfs::VFS_STAT_TYPE_SHIFT)
+    (size & nanami_client::vfs::VFS_STAT_SIZE_MASK)
+        | (kind << nanami_client::vfs::VFS_STAT_TYPE_SHIFT)
 }
 
 fn align4(value: usize) -> usize {
@@ -2130,22 +2130,22 @@ fn w32_mem(addr: usize, value: u32) {
     }
 }
 
-fn log_error(prefix: &str, e: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, e: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, e);
     e.into()
 }
 
 fn log_request_error(prefix: &str, e: RequestError) {
-    libnanami::print!("{}{}\n", prefix, e);
+    nanami_runtime::print!("{}{}\n", prefix, e);
 }
 
 fn map_request_error_to_status(e: RequestError) -> Word {
     match e {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport | RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport | RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(status) => status,
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

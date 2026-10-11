@@ -17,7 +17,7 @@ pub enum RequestError {
 const OS_REQUEST_NANAMI_INFO: Word = 0x1023;
 const OS_RESPONSE_OK: Word = 0;
 
-#[path = "../../nanami/servers/sdk/rust/libnanami/src/version.rs"]
+#[path = "../../nanami/servers/libs/nanami-runtime/src/version.rs"]
 mod client;
 #[path = "../../nanami/src/nanami_core/alpha/version_info.rs"]
 mod encoder;

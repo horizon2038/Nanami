@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 const SLOT_HONOKA_SERVICE: Word = 22;
 const SLOT_HONOKA_PRESENT_NOTIFICATION: Word = 23;
@@ -22,24 +22,24 @@ const BALL_SIZE: usize = 18;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[honoka-client] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[honoka-client] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[honoka-client] start\n");
-    libnanami::ipc::init_ipc_tls().map_err(|e| log_error("[honoka-client] ipc tls failed: ", e))?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[honoka-client] start\n");
+    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[honoka-client] ipc tls failed: ", e))?;
 
     let (honoka_port, honoka_pid) = connect_honoka_service();
-    libnanami::print!("[honoka-client] connected honoka-service\n");
+    nanami_runtime::print!("[honoka-client] connected honoka-service\n");
     let timer_port = connect_timer_service();
-    libnanami::request_notification_port_create(
+    nanami_runtime::request_notification_port_create(
         SLOT_TIMER_NOTIFICATION,
-        nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+        nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
     )
     .map_err(|e| log_error("[honoka-client] timer notification create failed: ", e))?;
-    let window_id = nanami_services::gfx::honoka::honoka_create_window_with_title(
+    let window_id = nanami_client::gfx::honoka::honoka_create_window_with_title(
         honoka_port,
         WINDOW_X,
         WINDOW_Y,
@@ -48,26 +48,26 @@ fn nanami_main() -> libnanami::NanamiResult {
         b"Honoka Demo",
     )
     .map_err(|e| log_error("[honoka-client] create window failed: ", e))?;
-    nanami_services::gfx::honoka::honoka_set_window_opacity(honoka_port, window_id, WINDOW_OPACITY)
+    nanami_client::gfx::honoka::honoka_set_window_opacity(honoka_port, window_id, WINDOW_OPACITY)
         .map_err(|e| log_error("[honoka-client] set window opacity failed: ", e))?;
-    libnanami::print!("[honoka-client] window created id=");
-    libnanami::print!("{}", window_id);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[honoka-client] window created id=");
+    nanami_runtime::print!("{}", window_id);
+    nanami_runtime::print!("\n");
 
     let present_notification = attach_honoka_present_notification(honoka_pid, window_id)
         .map_err(|e| log_error("[honoka-client] present notification failed: ", e))?;
 
-    let mut surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+    let mut surface = nanami_client::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
         .map_err(|e| log_error("[honoka-client] attach framebuffer failed: ", e))?;
     let shared_base = surface.base;
     let framebuffer = surface.pixels();
     let pixel_bytes = surface.pixel_bytes();
     let (input_base, _input_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
+        nanami_client::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
             .map_err(|e| log_error("[honoka-client] attach input queue failed: ", e))?;
-    nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
+    nanami_client::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
         .map_err(|e| log_error("[honoka-client] attach input notification failed: ", e))?;
-    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
+    let mut input_queue = nanami_client::gfx::honoka::WindowEventQueue::new(input_base);
 
     draw_demo(
         framebuffer,
@@ -76,8 +76,8 @@ fn nanami_main() -> libnanami::NanamiResult {
         surface.height,
     );
     push_damage_rect(shared_base, 0, 0, CONTENT_WIDTH, CONTENT_HEIGHT);
-    let _ = libnanami::ipc::notification_notify(present_notification);
-    let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+    let _ = nanami_runtime::ipc::notification_notify(present_notification);
+    let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
         honoka_port,
         window_id,
         0,
@@ -85,7 +85,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         CONTENT_WIDTH as Word,
         CONTENT_HEIGHT as Word,
     );
-    libnanami::print!("[honoka-client] rendered\n");
+    nanami_runtime::print!("[honoka-client] rendered\n");
 
     animate(
         honoka_port,
@@ -99,10 +99,10 @@ fn nanami_main() -> libnanami::NanamiResult {
 
 fn connect_honoka_service() -> (Word, Word) {
     loop {
-        match nanami_services::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
+        match nanami_client::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
             Ok(pid) => {
                 return (
-                    libnanami::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
+                    nanami_runtime::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
                     pid,
                 )
             }
@@ -118,21 +118,21 @@ fn attach_honoka_present_notification(
     honoka_pid: Word,
     window_id: Word,
 ) -> Result<Word, RequestError> {
-    libnanami::request_notification_port_copy(
+    nanami_runtime::request_notification_port_copy(
         honoka_pid,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
         SLOT_HONOKA_PRESENT_NOTIFICATION,
-        nanami_services::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
+        nanami_client::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
     )?;
-    Ok(libnanami::ipc::process_slot_descriptor(
+    Ok(nanami_runtime::ipc::process_slot_descriptor(
         SLOT_HONOKA_PRESENT_NOTIFICATION,
     ))
 }
 
 fn connect_timer_service() -> Word {
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-            Ok(()) => return libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
             Err(e) => {
                 log_request_error("[honoka-client] waiting timer-service: ", e);
                 busy_delay();
@@ -285,10 +285,10 @@ fn draw_rect(
 fn animate(
     honoka_port: Word,
     window_id: Word,
-    surface: &mut nanami_services::gfx::honoka::WindowSurface,
+    surface: &mut nanami_client::gfx::honoka::WindowSurface,
     present_notification: Word,
     timer_port: Word,
-    input_queue: &mut nanami_services::gfx::honoka::WindowEventQueue,
+    input_queue: &mut nanami_client::gfx::honoka::WindowEventQueue,
 ) -> ! {
     let mut frame = 0usize;
     start_frame_timer(timer_port);
@@ -316,8 +316,8 @@ fn animate(
             ANIMATION_W,
             ANIMATION_H,
         );
-        let _ = libnanami::ipc::notification_notify(present_notification);
-        let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+        let _ = nanami_runtime::ipc::notification_notify(present_notification);
+        let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
             honoka_port,
             window_id,
             ANIMATION_X as Word,
@@ -397,15 +397,15 @@ fn triangle_wave(frame: usize, amplitude: usize) -> usize {
 }
 
 fn push_damage_rect(base: Word, x: usize, y: usize, width: usize, height: usize) {
-    if read_word(base, 0) != nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
+    if read_word(base, 0) != nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
         return;
     }
     let capacity = read_word(base, 1) as usize;
-    if capacity == 0 || capacity > nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
+    if capacity == 0 || capacity > nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
         return;
     }
 
-    let entry = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS;
+    let entry = nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS;
     let pending = read_word(base, 4) != 0;
     let (mut out_x, mut out_y, mut out_w, mut out_h) = (x, y, width, height);
     if pending {
@@ -446,7 +446,7 @@ const fn word_offset(index: usize) -> Word {
 }
 
 fn start_frame_timer(timer_port: Word) {
-    if let Err(e) = nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+    if let Err(e) = nanami_client::timer::timer_service_interval_on_notification_milliseconds(
         timer_port,
         FRAME_DELAY_MS,
         SLOT_TIMER_NOTIFICATION,
@@ -457,14 +457,14 @@ fn start_frame_timer(timer_port: Word) {
 }
 
 fn wait_frame_timer() {
-    let notification = libnanami::ipc::process_slot_descriptor(SLOT_TIMER_NOTIFICATION);
+    let notification = nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_NOTIFICATION);
     loop {
-        match libnanami::ipc::notification_wait(notification) {
+        match nanami_runtime::ipc::notification_wait(notification) {
             Ok(identifier) => {
-                if (identifier & nanami_services::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
+                if (identifier & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
                     return;
                 }
-                if (identifier & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0 {
+                if (identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0 {
                     return;
                 }
             }
@@ -478,10 +478,10 @@ fn wait_frame_timer() {
 }
 
 fn drain_input(
-    input_queue: &mut nanami_services::gfx::honoka::WindowEventQueue,
+    input_queue: &mut nanami_client::gfx::honoka::WindowEventQueue,
     honoka_port: Word,
     window_id: Word,
-    surface: &mut nanami_services::gfx::honoka::WindowSurface,
+    surface: &mut nanami_client::gfx::honoka::WindowSurface,
 ) -> bool {
     let mut changed = false;
     let mut drained = 0usize;
@@ -489,8 +489,8 @@ fn drain_input(
         let Some(packed) = input_queue.pop() else {
             break;
         };
-        let (kind, _, width, height, _) = nanami_services::input::unpack_input_event(packed);
-        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
+        let (kind, _, width, height, _) = nanami_client::input::unpack_input_event(packed);
+        if kind == nanami_client::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
             match surface.resize(
                 honoka_port,
                 window_id,
@@ -500,9 +500,9 @@ fn drain_input(
                 Ok(resized) => changed |= resized,
                 Err(error) => log_request_error("[honoka-client] resize failed: ", error),
             }
-        } else if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
-            let _ = nanami_services::gfx::honoka::honoka_destroy_window(honoka_port, window_id);
-            let _ = libnanami::request_exit();
+        } else if kind == nanami_client::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
+            let _ = nanami_client::gfx::honoka::honoka_destroy_window(honoka_port, window_id);
+            let _ = nanami_runtime::request_exit();
             loop {
                 core::hint::spin_loop();
             }
@@ -520,13 +520,13 @@ fn busy_delay() {
     }
 }
 
-fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

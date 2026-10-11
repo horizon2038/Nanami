@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 extern crate alloc;
-extern crate self as libnanami;
+extern crate self as nanami_runtime;
 pub use std::println;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

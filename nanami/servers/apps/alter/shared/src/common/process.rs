@@ -1,6 +1,6 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
-pub type HardwareContext = [Word; libnanami::ipc::HARDWARE_CONTEXT_WORDS];
+pub type HardwareContext = [Word; nanami_runtime::ipc::HARDWARE_CONTEXT_WORDS];
 
 #[derive(Clone, Copy)]
 pub struct LinuxSyscallContext {

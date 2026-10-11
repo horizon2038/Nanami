@@ -50,6 +50,10 @@ use crate::nanami_utils::heap::init_global_heap;
 use crate::{debug, error, info, warn};
 use alloc::vec::Vec;
 use core::ptr;
+use nanami_uapi::os::{
+    NANAMI_INFO_ARCHITECTURE_NAME, NANAMI_INFO_KERNEL_VERSION, NANAMI_INFO_MEMORY,
+    NANAMI_INFO_OS_VERSION, NANAMI_INFO_PLATFORM_NAME, NANAMI_INFO_PROCESS, NANAMI_INFO_SMP,
+};
 use nun::{
     arch, CapabilityDescriptor, CapabilityError, CapabilityType, FramebufferInfo, InitInfo,
     InitSlotOffset, Word,
@@ -96,13 +100,6 @@ const PROCESS_ZERO_TEMP_BASE: usize = PROCESS_COPY_TEMP_BASE + PROCESS_COPY_TEMP
 // Keep the static backing buffer at that effective limit: making it larger only
 // inflates Nanami's BSS (and can make the init ELF exceed A9N's load capacity).
 const PROCESS_SPAWN_MEMORY_MAX_BYTES: usize = PROCESS_COPY_TEMP_WINDOW_SIZE;
-const NANAMI_INFO_MEMORY: usize = 1;
-const NANAMI_INFO_PROCESS: usize = 2;
-const NANAMI_INFO_SMP: usize = 3;
-const NANAMI_INFO_ARCHITECTURE_NAME: usize = 4;
-const NANAMI_INFO_PLATFORM_NAME: usize = 5;
-const NANAMI_INFO_KERNEL_VERSION: usize = 6;
-const NANAMI_INFO_OS_VERSION: usize = 7;
 static mut PROCESS_MEMORY_IMAGE_BUFFER: [u8; PROCESS_SPAWN_MEMORY_MAX_BYTES] =
     [0; PROCESS_SPAWN_MEMORY_MAX_BYTES];
 const ALPHA_RUNTIME_STACK_NODE_SLOT: usize = 1300;

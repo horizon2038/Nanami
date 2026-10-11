@@ -70,7 +70,7 @@ pub(super) fn sys_socket_send(
                         );
                         if !matches!(
                             error,
-                            RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)
+                            RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)
                         ) {
                             return Err(map_network_error(error));
                         }
@@ -138,7 +138,7 @@ pub(super) fn sys_socket_send(
                         );
                         if !matches!(
                             error,
-                            RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)
+                            RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)
                         ) {
                             return Err(map_network_error(error));
                         }
@@ -285,7 +285,7 @@ pub(super) fn sys_socket_recv(
         _ => return Err(ENOTSOCK),
     };
     if received != 0 {
-        libnanami::request_process_memory_write(
+        nanami_runtime::request_process_memory_write(
             pid,
             buffer,
             runtime.network_shm + source_offset,
@@ -325,7 +325,7 @@ pub(super) fn sys_sendmsg(
             return Err(EMSGSIZE);
         }
         if len != 0 {
-            libnanami::request_process_memory_read(
+            nanami_runtime::request_process_memory_read(
                 pid,
                 bases[index],
                 runtime.posix_shm + total,
@@ -365,7 +365,7 @@ pub(super) fn sys_recvmsg(
     while index < iov_count as usize && copied < response_len {
         let chunk = lens[index].min(response_len - copied);
         if chunk != 0 {
-            libnanami::request_process_memory_write(
+            nanami_runtime::request_process_memory_write(
                 pid,
                 bases[index],
                 runtime.posix_shm + copied,

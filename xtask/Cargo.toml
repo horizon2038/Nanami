@@ -1,0 +1,16 @@
+[package]
+name = "nanami-xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+camino = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tempfile = "3"
+ext2-image = { path = "../crates/ext2-image" }
+spencer-build = { package = "xtask", path = "../spencer/xtask" }

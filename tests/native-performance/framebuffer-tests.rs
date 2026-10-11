@@ -1,7 +1,7 @@
 //! Real fb-server presentation code, with RAM replacing the hardware aperture.
 #![allow(dead_code)]
 extern crate alloc;
-extern crate self as libnanami;
+extern crate self as nanami_runtime;
 use core::sync::atomic::{fence, Ordering};
 type Word = usize;
 const OS_RESPONSE_PERMISSION_DENIED: Word = 5;

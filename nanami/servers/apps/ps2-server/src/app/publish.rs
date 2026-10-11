@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::state::Ps2Server;
 
@@ -13,7 +13,7 @@ pub fn publish_pending_events(server: &mut Ps2Server) {
     server.mouse_batch.clear();
 
     if should_notify_input(published_keys, published_mouse, had_mouse_buttons) {
-        let _ = libnanami::ipc::notification_notify(server.input_notification);
+        let _ = nanami_runtime::ipc::notification_notify(server.input_notification);
     }
 }
 
@@ -30,18 +30,18 @@ fn should_notify_input(
 
 fn publish_keyboard_events(server: &mut Ps2Server) -> usize {
     let mut published = 0usize;
-    let mut queue = nanami_services::input::InputEventQueue::new(server.input_queue_vaddr);
+    let mut queue = nanami_client::input::InputEventQueue::new(server.input_queue_vaddr);
     let mut i = 0usize;
     while i < server.key_event_count {
         let (code, value) = server.key_events[i];
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_KEY,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_KEY,
             code,
             value as i16,
             0,
             next_sequence(server),
         );
-        queue.push_with_event_kind(nanami_services::input::INPUT_EVENT_KIND_KEY, packed);
+        queue.push_with_event_kind(nanami_client::input::INPUT_EVENT_KIND_KEY, packed);
         published = published.wrapping_add(1);
         i += 1;
     }
@@ -50,34 +50,34 @@ fn publish_keyboard_events(server: &mut Ps2Server) -> usize {
 
 fn publish_mouse_batch(server: &mut Ps2Server) -> usize {
     let mut published = 0usize;
-    let mut queue = nanami_services::input::InputEventQueue::new(server.input_queue_vaddr);
+    let mut queue = nanami_client::input::InputEventQueue::new(server.input_queue_vaddr);
 
     let dx = server.mouse_batch.dx;
     let dy = server.mouse_batch.dy;
     if dx != 0 || dy != 0 {
         let move_dx = clamp_i32_to_i16(dx);
         let move_dy = clamp_i32_to_i16(dy);
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE,
             0,
             move_dx,
             move_dy,
             next_sequence(server),
         );
-        queue.push_with_event_kind(nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE, packed);
+        queue.push_with_event_kind(nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE, packed);
         published = published.wrapping_add(1);
     }
 
     let wheel = server.mouse_batch.wheel;
     if wheel != 0 {
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL,
             0,
             clamp_i32_to_i16(wheel),
             0,
             next_sequence(server),
         );
-        queue.push_with_event_kind(nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL, packed);
+        queue.push_with_event_kind(nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL, packed);
         published = published.wrapping_add(1);
     }
 
@@ -85,15 +85,15 @@ fn publish_mouse_batch(server: &mut Ps2Server) -> usize {
     let button_count = server.mouse_batch.button_count;
     while i < button_count {
         let button = server.mouse_batch.buttons[i];
-        let packed = nanami_services::input::pack_input_event(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
+        let packed = nanami_client::input::pack_input_event(
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
             button.code,
             button.pressed as i16,
             0,
             next_sequence(server),
         );
         queue.push_with_event_kind(
-            nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
+            nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON,
             packed,
         );
         published = published.wrapping_add(1);

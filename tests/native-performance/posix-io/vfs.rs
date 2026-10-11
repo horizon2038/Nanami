@@ -1,8 +1,8 @@
 use super::*;
-#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/vfs/constants.rs"]
+#[path = "../../../nanami/servers/uapi/src/vfs.rs"]
 mod constants;
 pub use constants::*;
-#[path = "../../../nanami/servers/sdk/rust/nanami-services/src/vfs/truncate.rs"]
+#[path = "../../../nanami/servers/libs/nanami-client/src/vfs/truncate.rs"]
 mod truncate;
 pub use truncate::*;
 

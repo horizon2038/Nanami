@@ -144,7 +144,7 @@ pub fn wake_network_waiters(runtime: &mut Runtime) {
         )
         .is_err()
         {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/{}] network wake register write failed pid={} pcb={:#x}",
                 personality::name(process.personality),
                 process.pid,
@@ -154,7 +154,7 @@ pub fn wake_network_waiters(runtime: &mut Runtime) {
             continue;
         }
         if let Err(error) = a9n_abi::arch::process_control_block::resume(process.pcb) {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] network wake resume failed pid={} pcb={:#x} err={:?}",
                 process.pid,
                 process.pcb,

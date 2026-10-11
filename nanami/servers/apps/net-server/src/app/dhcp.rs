@@ -66,13 +66,13 @@ pub(crate) fn process_dhcp_payload(
 
     let Some(parsed) = parse_dhcp_payload(payload, runtime.dhcp_xid) else {
         if let Some((xid, msg_type)) = inspect_dhcp_packet(payload) {
-            libnanami::print!("[net-server][dhcp] ignore packet type=");
-            libnanami::print!("{}", msg_type as usize);
-            libnanami::print!(" xid=0x");
-            libnanami::print!("{:#x}", xid as usize);
-            libnanami::print!(" expected=0x");
-            libnanami::print!("{:#x}", runtime.dhcp_xid as usize);
-            libnanami::print!("\n");
+            nanami_runtime::print!("[net-server][dhcp] ignore packet type=");
+            nanami_runtime::print!("{}", msg_type as usize);
+            nanami_runtime::print!(" xid=0x");
+            nanami_runtime::print!("{:#x}", xid as usize);
+            nanami_runtime::print!(" expected=0x");
+            nanami_runtime::print!("{:#x}", runtime.dhcp_xid as usize);
+            nanami_runtime::print!("\n");
         }
         return true;
     };
@@ -94,15 +94,15 @@ pub(crate) fn process_dhcp_payload(
         if let Some(mask) = parsed.subnet_mask {
             runtime.dhcp_subnet_mask = Some(mask);
         }
-        libnanami::print!("[net-server][dhcp] offer received ip=");
+        nanami_runtime::print!("[net-server][dhcp] offer received ip=");
         log_ip(runtime.dhcp_offer_ip);
-        libnanami::print!(" server=");
+        nanami_runtime::print!(" server=");
         log_ip(runtime.dhcp_server_ip);
-        libnanami::print!(" gw=");
+        nanami_runtime::print!(" gw=");
         log_ip(runtime.dhcp_router_ip);
-        libnanami::print!(" dns=");
+        nanami_runtime::print!(" dns=");
         log_ip(runtime.dhcp_dns_ip);
-        libnanami::print!("\n");
+        nanami_runtime::print!("\n");
         return true;
     }
 
@@ -123,16 +123,16 @@ pub(crate) fn process_dhcp_payload(
         if let Some(mask) = parsed.subnet_mask {
             runtime.dhcp_subnet_mask = Some(mask);
         }
-        libnanami::print!("[net-server][dhcp] ack received ip=");
+        nanami_runtime::print!("[net-server][dhcp] ack received ip=");
         log_ip(runtime.dhcp_offer_ip);
-        libnanami::print!("\n");
+        nanami_runtime::print!("\n");
         return true;
     }
 
     if parsed.msg_type == DHCP_MSG_NAK {
         runtime.dhcp_offer_valid = false;
         runtime.dhcp_ack_valid = false;
-        libnanami::print!("[net-server][dhcp] nak received\n");
+        nanami_runtime::print!("[net-server][dhcp] nak received\n");
         return true;
     }
 
@@ -183,9 +183,9 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
     runtime.dhcp_subnet_mask = None;
     runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
 
-    libnanami::print!("[net-server][dhcp] bootstrap start xid=0x");
-    libnanami::print!("{:#x}", runtime.dhcp_xid as usize);
-    libnanami::print!("\n");
+    nanami_runtime::print!("[net-server][dhcp] bootstrap start xid=0x");
+    nanami_runtime::print!("{:#x}", runtime.dhcp_xid as usize);
+    nanami_runtime::print!("\n");
 
     'discover_phase: loop {
         runtime.dhcp_offer_valid = false;
@@ -197,12 +197,12 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
 
         let mut retry = 0usize;
         loop {
-            libnanami::print!("[net-server][dhcp] discover");
+            nanami_runtime::print!("[net-server][dhcp] discover");
             if retry > 0 {
-                libnanami::print!(" retry=");
-                libnanami::print!("{}", retry);
+                nanami_runtime::print!(" retry=");
+                nanami_runtime::print!("{}", retry);
             }
-            libnanami::print!("\n");
+            nanami_runtime::print!("\n");
 
             let wait_ms = dhcp_backoff_ms(retry);
             if let Err(e) = send_dhcp_discover(runtime) {
@@ -217,22 +217,22 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
                 use_configured_fallback(runtime, "offer timeout");
                 return;
             }
-            libnanami::print!("[net-server][dhcp] offer timeout, retry=");
-            libnanami::print!("{}", retry);
-            libnanami::print!(" next_wait_ms=");
-            libnanami::print!("{}", dhcp_backoff_ms(retry));
-            libnanami::print!("\n");
+            nanami_runtime::print!("[net-server][dhcp] offer timeout, retry=");
+            nanami_runtime::print!("{}", retry);
+            nanami_runtime::print!(" next_wait_ms=");
+            nanami_runtime::print!("{}", dhcp_backoff_ms(retry));
+            nanami_runtime::print!("\n");
         }
 
         let mut retry = 0usize;
         loop {
             runtime.dhcp_ack_valid = false;
-            libnanami::print!("[net-server][dhcp] request");
+            nanami_runtime::print!("[net-server][dhcp] request");
             if retry > 0 {
-                libnanami::print!(" retry=");
-                libnanami::print!("{}", retry);
+                nanami_runtime::print!(" retry=");
+                nanami_runtime::print!("{}", retry);
             }
-            libnanami::print!("\n");
+            nanami_runtime::print!("\n");
 
             let wait_ms = dhcp_backoff_ms(retry);
             if let Err(e) = send_dhcp_request(runtime) {
@@ -245,7 +245,7 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
             }
 
             if !runtime.dhcp_offer_valid {
-                libnanami::print!("[net-server][dhcp] request invalidated; restart discover\n");
+                nanami_runtime::print!("[net-server][dhcp] request invalidated; restart discover\n");
                 runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(0x1111_1111);
                 continue 'discover_phase;
             }
@@ -255,11 +255,11 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
                 use_configured_fallback(runtime, "ack timeout");
                 return;
             }
-            libnanami::print!("[net-server][dhcp] ack timeout, retry=");
-            libnanami::print!("{}", retry);
-            libnanami::print!(" next_wait_ms=");
-            libnanami::print!("{}", dhcp_backoff_ms(retry));
-            libnanami::print!("\n");
+            nanami_runtime::print!("[net-server][dhcp] ack timeout, retry=");
+            nanami_runtime::print!("{}", retry);
+            nanami_runtime::print!(" next_wait_ms=");
+            nanami_runtime::print!("{}", dhcp_backoff_ms(retry));
+            nanami_runtime::print!("\n");
         }
     }
 }
@@ -268,15 +268,15 @@ fn use_configured_fallback(runtime: &mut NetRuntime, reason: &str) {
     runtime.dhcp_waiting = false;
     runtime.dhcp_offer_valid = false;
     runtime.dhcp_ack_valid = false;
-    libnanami::print!("[net-server][dhcp] ");
-    libnanami::print!("{}", reason);
-    libnanami::print!("; using configured ip=");
+    nanami_runtime::print!("[net-server][dhcp] ");
+    nanami_runtime::print!("{}", reason);
+    nanami_runtime::print!("; using configured ip=");
     log_ip(runtime.ip);
-    libnanami::print!(" gw=");
+    nanami_runtime::print!(" gw=");
     log_ip(runtime.gateway_ip);
-    libnanami::print!(" dns=");
+    nanami_runtime::print!(" dns=");
     log_ip(runtime.dns_ip);
-    libnanami::print!("\n");
+    nanami_runtime::print!("\n");
 }
 
 fn wait_dhcp_offer(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {
@@ -288,7 +288,7 @@ fn wait_dhcp_ack(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Wor
 }
 
 fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, ack: bool) -> bool {
-    use nanami_services::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
+    use nanami_client::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
     let complete = |runtime: &NetRuntime| {
         if ack {
             runtime.dhcp_ack_valid
@@ -342,21 +342,21 @@ fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, a
                 let tick = now.saturating_add(ticks(DHCP_POLL_STEP_MS)).min(deadline);
                 timer_service_set_alarm_ticks(
                     timer,
-                    libnanami::PROCESS_SLOT_NOTIFICATION,
+                    nanami_runtime::PROCESS_SLOT_NOTIFICATION,
                     Some(tick),
                 )?;
                 alarm = Some(tick);
             }
             // RX notifications wake immediately; the alarm covers polling-only
             // NICs and an absent server. Only one replaceable alarm is live.
-            libnanami::ipc::notification_wait(libnanami::ipc::process_slot_descriptor(
-                libnanami::PROCESS_SLOT_NOTIFICATION,
+            nanami_runtime::ipc::notification_wait(nanami_runtime::ipc::process_slot_descriptor(
+                nanami_runtime::PROCESS_SLOT_NOTIFICATION,
             ))?;
         }
     })();
     if alarm.is_some() {
         if let Err(error) =
-            timer_service_set_alarm_ticks(timer, libnanami::PROCESS_SLOT_NOTIFICATION, None)
+            timer_service_set_alarm_ticks(timer, nanami_runtime::PROCESS_SLOT_NOTIFICATION, None)
         {
             log_request_error("[net-server][dhcp] alarm cancellation failed: ", error);
         }
@@ -391,15 +391,15 @@ fn apply_lease(runtime: &mut NetRuntime) {
         runtime.subnet_mask = mask;
     }
 
-    libnanami::print!("[net-server][dhcp] lease ip=");
+    nanami_runtime::print!("[net-server][dhcp] lease ip=");
     log_ip(runtime.ip);
-    libnanami::print!(" mask=");
+    nanami_runtime::print!(" mask=");
     log_ip(runtime.subnet_mask);
-    libnanami::print!(" gw=");
+    nanami_runtime::print!(" gw=");
     log_ip(runtime.gateway_ip);
-    libnanami::print!(" dns=");
+    nanami_runtime::print!(" dns=");
     log_ip(runtime.dns_ip);
-    libnanami::print!("\n");
+    nanami_runtime::print!("\n");
     announce_lease(runtime);
 }
 
@@ -644,11 +644,11 @@ fn parse_dhcp_payload(payload: &[u8], expected_xid: u32) -> Option<DhcpParsed> {
 }
 
 fn log_ip(ip: [u8; 4]) {
-    libnanami::print!("{}", ip[0] as usize);
-    libnanami::print!(".");
-    libnanami::print!("{}", ip[1] as usize);
-    libnanami::print!(".");
-    libnanami::print!("{}", ip[2] as usize);
-    libnanami::print!(".");
-    libnanami::print!("{}", ip[3] as usize);
+    nanami_runtime::print!("{}", ip[0] as usize);
+    nanami_runtime::print!(".");
+    nanami_runtime::print!("{}", ip[1] as usize);
+    nanami_runtime::print!(".");
+    nanami_runtime::print!("{}", ip[2] as usize);
+    nanami_runtime::print!(".");
+    nanami_runtime::print!("{}", ip[3] as usize);
 }

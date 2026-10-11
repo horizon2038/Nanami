@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use libnanami::Word;
+use nanami_runtime::Word;
 
 mod cli;
 #[path = "../shared/src/common/framebuffer_size.rs"]
@@ -32,13 +32,13 @@ const ALTER_ENV: [&[u8]; 4] = [
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[alter] panic");
-    let _ = libnanami::request_exit();
+    nanami_runtime::println!("[alter] panic");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
 
     let mut terminal = TerminalClient::new();
     let terminal_id = parse_terminal_id().unwrap_or(0);
@@ -46,7 +46,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         let _ = terminal.connect(terminal_id);
     }
 
-    let launch = match parse_cli(libnanami::process_argc(), libnanami::process_arg) {
+    let launch = match parse_cli(nanami_runtime::process_argc(), nanami_runtime::process_arg) {
         Ok(launch) => launch,
         Err(()) => {
             terminal.write_line(
@@ -56,7 +56,7 @@ fn nanami_main() -> libnanami::NanamiResult {
         }
     };
     if launch.diagnostics {
-        log_cli(libnanami::process_argc(), launch.first_arg, launch.os);
+        log_cli(nanami_runtime::process_argc(), launch.first_arg, launch.os);
     }
 
     let mut alter = match AlterClient::connect(launch.os.service_name()) {
@@ -88,7 +88,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     if launch.framebuffer_size.is_some() {
         flags |= ALTER_LAUNCH_FLAG_FB_SIZE;
     }
-    let (status, pid, _) = match libnanami::call_service_port(
+    let (status, pid, _) = match nanami_runtime::call_service_port(
         alter.port,
         ALTER_REQUEST_SPAWN_LINUX,
         offset as Word,
@@ -103,7 +103,7 @@ fn nanami_main() -> libnanami::NanamiResult {
             return Ok(());
         }
     };
-    if status != libnanami::OS_RESPONSE_OK {
+    if status != nanami_runtime::OS_RESPONSE_OK {
         terminal.write_status_line(b"alter: spawn failed ", status);
         return Ok(());
     }
@@ -113,7 +113,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 }
 
 fn log_cli(argc: usize, first_arg: usize, os: AlterOs) {
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter] cli argc={} first_arg={} os={}",
         argc,
         first_arg,
@@ -121,9 +121,9 @@ fn log_cli(argc: usize, first_arg: usize, os: AlterOs) {
     );
     let mut index = 0usize;
     while index < argc {
-        if let Some(arg) = libnanami::process_arg(index) {
+        if let Some(arg) = nanami_runtime::process_arg(index) {
             if let Ok(text) = core::str::from_utf8(arg) {
-                libnanami::println!("[alter] argv[{}]={}", index, text);
+                nanami_runtime::println!("[alter] argv[{}]={}", index, text);
             }
         }
         index += 1;
@@ -138,9 +138,9 @@ struct AlterClient {
 
 impl AlterClient {
     fn connect(service_name: &str) -> Result<Self, ()> {
-        libnanami::connect_service_by_name(service_name, SLOT_ALTER_SERVICE).map_err(|_| ())?;
-        let port = libnanami::ipc::process_slot_descriptor(SLOT_ALTER_SERVICE);
-        let (status, shm, size) = libnanami::call_service_port(
+        nanami_runtime::connect_service_by_name(service_name, SLOT_ALTER_SERVICE).map_err(|_| ())?;
+        let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_ALTER_SERVICE);
+        let (status, shm, size) = nanami_runtime::call_service_port(
             port,
             ALTER_REQUEST_CONTROL,
             ALTER_CONTROL_ATTACH_SHARED_MEMORY,
@@ -150,7 +150,7 @@ impl AlterClient {
             3,
         )
         .map_err(|_| ())?;
-        if status != libnanami::OS_RESPONSE_OK || shm == 0 || size == 0 {
+        if status != nanami_runtime::OS_RESPONSE_OK || shm == 0 || size == 0 {
             return Err(());
         }
         Ok(Self {
@@ -175,10 +175,10 @@ impl AlterClient {
         }
         let mut i = 0usize;
         while i < launch.argc {
-            let arg = libnanami::process_arg(launch.first_arg + i)?;
+            let arg = nanami_runtime::process_arg(launch.first_arg + i)?;
             if i == 0 && launch.diagnostics {
                 if let Ok(text) = core::str::from_utf8(arg) {
-                    libnanami::println!("[alter] launch image={}", text);
+                    nanami_runtime::println!("[alter] launch image={}", text);
                 }
             }
             cursor = write_shm_string(self.shm, self.shm_size, cursor, arg)?;
@@ -211,12 +211,12 @@ impl TerminalClient {
     }
 
     fn connect(&mut self, terminal_id: Word) -> Result<(), ()> {
-        nanami_services::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
+        nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
             .map_err(|_| ())?;
-        self.port = libnanami::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
-        let (shm, size) = nanami_services::terminal::terminal_attach_shared_memory(
+        self.port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
+        let (shm, size) = nanami_client::terminal::terminal_attach_shared_memory(
             self.port,
-            nanami_services::terminal::TERMINAL_DEFAULT_SHM_BYTES,
+            nanami_client::terminal::TERMINAL_DEFAULT_SHM_BYTES,
         )
         .map_err(|_| ())?;
         if shm == 0 || size == 0 {
@@ -245,7 +245,7 @@ impl TerminalClient {
         if !self.connected {
             let mut i = 0usize;
             while i < bytes.len() {
-                libnanami::debug::write_char(bytes[i] as char);
+                nanami_runtime::debug::write_char(bytes[i] as char);
                 i += 1;
             }
             return;
@@ -260,7 +260,7 @@ impl TerminalClient {
                     chunk,
                 );
             }
-            let _ = nanami_services::terminal::terminal_write_output(
+            let _ = nanami_client::terminal::terminal_write_output(
                 self.port,
                 self.terminal_id,
                 0,
@@ -275,16 +275,16 @@ fn wait_child(pid: Word, alter_port: Word, terminal: &mut TerminalClient) {
     let timer_port = connect_timer_service();
     let mut status_failures = 0usize;
     loop {
-        match libnanami::call_service_port(alter_port, ALTER_REQUEST_STATUS, pid, 0, 0, 0, 2) {
-            Ok((libnanami::OS_RESPONSE_OK, 1, status)) => {
+        match nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_STATUS, pid, 0, 0, 0, 2) {
+            Ok((nanami_runtime::OS_RESPONSE_OK, 1, status)) => {
                 let _ =
-                    libnanami::call_service_port(alter_port, ALTER_REQUEST_KILL, pid, 0, 0, 0, 3);
+                    nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, pid, 0, 0, 0, 3);
                 if status != 0 {
                     terminal.write_status_line(b"alter: exited status=", status);
                 }
                 break;
             }
-            Ok((libnanami::OS_RESPONSE_OK, 0, _)) => {
+            Ok((nanami_runtime::OS_RESPONSE_OK, 0, _)) => {
                 status_failures = 0;
             }
             Ok((status, _, _)) => {
@@ -301,7 +301,7 @@ fn wait_child(pid: Word, alter_port: Word, terminal: &mut TerminalClient) {
             }
         }
         if let Some(port) = timer_port {
-            let _ = nanami_services::timer::timer_service_sleep_milliseconds(port, 50);
+            let _ = nanami_client::timer::timer_service_sleep_milliseconds(port, 50);
         } else {
             let mut spin = 0usize;
             while spin < 500_000 {
@@ -313,14 +313,14 @@ fn wait_child(pid: Word, alter_port: Word, terminal: &mut TerminalClient) {
 }
 
 fn connect_timer_service() -> Option<Word> {
-    match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-        Ok(()) => Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
+    match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+        Ok(()) => Some(nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
         Err(_) => None,
     }
 }
 
 fn parse_terminal_id() -> Option<Word> {
-    let value = libnanami::process_env_value(b"NANAMI_TERMINAL_ID")?;
+    let value = nanami_runtime::process_env_value(b"NANAMI_TERMINAL_ID")?;
     parse_decimal(value)
 }
 
@@ -403,4 +403,4 @@ fn string_len(bytes: &[u8]) -> usize {
     len
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

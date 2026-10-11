@@ -69,7 +69,7 @@ impl Controller {
                     this.reset_endpoint(slot, 1, &mut device.control, true, input)?;
                     return Err(RequestError::Unsupported);
                 } else if event.code() != 1 {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] control req={:#x} slot={} code={}",
                         request,
                         slot,
@@ -88,7 +88,7 @@ impl Controller {
         })
         .inspect_err(|error| {
             if !matches!(error, RequestError::Unsupported) {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] control wait failed port={} slot={} setup={:#x} trb={:#x}: {}",
                     device.port,
                     slot,

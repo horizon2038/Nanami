@@ -48,7 +48,7 @@ The Hack font license is preserved in [licenses/hack.md](licenses/hack.md).
 ## Client Protocol
 
 The typed protocol lives in
-`nanami/servers/sdk/rust/nanami-services/src/gfx/honoka.rs`. A client connects to
+`nanami/servers/libs/nanami-client/src/gfx/honoka.rs`. A client connects to
 `honoka-service`, creates a window, attaches its framebuffer and event queue,
 draws content, and submits damage or a present notification.
 
@@ -60,8 +60,8 @@ Reference clients include the shell, performance monitor, image viewer,
 From the repository root:
 
 ```bash
-make image
-make fs-image
+cargo xtask build --rebuild-rootfs
+cargo xtask rootfs --rebuild-rootfs
 ```
 
 Compositor changes must be verified in QEMU at the configured desktop

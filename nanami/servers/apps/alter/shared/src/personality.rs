@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::common::process::LinuxSyscallContext;
 use crate::common::state::{OsPersonality, Runtime};

@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 mod editor;
 mod exec;
@@ -46,15 +46,15 @@ const FOREGROUND_DRAIN_BATCHES: usize = 64;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[shell] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[shell] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    let (used, remaining, total) = libnanami::heap::heap_stats();
-    libnanami::println!(
+    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
+    nanami_runtime::println!(
         "[shell] allocation failed size={:#x} align={:#x} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
         layout.size(),
         layout.align(),
@@ -62,24 +62,24 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
         remaining,
         total
     );
-    let _ = libnanami::request_exit();
+    let _ = nanami_runtime::request_exit();
     loop {
         core::hint::spin_loop();
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::print!("[shell] start\n");
-    libnanami::ipc::init_ipc_tls().map_err(|e| log_error("[shell] ipc tls failed: ", e))?;
-    let _ = libnanami::heap::init_heap(9 * 1024 * 1024)
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::print!("[shell] start\n");
+    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[shell] ipc tls failed: ", e))?;
+    let _ = nanami_runtime::heap::init_heap(9 * 1024 * 1024)
         .map_err(|e| log_error("[shell] heap init failed: ", e))?;
     let text = TextRenderer::new();
     let notification =
-        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
-    libnanami::ipc::bind_current_thread_notification(notification)
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
+    nanami_runtime::ipc::bind_current_thread_notification(notification)
         .map_err(|e| log_error("[shell] bind notification failed: ", e))?;
     let (honoka_port, honoka_pid) = connect_honoka_service();
-    let window_id = nanami_services::gfx::honoka::honoka_create_window_with_title(
+    let window_id = nanami_client::gfx::honoka::honoka_create_window_with_title(
         honoka_port,
         WINDOW_X,
         WINDOW_Y,
@@ -88,16 +88,16 @@ fn nanami_main() -> libnanami::NanamiResult {
         b"Shell",
     )
     .map_err(|e| log_error("[shell] create window failed: ", e))?;
-    nanami_services::gfx::honoka::honoka_set_window_opacity(honoka_port, window_id, WINDOW_OPACITY)
+    nanami_client::gfx::honoka::honoka_set_window_opacity(honoka_port, window_id, WINDOW_OPACITY)
         .map_err(|e| log_error("[shell] set window opacity failed: ", e))?;
     let present_notification = attach_honoka_present_notification(honoka_pid, window_id)
         .map_err(|e| log_error("[shell] present notification failed: ", e))?;
-    let surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+    let surface = nanami_client::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
         .map_err(|e| log_error("[shell] attach framebuffer failed: ", e))?;
     let (input_base, _input_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
+        nanami_client::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
             .map_err(|e| log_error("[shell] attach input queue failed: ", e))?;
-    nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
+    nanami_client::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
         .map_err(|e| log_error("[shell] attach input notification failed: ", e))?;
 
     let mut shell = Shell::new(honoka_port, window_id, surface, present_notification, text);
@@ -107,7 +107,7 @@ fn nanami_main() -> libnanami::NanamiResult {
     shell.present_full();
     start_shell_timer();
 
-    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
+    let mut input_queue = nanami_client::gfx::honoka::WindowEventQueue::new(input_base);
     loop {
         drain_input(&mut input_queue, &mut shell);
         if shell.drain_foreground_output() {
@@ -115,12 +115,12 @@ fn nanami_main() -> libnanami::NanamiResult {
             shell.present_full();
             continue;
         }
-        let waited = libnanami::ipc::notification_wait(notification)
+        let waited = nanami_runtime::ipc::notification_wait(notification)
             .map_err(|e| log_error("[shell] notification wait failed: ", e))?;
-        if (waited & nanami_services::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
+        if (waited & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
             drain_input(&mut input_queue, &mut shell);
         }
-        if (waited & nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0 {
+        if (waited & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT) != 0 {
             shell.on_timer();
         }
         if shell.drain_foreground_output() {
@@ -133,7 +133,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 struct Shell {
     honoka_port: Word,
     window_id: Word,
-    surface: nanami_services::gfx::honoka::WindowSurface,
+    surface: nanami_client::gfx::honoka::WindowSurface,
     present_notification: Word,
     text: TextRenderer,
     scrollback: scrollback::Scrollback,
@@ -152,7 +152,7 @@ impl Shell {
     fn new(
         honoka_port: Word,
         window_id: Word,
-        surface: nanami_services::gfx::honoka::WindowSurface,
+        surface: nanami_client::gfx::honoka::WindowSurface,
         present_notification: Word,
         text: TextRenderer,
     ) -> Self {
@@ -220,9 +220,9 @@ impl Shell {
             self.surface.width,
             self.surface.height,
         ) {
-            let _ = libnanami::ipc::notification_notify(self.present_notification);
+            let _ = nanami_runtime::ipc::notification_notify(self.present_notification);
         } else {
-            let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+            let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
                 self.honoka_port,
                 self.window_id,
                 0,
@@ -289,9 +289,9 @@ impl Shell {
             self.surface.width,
             FONT_H,
         ) {
-            let _ = libnanami::ipc::notification_notify(self.present_notification);
+            let _ = nanami_runtime::ipc::notification_notify(self.present_notification);
         } else {
-            let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+            let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
                 self.honoka_port,
                 self.window_id,
                 0,
@@ -453,16 +453,16 @@ impl Shell {
             self.present_full();
             let result = (|| {
                 if self.acpi_port.is_none() {
-                    nanami_services::registry::connect_service(
-                        nanami_services::power::ACPI_SERVICE,
+                    nanami_client::registry::connect_service(
+                        nanami_client::power::ACPI_SERVICE,
                         SLOT_ACPI_SERVICE,
                     )?;
-                    self.acpi_port = Some(libnanami::ipc::process_slot_descriptor(SLOT_ACPI_SERVICE));
+                    self.acpi_port = Some(nanami_runtime::ipc::process_slot_descriptor(SLOT_ACPI_SERVICE));
                 }
-                nanami_services::power::shutdown(self.acpi_port.unwrap())
+                nanami_client::power::shutdown(self.acpi_port.unwrap())
             })();
             if let Err(error) = result {
-                libnanami::println!("[shell] shutdown failed: {}", error);
+                nanami_runtime::println!("[shell] shutdown failed: {}", error);
                 self.push_line_bytes(b"shutdown failed (see serial log); power remains on");
             }
             return;
@@ -512,7 +512,7 @@ impl Shell {
 
             copy_bytes(&mut window_name, &self.editor.bytes[7..self.editor.len]);
 
-            match nanami_services::gfx::honoka::honoka_create_window_with_title(
+            match nanami_client::gfx::honoka::honoka_create_window_with_title(
                 self.honoka_port,
                 WINDOW_X,
                 WINDOW_Y,
@@ -565,9 +565,9 @@ impl Shell {
     fn run_nanami_control(&mut self) {
         let input = &self.editor.bytes[..self.editor.len];
         let result = if bytes_eq(input, b"nanami-control os.log enable") {
-            libnanami::request_nanami_control("os.log", "enable")
+            nanami_runtime::request_nanami_control("os.log", "enable")
         } else if bytes_eq(input, b"nanami-control os.log disable") {
-            libnanami::request_nanami_control("os.log", "disable")
+            nanami_runtime::request_nanami_control("os.log", "disable")
         } else {
             self.push_line_bytes(b"usage: nanami-control os.log enable|disable");
             return;
@@ -610,7 +610,7 @@ impl Shell {
         self.push_line_bytes(b"services:");
         let mut ordinal = 0usize;
         while ordinal < 64 {
-            match libnanami::service_info_by_ordinal(ordinal as Word) {
+            match nanami_runtime::service_info_by_ordinal(ordinal as Word) {
                 Ok((pid, service_kind)) => {
                     let mut line = [0u8; COLS];
                     let mut pos = 0usize;
@@ -627,16 +627,16 @@ impl Shell {
     }
 
     fn show_netinfo(&mut self) {
-        let _ = nanami_services::registry::connect_network_service(SLOT_NETWORK_SERVICE);
-        let net_port = libnanami::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
-        let (ip, gateway, dns) = match nanami_services::net::net_service_ipv4_config(net_port) {
+        let _ = nanami_client::registry::connect_network_service(SLOT_NETWORK_SERVICE);
+        let net_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
+        let (ip, gateway, dns) = match nanami_client::net::net_service_ipv4_config(net_port) {
             Ok(v) => v,
             Err(_) => {
                 self.push_line_bytes(b"netinfo: network-service unavailable");
                 return;
             }
         };
-        let mac = match nanami_services::net::net_service_mac_address(net_port) {
+        let mac = match nanami_client::net::net_service_mac_address(net_port) {
             Ok(v) => v,
             Err(_) => {
                 self.push_line_bytes(b"netinfo: mac query failed");
@@ -653,9 +653,9 @@ impl Shell {
 
     fn run_fs_test(&mut self) {
         self.push_line_bytes(b"fstest: connect vfs-service");
-        let _ = nanami_services::registry::connect_vfs_service(SLOT_VFS_SERVICE);
-        let vfs_port = libnanami::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
-        let (shm, shm_size) = match nanami_services::vfs::vfs_attach_shared_memory(vfs_port, 0x4000)
+        let _ = nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE);
+        let vfs_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
+        let (shm, shm_size) = match nanami_client::vfs::vfs_attach_shared_memory(vfs_port, 0x4000)
         {
             Ok(v) => v,
             Err(_) => {
@@ -679,17 +679,17 @@ impl Shell {
 
     fn fs_ls_root(&mut self, vfs_port: Word, shm: Word) -> bool {
         write_shm_bytes(shm, 0, b"/");
-        let handle = match nanami_services::vfs::vfs_open(vfs_port, 0, 1) {
+        let handle = match nanami_client::vfs::vfs_open(vfs_port, 0, 1) {
             Ok(h) => h,
             Err(_) => {
                 self.push_line_bytes(b"fstest: open / failed");
                 return false;
             }
         };
-        let (entries, _) = match nanami_services::vfs::vfs_read_dir(vfs_port, handle, 0, 4, 512) {
+        let (entries, _) = match nanami_client::vfs::vfs_read_dir(vfs_port, handle, 0, 4, 512) {
             Ok(v) => v,
             Err(_) => {
-                let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+                let _ = nanami_client::vfs::vfs_close(vfs_port, handle);
                 self.push_line_bytes(b"fstest: readdir / failed");
                 return false;
             }
@@ -699,11 +699,11 @@ impl Shell {
         while i < entries && i < 4 {
             self.push_line(format_dirent_line(
                 shm,
-                512 + i * nanami_services::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES,
+                512 + i * nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES,
             ));
             i += 1;
         }
-        let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        let _ = nanami_client::vfs::vfs_close(vfs_port, handle);
         true
     }
 
@@ -713,16 +713,16 @@ impl Shell {
         let body = b"Nanami ext2 write path ok";
 
         write_shm_bytes(shm, 0, path);
-        let _ = nanami_services::vfs::vfs_remove(vfs_port, 0, path.len() as Word);
+        let _ = nanami_client::vfs::vfs_remove(vfs_port, 0, path.len() as Word);
         write_shm_bytes(shm, 0, renamed);
-        let _ = nanami_services::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word);
+        let _ = nanami_client::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word);
 
         write_shm_bytes(shm, 0, path);
-        if nanami_services::vfs::vfs_create(vfs_port, 0, path.len() as Word).is_err() {
+        if nanami_client::vfs::vfs_create(vfs_port, 0, path.len() as Word).is_err() {
             self.push_line_bytes(b"fstest: create failed");
             return false;
         }
-        let handle = match nanami_services::vfs::vfs_open(vfs_port, 0, path.len() as Word) {
+        let handle = match nanami_client::vfs::vfs_open(vfs_port, 0, path.len() as Word) {
             Ok(h) => h,
             Err(_) => {
                 self.push_line_bytes(b"fstest: open new file failed");
@@ -730,17 +730,17 @@ impl Shell {
             }
         };
         write_shm_bytes(shm, 512, body);
-        if nanami_services::vfs::vfs_write(vfs_port, handle, 0, body.len() as Word, 512).is_err() {
-            let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        if nanami_client::vfs::vfs_write(vfs_port, handle, 0, body.len() as Word, 512).is_err() {
+            let _ = nanami_client::vfs::vfs_close(vfs_port, handle);
             self.push_line_bytes(b"fstest: write failed");
             return false;
         }
-        if nanami_services::vfs::vfs_read(vfs_port, handle, 0, body.len() as Word, 768).is_err() {
-            let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        if nanami_client::vfs::vfs_read(vfs_port, handle, 0, body.len() as Word, 768).is_err() {
+            let _ = nanami_client::vfs::vfs_close(vfs_port, handle);
             self.push_line_bytes(b"fstest: readback failed");
             return false;
         }
-        let _ = nanami_services::vfs::vfs_close(vfs_port, handle);
+        let _ = nanami_client::vfs::vfs_close(vfs_port, handle);
         if !shm_bytes_eq(shm, 768, body) {
             self.push_line_bytes(b"fstest: readback mismatch");
             return false;
@@ -748,7 +748,7 @@ impl Shell {
 
         write_shm_bytes(shm, 0, path);
         write_shm_bytes(shm, 256, renamed);
-        if nanami_services::vfs::vfs_rename(
+        if nanami_client::vfs::vfs_rename(
             vfs_port,
             0,
             path.len() as Word,
@@ -761,7 +761,7 @@ impl Shell {
             return false;
         }
         write_shm_bytes(shm, 0, renamed);
-        if nanami_services::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word).is_err() {
+        if nanami_client::vfs::vfs_remove(vfs_port, 0, renamed.len() as Word).is_err() {
             self.push_line_bytes(b"fstest: remove failed");
             return false;
         }
@@ -771,10 +771,10 @@ impl Shell {
 
     fn run_posix_test(&mut self) {
         self.push_line_bytes(b"posixtest: connect posix-service");
-        let _ = nanami_services::registry::connect_posix_service(SLOT_POSIX_SERVICE);
-        let posix_port = libnanami::ipc::process_slot_descriptor(SLOT_POSIX_SERVICE);
+        let _ = nanami_client::registry::connect_posix_service(SLOT_POSIX_SERVICE);
+        let posix_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_POSIX_SERVICE);
         let (shm, shm_size) =
-            match nanami_services::posix::posix_attach_shared_memory(posix_port, 0x4000) {
+            match nanami_client::posix::posix_attach_shared_memory(posix_port, 0x4000) {
                 Ok(v) => v,
                 Err(_) => {
                     self.push_line_bytes(b"posixtest: posix-service unavailable");
@@ -786,7 +786,7 @@ impl Shell {
             return;
         }
 
-        match nanami_services::posix::posix_getpid(posix_port) {
+        match nanami_client::posix::posix_getpid(posix_port) {
             Ok(pid) => {
                 let mut line = [0u8; COLS];
                 let pos = append_bytes(&mut line, 0, b"posix pid=");
@@ -827,58 +827,58 @@ impl Shell {
     }
 
     fn posix_process_memory_test(&mut self, posix_port: Word) -> bool {
-        let ppid = match nanami_services::posix::posix_getppid(posix_port) {
+        let ppid = match nanami_client::posix::posix_getppid(posix_port) {
             Ok(ppid) => ppid,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: getppid failed");
                 return false;
             }
         };
-        if ppid != nanami_services::posix::POSIX_PROCESS_ROOT_PID {
+        if ppid != nanami_client::posix::POSIX_PROCESS_ROOT_PID {
             self.push_line_bytes(b"posixtest: ppid mismatch");
             return false;
         }
-        if nanami_services::posix::posix_get_native_pid(posix_port).is_err() {
+        if nanami_client::posix::posix_get_native_pid(posix_port).is_err() {
             self.push_line_bytes(b"posixtest: native pid failed");
             return false;
         }
-        if nanami_services::posix::posix_getuid(posix_port).ok()
-            != Some(nanami_services::posix::POSIX_ROOT_UID)
-            || nanami_services::posix::posix_geteuid(posix_port).ok()
-                != Some(nanami_services::posix::POSIX_ROOT_UID)
-            || nanami_services::posix::posix_getgid(posix_port).ok()
-                != Some(nanami_services::posix::POSIX_ROOT_GID)
-            || nanami_services::posix::posix_getegid(posix_port).ok()
-                != Some(nanami_services::posix::POSIX_ROOT_GID)
+        if nanami_client::posix::posix_getuid(posix_port).ok()
+            != Some(nanami_client::posix::POSIX_ROOT_UID)
+            || nanami_client::posix::posix_geteuid(posix_port).ok()
+                != Some(nanami_client::posix::POSIX_ROOT_UID)
+            || nanami_client::posix::posix_getgid(posix_port).ok()
+                != Some(nanami_client::posix::POSIX_ROOT_GID)
+            || nanami_client::posix::posix_getegid(posix_port).ok()
+                != Some(nanami_client::posix::POSIX_ROOT_GID)
         {
             self.push_line_bytes(b"posixtest: credential mismatch");
             return false;
         }
-        let pid = match nanami_services::posix::posix_getpid(posix_port) {
+        let pid = match nanami_client::posix::posix_getpid(posix_port) {
             Ok(pid) => pid,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: getpid recheck failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
-            || nanami_services::posix::posix_getsid(posix_port, 0).ok()
-                != Some(nanami_services::posix::POSIX_PROCESS_ROOT_PID)
+        if nanami_client::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
+            || nanami_client::posix::posix_getsid(posix_port, 0).ok()
+                != Some(nanami_client::posix::POSIX_PROCESS_ROOT_PID)
         {
             self.push_line_bytes(b"posixtest: process group mismatch");
             return false;
         }
-        if nanami_services::posix::posix_setpgid(posix_port, 0, 0).is_err()
-            || nanami_services::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
+        if nanami_client::posix::posix_setpgid(posix_port, 0, 0).is_err()
+            || nanami_client::posix::posix_getpgid(posix_port, 0).ok() != Some(pid)
         {
             self.push_line_bytes(b"posixtest: setpgid failed");
             return false;
         }
-        if nanami_services::posix::posix_getpagesize() != 4096 {
+        if nanami_client::posix::posix_getpagesize() != 4096 {
             self.push_line_bytes(b"posixtest: pagesize mismatch");
             return false;
         }
-        let (base, mapped) = match nanami_services::posix::posix_mmap_anonymous(4096) {
+        let (base, mapped) = match nanami_client::posix::posix_mmap_anonymous(4096) {
             Ok(v) => v,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: mmap anon failed");
@@ -896,10 +896,10 @@ impl Shell {
                 return false;
             }
         }
-        let (base2, mapped2) = match nanami_services::posix::posix_mmap(
+        let (base2, mapped2) = match nanami_client::posix::posix_mmap(
             4096,
-            nanami_services::posix::POSIX_PROT_READ | nanami_services::posix::POSIX_PROT_WRITE,
-            nanami_services::posix::POSIX_MAP_PRIVATE | nanami_services::posix::POSIX_MAP_ANONYMOUS,
+            nanami_client::posix::POSIX_PROT_READ | nanami_client::posix::POSIX_PROT_WRITE,
+            nanami_client::posix::POSIX_MAP_PRIVATE | nanami_client::posix::POSIX_MAP_ANONYMOUS,
         ) {
             Ok(v) => v,
             Err(_) => {
@@ -907,19 +907,19 @@ impl Shell {
                 return false;
             }
         };
-        if !is_unsupported(nanami_services::posix::posix_mprotect(
+        if !is_unsupported(nanami_client::posix::posix_mprotect(
             base,
             4096,
-            nanami_services::posix::POSIX_PROT_READ,
+            nanami_client::posix::POSIX_PROT_READ,
         )) {
             self.push_line_bytes(b"posixtest: mprotect should be unsupported");
             return false;
         }
-        if let Err(e) = nanami_services::posix::posix_munmap(base, 4096) {
+        if let Err(e) = nanami_client::posix::posix_munmap(base, 4096) {
             self.push_posix_error(b"posixtest: munmap failed ", e);
             return false;
         }
-        if let Err(e) = nanami_services::posix::posix_munmap(base2, mapped2) {
+        if let Err(e) = nanami_client::posix::posix_munmap(base2, mapped2) {
             self.push_posix_error(b"posixtest: munmap second failed ", e);
             return false;
         }
@@ -929,7 +929,7 @@ impl Shell {
 
     fn posix_environment_test(&mut self, posix_port: Word, shm: Word) -> bool {
         write_shm_bytes(shm, 0, b"PATH");
-        match nanami_services::posix::posix_getenv(posix_port, 0, 4, 512, 64) {
+        match nanami_client::posix::posix_getenv(posix_port, 0, 4, 512, 64) {
             Ok(len) if len > 0 => {}
             _ => {
                 self.push_line_bytes(b"posixtest: getenv PATH failed");
@@ -939,11 +939,11 @@ impl Shell {
 
         write_shm_bytes(shm, 0, b"NANAMI_ENV");
         write_shm_bytes(shm, 128, b"working");
-        if nanami_services::posix::posix_setenv(posix_port, 0, 10, 128, 7).is_err() {
+        if nanami_client::posix::posix_setenv(posix_port, 0, 10, 128, 7).is_err() {
             self.push_line_bytes(b"posixtest: setenv failed");
             return false;
         }
-        match nanami_services::posix::posix_getenv(posix_port, 0, 10, 512, 32) {
+        match nanami_client::posix::posix_getenv(posix_port, 0, 10, 512, 32) {
             Ok(7) if shm_bytes_eq(shm, 512, b"working") => {}
             _ => {
                 self.push_line_bytes(b"posixtest: getenv mismatch");
@@ -951,7 +951,7 @@ impl Shell {
             }
         }
 
-        let count = match nanami_services::posix::posix_env_count(posix_port) {
+        let count = match nanami_client::posix::posix_env_count(posix_port) {
             Ok(count) if count >= 4 => count,
             _ => {
                 self.push_line_bytes(b"posixtest: env count failed");
@@ -961,7 +961,7 @@ impl Shell {
         let mut found = false;
         let mut index = 0;
         while index < count {
-            match nanami_services::posix::posix_env_at(posix_port, index, 768, 64) {
+            match nanami_client::posix::posix_env_at(posix_port, index, 768, 64) {
                 Ok((10, 7)) if shm_bytes_eq(shm, 768, b"NANAMI_ENV=working") => {
                     found = true;
                     break;
@@ -980,14 +980,14 @@ impl Shell {
         }
 
         write_shm_bytes(shm, 0, b"NANAMI_ENV");
-        if nanami_services::posix::posix_unsetenv(posix_port, 0, 10).is_err() {
+        if nanami_client::posix::posix_unsetenv(posix_port, 0, 10).is_err() {
             self.push_line_bytes(b"posixtest: unsetenv failed");
             return false;
         }
         if !matches!(
-            nanami_services::posix::posix_getenv(posix_port, 0, 10, 512, 32),
-            Err(libnanami::RequestError::Status(
-                libnanami::OS_RESPONSE_INVALID_DESCRIPTOR
+            nanami_client::posix::posix_getenv(posix_port, 0, 10, 512, 32),
+            Err(nanami_runtime::RequestError::Status(
+                nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR
             ))
         ) {
             self.push_line_bytes(b"posixtest: unsetenv still visible");
@@ -998,18 +998,18 @@ impl Shell {
     }
 
     fn posix_process_lifecycle_test(&mut self, posix_port: Word) -> bool {
-        let self_pid = match nanami_services::posix::posix_getpid(posix_port) {
+        let self_pid = match nanami_client::posix::posix_getpid(posix_port) {
             Ok(pid) => pid,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: getpid for kill failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_kill(posix_port, self_pid, 0).is_err() {
+        if nanami_client::posix::posix_kill(posix_port, self_pid, 0).is_err() {
             self.push_line_bytes(b"posixtest: kill probe failed");
             return false;
         }
-        let _ = nanami_services::posix::posix_fork(posix_port);
+        let _ = nanami_client::posix::posix_fork(posix_port);
         self.push_line_bytes(b"posixtest: lifecycle ok");
         true
     }
@@ -1018,12 +1018,12 @@ impl Shell {
         let path = b"/posix-inherit.txt";
         let body = b"POSIX inherited fd works";
         write_shm_bytes(shm, 0, path);
-        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
-        let fd = match nanami_services::posix::posix_open(
+        let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        let fd = match nanami_client::posix::posix_open(
             posix_port,
             0,
             path.len() as Word,
-            nanami_services::posix::POSIX_O_CREAT | nanami_services::posix::POSIX_O_TRUNC,
+            nanami_client::posix::POSIX_O_CREAT | nanami_client::posix::POSIX_O_TRUNC,
         ) {
             Ok(fd) => fd,
             Err(_) => {
@@ -1032,126 +1032,126 @@ impl Shell {
             }
         };
         if fd != 3 {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: inherit fd was not 3");
             return false;
         }
         write_shm_bytes(shm, 512, body);
-        if nanami_services::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err()
-            || nanami_services::posix::posix_seek(
+        if nanami_client::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err()
+            || nanami_client::posix::posix_seek(
                 posix_port,
                 fd,
                 0,
-                nanami_services::posix::POSIX_SEEK_SET,
+                nanami_client::posix::POSIX_SEEK_SET,
             )
             .is_err()
         {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: inherit file setup failed");
             return false;
         }
 
         let image = b"posix-child.elf";
         write_shm_bytes(shm, 0, image);
-        let pid = match nanami_services::posix::posix_spawn(posix_port, 0, image.len() as Word) {
+        let pid = match nanami_client::posix::posix_spawn(posix_port, 0, image.len() as Word) {
             Ok(pid) => pid,
             Err(e) => {
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 self.push_posix_error(b"posixtest: spawn failed ", e);
                 return false;
             }
         };
         if pid == 0 {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: spawn invalid pid");
             return false;
         }
         let status = match self.wait_posix_child(posix_port, pid) {
             Some(status) => status,
             None => {
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 self.push_line_bytes(b"posixtest: child did not exit");
                 return false;
             }
         };
         if status != 0 {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: inherited fd child failed");
             return false;
         }
 
-        let cloexec_fd = match nanami_services::posix::posix_dup(posix_port, fd) {
+        let cloexec_fd = match nanami_client::posix::posix_dup(posix_port, fd) {
             Ok(fd) => fd,
             Err(_) => {
                 write_shm_bytes(shm, 0, path);
-                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
                 self.push_line_bytes(b"posixtest: cloexec dup failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_fcntl_setfd(
+        if nanami_client::posix::posix_fcntl_setfd(
             posix_port,
             cloexec_fd,
-            nanami_services::posix::POSIX_FD_CLOEXEC,
+            nanami_client::posix::POSIX_FD_CLOEXEC,
         )
         .is_err()
         {
-            let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, cloexec_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             write_shm_bytes(shm, 0, path);
-            let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+            let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
             self.push_line_bytes(b"posixtest: cloexec setfd failed");
             return false;
         }
-        match nanami_services::posix::posix_fcntl_getfd(posix_port, cloexec_fd) {
-            Ok(flags) if (flags & nanami_services::posix::POSIX_FD_CLOEXEC) != 0 => {}
+        match nanami_client::posix::posix_fcntl_getfd(posix_port, cloexec_fd) {
+            Ok(flags) if (flags & nanami_client::posix::POSIX_FD_CLOEXEC) != 0 => {}
             _ => {
-                let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, cloexec_fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 write_shm_bytes(shm, 0, path);
-                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
                 self.push_line_bytes(b"posixtest: cloexec flag mismatch");
                 return false;
             }
         }
-        let dup_fd = match nanami_services::posix::posix_dup(posix_port, cloexec_fd) {
+        let dup_fd = match nanami_client::posix::posix_dup(posix_port, cloexec_fd) {
             Ok(dup_fd) => dup_fd,
             Err(_) => {
-                let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, cloexec_fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 write_shm_bytes(shm, 0, path);
-                let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+                let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
                 self.push_line_bytes(b"posixtest: cloexec dup clear failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_fcntl_getfd(posix_port, dup_fd).ok() != Some(0) {
-            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_fcntl_getfd(posix_port, dup_fd).ok() != Some(0) {
+            let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, cloexec_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             write_shm_bytes(shm, 0, path);
-            let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+            let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
             self.push_line_bytes(b"posixtest: dup inherited cloexec flag");
             return false;
         }
-        let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-        let _ = nanami_services::posix::posix_close(posix_port, cloexec_fd);
-        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+        let _ = nanami_client::posix::posix_close(posix_port, cloexec_fd);
+        let _ = nanami_client::posix::posix_close(posix_port, fd);
         write_shm_bytes(shm, 0, path);
-        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
         self.push_line_bytes(b"posixtest: spawn/wait/fd inherit/fcntl ok");
         true
     }
 
     fn wait_posix_child(&mut self, posix_port: Word, pid: Word) -> Option<Word> {
-        let _ = nanami_services::registry::connect_timer_service(SLOT_POSIX_TEST_TIMER_SERVICE);
-        let timer_port = libnanami::ipc::process_slot_descriptor(SLOT_POSIX_TEST_TIMER_SERVICE);
+        let _ = nanami_client::registry::connect_timer_service(SLOT_POSIX_TEST_TIMER_SERVICE);
+        let timer_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_POSIX_TEST_TIMER_SERVICE);
         let mut retry = 0usize;
         while retry < 64 {
-            match nanami_services::posix::posix_waitpid(
+            match nanami_client::posix::posix_waitpid(
                 posix_port,
                 pid,
-                nanami_services::posix::POSIX_WAIT_NOHANG,
+                nanami_client::posix::POSIX_WAIT_NOHANG,
             ) {
                 Ok((0, _)) => {}
                 Ok((waited_pid, status)) if waited_pid == pid => {
@@ -1164,7 +1164,7 @@ impl Shell {
                     return None;
                 }
             }
-            let _ = nanami_services::timer::timer_service_sleep_blocking_server_milliseconds(
+            let _ = nanami_client::timer::timer_service_sleep_blocking_server_milliseconds(
                 timer_port, 10,
             );
             retry += 1;
@@ -1172,24 +1172,24 @@ impl Shell {
         None
     }
 
-    fn push_posix_error(&mut self, prefix: &[u8], error: libnanami::RequestError) {
+    fn push_posix_error(&mut self, prefix: &[u8], error: nanami_runtime::RequestError) {
         let mut line = [0u8; COLS];
         let mut pos = append_bytes(&mut line, 0, prefix);
         match error {
-            libnanami::RequestError::Status(status) => {
+            nanami_runtime::RequestError::Status(status) => {
                 pos = append_bytes(&mut line, pos, b"status=");
                 let _ = append_decimal(&mut line, pos, status);
             }
-            libnanami::RequestError::InvalidArgument => {
+            nanami_runtime::RequestError::InvalidArgument => {
                 let _ = append_bytes(&mut line, pos, b"invalid-argument");
             }
-            libnanami::RequestError::Unsupported => {
+            nanami_runtime::RequestError::Unsupported => {
                 let _ = append_bytes(&mut line, pos, b"unsupported");
             }
-            libnanami::RequestError::Transport => {
+            nanami_runtime::RequestError::Transport => {
                 let _ = append_bytes(&mut line, pos, b"transport");
             }
-            libnanami::RequestError::Protocol => {
+            nanami_runtime::RequestError::Protocol => {
                 let _ = append_bytes(&mut line, pos, b"protocol");
             }
         }
@@ -1198,22 +1198,22 @@ impl Shell {
 
     fn posix_dev_zero_test(&mut self, posix_port: Word, shm: Word) -> bool {
         write_shm_bytes(shm, 0, b"/dev/zero");
-        let fd = match nanami_services::posix::posix_open(posix_port, 0, 9, 0) {
+        let fd = match nanami_client::posix::posix_open(posix_port, 0, 9, 0) {
             Ok(fd) => fd,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: open /dev/zero failed");
                 return false;
             }
         };
-        let bytes = match nanami_services::posix::posix_read(posix_port, fd, 512, 16) {
+        let bytes = match nanami_client::posix::posix_read(posix_port, fd, 512, 16) {
             Ok(bytes) => bytes,
             Err(_) => {
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 self.push_line_bytes(b"posixtest: read /dev/zero failed");
                 return false;
             }
         };
-        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        let _ = nanami_client::posix::posix_close(posix_port, fd);
         if bytes != 16 || !shm_zeroes(shm, 512, 16) {
             self.push_line_bytes(b"posixtest: /dev/zero mismatch");
             return false;
@@ -1225,16 +1225,16 @@ impl Shell {
     fn posix_dir_test(&mut self, posix_port: Word, shm: Word) -> bool {
         let path = b"/posixdir";
         write_shm_bytes(shm, 0, path);
-        let _ = nanami_services::posix::posix_rmdir(posix_port, 0, path.len() as Word);
-        if nanami_services::posix::posix_mkdir(posix_port, 0, path.len() as Word).is_err() {
+        let _ = nanami_client::posix::posix_rmdir(posix_port, 0, path.len() as Word);
+        if nanami_client::posix::posix_mkdir(posix_port, 0, path.len() as Word).is_err() {
             self.push_line_bytes(b"posixtest: mkdir failed");
             return false;
         }
-        if nanami_services::posix::posix_chdir(posix_port, 0, path.len() as Word).is_err() {
+        if nanami_client::posix::posix_chdir(posix_port, 0, path.len() as Word).is_err() {
             self.push_line_bytes(b"posixtest: chdir failed");
             return false;
         }
-        match nanami_services::posix::posix_getcwd(posix_port, 512, 64) {
+        match nanami_client::posix::posix_getcwd(posix_port, 512, 64) {
             Ok(len) if len == path.len() as Word && shm_bytes_eq(shm, 512, path) => {}
             _ => {
                 self.push_line_bytes(b"posixtest: getcwd mismatch");
@@ -1243,11 +1243,11 @@ impl Shell {
         }
 
         write_shm_bytes(shm, 0, b".");
-        let fd = match nanami_services::posix::posix_open(
+        let fd = match nanami_client::posix::posix_open(
             posix_port,
             0,
             1,
-            nanami_services::posix::POSIX_O_DIRECTORY,
+            nanami_client::posix::POSIX_O_DIRECTORY,
         ) {
             Ok(fd) => fd,
             Err(_) => {
@@ -1255,20 +1255,20 @@ impl Shell {
                 return false;
             }
         };
-        if nanami_services::posix::posix_read_dir(posix_port, fd, 4, 768).is_err() {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_read_dir(posix_port, fd, 4, 768).is_err() {
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: readdir failed");
             return false;
         }
-        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        let _ = nanami_client::posix::posix_close(posix_port, fd);
 
         write_shm_bytes(shm, 0, b"/");
-        if nanami_services::posix::posix_chdir(posix_port, 0, 1).is_err() {
+        if nanami_client::posix::posix_chdir(posix_port, 0, 1).is_err() {
             self.push_line_bytes(b"posixtest: chdir / failed");
             return false;
         }
         write_shm_bytes(shm, 0, path);
-        if nanami_services::posix::posix_rmdir(posix_port, 0, path.len() as Word).is_err() {
+        if nanami_client::posix::posix_rmdir(posix_port, 0, path.len() as Word).is_err() {
             self.push_line_bytes(b"posixtest: rmdir failed");
             return false;
         }
@@ -1282,16 +1282,16 @@ impl Shell {
         let body = b"POSIX facade write path ok";
 
         write_shm_bytes(shm, 0, path);
-        let _ = nanami_services::posix::posix_unlink(posix_port, 0, path.len() as Word);
+        let _ = nanami_client::posix::posix_unlink(posix_port, 0, path.len() as Word);
         write_shm_bytes(shm, 0, renamed);
-        let _ = nanami_services::posix::posix_unlink(posix_port, 0, renamed.len() as Word);
+        let _ = nanami_client::posix::posix_unlink(posix_port, 0, renamed.len() as Word);
 
         write_shm_bytes(shm, 0, path);
-        let fd = match nanami_services::posix::posix_open(
+        let fd = match nanami_client::posix::posix_open(
             posix_port,
             0,
             path.len() as Word,
-            nanami_services::posix::POSIX_O_CREAT | nanami_services::posix::POSIX_O_TRUNC,
+            nanami_client::posix::POSIX_O_CREAT | nanami_client::posix::POSIX_O_TRUNC,
         ) {
             Ok(fd) => fd,
             Err(_) => {
@@ -1300,104 +1300,104 @@ impl Shell {
             }
         };
         write_shm_bytes(shm, 512, body);
-        if nanami_services::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err() {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_write(posix_port, fd, 512, body.len() as Word).is_err() {
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: write failed");
             return false;
         }
-        match nanami_services::posix::posix_fstat(posix_port, fd) {
+        match nanami_client::posix::posix_fstat(posix_port, fd) {
             Ok((_, size, kind, _, _))
                 if size == body.len() as Word
-                    && kind == nanami_services::posix::POSIX_FILE_TYPE_REGULAR => {}
+                    && kind == nanami_client::posix::POSIX_FILE_TYPE_REGULAR => {}
             _ => {
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 self.push_line_bytes(b"posixtest: fstat mismatch");
                 return false;
             }
         }
-        if nanami_services::posix::posix_seek(
+        if nanami_client::posix::posix_seek(
             posix_port,
             fd,
             0,
-            nanami_services::posix::POSIX_SEEK_SET,
+            nanami_client::posix::POSIX_SEEK_SET,
         )
         .is_err()
         {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: seek failed");
             return false;
         }
-        if nanami_services::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: read after seek failed");
             return false;
         }
         if !shm_bytes_eq(shm, 768, body) {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: seek read mismatch");
             return false;
         }
-        if nanami_services::posix::posix_seek(
+        if nanami_client::posix::posix_seek(
             posix_port,
             fd,
             0,
-            nanami_services::posix::POSIX_SEEK_SET,
+            nanami_client::posix::POSIX_SEEK_SET,
         )
         .is_err()
         {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: dup seek failed");
             return false;
         }
-        let dup_fd = match nanami_services::posix::posix_dup(posix_port, fd) {
+        let dup_fd = match nanami_client::posix::posix_dup(posix_port, fd) {
             Ok(dup_fd) => dup_fd,
             Err(_) => {
-                let _ = nanami_services::posix::posix_close(posix_port, fd);
+                let _ = nanami_client::posix::posix_close(posix_port, fd);
                 self.push_line_bytes(b"posixtest: dup failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_dup2(posix_port, dup_fd, 7).ok() != Some(7) {
-            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_dup2(posix_port, dup_fd, 7).ok() != Some(7) {
+            let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: dup2 failed");
             return false;
         }
-        if nanami_services::posix::posix_read(posix_port, 7, 768, body.len() as Word).is_err()
+        if nanami_client::posix::posix_read(posix_port, 7, 768, body.len() as Word).is_err()
             || !shm_bytes_eq(shm, 768, body)
         {
-            let _ = nanami_services::posix::posix_close(posix_port, 7);
-            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, 7);
+            let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: dup2 read mismatch");
             return false;
         }
-        let eof = nanami_services::posix::posix_read(posix_port, fd, 768, 1).unwrap_or(1);
+        let eof = nanami_client::posix::posix_read(posix_port, fd, 768, 1).unwrap_or(1);
         if eof != 0 {
-            let _ = nanami_services::posix::posix_close(posix_port, 7);
-            let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+            let _ = nanami_client::posix::posix_close(posix_port, 7);
+            let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: dup offset mismatch");
             return false;
         }
-        let _ = nanami_services::posix::posix_close(posix_port, 7);
-        let _ = nanami_services::posix::posix_close(posix_port, dup_fd);
-        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        let _ = nanami_client::posix::posix_close(posix_port, 7);
+        let _ = nanami_client::posix::posix_close(posix_port, dup_fd);
+        let _ = nanami_client::posix::posix_close(posix_port, fd);
 
         write_shm_bytes(shm, 0, path);
-        let fd = match nanami_services::posix::posix_open(posix_port, 0, path.len() as Word, 0) {
+        let fd = match nanami_client::posix::posix_open(posix_port, 0, path.len() as Word, 0) {
             Ok(fd) => fd,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: reopen failed");
                 return false;
             }
         };
-        if nanami_services::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
-            let _ = nanami_services::posix::posix_close(posix_port, fd);
+        if nanami_client::posix::posix_read(posix_port, fd, 768, body.len() as Word).is_err() {
+            let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: readback failed");
             return false;
         }
-        let _ = nanami_services::posix::posix_close(posix_port, fd);
+        let _ = nanami_client::posix::posix_close(posix_port, fd);
         if !shm_bytes_eq(shm, 768, body) {
             self.push_line_bytes(b"posixtest: readback mismatch");
             return false;
@@ -1405,7 +1405,7 @@ impl Shell {
 
         write_shm_bytes(shm, 0, path);
         write_shm_bytes(shm, 256, renamed);
-        if nanami_services::posix::posix_rename(
+        if nanami_client::posix::posix_rename(
             posix_port,
             0,
             path.len() as Word,
@@ -1418,7 +1418,7 @@ impl Shell {
             return false;
         }
         write_shm_bytes(shm, 0, renamed);
-        if nanami_services::posix::posix_unlink(posix_port, 0, renamed.len() as Word).is_err() {
+        if nanami_client::posix::posix_unlink(posix_port, 0, renamed.len() as Word).is_err() {
             self.push_line_bytes(b"posixtest: unlink failed");
             return false;
         }
@@ -1428,7 +1428,7 @@ impl Shell {
 
     fn posix_stat_test(&mut self, posix_port: Word, shm: Word) -> bool {
         write_shm_bytes(shm, 0, b"/dev/null");
-        let (_, _, kind, major, minor) = match nanami_services::posix::posix_stat(posix_port, 0, 9)
+        let (_, _, kind, major, minor) = match nanami_client::posix::posix_stat(posix_port, 0, 9)
         {
             Ok(v) => v,
             Err(_) => {
@@ -1436,9 +1436,9 @@ impl Shell {
                 return false;
             }
         };
-        if kind != nanami_services::posix::POSIX_FILE_TYPE_CHAR_DEVICE
-            || major != nanami_services::posix::POSIX_DEV_NULL_MAJOR
-            || minor != nanami_services::posix::POSIX_DEV_NULL_MINOR
+        if kind != nanami_client::posix::POSIX_FILE_TYPE_CHAR_DEVICE
+            || major != nanami_client::posix::POSIX_DEV_NULL_MAJOR
+            || minor != nanami_client::posix::POSIX_DEV_NULL_MINOR
         {
             self.push_line_bytes(b"posixtest: device stat mismatch");
             return false;
@@ -1672,7 +1672,7 @@ impl Shell {
 }
 
 fn drain_input(
-    input_queue: &mut nanami_services::gfx::honoka::WindowEventQueue,
+    input_queue: &mut nanami_client::gfx::honoka::WindowEventQueue,
     shell: &mut Shell,
 ) {
     let mut drained = 0usize;
@@ -1680,20 +1680,20 @@ fn drain_input(
         let Some(packed) = input_queue.pop() else {
             break;
         };
-        let (kind, code, value0, value1, _) = nanami_services::input::unpack_input_event(packed);
-        if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
+        let (kind, code, value0, value1, _) = nanami_client::input::unpack_input_event(packed);
+        if kind == nanami_client::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
             shell.resize(value0 as u16 as usize, value1 as u16 as usize);
-        } else if kind == nanami_services::input::INPUT_EVENT_KIND_KEY {
+        } else if kind == nanami_client::input::INPUT_EVENT_KIND_KEY {
             shell.on_key(code, value0 != 0);
-        } else if kind == nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL {
+        } else if kind == nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL {
             shell.scroll_lines(value0.saturating_mul(3));
-        } else if kind == nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
+        } else if kind == nanami_client::input::INPUT_EVENT_KIND_WINDOW_CLOSE {
             shell.foreground.shutdown();
-            let _ = nanami_services::gfx::honoka::honoka_destroy_window(
+            let _ = nanami_client::gfx::honoka::honoka_destroy_window(
                 shell.honoka_port,
                 shell.window_id,
             );
-            let _ = libnanami::request_exit();
+            let _ = nanami_runtime::request_exit();
             loop {
                 core::hint::spin_loop();
             }
@@ -1703,15 +1703,15 @@ fn drain_input(
 }
 
 fn start_shell_timer() {
-    if nanami_services::registry::connect_timer_service(SLOT_SHELL_TIMER_SERVICE).is_err() {
-        libnanami::println!("[shell] timer-service unavailable; periodic updates disabled");
+    if nanami_client::registry::connect_timer_service(SLOT_SHELL_TIMER_SERVICE).is_err() {
+        nanami_runtime::println!("[shell] timer-service unavailable; periodic updates disabled");
         return;
     }
-    let timer_port = libnanami::ipc::process_slot_descriptor(SLOT_SHELL_TIMER_SERVICE);
-    if let Err(error) = nanami_services::timer::timer_service_interval_on_notification_milliseconds(
+    let timer_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SHELL_TIMER_SERVICE);
+    if let Err(error) = nanami_client::timer::timer_service_interval_on_notification_milliseconds(
         timer_port,
         100,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
     ) {
         log_request_error("[shell] timer interval failed: ", error);
     }
@@ -1719,16 +1719,16 @@ fn start_shell_timer() {
 
 fn connect_honoka_service() -> (Word, Word) {
     loop {
-        match nanami_services::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
+        match nanami_client::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
             Ok(pid) => {
                 return (
-                    libnanami::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
+                    nanami_runtime::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
                     pid,
                 )
             }
             Err(e) => {
                 log_request_error("[shell] waiting honoka-service: ", e);
-                libnanami::yield_now();
+                nanami_runtime::yield_now();
             }
         }
     }
@@ -1738,13 +1738,13 @@ fn attach_honoka_present_notification(
     honoka_pid: Word,
     window_id: Word,
 ) -> Result<Word, RequestError> {
-    libnanami::request_notification_port_copy(
+    nanami_runtime::request_notification_port_copy(
         honoka_pid,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
         SLOT_HONOKA_PRESENT_NOTIFICATION,
-        nanami_services::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
+        nanami_client::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
     )?;
-    Ok(libnanami::ipc::process_slot_descriptor(
+    Ok(nanami_runtime::ipc::process_slot_descriptor(
         SLOT_HONOKA_PRESENT_NOTIFICATION,
     ))
 }
@@ -1967,11 +1967,11 @@ fn put_pixel(vaddr: Word, fb_width: usize, x: usize, y: usize, color: u32) {
 }
 
 fn push_damage_rect(base: Word, x: usize, y: usize, width: usize, height: usize) -> bool {
-    if read_word(base, 0) != nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
+    if read_word(base, 0) != nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_MAGIC {
         return false;
     }
     let capacity = read_word(base, 1) as usize;
-    if capacity == 0 || capacity > nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
+    if capacity == 0 || capacity > nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_CAPACITY {
         return false;
     }
     let head = (read_word(base, 2) as usize) % capacity;
@@ -1980,8 +1980,8 @@ fn push_damage_rect(base: Word, x: usize, y: usize, width: usize, height: usize)
     if next == head {
         return false;
     }
-    let entry = nanami_services::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS
-        + tail * nanami_services::gfx::honoka::HONOKA_DAMAGE_ENTRY_WORDS;
+    let entry = nanami_client::gfx::honoka::HONOKA_DAMAGE_QUEUE_HEADER_WORDS
+        + tail * nanami_client::gfx::honoka::HONOKA_DAMAGE_ENTRY_WORDS;
     write_word(base, entry, x as Word);
     write_word(base, entry + 1, y as Word);
     write_word(base, entry + 2, width as Word);
@@ -2088,7 +2088,7 @@ fn shm_zeroes(base: Word, offset: usize, len: usize) -> bool {
 fn is_unsupported<T>(result: Result<T, RequestError>) -> bool {
     match result {
         Err(RequestError::Unsupported) => true,
-        Err(RequestError::Status(status)) if status == libnanami::OS_RESPONSE_ILLEGAL_OPERATION => {
+        Err(RequestError::Status(status)) if status == nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION => {
             true
         }
         _ => false,
@@ -2113,24 +2113,24 @@ fn append_shm_text(dst: &mut [u8], mut pos: usize, base: Word, offset: usize, le
 fn format_dirent_line(base: Word, offset: usize) -> [u8; COLS] {
     let inode = read_shm_word(
         base,
-        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET,
+        offset + nanami_client::vfs::VFS_DIRECTORY_ENTRY_INODE_OFFSET,
     );
     let kind = read_shm_word(
         base,
-        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET,
+        offset + nanami_client::vfs::VFS_DIRECTORY_ENTRY_TYPE_OFFSET,
     );
     let name_len = read_shm_word(
         base,
-        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET,
+        offset + nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_LEN_OFFSET,
     ) as usize;
-    let name_len = name_len.min(nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES);
+    let name_len = name_len.min(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES);
     let mut line = [0u8; COLS];
     let mut pos = append_bytes(&mut line, 0, b"  ");
     pos = append_shm_text(
         &mut line,
         pos,
         base,
-        offset + nanami_services::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET,
+        offset + nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET,
         name_len,
     );
     pos = append_bytes(&mut line, pos, b" inode=");
@@ -2183,14 +2183,14 @@ fn format_mac_line(prefix: &[u8], mac: [u8; 6]) -> [u8; COLS] {
 
 fn service_name(kind: Word) -> &'static [u8] {
     match kind {
-        nanami_services::registry::SERVICE_KIND_NET_DEVICE => b"net-device",
-        nanami_services::registry::SERVICE_KIND_NETWORK_SERVICE => b"network-service",
-        nanami_services::registry::SERVICE_KIND_TIMER_SERVICE => b"timer-service",
-        nanami_services::registry::SERVICE_KIND_DISPLAY_SERVICE => b"display_service",
-        nanami_services::registry::SERVICE_KIND_INPUT_SERVICE => b"input-service",
-        nanami_services::registry::SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
-        nanami_services::registry::SERVICE_KIND_VFS_SERVICE => b"vfs-service",
-        nanami_services::registry::SERVICE_KIND_BLOCK_DEVICE => b"block-device",
+        nanami_client::registry::SERVICE_KIND_NET_DEVICE => b"net-device",
+        nanami_client::registry::SERVICE_KIND_NETWORK_SERVICE => b"network-service",
+        nanami_client::registry::SERVICE_KIND_TIMER_SERVICE => b"timer-service",
+        nanami_client::registry::SERVICE_KIND_DISPLAY_SERVICE => b"display_service",
+        nanami_client::registry::SERVICE_KIND_INPUT_SERVICE => b"input-service",
+        nanami_client::registry::SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
+        nanami_client::registry::SERVICE_KIND_VFS_SERVICE => b"vfs-service",
+        nanami_client::registry::SERVICE_KIND_BLOCK_DEVICE => b"block-device",
         _ => b"unknown-service",
     }
 }
@@ -2223,13 +2223,13 @@ fn starts_with(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

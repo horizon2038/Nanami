@@ -76,10 +76,10 @@ pub(super) fn sys_execve(
     let interpreter = crate::common::dynamic::prepare(runtime, &loaded).map_err(map_load_error)?;
     let preferred_image_base = preferred_exec_image_base(personality, &loaded.metadata);
     let exec_elf = current_elf_metadata_from_loaded(&loaded.metadata, preferred_image_base);
-    if let Err(error) = libnanami::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
+    if let Err(error) = nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
     {
         let errno = map_request_error(error);
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] execve exec-memory failed pid={} image_base={:#x} bytes={:#x} errno={}",
             pid,
             preferred_image_base,
@@ -114,7 +114,7 @@ pub(super) fn sys_execve(
         Some(exec_elf),
         interpreter.as_ref(),
     ) {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] execve stack rewrite failed pid={} image_base={:#x} errno={}",
             pid,
             preferred_image_base,
@@ -132,7 +132,7 @@ pub(super) fn log_execve_stage_error(
     path_len: Word,
     errno: i32,
 ) {
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter/linux] execve failed pid={} stage={} path-len={} client-shm={:#x} posix-shm={:#x} errno={}",
         pid,
         stage,

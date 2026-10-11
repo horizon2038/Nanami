@@ -25,7 +25,7 @@ use crate::{
 use alloc::vec::Vec;
 use core::sync::atomic::{fence, Ordering};
 use dma::Dma;
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 use registers::*;
 use ring::{Producer, Trb, IOC};
 
@@ -37,7 +37,7 @@ const SLOT_BYTES: usize = BULK_BASE + 0x3000 + 2 * crate::usb::mass_storage::DAT
 const SLOT_BASE: usize = 0x4000;
 const _: () = assert!(
     crate::usb::mass_storage::DATA_BYTES == 0x10000
-        && nanami_services::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
+        && nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
             <= crate::usb::mass_storage::DATA_BYTES
 );
 
@@ -115,7 +115,7 @@ impl Controller {
             }
             self.delay(1)?;
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] xHCI timeout op+{:#x} value={:#010x} mask={:#010x} expected={:#010x}",
             offset,
             last,
@@ -167,7 +167,7 @@ impl Controller {
                     endpoint.failed = true;
                     endpoint.keyboard.release(|e| input.emit(e));
                     endpoint.mouse.release(|e| input.emit(e));
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] HID transfer failed slot={} ep={} code={}",
                         slot,
                         endpoint.dci,
@@ -205,7 +205,7 @@ impl Controller {
                 }
             }
             37 => {
-                libnanami::println!("[usb-server] host controller event code={}", event.code());
+                nanami_runtime::println!("[usb-server] host controller event code={}", event.code());
                 self.fail(input);
             }
             _ => {}
@@ -261,14 +261,14 @@ impl Controller {
                 endpoint.mouse.release(|event| input.emit(event));
             }
         }
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] controller stopped: USBCMD={:#x} USBSTS={:#x} IMAN={:#x} irq-enabled={}",
             command,
             status,
             iman,
             self.interrupts_enabled
         );
-        libnanami::println!(
+        nanami_runtime::println!(
             "[usb-server] event ring ERDP={:#x} next={:#x}",
             erdp,
             self.events.dequeue()
@@ -288,7 +288,7 @@ impl Controller {
             if event.kind() == 33 && event.parameter & !15 == pointer {
                 this.command_ring.complete();
                 if event.code() != 1 {
-                    libnanami::println!(
+                    nanami_runtime::println!(
                         "[usb-server] command {} failed code={}",
                         trb.kind(),
                         event.code()
@@ -301,7 +301,7 @@ impl Controller {
             Ok(None)
         })
         .inspect_err(|error| {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[usb-server] command wait failed kind={} slot={} trb={:#x}: {}",
                 trb.kind(),
                 trb.slot(),

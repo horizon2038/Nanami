@@ -34,7 +34,7 @@ pub(super) fn rewrite_linux_stack(
         || runtime.exec_stack_buffer_size < LINUX_EXEC_STACK_BYTES as Word
     {
         let (stack_buffer, mapped) =
-            libnanami::request_heap(LINUX_EXEC_STACK_BYTES as Word).map_err(map_request_error)?;
+            nanami_runtime::request_heap(LINUX_EXEC_STACK_BYTES as Word).map_err(map_request_error)?;
         if mapped < LINUX_EXEC_STACK_BYTES as Word {
             return Err(ENOMEM);
         }
@@ -173,7 +173,7 @@ pub(super) fn rewrite_linux_stack(
     let _ = write_aux(stack_buffer, out, AT_NULL, 0);
 
     let guest_sp = stack_base + sp_offset as Word;
-    libnanami::request_process_memory_write(
+    nanami_runtime::request_process_memory_write(
         pid,
         stack_base,
         stack_buffer,

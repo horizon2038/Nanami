@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-use libnanami::ipc::{ServiceEvent, ServiceRequest};
-use libnanami::{RequestError, Word};
+use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
+use nanami_runtime::{RequestError, Word};
 
 #[path = "arch.rs"]
 mod arch;
@@ -23,40 +23,40 @@ struct DriverState {
     acpi_pid: Word,
     acpi_rsdp: Word,
     usb_pid: Word,
-    usb_controllers: [Option<nanami_services::device::UsbControllerResource>; 4],
+    usb_controllers: [Option<nanami_client::device::UsbControllerResource>; 4],
     usb_count: usize,
     usb_routes: usb_irq::Routes,
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[driver-manager] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[driver-manager] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
 fn spawn(image: &str) -> Result<Word, RequestError> {
-    let pid = libnanami::request_process_spawn(image)?;
-    libnanami::println!("[driver-manager] spawned {} pid={}", image, pid);
+    let pid = nanami_runtime::request_process_spawn(image)?;
+    nanami_runtime::println!("[driver-manager] spawned {} pid={}", image, pid);
     Ok(pid)
 }
 
 fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Word, Word) {
     match request.code {
-        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE
-        | nanami_services::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => state
+        nanami_client::device::DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE
+        | nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => state
             .usb_routes
             .handle(request, state.acpi_pid, &mut state.usb_controllers),
-        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_IRQ => {
+        nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ => {
             if state.usb_pid == 0 || request.identifier != state.usb_pid {
-                return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
             if request.arg0 >= state.usb_count {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             match state.usb_routes.query(request.arg0, state.acpi_pid) {
                 Ok(ready) => (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     ready as Word,
                     state.usb_controllers[request.arg0]
                         .unwrap()
@@ -64,56 +64,56 @@ fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Wo
                         .unwrap_or(0),
                 ),
                 Err(error) => {
-                    libnanami::println!("[driver-manager] ACPI IRQ dispatch failed: {}", error);
-                    (libnanami::OS_RESPONSE_FATAL, 0, 0)
+                    nanami_runtime::println!("[driver-manager] ACPI IRQ dispatch failed: {}", error);
+                    (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
                 }
             }
         }
-        nanami_services::device::DEVICE_MANAGER_REQUEST_ACPI_RSDP => {
+        nanami_client::device::DEVICE_MANAGER_REQUEST_ACPI_RSDP => {
             if state.acpi_pid != 0 && request.identifier == state.acpi_pid {
-                (libnanami::OS_RESPONSE_OK, state.acpi_rsdp, 0)
+                (nanami_runtime::OS_RESPONSE_OK, state.acpi_rsdp, 0)
             } else {
-                (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+                (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
             }
         }
-        nanami_services::device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE => {
+        nanami_client::device::DEVICE_MANAGER_REQUEST_STORAGE_PROBE => {
             match state.storage.report(request.identifier, request.arg0) {
-                Ok(decision) => (libnanami::OS_RESPONSE_OK, decision, 0),
-                Err(()) => (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0),
+                Ok(decision) => (nanami_runtime::OS_RESPONSE_OK, decision, 0),
+                Err(()) => (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0),
             }
         }
-        nanami_services::device::DEVICE_MANAGER_REQUEST_USB_CONTROLLER => {
+        nanami_client::device::DEVICE_MANAGER_REQUEST_USB_CONTROLLER => {
             if state.usb_pid == 0 || request.identifier != state.usb_pid {
-                (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+                (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
             } else if request.arg0 < state.usb_count {
                 let resource = state.usb_controllers[request.arg0].unwrap();
                 (
-                    libnanami::OS_RESPONSE_OK,
+                    nanami_runtime::OS_RESPONSE_OK,
                     resource.physical,
                     resource.bytes | resource.irq.unwrap_or(0),
                 )
             } else {
-                (libnanami::OS_RESPONSE_OK, 0, 0)
+                (nanami_runtime::OS_RESPONSE_OK, 0, 0)
             }
         }
-        nanami_services::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE
+        nanami_client::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE
             if request.identifier == state.hpet_pid
                 && state.hpet_pid != 0
                 && state.hpet_mmio_base != 0 =>
         {
-            (libnanami::OS_RESPONSE_OK, state.hpet_mmio_base, 0)
+            (nanami_runtime::OS_RESPONSE_OK, state.hpet_mmio_base, 0)
         }
-        nanami_services::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE => {
-            (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+        nanami_client::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE => {
+            (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
-    let platform = libnanami::request_nanami_info_platform()?;
-    libnanami::println!(
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
+    let platform = nanami_runtime::request_nanami_info_platform()?;
+    nanami_runtime::println!(
         "[driver-manager] architecture={} platform={} cores={}",
         platform.architecture_name(),
         platform.platform_name(),
@@ -122,11 +122,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     if let Err(error) =
         arch::validate_platform(platform.architecture_name(), platform.platform_name())
     {
-        libnanami::print!("[driver-manager] no drivers for this architecture/platform\n");
+        nanami_runtime::print!("[driver-manager] no drivers for this architecture/platform\n");
         return Err(error.into());
     }
-    libnanami::register_service_by_name(
-        nanami_services::device::DEVICE_MANAGER_SERVICE,
+    nanami_runtime::register_service_by_name(
+        nanami_client::device::DEVICE_MANAGER_SERVICE,
         SERVICE_PORT_SLOT,
     )?;
 
@@ -156,7 +156,7 @@ fn nanami_main() -> libnanami::NanamiResult {
                 state.usb_controllers[state.usb_count] = Some(resource);
                 state.usb_count += 1;
             }
-            Err(error) => libnanami::println!(
+            Err(error) => nanami_runtime::println!(
                 "[driver-manager] USB PCI {:06x} skipped: {}",
                 address,
                 error
@@ -180,31 +180,31 @@ fn nanami_main() -> libnanami::NanamiResult {
                 state.usb_pid = pid;
                 state.storage.pids[1] = pid;
             }
-            Err(error) => libnanami::println!("[driver-manager] USB spawn failed: {}", error),
+            Err(error) => nanami_runtime::println!("[driver-manager] USB spawn failed: {}", error),
         }
     }
     #[cfg(target_arch = "x86_64")]
     {
         state.acpi_rsdp =
-            libnanami::request_driver_platform_info(libnanami::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?
+            nanami_runtime::request_driver_platform_info(nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?
                 .0;
         if state.acpi_rsdp != 0 {
             match spawn("./bin/acpi-server") {
                 Ok(pid) => state.acpi_pid = pid,
-                Err(error) => libnanami::println!("[driver-manager] ACPI spawn failed: {}", error),
+                Err(error) => nanami_runtime::println!("[driver-manager] ACPI spawn failed: {}", error),
             }
         }
     }
-    libnanami::print!("[driver-manager] ready\n");
-    let port = libnanami::ipc::process_slot_descriptor(SERVICE_PORT_SLOT);
-    let mut reply = (libnanami::OS_RESPONSE_OK, 0, 0);
+    nanami_runtime::print!("[driver-manager] ready\n");
+    let port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_PORT_SLOT);
+    let mut reply = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_reply = false;
     loop {
         let event = if has_reply {
             has_reply = false;
-            libnanami::ipc::service_reply_receive_event(port, reply.0, reply.1, reply.2)?
+            nanami_runtime::ipc::service_reply_receive_event(port, reply.0, reply.1, reply.2)?
         } else {
-            libnanami::ipc::service_receive_event(port)?
+            nanami_runtime::ipc::service_receive_event(port)?
         };
         match event {
             ServiceEvent::Request(request) => {
@@ -216,4 +216,4 @@ fn nanami_main() -> libnanami::NanamiResult {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

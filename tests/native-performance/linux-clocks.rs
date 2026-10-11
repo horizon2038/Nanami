@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 extern crate self as a9n_abi;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::cell::RefCell;
 pub use std::println;
 pub type Word = usize;

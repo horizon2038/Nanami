@@ -5,7 +5,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 const SLOT_HONOKA_SERVICE: Word = 22;
 const SLOT_HONOKA_PRESENT_NOTIFICATION: Word = 23;
@@ -26,15 +26,15 @@ const MAX_ROWS: usize = 32;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::print!("[Saran] panic\n");
-    let _ = libnanami::request_exit();
+    nanami_runtime::print!("[Saran] panic\n");
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
 #[alloc_error_handler]
 fn alloc_error(layout: core::alloc::Layout) -> ! {
-    let (used, remaining, total) = libnanami::heap::heap_stats();
-    libnanami::println!(
+    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
+    nanami_runtime::println!(
         "[Saran] allocation failed size={:#x} align={:#x} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
         layout.size(),
         layout.align(),
@@ -42,7 +42,7 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
         remaining,
         total
     );
-    let _ = libnanami::request_exit();
+    let _ = nanami_runtime::request_exit();
     loop {
         core::hint::spin_loop();
     }
@@ -94,10 +94,10 @@ struct Saran<'a> {
     present_notification: Word,
 
     // framebuffer state
-    surface: nanami_services::gfx::honoka::WindowSurface,
+    surface: nanami_client::gfx::honoka::WindowSurface,
 
     // input state
-    input_queue: &'a mut nanami_services::gfx::honoka::WindowEventQueue,
+    input_queue: &'a mut nanami_client::gfx::honoka::WindowEventQueue,
     mouse_pressed: bool,
     previous_mouse_x: Option<usize>,
     previous_mouse_y: Option<usize>,
@@ -112,11 +112,11 @@ impl<'a> Saran<'a> {
         timer_port: Word,
         notification: Word,
         present_notification: Word,
-        surface: nanami_services::gfx::honoka::WindowSurface,
-        input_queue: &'a mut nanami_services::gfx::honoka::WindowEventQueue,
+        surface: nanami_client::gfx::honoka::WindowSurface,
+        input_queue: &'a mut nanami_client::gfx::honoka::WindowEventQueue,
         window_id: Word,
     ) -> Self {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[Saran] Saran::new honoka_port={:#x} timer_port={:#x} notification={:#x} present_notification={:#x} framebuffer_vaddr={:#x} width={} height={} window_id={}",
             honoka_port,
             timer_port,
@@ -142,30 +142,30 @@ impl<'a> Saran<'a> {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
-fn nanami_main() -> libnanami::NanamiResult {
+nanami_runtime::nanami_entry!(nanami_main);
+fn nanami_main() -> nanami_runtime::NanamiResult {
     // init ipc-buffer (TLS)
-    libnanami::println!("[Saran] Starting EBI Emulation ...");
-    libnanami::ipc::init_ipc_tls().map_err(|e| log_error("[Saran] ipc tls failed: ", e))?;
+    nanami_runtime::println!("[Saran] Starting EBI Emulation ...");
+    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[Saran] ipc tls failed: ", e))?;
 
     // init process notification
     let notification =
-        libnanami::ipc::process_slot_descriptor(libnanami::PROCESS_SLOT_NOTIFICATION);
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
 
     // connect to honoka-service
     let (honoka_port, honoka_pid) = connect_honoka_service();
-    libnanami::println!("[Saran] connected honoka-service");
+    nanami_runtime::println!("[Saran] connected honoka-service");
 
     // connect to timer-service
     let timer_port = connect_timer_service();
-    libnanami::request_notification_port_create(
+    nanami_runtime::request_notification_port_create(
         SLOT_TIMER_NOTIFICATION,
-        nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+        nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
     )
     .map_err(|e| log_error("[honoka-client] timer notification create failed: ", e))?;
 
     // create window
-    let window_id = nanami_services::gfx::honoka::honoka_create_window_with_title(
+    let window_id = nanami_client::gfx::honoka::honoka_create_window_with_title(
         honoka_port,
         WINDOW_X,
         WINDOW_Y,
@@ -174,25 +174,25 @@ fn nanami_main() -> libnanami::NanamiResult {
         b"Saran",
     )
     .map_err(|e| log_error("[Saran] create window failed: ", e))?;
-    libnanami::println!("[Saran] window created id={}", window_id);
+    nanami_runtime::println!("[Saran] window created id={}", window_id);
 
     // attach present notification
     let present_notification = attach_honoka_present_notification(honoka_pid, window_id)
         .map_err(|e| log_error("[honoka-client] present notification failed: ", e))?;
 
-    let surface = nanami_services::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
+    let surface = nanami_client::gfx::honoka::WindowSurface::attach(honoka_port, window_id)
         .map_err(|e| log_error("[Saran] attach framebuffer failed: ", e))?;
     draw_paper(&surface);
 
     // attach input queue
     let (input_base, _input_bytes) =
-        nanami_services::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
+        nanami_client::gfx::honoka::honoka_attach_input_queue(honoka_port, window_id)
             .map_err(|e| log_error("[shell] attach input queue failed: ", e))?;
-    nanami_services::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
+    nanami_client::gfx::honoka::honoka_attach_input_notification(honoka_port, window_id)
         .map_err(|e| log_error("[shell] attach input notification failed: ", e))?;
 
     // create input event queue
-    let mut input_queue = nanami_services::gfx::honoka::WindowEventQueue::new(input_base);
+    let mut input_queue = nanami_client::gfx::honoka::WindowEventQueue::new(input_base);
 
     // create Saran
     let mut saran = Saran::new(
@@ -206,8 +206,8 @@ fn nanami_main() -> libnanami::NanamiResult {
     );
 
     // flush framebuffer
-    let _ = libnanami::ipc::notification_notify(saran.present_notification);
-    let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+    let _ = nanami_runtime::ipc::notification_notify(saran.present_notification);
+    let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
         saran.honoka_port,
         saran.window_id,
         0 as Word,
@@ -219,24 +219,24 @@ fn nanami_main() -> libnanami::NanamiResult {
     // main loop
     loop {
         drain_input(&mut saran);
-        let waited = libnanami::ipc::notification_wait(saran.notification)
+        let waited = nanami_runtime::ipc::notification_wait(saran.notification)
             .map_err(|e| log_error("[shell] notification wait failed: ", e))?;
-        if (waited & nanami_services::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
+        if (waited & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
             drain_input(&mut saran);
         }
     }
 
-    libnanami::println!("[Saran] Exiting ...");
-    Ok(libnanami::request_exit()?)
+    nanami_runtime::println!("[Saran] Exiting ...");
+    Ok(nanami_runtime::request_exit()?)
 }
 
 fn connect_honoka_service() -> (Word, Word) {
     loop {
-        match nanami_services::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
+        match nanami_client::registry::connect_honoka_service_with_pid(SLOT_HONOKA_SERVICE) {
             Ok(pid) => {
                 // port-descriptor, pid
                 return (
-                    libnanami::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
+                    nanami_runtime::ipc::process_slot_descriptor(SLOT_HONOKA_SERVICE),
                     pid,
                 );
             }
@@ -252,21 +252,21 @@ fn attach_honoka_present_notification(
     honoka_pid: Word,
     window_id: Word,
 ) -> Result<Word, RequestError> {
-    libnanami::request_notification_port_copy(
+    nanami_runtime::request_notification_port_copy(
         honoka_pid,
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
         SLOT_HONOKA_PRESENT_NOTIFICATION,
-        nanami_services::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
+        nanami_client::gfx::honoka::HONOKA_NOTIFICATION_PRESENT | (window_id & 0xffff_ffff),
     )?;
-    Ok(libnanami::ipc::process_slot_descriptor(
+    Ok(nanami_runtime::ipc::process_slot_descriptor(
         SLOT_HONOKA_PRESENT_NOTIFICATION,
     ))
 }
 
 fn connect_timer_service() -> Word {
     loop {
-        match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-            Ok(()) => return libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
+        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
             Err(e) => {
                 log_request_error("[honoka-client] waiting timer-service: ", e);
                 busy_delay();
@@ -360,25 +360,25 @@ pub enum InputEvent {
 }
 
 pub fn decode_input_event(packed: Word) -> InputEvent {
-    let (kind, code, value0, value1, _) = nanami_services::input::unpack_input_event(packed);
+    let (kind, code, value0, value1, _) = nanami_client::input::unpack_input_event(packed);
     match kind {
-        nanami_services::input::INPUT_EVENT_KIND_KEY => InputEvent::Key {
+        nanami_client::input::INPUT_EVENT_KIND_KEY => InputEvent::Key {
             code,
             pressed: value0 != 0,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_MOVE => InputEvent::MouseMove {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE => InputEvent::MouseMove {
             dx: value0 as i32,
             dy: value1 as i32,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_BUTTON => InputEvent::MouseButton {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_BUTTON => InputEvent::MouseButton {
             code,
             pressed: value0 != 0,
         },
-        nanami_services::input::INPUT_EVENT_KIND_MOUSE_WHEEL => InputEvent::MouseWheel {
+        nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL => InputEvent::MouseWheel {
             delta: value0 as i32,
         },
-        nanami_services::input::INPUT_EVENT_KIND_WINDOW_CLOSE => InputEvent::WindowClose,
-        nanami_services::input::INPUT_EVENT_KIND_WINDOW_RESIZE => InputEvent::Resize {
+        nanami_client::input::INPUT_EVENT_KIND_WINDOW_CLOSE => InputEvent::WindowClose,
+        nanami_client::input::INPUT_EVENT_KIND_WINDOW_RESIZE => InputEvent::Resize {
             width: value0 as u16 as usize,
             height: value1 as u16 as usize,
         },
@@ -424,7 +424,7 @@ fn drain_input(saran: &mut Saran) {
                 saran.previous_mouse_y = None;
             }
             InputEvent::MouseMove { dx, dy } => {
-                libnanami::println!("[Saran] mouse move dx={} dy={}", dx, dy);
+                nanami_runtime::println!("[Saran] mouse move dx={} dy={}", dx, dy);
                 if saran.mouse_pressed {
                     dirty = true;
                     // draw when mouse pressed
@@ -458,7 +458,7 @@ fn drain_input(saran: &mut Saran) {
                 }
             }
             InputEvent::MouseButton { code, pressed } => {
-                libnanami::println!("[Saran] mouse button code={} pressed={}", code, pressed);
+                nanami_runtime::println!("[Saran] mouse button code={} pressed={}", code, pressed);
                 saran.mouse_pressed = pressed;
 
                 if !pressed {
@@ -467,29 +467,29 @@ fn drain_input(saran: &mut Saran) {
                 }
             }
             InputEvent::MouseWheel { delta } => {
-                libnanami::println!("[Saran] mouse wheel delta={}", delta);
+                nanami_runtime::println!("[Saran] mouse wheel delta={}", delta);
             }
             InputEvent::Key { code, pressed } => {
-                libnanami::println!("[Saran] key code={} pressed={}", code, pressed);
+                nanami_runtime::println!("[Saran] key code={} pressed={}", code, pressed);
             }
             InputEvent::WindowClose => {
-                let _ = nanami_services::gfx::honoka::honoka_destroy_window(
+                let _ = nanami_client::gfx::honoka::honoka_destroy_window(
                     saran.honoka_port,
                     saran.window_id,
                 );
-                let _ = libnanami::request_exit();
+                let _ = nanami_runtime::request_exit();
                 loop {
                     core::hint::spin_loop();
                 }
             }
             InputEvent::Unknown => {
-                libnanami::println!("[Saran] unknown input event packed={:#x}", packed);
+                nanami_runtime::println!("[Saran] unknown input event packed={:#x}", packed);
             }
         }
         drained += 1;
     }
     if dirty {
-        let _ = nanami_services::gfx::honoka::honoka_invalidate_logical_framebuffer(
+        let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
             saran.honoka_port,
             saran.window_id,
             0,
@@ -508,16 +508,16 @@ fn busy_delay() {
     }
 }
 
-fn log_error(prefix: &str, err: RequestError) -> libnanami::NanamiError {
+fn log_error(prefix: &str, err: RequestError) -> nanami_runtime::NanamiError {
     log_request_error(prefix, err);
     err.into()
 }
 
 fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
-fn draw_paper(surface: &nanami_services::gfx::honoka::WindowSurface) {
+fn draw_paper(surface: &nanami_client::gfx::honoka::WindowSurface) {
     draw_rect(
         surface.pixels(),
         surface.width,

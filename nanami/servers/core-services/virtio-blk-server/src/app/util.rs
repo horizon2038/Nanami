@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) fn log_request_error(prefix: &str, err: RequestError) {
-    libnanami::println!("{}{}", prefix, err);
+    nanami_runtime::println!("{}{}", prefix, err);
 }
 
 pub(crate) fn fail_device(io_desc: Word, io_base: Word) {

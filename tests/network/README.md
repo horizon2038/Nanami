@@ -5,20 +5,19 @@ The subsequent TX queue, RX batch and TCP lookup changes are documented in
 
 ## Launcher and DHCP bootstrap regression (2026-10-11)
 
-`scripts/run-nanami.sh run` previously forced `NET_MODE=user`, discarding
-`BRIDGE_IF`. It now defaults to bridged mode when that interface is specified,
-and preserves explicit `NET_MODE` and `QEMU_USE_SUDO` choices:
+The Rust launcher selects bridged networking when `BRIDGE_IF` / `--bridge-if`
+is specified and preserves an explicit `NET_MODE` / `--net` override:
 
-```sh
-BRIDGE_IF=en0 ./scripts/run-nanami.sh run
+```text
+cargo xtask run --bridge-if en0 --sudo
 ```
 
-On macOS, bridged mode uses the launcher's `auto` sudo policy. This command
-regenerates the rootfs; back up saved files before running it. Five isolated
-wrapper tests check the network environment without building, launching QEMU,
-invoking sudo or modifying the user's images:
+On macOS vmnet may require QEMU elevation. `--sudo` applies only to QEMU,
+not builds. `run` does not rebuild the rootfs or boot disk. Argument tests
+do not launch QEMU, invoke sudo or write firmware:
 
-```sh
+```text
+cargo test -p nanami-xtask
 python3 tests/usb/qemu-launcher.py
 ```
 

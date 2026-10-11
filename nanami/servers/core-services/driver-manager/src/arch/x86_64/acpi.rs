@@ -1,6 +1,6 @@
 use core::ptr::read_volatile;
 
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 const PAGE_SIZE: Word = 0x1000;
 const RSDP_V1_BYTES: usize = 20;
@@ -62,9 +62,9 @@ impl AcpiMapper {
         if self.mapped_count == self.pages.len() {
             return Err(RequestError::Unsupported);
         }
-        let (_, virtual_address) = libnanami::request_mmio(physical_address, PAGE_SIZE)
+        let (_, virtual_address) = nanami_runtime::request_mmio(physical_address, PAGE_SIZE)
             .inspect_err(|error| {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[driver-manager] ACPI map failed page={:#x} bytes={:#x}: {}",
                     physical_address,
                     PAGE_SIZE,

@@ -9,7 +9,7 @@ pub(super) fn present_shared_framebuffer(
     let shared = display.shared;
     if owner_pid == 0 || shared.owner_pid != owner_pid || shared.local_vaddr == 0 {
         return Err(RequestError::Status(
-            libnanami::OS_RESPONSE_PERMISSION_DENIED,
+            nanami_runtime::OS_RESPONSE_PERMISSION_DENIED,
         ));
     }
 

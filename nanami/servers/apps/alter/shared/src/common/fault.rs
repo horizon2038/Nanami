@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::abi::A9N_FAULT_INVALID_KERNEL_CALL;
 use crate::linux::EmulationAction;
@@ -32,7 +32,7 @@ pub enum FaultAction {
 
 pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
     if fault.reason != A9N_FAULT_INVALID_KERNEL_CALL {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter] unsupported fault pid={} reason={:#x} pc={:#x}",
             fault.identifier,
             fault.reason,
@@ -45,7 +45,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
     }
 
     let Some(process) = runtime.process_for_fault_identifier(fault.identifier) else {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter] fault from unmanaged pid={} syscall={}",
             fault.identifier,
             fault.kernel_call_number
@@ -59,7 +59,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
     let pid = process.pid;
     let pcb = process.pcb;
 
-    let fast_context = fault.hardware_context_count == libnanami::ipc::HARDWARE_CONTEXT_WORDS;
+    let fast_context = fault.hardware_context_count == nanami_runtime::ipc::HARDWARE_CONTEXT_WORDS;
     let context = if fast_context {
         syscall_context_from_hardware_context(
             &fault.hardware_context,
@@ -70,7 +70,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
         match read_syscall_context(pcb, fault.kernel_call_number, fault.program_counter) {
             Ok(context) => context,
             Err(error) => {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter] register read failed pid={} pcb={:#x} err={:?}",
                     pid,
                     pcb,
@@ -99,7 +99,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
                 };
             }
             if write_personality_syscall_return(pcb, context, value, process.personality).is_err() {
-                libnanami::println!("[alter] register write failed pid={} pcb={:#x}", pid, pcb);
+                nanami_runtime::println!("[alter] register write failed pid={} pcb={:#x}", pid, pcb);
                 return FaultAction::Terminate { pid, status: 1 };
             }
             FaultAction::Continue {
@@ -118,7 +118,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
                 crate::state::OsPersonality::Linux => 38,
                 crate::state::OsPersonality::FreeBsd => 78,
             };
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/{}] unsupported syscall {}, returning -ENOSYS",
                 personality::name(process.personality),
                 number

@@ -1,126 +1,89 @@
-# Nanami User-Space Components and SDK
+# Nanami User-space API and Libraries
 
-`nanami/servers` contains Nanami's boot services, rootfs applications, reusable
-libraries, and native user-space SDKs.
+`nanami/servers` contains boot services, rootfs applications and reusable
+user-space libraries. There is no umbrella `sdk/` directory.
 
 ## Layout
 
 ```text
 servers/
-  boot-list              # Alpha/initramfs startup manifest
-  system-list            # Rootfs system-service manifest
-  session-list           # Rootfs user-session manifest
-  core-services/         # Boot-critical services
-  apps/                  # Upper services, drivers, and applications
-  libs/                  # Reusable implementation crates
-  sdk/
-    arch/x86_64/          # Target specification and linker scripts
-    arch/aarch64/         # AArch64 target specification and linker scripts
-    build/                # Shared C++ build rules
-    cpp/                  # Freestanding C++ SDK
-    rust/libnanami/       # Low-level Nanami core API
-    rust/nanami-services/ # Typed service protocols
+  boot-list, system-list, session-list   # Startup manifests
+  core-services/                        # Boot-critical binaries
+  apps/                                 # Upper services, drivers and apps
+  uapi/                                 # nanami-uapi: dependency-free no_std ABI
+    include/                            # Public C++ headers
+  targets/{x86_64,aarch64}/              # Target JSON and linker scripts
+  libs/
+    nanami-runtime/                     # Entry, allocator, OS requests and IPC
+      arch/                             # Architecture-specific C++ runtime/ABI
+      cpp/                              # C++ implementation
+    nanami-client/                      # Typed service clients
+    ...                                 # Reusable subsystem implementations
 ```
 
-## Component Classes
-
-### Core Services
-
-Only components required to mount and consume the root filesystem belong in
-`core-services`. Active Rust and C++ outputs are packaged into
-`initramfs.cpio`, and Alpha starts entries from `boot-list`.
-
-The current core path is:
+## Dependency Direction
 
 ```text
-Device Driver Manager -> platform timer + platform storage
-                      -> ext2-server -> system-manager
+nanami-uapi <- nanami-runtime <- nanami-client <- applications/services
+      ^              ^
+      |              |
+    Alpha        C++ runtime uses uapi/include
 ```
 
-The manager queries Alpha for A9N v0.3.0's `init_info` architecture/platform
-names and core count before selecting drivers. Driver policies currently
-support `x86_64/pc99` and `aarch64/qemu`; unknown platforms are rejected instead
-of assuming that all machines of the same architecture have the same devices.
+- `nanami-uapi` owns request/response numbers, flags and wire value types.
+  It has no allocator, IPC execution or kernel-ABI crate dependency.
+  Alpha and native clients share the same OS definitions.
+- `nanami-runtime` implements native entry/exit, diagnostics, allocation,
+  capabilities, OS requests and IPC. It re-exports UAPI values needed by callers.
+- `nanami-client` implements registration/connection and typed wrappers for
+  block, VFS, exec, terminal, POSIX, graphics, input, timers, RTC, power,
+  device management and networking. Protocol values are re-exported from UAPI,
+  not copied into client implementations.
+- Other `libs/` crates contain subsystem implementations, not the public ABI.
 
-On x86_64 the manager maps `arch_info[0]`'s RSDP on demand, validates and walks
-the XSDT/RSDT in user space, and selects HPET when its ACPI table is present.
-It selects AHCI through PCI and keeps the existing PIT and virtio-blk
-implementations as fallbacks. On AArch64 it currently selects virtio-mmio
-storage and deliberately selects no timer: EL0 virtual-timer access is not
-exposed while the platform timer policy remains deferred. Architecture-specific
-probing lives below `driver-manager/src/arch`.
+Rust package names use hyphens; imports use underscores
+(`nanami_runtime`, `nanami_client`, `nanami_uapi`).
+The wire numbers and Linux/FreeBSD guest ABIs are unchanged by this split.
 
-### Applications and Upper Services
+## Components and Packaging
 
-Components under `apps` are built with the same native ABI but are installed
-into the ext2 root filesystem under `/bin`. `system-manager` starts entries from
-`system-list` and `session-list`; other applications are launched manually.
+Only services needed before mounting the rootfs belong in `core-services/`.
+Their binaries and the architecture-specific `boot-list` are packaged in
+Rust-generated `initramfs.cpio`. Driver Manager selects platform timer/storage
+drivers; ext2-server and system-manager consume the mounted filesystem.
 
-The rootfs builder uses extensionless executable names. Nested source paths are
-joined with `-`, so `apps/alter/linux` becomes `/bin/alter-linux`.
+Normal services/apps under `apps/` are installed into ext2 `/bin`.
+Nested paths join with `-`: `apps/alter/linux` becomes `/bin/alter-linux`.
+Rust binaries are discovered from Cargo manifests. Freestanding x86_64 C++
+apps use declarative `nanami-app.toml` manifests, not Makefiles:
 
-## Rust SDK
+```toml
+name = "cpp-hello"
+sources = ["src/main.cpp"]
+```
 
-`libnanami` provides:
-
-- x86_64 and AArch64 process entry and argument parsing;
-- A9N IPC and notification primitives;
-- Nanami OS requests for process, memory, capabilities, and services;
-- heap allocation and growth;
-- process exit and diagnostic information.
-
-`nanami-services` provides named-service registration/connection and typed
-protocol wrappers for block, VFS, execution, terminal, POSIX, graphics, input,
-timer, RTC, device management, and networking services.
-
-Service-specific protocol code belongs in `nanami-services`, not in
-`libnanami`.
-
-## C++ SDK
-
-`sdk/build/cpp_app.mk` supplies the freestanding x86_64 C++ build using Clang,
-LLD, the Nanami user linker script, and the C++ Nanami support library.
+xtask invokes Clang/LLD directly, linking the shared runtime and matching target
+script. AArch64 currently omits the x86-only ACPI/AHCI/HPET/PIT services and C++
+sample.
 
 ## Build
 
-From the repository root:
+Run from the repository root:
 
-```bash
-make servers
-make servers ARCH=aarch64
+```text
+cargo xtask servers
+cargo xtask servers --arch aarch64
+cargo xtask rootfs --rootfs out/new-ext2.img
+cargo xtask build --rebuild-rootfs
+cargo xtask run
 ```
 
-Or from this directory:
-
-```bash
-make initramfs
-```
-
-This builds all active core services and applications, then packages only
-`core-services` plus `boot-list` into `initramfs.cpio`.
-
-Build component classes directly:
-
-```bash
-make rust
-make cpp
-make apps
-```
-
-Create the ext2 root filesystem from the repository root:
-
-```bash
-make fs-image SIZE_MB=64 OUT=out/ext2.img
-make fs-image ARCH=aarch64 SIZE_MB=64
-```
-
-For x86_64, `make image` embeds this filesystem in the Nanami root partition of
-the same GPT `spencer.img` that contains the EFI System Partition. AHCI scans all
-active SATA ports and selects the partition by the Nanami root type GUID; block
-requests remain relative to that partition. The standalone image remains useful
-as a staging artifact and for rebuilding the combined disk.
+`servers` builds all native components and the initramfs; `rootfs` packages
+previously built applications using the reusable `crates/ext2-image` library.
+See the [root README](../../README.md) for payload directories, bridge options,
+macOS/Linux prerequisites and image-overwrite rules.
 
 ## Adding a Component
 
-See the [Nanami Application Guide](../docs/application.md) for entry code,
-Cargo layout, service use, startup manifests, and verification requirements.
+See the [Application Guide](../docs/application.md) for entry code, Cargo
+layout, startup manifests and verification.

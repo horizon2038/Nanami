@@ -1,7 +1,7 @@
 use core::ptr;
 
-use libnanami::ipc::ServiceRequest;
-use libnanami::Word;
+use nanami_runtime::ipc::ServiceRequest;
+use nanami_runtime::Word;
 
 use crate::state::{EnvironmentVariable, Runtime, Session, ENV_NAME_MAX, ENV_VALUE_MAX};
 
@@ -14,19 +14,19 @@ pub(crate) fn init_default_environment(session: &mut Session) {
 
 pub(crate) fn handle_getenv(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
         read_client_name(runtime, index, request.arg0 as usize, request.arg1 as usize)
     else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some(env_index) = find_env_index(&runtime.sessions[index], &name[..name_len]) else {
-        return (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let env = &runtime.sessions[index].env[env_index];
     if env.value_len > request.arg3 as usize {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if !write_client_bytes(
         runtime,
@@ -34,32 +34,32 @@ pub(crate) fn handle_getenv(runtime: &mut Runtime, request: ServiceRequest) -> (
         request.arg2 as usize,
         &env.value[..env.value_len],
     ) {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    (libnanami::OS_RESPONSE_OK, env.value_len as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, env.value_len as Word, 0)
 }
 
 pub(crate) fn handle_setenv(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
         read_client_name(runtime, index, request.arg0 as usize, request.arg1 as usize)
     else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((value, value_len)) =
         read_client_value(runtime, index, request.arg2 as usize, request.arg3 as usize)
     else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     match set_session_env(
         &mut runtime.sessions[index],
         &name[..name_len],
         &value[..value_len],
     ) {
-        Ok(()) => (libnanami::OS_RESPONSE_OK, 0, 0),
-        Err(()) => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
+        Err(()) => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -68,17 +68,17 @@ pub(crate) fn handle_unsetenv(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((name, name_len)) =
         read_client_name(runtime, index, request.arg0 as usize, request.arg1 as usize)
     else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     if let Some(env_index) = find_env_index(&runtime.sessions[index], &name[..name_len]) {
         runtime.sessions[index].env[env_index] = EnvironmentVariable::EMPTY;
     }
-    (libnanami::OS_RESPONSE_OK, 0, 0)
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }
 
 pub(crate) fn handle_env_count(
@@ -86,7 +86,7 @@ pub(crate) fn handle_env_count(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let mut count = 0usize;
     for env in runtime.sessions[index].env.iter() {
@@ -94,12 +94,12 @@ pub(crate) fn handle_env_count(
             count += 1;
         }
     }
-    (libnanami::OS_RESPONSE_OK, count as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, count as Word, 0)
 }
 
 pub(crate) fn handle_env_at(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = crate::process::find_session(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let target = request.arg0 as usize;
     let out_offset = request.arg1 as usize;
@@ -113,7 +113,7 @@ pub(crate) fn handle_env_at(runtime: &mut Runtime, request: ServiceRequest) -> (
             let needed = env.name_len + 1 + env.value_len;
             let session = &runtime.sessions[index];
             if needed > max_len || out_offset.saturating_add(needed) > session.shm_size as usize {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             unsafe {
                 let dst = (session.shm_local as usize + out_offset) as *mut u8;
@@ -126,14 +126,14 @@ pub(crate) fn handle_env_at(runtime: &mut Runtime, request: ServiceRequest) -> (
                 );
             }
             return (
-                libnanami::OS_RESPONSE_OK,
+                nanami_runtime::OS_RESPONSE_OK,
                 env.name_len as Word,
                 env.value_len as Word,
             );
         }
         seen += 1;
     }
-    (libnanami::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0)
+    (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0)
 }
 
 fn read_client_name(

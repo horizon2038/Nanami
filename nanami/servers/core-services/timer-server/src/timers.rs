@@ -13,14 +13,14 @@ pub(super) fn schedule_timer(
         return Err(RequestError::InvalidArgument);
     }
     let source_slot = if source_notification_slot == 0 {
-        libnanami::PROCESS_SLOT_NOTIFICATION
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION
     } else {
         source_notification_slot
     };
     let descriptor = ensure_client_notification_descriptor(state, requester_pid, source_slot)?;
     let wait_ticks = milliseconds_to_ticks(wait_ms);
     if wait_ticks == 0 {
-        return libnanami::ipc::notification_notify(descriptor);
+        return nanami_runtime::ipc::notification_notify(descriptor);
     }
     refresh_clock(state, timer, irq_desc)?;
     let interval_ticks = if interval_ms == 0 {
@@ -50,7 +50,7 @@ pub(super) fn refresh_clock(
 ) -> Result<(), RequestError> {
     if !state.timer_started {
         timer.start()?;
-        libnanami::ipc::interrupt_ack(irq_desc)?;
+        nanami_runtime::ipc::interrupt_ack(irq_desc)?;
         state.timer_started = true;
     }
     state.ticks = timer.now();
@@ -89,7 +89,7 @@ pub(super) fn set_alarm(
         return Err(RequestError::InvalidArgument);
     }
     let source_slot = if source_slot == 0 {
-        libnanami::PROCESS_SLOT_NOTIFICATION
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION
     } else {
         source_slot
     };
@@ -102,7 +102,7 @@ pub(super) fn set_alarm(
         return Ok(());
     };
     if target_tick <= state.ticks {
-        return libnanami::ipc::notification_notify(descriptor);
+        return nanami_runtime::ipc::notification_notify(descriptor);
     }
     if state.pending_timers.push(PendingAsyncTimer {
         target_tick,
@@ -143,14 +143,14 @@ fn ensure_client_notification_descriptor(
     let index = free_index.ok_or(RequestError::Unsupported)?;
     let destination_slot = SLOT_CLIENT_NOTIFICATION_BASE + index as Word;
 
-    libnanami::request_notification_port_copy(
+    nanami_runtime::request_notification_port_copy(
         requester_pid,
         source_notification_slot,
         destination_slot,
-        nanami_services::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+        nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
     )?;
 
-    let descriptor = libnanami::ipc::process_slot_descriptor(destination_slot);
+    let descriptor = nanami_runtime::ipc::process_slot_descriptor(destination_slot);
     state.client_notifications[index] = ClientNotificationEntry {
         used: true,
         pid: requester_pid,
@@ -172,7 +172,7 @@ pub(super) fn fire_expired_async_timers(state: &mut TimerState) {
             }
         }
         state.fire_count = state.fire_count.wrapping_add(1);
-        if let Err(e) = libnanami::ipc::notification_notify(timer.notification_descriptor) {
+        if let Err(e) = nanami_runtime::ipc::notification_notify(timer.notification_descriptor) {
             log_request_error("[timer-server] async notify failed: ", e);
             retire_notification_descriptor(state, timer.notification_descriptor);
         }

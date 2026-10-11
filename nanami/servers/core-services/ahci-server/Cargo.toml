@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libnanami = { path = "../../sdk/rust/libnanami" }
-nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
 nanami-gpt = { path = "../../libs/gpt" }
 
 [profile.dev]

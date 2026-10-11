@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 /// Opt-in wall times, including preemption and timer IPC, not GPU/CPU timings.
 #[derive(Default)]
@@ -25,7 +25,7 @@ impl Profile {
         if option_env!("NANAMI_FB_PROFILE") != Some("1") || self.port == 0 {
             return None;
         }
-        let (ticks, hz) = nanami_services::timer::timer_service_monotonic_ticks(self.port).ok()?;
+        let (ticks, hz) = nanami_client::timer::timer_service_monotonic_ticks(self.port).ok()?;
         (hz != 0).then(|| (ticks as u128 * 1_000_000_000 / hz as u128) as u64)
     }
 
@@ -46,7 +46,7 @@ impl Profile {
         self.max_compose = self.max_compose.max(compose);
         self.max_present = self.max_present.max(present);
         if interval >= 2_000_000_000 {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[honoka.perf] interval-ms={} renders={} rects={} compose-us={} present-us={} max-compose-us={} max-present-us={}",
                 interval / 1_000_000, self.renders, self.rects,
                 self.compose / 1000, self.present / 1000,

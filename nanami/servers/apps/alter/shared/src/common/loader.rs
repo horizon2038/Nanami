@@ -1,5 +1,5 @@
-use libnanami::{RequestError, Word};
-use nanami_services::posix;
+use nanami_runtime::{RequestError, Word};
+use nanami_client::posix;
 
 use crate::abi::{ALTER_IO_OFFSET, ALTER_PATH_MAX};
 use crate::elf::{parse_elf64_header, parse_elf64_image, ElfError, ElfMetadata};
@@ -67,7 +67,7 @@ pub fn load_cached_fork_linux_elf_image(
     if matches!(buffer, ImageBuffer::Cached)
         && !runtime.cache_fork_image(path, loaded.address, loaded.size, loaded.metadata)
     {
-        let _ = libnanami::request_mapping_release(loaded.address, loaded.size);
+        let _ = nanami_runtime::request_mapping_release(loaded.address, loaded.size);
         return Err(LoadError::Io);
     }
     Ok(loaded)
@@ -132,21 +132,21 @@ fn load_elf_image(
             };
             if *address == 0 || *capacity < size {
                 let (image, image_size) =
-                    libnanami::request_heap(size).map_err(|_| LoadError::Io)?;
+                    nanami_runtime::request_heap(size).map_err(|_| LoadError::Io)?;
                 if image_size < size {
-                    let _ = libnanami::request_mapping_release(image, image_size);
+                    let _ = nanami_runtime::request_mapping_release(image, image_size);
                     return Err(LoadError::Io);
                 }
-                if *address != 0 { let _ = libnanami::request_mapping_release(*address, *capacity); }
+                if *address != 0 { let _ = nanami_runtime::request_mapping_release(*address, *capacity); }
                 *address = image;
                 *capacity = image_size;
             }
             (*address, *capacity)
         }
         ImageBuffer::Cached => {
-            let (image, image_size) = libnanami::request_heap(size).map_err(|_| LoadError::Io)?;
+            let (image, image_size) = nanami_runtime::request_heap(size).map_err(|_| LoadError::Io)?;
             if image_size < size {
-                let _ = libnanami::request_mapping_release(image, image_size);
+                let _ = nanami_runtime::request_mapping_release(image, image_size);
                 return Err(LoadError::Io);
             }
             (image, image_size)
@@ -155,7 +155,7 @@ fn load_elf_image(
 
     let result = read_and_parse_elf(runtime, path, image, size);
     if result.is_err() && matches!(buffer, ImageBuffer::Cached) {
-        let _ = libnanami::request_mapping_release(image, allocation_size);
+        let _ = nanami_runtime::request_mapping_release(image, allocation_size);
     }
     let metadata = result?;
     Ok(LoadedElfImage {
@@ -248,28 +248,28 @@ fn map_elf_error(error: ElfError) -> LoadError {
 
 fn map_load_request_error(error: RequestError) -> LoadError {
     match error {
-        RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT)
-        | RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR) => LoadError::NotFound,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR) => LoadError::NotFound,
         _ => LoadError::Io,
     }
 }
 
 pub fn map_load_error_to_status(error: LoadError) -> Word {
     match error {
-        LoadError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        LoadError::NotFound => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        LoadError::Io => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        LoadError::InvalidElf => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        LoadError::UnsupportedElf => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
+        LoadError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        LoadError::NotFound => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        LoadError::Io => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        LoadError::InvalidElf => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        LoadError::UnsupportedElf => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
     }
 }
 
 pub fn map_request_error_to_status(error: RequestError) -> Word {
     match error {
-        RequestError::InvalidArgument => libnanami::OS_RESPONSE_INVALID_ARGUMENT,
-        RequestError::Unsupported => libnanami::OS_RESPONSE_ILLEGAL_OPERATION,
-        RequestError::Transport => libnanami::OS_RESPONSE_FATAL,
-        RequestError::Protocol => libnanami::OS_RESPONSE_FATAL,
+        RequestError::InvalidArgument => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+        RequestError::Unsupported => nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+        RequestError::Transport => nanami_runtime::OS_RESPONSE_FATAL,
+        RequestError::Protocol => nanami_runtime::OS_RESPONSE_FATAL,
         RequestError::Status(status) => status,
     }
 }

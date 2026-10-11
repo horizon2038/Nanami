@@ -1,6 +1,6 @@
 # Deferred IPC notifications
 
-`libnanami::call_port` preserves a bound notification when it interrupts Call,
+`nanami_runtime::call_port` preserves a bound notification when it interrupts Call,
 then retries the RPC. The kernel has already consumed the notification; it is
 now held in the SDK's `PENDING_NOTIFICATION`, not in the kernel notification
 port. Previously only `notification_wait`/`notification_poll` consumed this

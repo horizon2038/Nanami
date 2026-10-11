@@ -35,8 +35,8 @@ name = "acpi_server"
 version = "0.1.0"
 dependencies = [
  "acpi",
- "libnanami",
- "nanami-services",
+ "nanami-client",
+ "nanami-runtime",
 ]
 
 [[package]]
@@ -76,15 +76,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libnanami"
-version = "0.1.0"
-dependencies = [
- "a9n-types",
- "a9n_abi",
- "rlsf",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -100,12 +91,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "nanami-services"
+name = "nanami-client"
 version = "0.1.0"
 dependencies = [
  "a9n_abi",
- "libnanami",
+ "nanami-runtime",
+ "nanami-uapi",
 ]
+
+[[package]]
+name = "nanami-runtime"
+version = "0.1.0"
+dependencies = [
+ "a9n-types",
+ "a9n_abi",
+ "nanami-uapi",
+ "rlsf",
+]
+
+[[package]]
+name = "nanami-uapi"
+version = "0.1.0"
 
 [[package]]
 name = "pci_types"

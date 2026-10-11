@@ -1,7 +1,7 @@
 //! Production DHCP bootstrap with a full NIC RX queue and deterministic time.
 #![allow(dead_code)]
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 use std::{cell::RefCell, collections::VecDeque, ptr};
 pub use std::{print, println};
 pub type Word = usize;

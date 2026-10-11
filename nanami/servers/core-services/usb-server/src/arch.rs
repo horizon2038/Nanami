@@ -9,16 +9,16 @@ pub struct ControllerResource {
 
 #[cfg(not(target_arch = "x86_64"))]
 pub fn prepare(
-    _: nanami_services::device::UsbControllerResource,
-) -> Result<ControllerResource, libnanami::RequestError> {
-    Err(libnanami::RequestError::Unsupported)
+    _: nanami_client::device::UsbControllerResource,
+) -> Result<ControllerResource, nanami_runtime::RequestError> {
+    Err(nanami_runtime::RequestError::Unsupported)
 }
 
 #[cfg(target_arch = "x86_64")]
 pub fn prepare(
-    resource: nanami_services::device::UsbControllerResource,
-) -> Result<ControllerResource, libnanami::RequestError> {
-    let (_, mmio) = libnanami::request_mmio(resource.physical, resource.bytes)?;
+    resource: nanami_client::device::UsbControllerResource,
+) -> Result<ControllerResource, nanami_runtime::RequestError> {
+    let (_, mmio) = nanami_runtime::request_mmio(resource.physical, resource.bytes)?;
     Ok(ControllerResource {
         mmio,
         bytes: resource.bytes,

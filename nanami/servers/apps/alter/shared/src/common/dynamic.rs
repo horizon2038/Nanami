@@ -2,7 +2,7 @@
 use crate::elf::ElfMetadata;
 use crate::loader::{load_interpreter_elf_image, LoadError, LoadedElfImage};
 use crate::state::Runtime;
-use libnanami::Word;
+use nanami_runtime::Word;
 
 const PAGE: Word = 4096;
 const INTERPRETER_BASE: Word = 0x6000_0000;
@@ -132,7 +132,7 @@ pub fn prepare(
 
 pub fn install(pid: Word, interpreter: &Interpreter) -> Result<(), LoadError> {
     let (base, size) =
-        libnanami::request_process_map_anonymous_at(pid, interpreter.base, interpreter.size)
+        nanami_runtime::request_process_map_anonymous_at(pid, interpreter.base, interpreter.size)
             .map_err(|_| LoadError::Io)?;
     if base != interpreter.base || size != interpreter.size {
         return Err(LoadError::Io);
@@ -145,7 +145,7 @@ pub fn install(pid: Word, interpreter: &Interpreter) -> Result<(), LoadError> {
         .take(interpreter.image.metadata.load_segment_count)
     {
         if segment.file_size != 0 {
-            libnanami::request_process_memory_write(
+            nanami_runtime::request_process_memory_write(
                 pid,
                 interpreter.load_bias + segment.virtual_address,
                 interpreter.image.address + segment.offset,

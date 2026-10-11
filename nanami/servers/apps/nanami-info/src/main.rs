@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::fmt::{self, Write};
-use libnanami::Word;
+use nanami_runtime::Word;
 
 const SLOT_TERMINAL_SERVICE: Word = 22;
 const OUTPUT_SHM_BYTES: Word = 0x1000;
@@ -10,16 +10,16 @@ const OUTPUT_BYTES: usize = 512;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[nanami-info] panic: {}", info);
-    let _ = libnanami::request_exit();
+    nanami_runtime::println!("[nanami-info] panic: {}", info);
+    let _ = nanami_runtime::request_exit();
     loop {}
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
 
     let mut text = FixedText::new();
-    match libnanami::process_arg(1) {
+    match nanami_runtime::process_arg(1) {
         Some(b"memory") => write_memory_info(&mut text),
         Some(b"process") => write_process_info(&mut text),
         Some(b"smp") => write_smp_info(&mut text),
@@ -33,7 +33,7 @@ fn nanami_main() -> libnanami::NanamiResult {
 }
 
 fn write_memory_info(text: &mut FixedText) {
-    match libnanami::request_nanami_info_memory() {
+    match nanami_runtime::request_nanami_info_memory() {
         Ok(info) => {
             let used = info.used_bytes();
             let usage = percent(used, info.total_bytes);
@@ -49,7 +49,7 @@ fn write_memory_info(text: &mut FixedText) {
 }
 
 fn write_process_info(text: &mut FixedText) {
-    match libnanami::request_nanami_info_process() {
+    match nanami_runtime::request_nanami_info_process() {
         Ok(info) => {
             let _ = writeln!(text, "Processes");
             let _ = writeln!(text, "  running: {}", info.running);
@@ -63,7 +63,7 @@ fn write_process_info(text: &mut FixedText) {
 }
 
 fn write_smp_info(text: &mut FixedText) {
-    match libnanami::request_nanami_info_smp() {
+    match nanami_runtime::request_nanami_info_smp() {
         Ok(info) => {
             let _ = writeln!(text, "SMP");
             let _ = writeln!(
@@ -81,7 +81,7 @@ fn write_smp_info(text: &mut FixedText) {
 }
 
 fn write_platform_info(text: &mut FixedText) {
-    match libnanami::request_nanami_info_platform() {
+    match nanami_runtime::request_nanami_info_platform() {
         Ok(info) => {
             let _ = writeln!(text, "Platform");
             let _ = writeln!(text, "  architecture: {}", info.architecture_name());
@@ -99,13 +99,13 @@ fn write_output(bytes: &[u8]) {
         write_debug(bytes);
         return;
     };
-    if nanami_services::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE).is_err() {
+    if nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE).is_err() {
         write_debug(bytes);
         return;
     }
-    let port = libnanami::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
     let Ok((shm, size)) =
-        nanami_services::terminal::terminal_attach_shared_memory(port, OUTPUT_SHM_BYTES)
+        nanami_client::terminal::terminal_attach_shared_memory(port, OUTPUT_SHM_BYTES)
     else {
         write_debug(bytes);
         return;
@@ -121,7 +121,7 @@ fn write_output(bytes: &[u8]) {
         unsafe {
             core::ptr::copy_nonoverlapping(bytes[offset..].as_ptr(), shm as *mut u8, count);
         }
-        match nanami_services::terminal::terminal_write_output(port, terminal_id, 0, count as Word)
+        match nanami_client::terminal::terminal_write_output(port, terminal_id, 0, count as Word)
         {
             Ok(written) if written != 0 => offset += written as usize,
             _ => {
@@ -133,7 +133,7 @@ fn write_output(bytes: &[u8]) {
 }
 
 fn parse_terminal_id() -> Option<Word> {
-    let bytes = libnanami::process_env_value(b"NANAMI_TERMINAL_ID")?;
+    let bytes = nanami_runtime::process_env_value(b"NANAMI_TERMINAL_ID")?;
     if bytes.is_empty() {
         return None;
     }
@@ -149,7 +149,7 @@ fn parse_terminal_id() -> Option<Word> {
 
 fn write_debug(bytes: &[u8]) {
     for byte in bytes.iter().copied() {
-        libnanami::debug::write_char(byte as char);
+        nanami_runtime::debug::write_char(byte as char);
     }
 }
 
@@ -196,4 +196,4 @@ impl Write for FixedText {
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

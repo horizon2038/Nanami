@@ -1,5 +1,5 @@
-use libnanami::{ipc::ServiceRequest, Word};
-use nanami_services::posix::*;
+use nanami_runtime::{ipc::ServiceRequest, Word};
+use nanami_client::posix::*;
 
 use super::{io::map_request_error_to_status, process::session_for_pid, state::Runtime};
 
@@ -11,14 +11,14 @@ pub(crate) fn handle_control(runtime: &mut Runtime, request: ServiceRequest) -> 
             } else {
                 request.arg1
             };
-            match libnanami::request_shared_memory(request.identifier, size) {
+            match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => match session_for_pid(runtime, request.identifier) {
                     Some(index) => {
                         runtime.sessions[index].shm_local = local;
                         runtime.sessions[index].shm_size = size;
-                        (libnanami::OS_RESPONSE_OK, peer, size)
+                        (nanami_runtime::OS_RESPONSE_OK, peer, size)
                     }
-                    None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+                    None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
                 },
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
@@ -30,9 +30,9 @@ pub(crate) fn handle_control(runtime: &mut Runtime, request: ServiceRequest) -> 
                 request.arg1
             };
             let Some(index) = session_for_pid(runtime, request.identifier) else {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             };
-            match nanami_services::vfs::vfs_attach_delegated_shared_memory(
+            match nanami_client::vfs::vfs_attach_delegated_shared_memory(
                 runtime.vfs_port,
                 request.identifier,
                 size,
@@ -40,11 +40,11 @@ pub(crate) fn handle_control(runtime: &mut Runtime, request: ServiceRequest) -> 
                 Ok((peer_vaddr, mapped_size, delegate_id)) => {
                     runtime.sessions[index].direct_vfs_delegate = delegate_id;
                     runtime.sessions[index].direct_io_size = mapped_size;
-                    (libnanami::OS_RESPONSE_OK, peer_vaddr, mapped_size)
+                    (nanami_runtime::OS_RESPONSE_OK, peer_vaddr, mapped_size)
                 }
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
-        _ => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }

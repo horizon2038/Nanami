@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 // AArch64 user-space timer access is intentionally not exposed. A platform
 // driver must own a concrete timer device instead of programming CNTV_* from

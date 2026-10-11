@@ -35,7 +35,7 @@ impl ExecGuestPage {
     fn ensure(&mut self, pid: Word, address: Word) -> Result<usize, i32> {
         let page = address & !(LINUX_PAGE_SIZE - 1);
         if !self.valid || self.pid != pid || self.page != page {
-            libnanami::request_process_memory_read(pid, page, self.buffer, LINUX_PAGE_SIZE)
+            nanami_runtime::request_process_memory_read(pid, page, self.buffer, LINUX_PAGE_SIZE)
                 .map_err(map_request_error)?;
             self.pid = pid;
             self.page = page;
@@ -80,7 +80,7 @@ pub(super) fn snapshot_exec_strings(
         || runtime.exec_snapshot_buffer_size < LINUX_EXEC_SNAPSHOT_ALLOCATION_BYTES as Word
     {
         let (buffer, mapped) =
-            libnanami::request_heap(LINUX_EXEC_SNAPSHOT_ALLOCATION_BYTES as Word)
+            nanami_runtime::request_heap(LINUX_EXEC_SNAPSHOT_ALLOCATION_BYTES as Word)
                 .map_err(map_request_error)?;
         if mapped < LINUX_EXEC_SNAPSHOT_ALLOCATION_BYTES as Word {
             return Err(ENOMEM);

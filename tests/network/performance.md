@@ -66,7 +66,7 @@ again 10,000 completions and zero failures in each run. Across the two pairs,
 the measured improvement is approximately **2.9–3.0 times**. Host scheduling
 and emulation variance remain visible; no bare-metal speedup is claimed.
 
-Reproduce after building with `scripts/build-image.sh`:
+Reproduce after building with `cargo xtask build --rebuild-rootfs`:
 
 ```sh
 python3 tests/network/qemu-http.py \

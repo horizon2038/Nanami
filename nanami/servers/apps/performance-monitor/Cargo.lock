@@ -93,27 +93,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
-name = "libnanami"
-version = "0.1.0"
-dependencies = [
- "a9n-types",
- "a9n_abi",
- "rlsf",
-]
-
-[[package]]
 name = "micromath"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
 
 [[package]]
-name = "nanami-services"
+name = "nanami-client"
 version = "0.1.0"
 dependencies = [
  "a9n_abi",
- "libnanami",
+ "nanami-runtime",
+ "nanami-uapi",
 ]
+
+[[package]]
+name = "nanami-runtime"
+version = "0.1.0"
+dependencies = [
+ "a9n-types",
+ "a9n_abi",
+ "nanami-uapi",
+ "rlsf",
+]
+
+[[package]]
+name = "nanami-uapi"
+version = "0.1.0"
 
 [[package]]
 name = "num-traits"
@@ -129,8 +135,8 @@ name = "performance-monitor"
 version = "0.1.0"
 dependencies = [
  "embedded-graphics",
- "libnanami",
- "nanami-services",
+ "nanami-client",
+ "nanami-runtime",
 ]
 
 [[package]]

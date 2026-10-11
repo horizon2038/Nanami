@@ -28,7 +28,7 @@ pub(super) fn sys_framebuffer_read(
     let mut copied = 0;
     while copied < bytes {
         let chunk = (bytes - copied).min(LINUX_DIRECT_COPY_CHUNK);
-        libnanami::request_process_memory_copy_within(
+        nanami_runtime::request_process_memory_copy_within(
             pid,
             base + file.offset + copied,
             user_buffer + copied,
@@ -64,7 +64,7 @@ pub(super) fn sys_framebuffer_write(
     let mut copied = 0;
     while copied < bytes {
         let chunk = (bytes - copied).min(LINUX_DIRECT_COPY_CHUNK);
-        libnanami::request_process_memory_copy_within(
+        nanami_runtime::request_process_memory_copy_within(
             pid,
             user_buffer + copied,
             base + file.offset + copied,
@@ -120,7 +120,7 @@ pub(super) fn ensure_framebuffer_mapping(
     .map_err(map_request_error)?;
     if bytes != session.framebuffer_bytes || shared == 0 {
         if shared != 0 && bytes != 0 {
-            let _ = libnanami::request_process_mapping_release(pid, shared, bytes);
+            let _ = nanami_runtime::request_process_mapping_release(pid, shared, bytes);
         }
         let _ = honoka::honoka_detach_logical_framebuffer(session.honoka_port, session.window_id);
         return Err(EIO);
@@ -129,7 +129,7 @@ pub(super) fn ensure_framebuffer_mapping(
     let framebuffer_bytes = bytes;
     let mapped = align_up_word(framebuffer_bytes, LINUX_PAGE_SIZE);
     if !runtime.add_mapping(pid, framebuffer, mapped, prot) {
-        let _ = libnanami::request_process_mapping_release(pid, shared, bytes);
+        let _ = nanami_runtime::request_process_mapping_release(pid, shared, bytes);
         let _ = honoka::honoka_detach_logical_framebuffer(session.honoka_port, session.window_id);
         return Err(ENOMEM);
     }
@@ -169,7 +169,7 @@ pub(super) fn present_graphics_session(
 }
 
 pub(super) fn notify_graphics_session(session: crate::state::GraphicsSession) -> Result<(), i32> {
-    libnanami::ipc::notification_notify(session.present_notification).map_err(map_request_error)
+    nanami_runtime::ipc::notification_notify(session.present_notification).map_err(map_request_error)
 }
 
 pub(super) fn present_mapped_framebuffers(runtime: &Runtime) {

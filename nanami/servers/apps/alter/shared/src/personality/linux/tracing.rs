@@ -77,7 +77,7 @@ pub(super) fn trace_syscall_action(
     unsafe {
         ::core::ptr::copy_nonoverlapping(line.as_ptr(), runtime.terminal_shm as *mut u8, pos);
     }
-    let _ = nanami_services::terminal::terminal_write_output(
+    let _ = nanami_client::terminal::terminal_write_output(
         runtime.terminal_port,
         process.terminal_id,
         0,
@@ -135,7 +135,7 @@ pub(super) fn trace_critical_syscall(
     }
     match context.number {
         SYS_READ if context.args[0] == 0 => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] read stdin pid={} buf={:#x} len={} ret={}",
                 pid,
                 context.args[1],
@@ -144,7 +144,7 @@ pub(super) fn trace_critical_syscall(
             );
         }
         SYS_WAIT4 | SYS_RT_SIGSUSPEND | SYS_VFORK | SYS_FORK | SYS_CLONE => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] sync syscall pid={} nr={} a0={:#x} a1={:#x} ret={}",
                 pid,
                 context.number,
@@ -396,7 +396,7 @@ pub(super) fn trace_append_hex(out: &mut [u8], pos: usize, value: Word) -> usize
 
 pub(super) fn log_exec_image_entry(runtime: &mut Runtime, pid: Word, entry_point: Word) {
     if read_target_memory(runtime, pid, entry_point, 16).is_err() {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] execve entry read-back failed pid={} entry={:#x}",
             pid,
             entry_point
@@ -405,7 +405,7 @@ pub(super) fn log_exec_image_entry(runtime: &mut Runtime, pid: Word, entry_point
     }
     let word0 = read_shm_u64(runtime, 0);
     let word1 = read_shm_u64(runtime, 8);
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter/linux] execve entry pid={} entry={:#x} bytes={:#018x} {:#018x}",
         pid,
         entry_point,
@@ -416,7 +416,7 @@ pub(super) fn log_exec_image_entry(runtime: &mut Runtime, pid: Word, entry_point
 
 pub(super) fn log_exec_stack(runtime: &mut Runtime, pid: Word, guest_sp: Word) {
     if read_target_memory(runtime, pid, guest_sp, 64).is_err() {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] execve stack read-back failed pid={} sp={:#x}",
             pid,
             guest_sp
@@ -427,7 +427,7 @@ pub(super) fn log_exec_stack(runtime: &mut Runtime, pid: Word, guest_sp: Word) {
     let argv0 = read_shm_u64(runtime, 8);
     let argv1 = read_shm_u64(runtime, 16);
     let env0 = read_shm_u64(runtime, 24);
-    libnanami::println!(
+    nanami_runtime::println!(
         "[alter/linux] execve stack pid={} sp={:#x} argc={} argv0={:#x} argv1={:#x} env0={:#x}",
         pid,
         guest_sp,

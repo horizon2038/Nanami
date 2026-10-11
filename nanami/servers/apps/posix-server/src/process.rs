@@ -1,6 +1,6 @@
-use libnanami::ipc::ServiceRequest;
-use libnanami::Word;
-use nanami_services::posix::*;
+use nanami_runtime::ipc::ServiceRequest;
+use nanami_runtime::Word;
+use nanami_client::posix::*;
 
 use crate::environment::init_default_environment;
 use crate::fd::{inherit_fds, release_cloexec_session_fds, release_session_fds};
@@ -61,11 +61,11 @@ pub(crate) fn find_session(runtime: &mut Runtime, owner_pid: Word) -> Option<usi
 pub(crate) fn handle_getppid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     match session_for_pid(runtime, request.identifier) {
         Some(index) => (
-            libnanami::OS_RESPONSE_OK,
+            nanami_runtime::OS_RESPONSE_OK,
             runtime.sessions[index].posix_ppid,
             0,
         ),
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -74,8 +74,8 @@ pub(crate) fn handle_get_native_pid(
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
     match session_for_pid(runtime, request.identifier) {
-        Some(_) => (libnanami::OS_RESPONSE_OK, request.identifier, 0),
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        Some(_) => (nanami_runtime::OS_RESPONSE_OK, request.identifier, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -87,9 +87,9 @@ pub(crate) fn handle_getuid(runtime: &mut Runtime, request: ServiceRequest) -> (
             } else {
                 runtime.sessions[index].uid
             };
-            (libnanami::OS_RESPONSE_OK, uid, 0)
+            (nanami_runtime::OS_RESPONSE_OK, uid, 0)
         }
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
@@ -101,43 +101,43 @@ pub(crate) fn handle_getgid(runtime: &mut Runtime, request: ServiceRequest) -> (
             } else {
                 runtime.sessions[index].gid
             };
-            (libnanami::OS_RESPONSE_OK, gid, 0)
+            (nanami_runtime::OS_RESPONSE_OK, gid, 0)
         }
-        None => (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     }
 }
 
 pub(crate) fn handle_getpgid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let session = runtime.sessions[index];
     let current_pid = session.posix_pid;
     if request.arg0 != 0 && request.arg0 != current_pid {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    (libnanami::OS_RESPONSE_OK, session.posix_pgid, 0)
+    (nanami_runtime::OS_RESPONSE_OK, session.posix_pgid, 0)
 }
 
 pub(crate) fn handle_getsid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let session = runtime.sessions[index];
     let current_pid = session.posix_pid;
     if request.arg0 != 0 && request.arg0 != current_pid {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    (libnanami::OS_RESPONSE_OK, session.posix_sid, 0)
+    (nanami_runtime::OS_RESPONSE_OK, session.posix_sid, 0)
 }
 
 pub(crate) fn handle_setpgid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let current_pid = runtime.sessions[index].posix_pid;
     if request.arg0 != 0 && request.arg0 != current_pid {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     let pgid = if request.arg1 == 0 {
         current_pid
@@ -145,25 +145,25 @@ pub(crate) fn handle_setpgid(runtime: &mut Runtime, request: ServiceRequest) -> 
         request.arg1
     };
     runtime.sessions[index].posix_pgid = pgid;
-    (libnanami::OS_RESPONSE_OK, 0, 0)
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }
 
 pub(crate) fn handle_setsid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let pid = runtime.sessions[index].posix_pid;
     if runtime.sessions[index].posix_pgid == pid {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     runtime.sessions[index].posix_sid = pid;
     runtime.sessions[index].posix_pgid = pid;
-    (libnanami::OS_RESPONSE_OK, pid, 0)
+    (nanami_runtime::OS_RESPONSE_OK, pid, 0)
 }
 
 pub(crate) fn handle_spawn(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(parent_index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Some((path, len)) = resolve_client_path(
         runtime,
@@ -171,13 +171,13 @@ pub(crate) fn handle_spawn(runtime: &mut Runtime, request: ServiceRequest) -> (W
         request.arg0 as usize,
         request.arg1 as usize,
     ) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let image_name = path_basename(&path[..len]);
     let Ok(image_name_str) = core::str::from_utf8(image_name) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
-    let native_pid = match libnanami::request_process_spawn(image_name_str) {
+    let native_pid = match nanami_runtime::request_process_spawn(image_name_str) {
         Ok(pid) => pid,
         Err(e) => {
             crate::log_request_error("[posix-server] native spawn failed: ", e);
@@ -185,19 +185,19 @@ pub(crate) fn handle_spawn(runtime: &mut Runtime, request: ServiceRequest) -> (W
         }
     };
     let Some(child_index) = create_child_session(runtime, native_pid, parent_index) else {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[posix-server] child session allocation failed native_pid={}",
             native_pid
         );
         cleanup_native_process(native_pid);
-        return (libnanami::OS_RESPONSE_FATAL, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
     };
     if !set_session_image_name(&mut runtime.sessions[child_index], image_name) {
         cleanup_native_process(native_pid);
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     (
-        libnanami::OS_RESPONSE_OK,
+        nanami_runtime::OS_RESPONSE_OK,
         runtime.sessions[child_index].posix_pid,
         native_pid,
     )
@@ -205,17 +205,17 @@ pub(crate) fn handle_spawn(runtime: &mut Runtime, request: ServiceRequest) -> (W
 
 pub(crate) fn handle_fork(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(parent_index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let parent = runtime.sessions[parent_index];
     if parent.image_name_len == 0 {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     let image_name = &parent.image_name[..parent.image_name_len];
     let Ok(image_name_str) = core::str::from_utf8(image_name) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
-    let native_pid = match libnanami::request_process_spawn(image_name_str) {
+    let native_pid = match nanami_runtime::request_process_spawn(image_name_str) {
         Ok(pid) => pid,
         Err(e) => {
             crate::log_request_error("[posix-server] native fork spawn failed: ", e);
@@ -223,17 +223,17 @@ pub(crate) fn handle_fork(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
         }
     };
     let Some(child_index) = create_child_session(runtime, native_pid, parent_index) else {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[posix-server] fork child session allocation failed native_pid={}",
             native_pid
         );
         cleanup_native_process(native_pid);
-        return (libnanami::OS_RESPONSE_FATAL, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
     };
     runtime.sessions[child_index].image_name = parent.image_name;
     runtime.sessions[child_index].image_name_len = parent.image_name_len;
     (
-        libnanami::OS_RESPONSE_OK,
+        nanami_runtime::OS_RESPONSE_OK,
         runtime.sessions[child_index].posix_pid,
         native_pid,
     )
@@ -241,21 +241,21 @@ pub(crate) fn handle_fork(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
 
 pub(crate) fn handle_exec(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     let Some(index) = session_for_pid(runtime, request.identifier) else {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     };
     let Some((path, len)) =
         resolve_client_path(runtime, index, request.arg0 as usize, request.arg1 as usize)
     else {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     };
     let image_name = path_basename(&path[..len]);
     if image_name.is_empty() || image_name.len() > IMAGE_NAME_MAX {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let Ok(image_name_str) = core::str::from_utf8(image_name) else {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     };
-    let native_pid = match libnanami::request_process_spawn(image_name_str) {
+    let native_pid = match nanami_runtime::request_process_spawn(image_name_str) {
         Ok(pid) => pid,
         Err(e) => {
             crate::log_request_error("[posix-server] native exec spawn failed: ", e);
@@ -264,11 +264,11 @@ pub(crate) fn handle_exec(runtime: &mut Runtime, request: ServiceRequest) -> Rep
     };
 
     let old_native_pid = runtime.sessions[index].owner_pid;
-    if let Err(e) = libnanami::request_process_kill(old_native_pid, 0) {
+    if let Err(e) = nanami_runtime::request_process_kill(old_native_pid, 0) {
         cleanup_native_process(native_pid);
         return ReplyAction::error(crate::map_request_error_to_status(e));
     }
-    let _ = libnanami::request_process_reap(old_native_pid);
+    let _ = nanami_runtime::request_process_reap(old_native_pid);
 
     runtime.sessions[index].owner_pid = native_pid;
     runtime.cache_session(native_pid, index);
@@ -279,12 +279,12 @@ pub(crate) fn handle_exec(runtime: &mut Runtime, request: ServiceRequest) -> Rep
 
 pub(crate) fn handle_kill(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     let Some(caller_index) = session_for_pid(runtime, request.identifier) else {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     };
     let target_posix_pid = request.arg0;
     let signal = request.arg1;
     if target_posix_pid == 0 {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
 
     let mut target_index = None;
@@ -297,7 +297,7 @@ pub(crate) fn handle_kill(runtime: &mut Runtime, request: ServiceRequest) -> Rep
         i += 1;
     }
     let Some(target_index) = target_index else {
-        return ReplyAction::error(libnanami::OS_RESPONSE_INVALID_ARGUMENT);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     };
 
     let caller = runtime.sessions[caller_index];
@@ -305,12 +305,12 @@ pub(crate) fn handle_kill(runtime: &mut Runtime, request: ServiceRequest) -> Rep
     let same_user =
         caller.euid == POSIX_ROOT_UID || caller.euid == target.uid || caller.euid == target.euid;
     if !same_user {
-        return ReplyAction::error(libnanami::OS_RESPONSE_PERMISSION_DENIED);
+        return ReplyAction::error(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED);
     }
     if signal == 0 {
         return ReplyAction::ok(0, 0);
     }
-    match libnanami::request_process_kill(target.owner_pid, signal) {
+    match nanami_runtime::request_process_kill(target.owner_pid, signal) {
         Ok(()) if target.owner_pid == request.identifier => ReplyAction::DropReply,
         Ok(()) => ReplyAction::ok(0, 0),
         Err(e) => ReplyAction::error(crate::map_request_error_to_status(e)),
@@ -319,10 +319,10 @@ pub(crate) fn handle_kill(runtime: &mut Runtime, request: ServiceRequest) -> Rep
 
 pub(crate) fn handle_waitpid(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     let Some(parent_index) = session_for_pid(runtime, request.identifier) else {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     if (request.arg1 & !POSIX_WAIT_NOHANG) != 0 {
-        return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
     let parent_pid = runtime.sessions[parent_index].posix_pid;
@@ -337,16 +337,16 @@ pub(crate) fn handle_waitpid(runtime: &mut Runtime, request: ServiceRequest) -> 
             && (any_child || child.posix_pid == target_pid)
         {
             matched = true;
-            match libnanami::request_process_status(child.owner_pid) {
+            match nanami_runtime::request_process_status(child.owner_pid) {
                 Ok((true, exit_code)) => {
                     let posix_pid = child.posix_pid;
-                    if let Err(e) = libnanami::request_process_reap(child.owner_pid) {
+                    if let Err(e) = nanami_runtime::request_process_reap(child.owner_pid) {
                         return (crate::map_request_error_to_status(e), 0, 0);
                     }
                     release_session_fds(runtime, i);
                     runtime.invalidate_session_cache(i);
                     runtime.sessions[i] = Session::EMPTY;
-                    return (libnanami::OS_RESPONSE_OK, posix_pid, exit_code);
+                    return (nanami_runtime::OS_RESPONSE_OK, posix_pid, exit_code);
                 }
                 Ok((false, _)) => {}
                 Err(e) => return (crate::map_request_error_to_status(e), 0, 0),
@@ -356,12 +356,12 @@ pub(crate) fn handle_waitpid(runtime: &mut Runtime, request: ServiceRequest) -> 
     }
 
     if matched && (request.arg1 & POSIX_WAIT_NOHANG) != 0 {
-        return (libnanami::OS_RESPONSE_OK, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
     if matched {
-        return (libnanami::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
-    (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+    (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
 }
 
 fn create_child_session(
@@ -427,6 +427,6 @@ fn set_session_image_name(session: &mut Session, image_name: &[u8]) -> bool {
 }
 
 fn cleanup_native_process(native_pid: Word) {
-    let _ = libnanami::request_process_kill(native_pid, 0);
-    let _ = libnanami::request_process_reap(native_pid);
+    let _ = nanami_runtime::request_process_kill(native_pid, 0);
+    let _ = nanami_runtime::request_process_reap(native_pid);
 }

@@ -18,7 +18,7 @@ impl Controller {
                     {
                         Ok(_) => {
                             device.endpoints[index].mouse.set_report_protocol(layout);
-                            libnanami::println!(
+                            nanami_runtime::println!(
                                 "[usb-server] mouse interface={} protocol=report wheel=true",
                                 interface.number
                             );
@@ -28,7 +28,7 @@ impl Controller {
                         Err(error) => return Err(error),
                     }
                 }
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] mouse interface={} protocol=boot wheel=false (report unavailable)",
                     interface.number
                 );

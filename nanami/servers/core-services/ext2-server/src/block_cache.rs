@@ -1,7 +1,7 @@
 //! Bounded, indexed block cache. Dirty entries are never evicted or replayed
 //! after an uncertain device error; successful barriers make them evictable.
 use alloc::{collections::BTreeMap, vec, vec::Vec};
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BlockKind {
@@ -183,14 +183,14 @@ impl BlockCache {
                 self.write_run(port, first, count)?;
             }
             if wrote {
-                nanami_services::block::block_device_flush(port)?;
+                nanami_client::block::block_device_flush(port)?;
             }
         }
         Ok(())
     }
 
     fn write_run(&self, port: Word, block: usize, count: usize) -> Result<(), RequestError> {
-        let written = nanami_services::block::block_device_write(port, block, count, 0)?;
+        let written = nanami_client::block::block_device_write(port, block, count, 0)?;
         if written == count * self.block_size {
             Ok(())
         } else {

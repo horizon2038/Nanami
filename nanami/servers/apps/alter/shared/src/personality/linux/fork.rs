@@ -38,7 +38,7 @@ pub(super) fn sys_fork(
     let child_pid = match spawn_fork_child(runtime, image_name.as_bytes(), pcb_slot, personality) {
         Ok(pid) => pid,
         Err(errno) => {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] fork failed stage=spawn image={} pcb_slot={} errno={}",
                 image_name,
                 pcb_slot,
@@ -47,7 +47,7 @@ pub(super) fn sys_fork(
             return Err(errno);
         }
     };
-    let child_pcb = libnanami::ipc::process_slot_descriptor(pcb_slot);
+    let child_pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
 
     let image_ranges = match fork_step(
         "clone image",
@@ -99,7 +99,7 @@ pub(super) fn sys_fork(
         ) {
             Ok(()) => Ok(()),
             Err(error) => {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] fork register clone failed parent_pcb={:#x} child_pcb={:#x} err={:?}",
                     parent.pcb,
                     child_pcb,
@@ -120,7 +120,7 @@ pub(super) fn sys_fork(
         parent.terminal_id,
         &parent.image_name[..parent.image_name_len],
     ) {
-        libnanami::println!(
+        nanami_runtime::println!(
             "[alter/linux] fork failed stage=install child parent={} child={} errno={}",
             parent_pid,
             child_pid,
@@ -143,7 +143,7 @@ pub(super) fn sys_fork(
         if mapping.base != 0
             && !runtime.add_mapping(child_pid, mapping.base, mapping.size, mapping.prot)
         {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[alter/linux] fork failed stage=track mappings parent={} child={} errno={}",
                 parent_pid,
                 child_pid,
@@ -177,7 +177,7 @@ pub(super) fn sys_fork(
     if cfg!(debug_assertions) {
         if let Ok(read_back_fs_base) = read_register_value(child_pcb, REG_FS_BASE) {
             if read_back_fs_base != child_fs_base {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] fork fsbase mismatch parent={} child={} expected={:#x} actual={:#x}",
                     parent_pid,
                     child_pid,
@@ -216,8 +216,8 @@ pub(super) fn sys_vfork(
 }
 
 pub(super) fn discard_spawned_child(pid: Word) {
-    let _ = libnanami::request_process_kill(pid, 1);
-    let _ = libnanami::request_process_reap(pid);
+    let _ = nanami_runtime::request_process_kill(pid, 1);
+    let _ = nanami_runtime::request_process_reap(pid);
 }
 
 pub(super) fn reap_exited_children(runtime: &mut Runtime, parent_pid: Word) {
@@ -225,14 +225,14 @@ pub(super) fn reap_exited_children(runtime: &mut Runtime, parent_pid: Word) {
         let Some((child_pid, _status)) = runtime.exited_child(parent_pid, 0) else {
             return;
         };
-        match libnanami::request_process_reap(child_pid) {
+        match nanami_runtime::request_process_reap(child_pid) {
             Ok(()) => {
                 close_process_files(runtime, child_pid);
                 runtime.remove_process(child_pid);
             }
             Err(error) => {
                 let errno = map_request_error(error);
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] fork pre-clean reap failed parent={} child={} errno={}",
                     parent_pid,
                     child_pid,
@@ -248,7 +248,7 @@ pub(super) fn reap_exited_children(runtime: &mut Runtime, parent_pid: Word) {
 
 pub(super) fn fork_step<T>(stage: &str, result: Result<T, i32>) -> Result<T, i32> {
     result.map_err(|error| {
-        libnanami::println!("[alter/linux] fork failed stage={} errno={}", stage, error);
+        nanami_runtime::println!("[alter/linux] fork failed stage={} errno={}", stage, error);
         error
     })
 }
@@ -320,7 +320,7 @@ pub(super) fn clone_process_image(
     parent_pid: Word,
     child_pid: Word,
 ) -> Result<[(Word, Word); LINUX_MAX_LOAD_SEGMENTS], i32> {
-    libnanami::request_process_memory_read(
+    nanami_runtime::request_process_memory_read(
         parent_pid,
         LINUX_IMAGE_BASE,
         runtime.posix_shm,
@@ -348,7 +348,7 @@ pub(super) fn clone_process_image(
     if table_bytes > runtime.posix_shm_size {
         return Err(EINVAL);
     }
-    libnanami::request_process_memory_read(
+    nanami_runtime::request_process_memory_read(
         parent_pid,
         LINUX_IMAGE_BASE + phoff,
         runtime.posix_shm,
@@ -413,10 +413,10 @@ pub(super) fn clone_process_mappings(
                 continue;
             }
             let (base, mapped) =
-                libnanami::request_process_map_anonymous_at(child_pid, mapping.base, mapping.size)
+                nanami_runtime::request_process_map_anonymous_at(child_pid, mapping.base, mapping.size)
                     .map_err(|error| {
                         let errno = map_request_error(error);
-                        libnanami::println!(
+                        nanami_runtime::println!(
                             "[alter/linux] fork map clone failed parent={} child={} base={:#x} size={:#x} errno={}",
                             parent_pid,
                             child_pid,
@@ -427,7 +427,7 @@ pub(super) fn clone_process_mappings(
                         errno
                     })?;
             if base != mapping.base || mapped < mapping.size {
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[alter/linux] fork map clone mismatch parent={} child={} want=[{:#x}..{:#x}) got=[{:#x}..{:#x})",
                     parent_pid,
                     child_pid,

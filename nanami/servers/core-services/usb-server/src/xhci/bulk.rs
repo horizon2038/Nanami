@@ -187,7 +187,7 @@ impl Controller {
                     );
                     return Ok(Some(len - residual));
                 }
-                libnanami::println!(
+                nanami_runtime::println!(
                     "[usb-server] bulk slot={} ep={} code={}",
                     slot,
                     endpoint.dci(),

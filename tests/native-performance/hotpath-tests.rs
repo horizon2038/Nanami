@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 extern crate alloc;
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 
 use std::collections::VecDeque;
 use std::hint::black_box;

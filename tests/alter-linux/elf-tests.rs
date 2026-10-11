@@ -1,5 +1,5 @@
 //! Host-side tests of the ELF parser actually used by Alter.
-extern crate self as libnanami;
+extern crate self as nanami_runtime;
 pub type Word = usize;
 mod arch {
     pub const ELF_MACHINE: u16 = 62;

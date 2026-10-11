@@ -15,10 +15,10 @@ pub(super) fn ensure_network(runtime: &mut Runtime) -> Result<(), i32> {
     if runtime.network_port != 0 && runtime.network_shm != 0 {
         return Ok(());
     }
-    nanami_services::registry::connect_network_service(SLOT_NETWORK_SERVICE)
+    nanami_client::registry::connect_network_service(SLOT_NETWORK_SERVICE)
         .map_err(|_| ENETDOWN)?;
-    let port = libnanami::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
-    let self_pid = libnanami::get_self_pid().map_err(|_| ENETDOWN)?;
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
+    let self_pid = nanami_runtime::get_self_pid().map_err(|_| ENETDOWN)?;
     let (status, peer, size) = net::net_service_control_ex(
         port,
         net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY,
@@ -26,10 +26,10 @@ pub(super) fn ensure_network(runtime: &mut Runtime) -> Result<(), i32> {
         ALTER_DEFAULT_SHM_BYTES,
     )
     .map_err(map_network_error)?;
-    if status != libnanami::OS_RESPONSE_OK || peer == 0 || size == 0 {
+    if status != nanami_runtime::OS_RESPONSE_OK || peer == 0 || size == 0 {
         return Err(ENETDOWN);
     }
-    net::net_service_attach_rx_notification(port, libnanami::PROCESS_SLOT_NOTIFICATION)
+    net::net_service_attach_rx_notification(port, nanami_runtime::PROCESS_SLOT_NOTIFICATION)
         .map_err(map_network_error)?;
     runtime.network_port = port;
     runtime.network_shm = peer;
@@ -124,7 +124,7 @@ pub(super) fn sys_connect(
                 }
                 return Ok(0);
             }
-            Ok(_) | Err(RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)) => {
+            Ok(_) | Err(RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)) => {
                 return Err(EINPROGRESS);
             }
             Err(error) => return Err(map_network_error(error)),

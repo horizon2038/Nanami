@@ -12,30 +12,30 @@ mod host;
 mod power;
 mod routing;
 
-use libnanami::{ipc::ServiceEvent, RequestError, Word};
-use nanami_services::{power::ACPI_SERVICE, registry, vfs};
+use nanami_runtime::{ipc::ServiceEvent, RequestError, Word};
+use nanami_client::{power::ACPI_SERVICE, registry, vfs};
 
 const SERVICE_SLOT: Word = 20;
 const VFS_SLOT: Word = 23;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[acpi-server] panic: {}", info);
+    nanami_runtime::println!("[acpi-server] panic: {}", info);
     failure::stop()
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
-    registry::connect_service(nanami_services::device::DEVICE_MANAGER_SERVICE, 24)?;
-    let rsdp = nanami_services::device::acpi_rsdp(libnanami::ipc::process_slot_descriptor(24))?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
+    registry::connect_service(nanami_client::device::DEVICE_MANAGER_SERVICE, 24)?;
+    let rsdp = nanami_client::device::acpi_rsdp(nanami_runtime::ipc::process_slot_descriptor(24))?;
     // Register before loading AML. Routing runs on notification without holding
     // a driver-manager RPC; power methods remain deferred until shutdown.
     registry::register_service(ACPI_SERVICE)?;
-    libnanami::ipc::bind_current_thread_notification(libnanami::ipc::process_slot_descriptor(
-        libnanami::PROCESS_SLOT_NOTIFICATION,
+    nanami_runtime::ipc::bind_current_thread_notification(nanami_runtime::ipc::process_slot_descriptor(
+        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
     ))?;
-    libnanami::println!("[acpi-server] ready rsdp={:#x} (S5 on demand)", rsdp);
-    let port = libnanami::ipc::process_slot_descriptor(SERVICE_SLOT);
+    nanami_runtime::println!("[acpi-server] ready rsdp={:#x} (S5 on demand)", rsdp);
+    let port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_SLOT);
     let mut reply = None;
     let mut state = State {
         host: None,
@@ -45,11 +45,11 @@ fn nanami_main() -> libnanami::NanamiResult {
     };
     loop {
         let event = match reply.take() {
-            Some(status) => libnanami::ipc::service_reply_receive_event(port, status, 0, 0)?,
-            None => libnanami::ipc::service_receive_event(port)?,
+            Some(status) => nanami_runtime::ipc::service_reply_receive_event(port, status, 0, 0)?,
+            None => nanami_runtime::ipc::service_receive_event(port)?,
         };
         if let ServiceEvent::Notification { identifier, .. } = event {
-            if identifier & nanami_services::device::ACPI_ROUTE_NOTIFICATION != 0 {
+            if identifier & nanami_client::device::ACPI_ROUTE_NOTIFICATION != 0 {
                 state.route_usb(rsdp);
             }
             continue;
@@ -57,15 +57,15 @@ fn nanami_main() -> libnanami::NanamiResult {
         if let ServiceEvent::Request(request) = event {
             failure::request_active(true);
             reply = Some(
-                if request.code != nanami_services::power::POWER_REQUEST_SHUTDOWN {
-                    libnanami::OS_RESPONSE_INVALID_ARGUMENT
+                if request.code != nanami_client::power::POWER_REQUEST_SHUTDOWN {
+                    nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT
                 } else {
                     match state.shutdown(rsdp) {
                         Err(error) => {
-                            libnanami::println!("[acpi-server] shutdown aborted: {}", error);
-                            libnanami::OS_RESPONSE_ILLEGAL_OPERATION
+                            nanami_runtime::println!("[acpi-server] shutdown aborted: {}", error);
+                            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION
                         }
-                        Ok(()) => libnanami::OS_RESPONSE_FATAL,
+                        Ok(()) => nanami_runtime::OS_RESPONSE_FATAL,
                     }
                 },
             );
@@ -89,7 +89,7 @@ impl State {
         if self.firmware.is_none() {
             self.firmware = Some(
                 firmware::load(self.host.as_ref().unwrap().clone(), rsdp).map_err(|error| {
-                    libnanami::println!("[acpi-server] firmware: {:?}", error);
+                    nanami_runtime::println!("[acpi-server] firmware: {:?}", error);
                     RequestError::Unsupported
                 })?,
             );
@@ -98,22 +98,22 @@ impl State {
     }
 
     fn route_usb(&mut self, rsdp: Word) {
-        let manager = libnanami::ipc::process_slot_descriptor(24);
+        let manager = nanami_runtime::ipc::process_slot_descriptor(24);
         let router = self.firmware(rsdp).and_then(|firmware| {
             routing::Routing::new(firmware.interpreter.clone()).map_err(|error| {
-                libnanami::println!("[acpi-server] PCI routing init: {}", error);
+                nanami_runtime::println!("[acpi-server] PCI routing init: {}", error);
                 RequestError::Unsupported
             })
         });
         for index in 0..4 {
-            let Ok(Some((bdf, pin))) = nanami_services::device::usb_pci_route(manager, index)
+            let Ok(Some((bdf, pin))) = nanami_client::device::usb_pci_route(manager, index)
             else {
                 continue;
             };
             let irq = router.as_ref().ok().and_then(|router| {
                 match router.route(bdf, pin).and_then(|route| {
                     route.supported_irq().map_err(|error| {
-                        libnanami::println!(
+                        nanami_runtime::println!(
                             "[acpi-server] USB PCI {:06x} unsupported route {:?}",
                             bdf,
                             route
@@ -122,7 +122,7 @@ impl State {
                     })
                 }) {
                     Ok(irq) => {
-                        libnanami::println!(
+                        nanami_runtime::println!(
                             "[acpi-server] USB PCI {:06x} pin={} -> GSI={} level/low",
                             bdf,
                             pin,
@@ -131,7 +131,7 @@ impl State {
                         Some(irq)
                     }
                     Err(error) => {
-                        libnanami::println!(
+                        nanami_runtime::println!(
                             "[acpi-server] USB PCI {:06x} pin={} route unavailable: {}",
                             bdf,
                             pin,
@@ -141,8 +141,8 @@ impl State {
                     }
                 }
             });
-            if let Err(error) = nanami_services::device::report_usb_irq(manager, index, irq) {
-                libnanami::println!("[acpi-server] USB IRQ report failed: {}", error);
+            if let Err(error) = nanami_client::device::report_usb_irq(manager, index, irq) {
+                nanami_runtime::println!("[acpi-server] USB IRQ report failed: {}", error);
             }
         }
     }
@@ -150,7 +150,7 @@ impl State {
     fn shutdown(&mut self, rsdp: Word) -> Result<(), RequestError> {
         if self.power.is_none() {
             self.power = Some(self.firmware(rsdp)?.power().map_err(|error| {
-                libnanami::println!("[acpi-server] S5 initialization: {:?}", error);
+                nanami_runtime::println!("[acpi-server] S5 initialization: {:?}", error);
                 RequestError::Unsupported
             })?);
         }
@@ -158,10 +158,10 @@ impl State {
             power, vfs_port, ..
         } = self;
         let power = power.as_ref().unwrap();
-        libnanami::println!("[acpi-server] S5 types={:?}", power.sleep_types());
+        nanami_runtime::println!("[acpi-server] S5 types={:?}", power.sleep_types());
         if vfs_port.is_none() {
             registry::connect_vfs_service(VFS_SLOT)?;
-            *vfs_port = Some(libnanami::ipc::process_slot_descriptor(VFS_SLOT));
+            *vfs_port = Some(nanami_runtime::ipc::process_slot_descriptor(VFS_SLOT));
         }
         let vfs_port = vfs_port.unwrap();
         // Prepare firmware only after all storage writes are durable. Mutations
@@ -169,11 +169,11 @@ impl State {
         vfs::vfs_freeze(vfs_port)?;
         failure::storage_frozen(true);
         let result = power.prepare().and_then(|()| {
-            libnanami::println!("[acpi-server] entering S5");
+            nanami_runtime::println!("[acpi-server] entering S5");
             power.enter_s5()
         });
         if let Err(error) = power.restore_mode() {
-            libnanami::println!(
+            nanami_runtime::println!(
                 "[acpi-server] restoring firmware power mode failed: {:?}",
                 error
             );
@@ -181,10 +181,10 @@ impl State {
         vfs::vfs_thaw(vfs_port)?;
         failure::storage_frozen(false);
         result.map_err(|error| {
-            libnanami::println!("[acpi-server] S5 failed: {:?}", error);
+            nanami_runtime::println!("[acpi-server] S5 failed: {:?}", error);
             RequestError::Unsupported
         })
     }
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);

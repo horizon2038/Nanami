@@ -25,7 +25,7 @@ docker run --rm --platform linux/amd64 \
 Build the image and test:
 
 ```sh
-LINUX_ROOTFS_DIR="$PWD/out/alter-glibc-root" make image
+LINUX_ROOTFS_DIR="$PWD/out/alter-glibc-root" cargo xtask build --rebuild-rootfs
 python3 tests/alter-linux/qemu-smoke.py \
   --image spencer/out/x86_64-pc99-release/spencer.img --smp 4
 ```
@@ -49,8 +49,8 @@ clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
   tests/alter-linux/network.c -o out/alter-glibc-root/bin/network-test
 ```
 
-Include `bin/busybox` through `EXTRA_LINUX_BINS`, seed this fixture through
-`LINUX_ROOTFS_DIR`, and rebuild the rootfs (`ROOTFS_REBUILD=1`). Run:
+Include `bin/busybox` through repeatable `--linux-bin` options, seed this fixture through
+`LINUX_ROOTFS_DIR`, and rebuild the rootfs (`--rebuild-rootfs`). Run:
 
 ```sh
 python3 tests/alter-linux/qemu-smoke.py \
@@ -100,7 +100,7 @@ done
 ```
 
 Seed these through `LINUX_ROOTFS_DIR`, with `bin/bash` and `bin/busybox` in
-`EXTRA_LINUX_BINS`. Use a disposable rootfs/image: the fixtures create, rename,
+repeatable `--linux-bin` options. Use a disposable rootfs/image: the fixtures create, rename,
 and delete guest files. Run on snapshots without network access:
 
 ```sh

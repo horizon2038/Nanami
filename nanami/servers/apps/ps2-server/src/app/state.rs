@@ -1,4 +1,4 @@
-use libnanami::Word;
+use nanami_runtime::Word;
 
 use crate::constants::{
     MAX_KEY_EVENTS_PER_BATCH, MAX_MOUSE_BUTTON_EVENTS_PER_BATCH, PS2_MOUSE_ACK, PS2_MOUSE_RESEND,

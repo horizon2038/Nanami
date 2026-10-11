@@ -1,5 +1,5 @@
-use libnanami::Word;
-use nanami_services::posix::*;
+use nanami_runtime::Word;
+use nanami_client::posix::*;
 
 pub(crate) const SLOT_SERVICE_PORT: Word = 20;
 pub(crate) const SLOT_VFS_SERVICE: Word = 23;
@@ -177,7 +177,7 @@ pub(crate) enum ReplyAction {
 
 impl ReplyAction {
     pub(crate) const fn ok(detail0: Word, detail1: Word) -> Self {
-        Self::Reply(libnanami::OS_RESPONSE_OK, detail0, detail1)
+        Self::Reply(nanami_runtime::OS_RESPONSE_OK, detail0, detail1)
     }
 
     pub(crate) const fn error(status: Word) -> Self {

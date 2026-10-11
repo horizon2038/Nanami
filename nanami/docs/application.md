@@ -10,10 +10,11 @@ C++ SDK remains x86_64-only.
 nanami/servers/
   core-services/        # Boot-critical binaries packaged into initramfs
   apps/                 # Services and applications installed into rootfs /bin
-  libs/                 # Reusable implementation crates
-  sdk/rust/libnanami/   # Low-level Nanami OS API
-  sdk/rust/nanami-services/ # Typed service protocol wrappers
-  sdk/cpp/              # Freestanding C++ SDK
+  uapi/                 # Pure ABI/protocol definitions and C++ headers
+  targets/              # Native target JSON and linker scripts
+  libs/nanami-runtime/  # Entry, allocator, OS requests, IPC and C++ implementation
+  libs/nanami-client/   # Typed service protocol wrappers
+  libs/                 # Other reusable implementation crates
 ```
 
 Use `core-services` only when a component must run before the root filesystem
@@ -21,7 +22,7 @@ is available. Normal drivers, upper services, desktop components, tests, and
 applications belong in `apps`.
 
 The build discovers Rust components through `Cargo.toml` and C++ components
-through `Makefile`. A disabled source directory may retain `_Cargo.toml`, but it
+through declarative `nanami-app.toml` manifests. A disabled source directory may retain `_Cargo.toml`, but it
 is not built or installed.
 
 ## Startup Manifests
@@ -44,8 +45,8 @@ The rootfs image contains extensionless executable names. For example, the
 
 ## Minimal Rust Application
 
-Native Rust applications are `no_std`, use `libnanami::nanami_entry!`, and
-return `libnanami::NanamiResult` from their entry function.
+Native Rust applications are `no_std`, use `nanami_runtime::nanami_entry!`, and
+return `nanami_runtime::NanamiResult` from their entry function.
 
 ```rust
 #![no_std]
@@ -53,20 +54,20 @@ return `libnanami::NanamiResult` from their entry function.
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    libnanami::println!("[sample] panic");
-    let _ = libnanami::request_exit();
+    nanami_runtime::println!("[sample] panic");
+    let _ = nanami_runtime::request_exit();
     loop {
         core::hint::spin_loop();
     }
 }
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
-    libnanami::println!("[sample] hello");
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
+    nanami_runtime::println!("[sample] hello");
     Ok(())
 }
 
-libnanami::nanami_entry!(nanami_main);
+nanami_runtime::nanami_entry!(nanami_main);
 ```
 
 `nanami_entry!` parses the initial process stack, calls the application entry,
@@ -81,9 +82,9 @@ Applications that allocate must initialize the Nanami allocator explicitly:
 #![feature(alloc_error_handler)]
 extern crate alloc;
 
-fn nanami_main() -> libnanami::NanamiResult {
-    libnanami::ipc::init_ipc_tls()?;
-    let (_base, _mapped_size) = libnanami::heap::init_heap(4 * 1024 * 1024)?;
+fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
+    let (_base, _mapped_size) = nanami_runtime::heap::init_heap(4 * 1024 * 1024)?;
     Ok(())
 }
 ```
@@ -112,8 +113,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libnanami = { path = "../../sdk/rust/libnanami" }
-nanami-services = { path = "../../sdk/rust/nanami-services" }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
 
 [profile.dev]
 panic = "abort"
@@ -125,8 +126,8 @@ panic = "abort"
 ```
 
 Use an existing neighboring `.cargo/config.toml` as the target configuration.
-The top-level build selects the target under `sdk/arch/x86_64` or
-`sdk/arch/aarch64`, enables `build-std`, and passes the matching Nanami user
+The top-level build selects the target under `targets/x86_64` or
+`targets/aarch64`, enables `build-std`, and passes the matching Nanami user
 linker script.
 
 The empty `[workspace]` prevents Cargo from treating each application as a
@@ -136,32 +137,39 @@ member of an unrelated parent workspace.
 
 From the repository root:
 
-```bash
-make image
-make fs-image SIZE_MB=64 OUT=out/ext2.img
-make run
-
-make image ARCH=aarch64
-make fs-image ARCH=aarch64 SIZE_MB=64
-make run ARCH=aarch64
+```text
+cargo xtask servers
+cargo xtask build --rebuild-rootfs
+cargo xtask run
+cargo xtask build --arch aarch64 --no-linux-bins --rebuild-rootfs
+cargo xtask run --arch aarch64 --net none
 ```
 
-`make image` builds all active components, creates the initramfs, and delegates
-the boot image to SPENCER. `make run` also rebuilds the default rootfs when its
-inputs are newer.
+`build` assembles the boot disk; an existing staging rootfs is reused unless
+`--rebuild-rootfs` is supplied. `run` never builds implicitly. Back up saved
+guest data before rebuilding the boot disk, or use `--output-image` to isolate
+the output.
 
-To intentionally install only selected native rootfs applications:
+To package only selected native rootfs applications:
 
-```bash
-ROOTFS_APPS="shell nanami-info performance-monitor" make fs-image
+```text
+cargo xtask rootfs --rootfs out/minimal.img --no-linux-bins --rootfs-app shell --rootfs-app nanami-info
 ```
 
-To install foreign binaries for Alter:
+To collect every file in a foreign-binary directory (recursively, by basename):
 
-```bash
-EXTRA_LINUX_BINS="/path/to/busybox /path/to/iwasm" make fs-image
-EXTRA_FREEBSD_BINS="/path/to/sh" make fs-image
+```text
+cargo xtask rootfs --rootfs out/linux.img --linux-bin-dir "path/to/linux binaries"
+cargo xtask rootfs --rootfs out/freebsd.img --freebsd-bin "path/to/sh"
 ```
+
+The default Linux directory is `bin/`; additional files use repeatable
+`--linux-bin`. Duplicate names and host links/special files are rejected.
+A Linux directory tree can be added with `--linux-rootfs-dir`.
+
+Public protocol constants/types belong in `nanami-uapi`. Runtime code belongs
+in `nanami-runtime`; service IPC wrappers belong in `nanami-client`.
+Do not put an executable service implementation in UAPI.
 
 ## Connecting to a Service
 
@@ -169,11 +177,11 @@ Services are resolved through Alpha's registry into a capability slot chosen by
 the client.
 
 ```rust
-const SLOT_TIMER_SERVICE: libnanami::Word = 22;
+const SLOT_TIMER_SERVICE: nanami_runtime::Word = 22;
 
-nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE)?;
-let timer = libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
-nanami_services::timer::timer_service_sleep_milliseconds(timer, 100)?;
+nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE)?;
+let timer = nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
+nanami_client::timer::timer_service_sleep_milliseconds(timer, 100)?;
 ```
 
 Rules:
@@ -190,11 +198,11 @@ Rules:
 Generic registration uses a name:
 
 ```rust
-nanami_services::registry::register_service("sample-service")?;
+nanami_client::registry::register_service("sample-service")?;
 ```
 
 The server port is conventionally stored in process slot 20. Add a typed
-registration and connection wrapper to `nanami-services` when a protocol is
+registration and connection wrapper to `nanami-client` when a protocol is
 shared by multiple clients.
 
 A service loop should receive a request, perform bounded work, reply, and return
@@ -223,13 +231,13 @@ Every shared-memory protocol must validate:
 ## VFS Applications
 
 Connect to `vfs-service`, attach shared memory, place paths or payloads into the
-mapping, and call the typed wrappers in `nanami_services::vfs`.
+mapping, and call the typed wrappers in `nanami_client::vfs`.
 
 Current operations include open, compound open, read, delegated read, write,
 create, mkdir, remove, rename, stat, fstat, directory read, and close.
 
 Directory records use the VFS layout defined in
-`nanami-services/src/vfs/constants.rs`. Applications must use those constants
+`nanami-client/src/vfs/constants.rs`. Applications must use those constants
 instead of duplicating offsets.
 
 ## Terminal and Process Launch
@@ -274,7 +282,7 @@ protocols belong above `net-server`.
 2. Copy the closest active component's Cargo and target configuration.
 3. Implement a `NanamiResult` entry and bounded event loop.
 4. Initialize IPC TLS and heap state as required.
-5. Connect to dependencies through `nanami-services`.
+5. Connect to dependencies through `nanami-client`.
 6. Register a service only when other processes consume the component.
 7. Add a startup-manifest entry only when automatic startup is required.
 8. Build the component in release mode.
@@ -286,7 +294,7 @@ protocols belong above `net-server`.
 At minimum:
 
 ```bash
-make image
+cargo xtask build --rebuild-rootfs
 ```
 
 For user-visible or lifecycle changes, run QEMU and verify the actual workflow.
@@ -298,7 +306,7 @@ change touches the device path.
 
 ### Custom target errors
 
-Build through `nanami/servers/Makefile` or use an existing application
+Build through `cargo xtask servers` or use an existing application
 `.cargo/config.toml`. Native applications require the custom target, Rust
 `build-std`, and Nanami linker script together.
 

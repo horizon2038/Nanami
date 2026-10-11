@@ -14,9 +14,9 @@ pub(super) fn map_request_error(error: RequestError) -> i32 {
     match error {
         RequestError::InvalidArgument => EINVAL,
         RequestError::Unsupported => ENOSYS,
-        RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
-        RequestError::Status(libnanami::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
-        RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION) => EIO,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION) => EIO,
         RequestError::Status(_) | RequestError::Transport | RequestError::Protocol => EIO,
     }
 }
@@ -24,9 +24,9 @@ pub(super) fn map_request_error(error: RequestError) -> i32 {
 pub(super) fn map_path_request_error(error: RequestError) -> i32 {
     match error {
         RequestError::InvalidArgument
-        | RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT)
-        | RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR)
-        | RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION) => ENOENT,
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION) => ENOENT,
         other => map_request_error(other),
     }
 }
@@ -34,32 +34,32 @@ pub(super) fn map_path_request_error(error: RequestError) -> i32 {
 pub(super) fn map_network_error(error: RequestError) -> i32 {
     match error {
         RequestError::InvalidArgument
-        | RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
-        RequestError::Status(libnanami::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
-        RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)
-        | RequestError::Status(nanami_services::net::NET_SERVICE_RESPONSE_WOULD_BLOCK) => EAGAIN,
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)
+        | RequestError::Status(nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK) => EAGAIN,
         _ => ENETDOWN,
     }
 }
 
 pub(super) fn map_link_request_error(error: RequestError) -> i32 {
     match error {
-        RequestError::Status(libnanami::OS_RESPONSE_INVALID_DESCRIPTOR) => ENOENT,
-        RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EEXIST,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR) => ENOENT,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EEXIST,
         other => map_request_error(other),
     }
 }
 
 pub(super) fn map_network_bind_error(error: RequestError) -> i32 {
     match error {
-        RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION) => EADDRINUSE,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION) => EADDRINUSE,
         other => map_network_error(other),
     }
 }
 
 pub(super) fn map_create_request_error(error: RequestError) -> i32 {
     match error {
-        RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT) => EEXIST,
+        RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EEXIST,
         other => map_path_request_error(other),
     }
 }

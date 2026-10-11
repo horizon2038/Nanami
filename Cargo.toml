@@ -1,5 +1,6 @@
 [workspace]
-members = ["nanami"]
+members = ["nanami", "xtask", "crates/ext2-image", "nanami/servers/uapi"]
+default-members = ["nanami"]
 exclude = ["spencer"]
 resolver = "2"
 

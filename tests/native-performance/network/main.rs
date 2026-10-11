@@ -1,7 +1,7 @@
 //! Production ARP/IP/TCP-send and HTTP reactor code with IPC/device I/O mocked.
 #![allow(dead_code)]
-extern crate self as libnanami;
-extern crate self as nanami_services;
+extern crate self as nanami_runtime;
+extern crate self as nanami_client;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -59,7 +59,7 @@ pub mod net {
     use super::*;
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../nanami/servers/sdk/rust/nanami-services/src/net/constants.rs"
+        "/../../nanami/servers/uapi/src/net.rs"
     ));
 
     pub fn net_device_recv(_: Word, offset: Word, _: Word) -> Result<Word, RequestError> {

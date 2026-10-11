@@ -1,6 +1,6 @@
 use core::ptr::{read_volatile, write_volatile};
 
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 #[path = "hpet_clock.rs"]
 mod hpet_clock;
@@ -79,15 +79,15 @@ fn select_interrupt(base: Word) -> Result<(Word, bool), RequestError> {
 }
 
 pub fn prepare(_timer_resource_slot: Word) -> Result<PreparedTimer, RequestError> {
-    libnanami::connect_service_by_name(
-        nanami_services::device::DEVICE_MANAGER_SERVICE,
+    nanami_runtime::connect_service_by_name(
+        nanami_client::device::DEVICE_MANAGER_SERVICE,
         SLOT_DEVICE_MANAGER,
     )?;
-    let manager = libnanami::ipc::process_slot_descriptor(SLOT_DEVICE_MANAGER);
-    let physical_base = nanami_services::device::hpet_mmio_base(manager)?;
+    let manager = nanami_runtime::ipc::process_slot_descriptor(SLOT_DEVICE_MANAGER);
+    let physical_base = nanami_client::device::hpet_mmio_base(manager)?;
     let page_base = physical_base & !0xfff;
     let page_offset = physical_base - page_base;
-    let (_, mapped_base) = libnanami::request_mmio(page_base, HPET_MMIO_BYTES + page_offset)?;
+    let (_, mapped_base) = nanami_runtime::request_mmio(page_base, HPET_MMIO_BYTES + page_offset)?;
     let virtual_base = mapped_base + page_offset;
 
     let capabilities = unsafe { read64(virtual_base, REG_CAPABILITIES) };
@@ -98,7 +98,7 @@ pub fn prepare(_timer_resource_slot: Word) -> Result<PreparedTimer, RequestError
     }
     let timer_capabilities = unsafe { read64(virtual_base, REG_TIMER0_CONFIGURATION) };
     let (irq_number, legacy) = select_interrupt(virtual_base)?;
-    libnanami::println!(
+    nanami_runtime::println!(
         "[hpet-server] mmio={:#x} period-fs={} irq={} legacy={}",
         physical_base,
         period_fs,

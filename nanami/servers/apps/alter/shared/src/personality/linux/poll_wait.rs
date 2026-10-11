@@ -105,7 +105,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
     }
     if completed && !timer {
         if let Err(errno) = arm_clock_timer(runtime) {
-            libnanami::println!("[alter/linux] poll alarm failed errno={}", errno);
+            nanami_runtime::println!("[alter/linux] poll alarm failed errno={}", errno);
         }
     }
 }
@@ -118,15 +118,15 @@ pub fn handle_readiness_changes(runtime: &mut Runtime) {
 }
 
 pub fn handle_readiness_notification(runtime: &mut Runtime, identifier: Word) {
-    let sources = (if identifier & nanami_services::terminal::TERMINAL_NOTIFICATION_INPUT != 0 {
+    let sources = (if identifier & nanami_client::terminal::TERMINAL_NOTIFICATION_INPUT != 0 {
         READY_TERMINAL
     } else {
         0
-    }) | (if identifier & nanami_services::net::NET_NOTIFICATION_RX != 0 {
+    }) | (if identifier & nanami_client::net::NET_NOTIFICATION_RX != 0 {
         READY_NETWORK
     } else {
         0
-    }) | (if identifier & nanami_services::input::INPUT_NOTIFICATION_IDENTIFIER != 0 {
+    }) | (if identifier & nanami_client::input::INPUT_NOTIFICATION_IDENTIFIER != 0 {
         READY_INPUT
     } else {
         0

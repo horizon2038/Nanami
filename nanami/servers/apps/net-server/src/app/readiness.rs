@@ -1,12 +1,12 @@
 use super::*;
-use nanami_services::net::*;
+use nanami_client::net::*;
 
 pub(super) fn handle_readiness_request(
     runtime: &NetRuntime,
-    request: libnanami::ipc::ServiceRequest,
+    request: nanami_runtime::ipc::ServiceRequest,
 ) -> (Word, Word, Word) {
     if session_for(runtime, request.identifier).is_none() {
-        return (libnanami::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+        return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     }
     let owner = request.identifier;
     let id = request.arg1;
@@ -41,7 +41,7 @@ pub(super) fn handle_readiness_request(
         }
         NET_READINESS_TCP => {
             if id == 0 {
-                return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
             match active_tcp_connection_index(runtime, owner, id) {
                 Some(index) => {
@@ -61,7 +61,7 @@ pub(super) fn handle_readiness_request(
                 None => NET_READY_READ | NET_READY_WRITE | NET_READY_HANGUP | NET_READY_ERROR,
             }
         }
-        _ => return (libnanami::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+        _ => return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
     };
-    (libnanami::OS_RESPONSE_OK, ready, 0)
+    (nanami_runtime::OS_RESPONSE_OK, ready, 0)
 }

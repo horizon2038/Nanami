@@ -1,5 +1,5 @@
 use super::*;
-use nanami_services::net::{
+use nanami_client::net::{
     net_device_recv, net_device_recv_batch, NET_DEVICE_RX_BATCH_MAX, NET_DEVICE_RX_FRAME_MAX,
     NET_DEVICE_RX_SLOT_STRIDE,
 };

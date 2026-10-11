@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word};
+use nanami_runtime::{RequestError, Word};
 
 use crate::{
     append_bytes, append_decimal, bytes_eq, copy_bytes, starts_with, COLS, SLOT_EXEC_SERVICE,
@@ -144,7 +144,7 @@ impl ExecShell {
             unsafe {
                 core::ptr::copy_nonoverlapping(path.as_ptr(), self.shm as *mut u8, path_len);
             }
-            match nanami_services::exec::exec_spawn_path_arguments(
+            match nanami_client::exec::exec_spawn_path_arguments(
                 self.port,
                 0,
                 path_len as Word,
@@ -152,7 +152,7 @@ impl ExecShell {
                 launch_len as Word,
             ) {
                 Ok(pid) => return Some((pid, path, path_len)),
-                Err(RequestError::Status(libnanami::OS_RESPONSE_INVALID_ARGUMENT)) => {}
+                Err(RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)) => {}
                 Err(error) => {
                     out.push_line(format_error_line(b"exec: spawn failed ", error));
                     return None;
@@ -171,15 +171,15 @@ impl ExecShell {
         if self.connected {
             return true;
         }
-        match nanami_services::registry::connect_exec_service(SLOT_EXEC_SERVICE) {
+        match nanami_client::registry::connect_exec_service(SLOT_EXEC_SERVICE) {
             Ok(()) => {}
             Err(error) => {
                 out.push_line(format_error_line(b"exec: service unavailable ", error));
                 return false;
             }
         }
-        self.port = libnanami::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE);
-        match nanami_services::exec::exec_attach_shared_memory(self.port, EXEC_SHM_BYTES) {
+        self.port = nanami_runtime::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE);
+        match nanami_client::exec::exec_attach_shared_memory(self.port, EXEC_SHM_BYTES) {
             Ok((shm, shm_size)) => {
                 if shm == 0 || shm_size == 0 {
                     out.push_bytes(b"exec: invalid shared memory");

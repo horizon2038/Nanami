@@ -1,4 +1,4 @@
-use libnanami::{RequestError, Word, OS_RESPONSE_INVALID_ARGUMENT};
+use nanami_runtime::{RequestError, Word, OS_RESPONSE_INVALID_ARGUMENT};
 
 use crate::{log_request_error, SLOT_BLOCK_DEVICE, SLOT_TIMER_SERVICE};
 
@@ -13,10 +13,10 @@ pub(super) fn connect_block_device() -> Result<(Word, Option<Word>), RequestErro
     let mut logged_wait = false;
     loop {
         // Storage may become available before the platform timer does.
-        match nanami_services::registry::connect_block_device_with_pid(SLOT_BLOCK_DEVICE) {
+        match nanami_client::registry::connect_block_device_with_pid(SLOT_BLOCK_DEVICE) {
             Ok(_) => {
                 return Ok((
-                    libnanami::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE),
+                    nanami_runtime::ipc::process_slot_descriptor(SLOT_BLOCK_DEVICE),
                     timer_port,
                 ))
             }
@@ -36,9 +36,9 @@ pub(super) fn connect_block_device() -> Result<(Word, Option<Word>), RequestErro
         }
 
         if timer_port.is_none() {
-            match nanami_services::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+            match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
                 Ok(()) => {
-                    timer_port = Some(libnanami::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE));
+                    timer_port = Some(nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE));
                 }
                 Err(RequestError::Status(OS_RESPONSE_INVALID_ARGUMENT)) => {}
                 Err(error) => {
@@ -48,7 +48,7 @@ pub(super) fn connect_block_device() -> Result<(Word, Option<Word>), RequestErro
             }
         }
         if let Some(timer) = timer_port {
-            if let Err(error) = nanami_services::timer::timer_service_sleep_milliseconds(
+            if let Err(error) = nanami_client::timer::timer_service_sleep_milliseconds(
                 timer,
                 BLOCK_CONNECT_RETRY_MS,
             ) {
@@ -59,7 +59,7 @@ pub(super) fn connect_block_device() -> Result<(Word, Option<Word>), RequestErro
         } else {
             // Without a timer there is no elapsed-time budget to consume.
             // Yield to the boot drivers, then retry *both* service lookups.
-            libnanami::yield_now();
+            nanami_runtime::yield_now();
         }
     }
 }

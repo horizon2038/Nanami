@@ -56,7 +56,7 @@ pub mod ipc {
         })
     }
 }
-#[path = "../../nanami/servers/sdk/rust/nanami-services/src/timer.rs"]
+#[path = "../../nanami/servers/libs/nanami-client/src/timer.rs"]
 mod timer;
 const TIMER: Word = timer::TIMER_NOTIFICATION_IDENTIFIER_BIT;
 const IRQ: Word = 1 << 16;

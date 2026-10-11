@@ -19,7 +19,7 @@ pub(super) fn socket_readiness(
             file.peer_port,
         ) {
             Ok(id) => id,
-            Err(RequestError::Status(libnanami::OS_RESPONSE_ILLEGAL_OPERATION)) => 0,
+            Err(RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION)) => 0,
             Err(error) => return Err(map_network_error(error)),
         };
         if id == 0 {

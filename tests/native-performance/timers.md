@@ -65,7 +65,7 @@ clang --target=x86_64-linux-gnu -O2 -nostdlib -static -fno-builtin \
 ```
 
 Include `./out/timer-test` (and `./out/writeback-test` for persistence checks) in
-`EXTRA_LINUX_BINS` when rebuilding the image. Then:
+repeatable `--linux-bin` options when rebuilding the image. Then:
 
 ```sh
 python3 tests/usb/qemu-hid.py \

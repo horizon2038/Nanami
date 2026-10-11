@@ -9,12 +9,12 @@ sixteen slots per controller and four HID interfaces per device.
 ## Run
 
 ```sh
-USB_INPUT=on QEMU_HPET=on STORAGE_DEVICE=ahci make run
-STORAGE_DEVICE=usb USB_INPUT=on QEMU_HPET=on make run
+cargo xtask run --storage ahci
+cargo xtask run --storage usb
 ```
 
-`USB_INPUT=off` remains the default and only controls emulated HID devices.
-`STORAGE_DEVICE=usb` adds xHCI even when HID is off. Hardware controllers are
+`--no-usb-input` omits the default USB HID devices.
+`--storage usb` adds xHCI even when HID is omitted. Hardware controllers are
 discovered independently of these QEMU options. The same complete Spencer image
 contains firmware boot files and the Nanami GPT root partition.
 
@@ -124,7 +124,7 @@ cargo test --locked --release --manifest-path tests/native-performance/Cargo.tom
   --test usb-irq --test usb-pci --test usb-service --test usb-completion --test timer-wait
 ```
 
-`NANAMI_USB_ACPI_IRQ=1 make init` ignores the firmware PCI Line for testing
+`NANAMI_USB_ACPI_IRQ=1 cargo xtask build` ignores the firmware PCI Line for testing
 ACPI discovery even on QEMU. This is not needed on hardware. QEMU q35 currently
 describes its GSI links as active-high, which cannot be expressed for GSI 23
 through the current kernel API; the forced-ACPI test must take the fallback:
@@ -153,12 +153,12 @@ Start with low-volume saved-PC sampling, **without** per-I/O tracing:
 
 ```sh
 NANAMI_BOOT_PC_TRACE=1 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
-  ROOTFS_REBUILD=1 make image
+  cargo xtask build --rebuild-rootfs
 ```
 
-Keep the existing `EXTRA_LINUX_BINS`/rootfs settings when rebuilding. Rebuilding
+Keep the existing repeatable `--linux-bin` options/rootfs settings when rebuilding. Rebuilding
 the rootfs also removes any previous PCI trace from `/bin/virtio-net`;
-`ROOTFS_REBUILD=0` would retain that binary and its compile-time trace flag.
+omitting `--rebuild-rootfs` would retain that binary and its compile-time trace flag.
 On x86_64, every 500 delivered USB maintenance timer events (nominally five
 seconds), `usb.watch` requests a read-only `boot.pc` sample from Alpha.
 Its `sample begin` line summarizes requests and delivered IRQ notification
@@ -185,10 +185,10 @@ Only if per-request detail is needed, enable the much heavier I/O trace:
 
 ```sh
 NANAMI_BOOT_IO_TRACE=1 NANAMI_BOOT_PC_TRACE=0 NANAMI_USB_IO_TRACE=0 \
-  ROOTFS_REBUILD=1 make image
+  cargo xtask build --rebuild-rootfs
 ```
 
-Keep any existing `EXTRA_LINUX_BINS`/rootfs settings when rebuilding. This flag
+Keep any existing repeatable `--linux-bin` options/rootfs settings when rebuilding. This flag
 adds VFS request sequence numbers, uncached block read entry/return, USB block
 request/reply entry, and virtio-net PCI config selection/read/return logs.
 Unlike `NANAMI_USB_IO_TRACE`, it does not trace periodic USB maintenance.
@@ -197,7 +197,7 @@ hotplug event. A `reply-receive` line means that the syscall is about to be
 entered, not that the receiver has consumed the reply.
 
 For the full I/O trace, the image must contain both the new init ELF (ext2/USB)
-and the rebuilt rootfs (`virtio-net`); `make init` alone does not update the
+and the rebuilt rootfs (`virtio-net`); `cargo xtask servers` alone does not update the
 disk's `/bin/virtio-net`.
 Debug output currently makes one kernel call per character. On the reported
 hardware, the saved VFS PCs repeatedly landed in `DebugWriter::write_str`
@@ -400,7 +400,7 @@ performance-monitor, image-viewer and Saran, checking close at resized geometry.
 Screenshots are retained for visual review. These are QEMU checks, not a
 confirmation that the previously reported real-hardware boot stall is fixed.
 
-Protocol and terminal scope: [Honoka resize and Shell terminal](../../nanami/servers/sdk/rust/nanami-services/src/gfx/honoka/README.md).
+Protocol and terminal scope: [Honoka resize and Shell terminal](../../nanami/servers/libs/nanami-client/src/gfx/honoka/README.md).
 
 Host tests compile the production parsers, BOT wire handling, rings, PCI
 preparation, storage-selection IPC, deferred root discovery and physical memory

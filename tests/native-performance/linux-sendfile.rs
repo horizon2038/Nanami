@@ -1,6 +1,6 @@
 //! Production sendfile; service I/O and guest memory are deterministic mocks.
 #![allow(dead_code)]
-extern crate self as nanami_services;
+extern crate self as nanami_client;
 type Word = usize;
 mod state {
     pub const LINUX_FD_MAX: usize = 64;

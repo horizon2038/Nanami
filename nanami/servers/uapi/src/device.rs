@@ -1,0 +1,27 @@
+use crate::Word;
+
+pub const DEVICE_MANAGER_SERVICE: &str = "device-manager";
+
+pub const DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE: Word = 0xd001;
+
+pub const DEVICE_MANAGER_REQUEST_USB_CONTROLLER: Word = 0xd002;
+
+pub const DEVICE_MANAGER_REQUEST_STORAGE_PROBE: Word = 0xd003;
+
+pub const DEVICE_MANAGER_REQUEST_ACPI_RSDP: Word = 0xd004;
+
+pub const DEVICE_MANAGER_REQUEST_USB_IRQ: Word = 0xd005;
+
+pub const DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE: Word = 0xd006;
+
+pub const DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT: Word = 0xd007;
+
+pub const ACPI_ROUTE_NOTIFICATION: Word = 1;
+
+pub const STORAGE_PENDING: Word = 0;
+
+pub const STORAGE_SELECTED: Word = 1;
+
+pub const STORAGE_NOT_SELECTED: Word = 2;
+
+pub const STORAGE_AMBIGUOUS: Word = 3;

@@ -49,6 +49,7 @@ pub fn create(root: &Path, args: &Common) -> Result<PathBuf> {
                 if dir == "tmp" { 0o777 } else { 0o755 },
             )?;
         }
+        crate::terminfo::install(&mut builder, guest)?;
     }
     let system = payload::manifest(root, "system-list", args.arch)?;
     let session = payload::manifest(root, "session-list", args.arch)?;
@@ -307,6 +308,7 @@ mod tests {
             b"game-data-payload",
             b"native-payload",
             b"theme-payload",
+            b"vt100|Nanami VT100-compatible terminal\0",
         ] {
             assert!(image.windows(contents.len()).any(|w| w == contents));
         }

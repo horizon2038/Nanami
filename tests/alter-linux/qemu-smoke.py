@@ -14,10 +14,18 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
 parser.add_argument("--program", action="append", help="guest basename and optional arguments (repeatable)")
+parser.add_argument("--capture-running-after", type=float,
+                    help="capture each guest's running screen this many seconds after launch (0-30)")
+parser.add_argument("--visual-program",
+                    help="after checked fixtures, launch this guest untraced and capture two animation frames")
 parser.add_argument("--network", action="store_true", help="attach an isolated user-mode virtio NIC (no external network access)")
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
 args = parser.parse_args()
+if args.capture_running_after is not None and not 0 <= args.capture_running_after <= 30:
+    parser.error("--capture-running-after must be between 0 and 30 seconds")
+if args.visual_program and args.ui_stress:
+    parser.error("--visual-program leaves its guest running; it cannot precede --ui-stress")
 repo = pathlib.Path(__file__).resolve().parents[2]
 logs = pathlib.Path(tempfile.mkdtemp(prefix="nanami-alter-test-"))
 firmware = repo / "spencer/a9nloader-rs/tools"
@@ -78,11 +86,17 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 send(f"sendkey {keys.get(character, character)} 50")
                 time.sleep(0.35)
 
-        for program in args.program or ["linux-syscall-smoke", "glibc-true", "glibc-regression"]:
+        for index, program in enumerate(args.program or ["linux-syscall-smoke", "glibc-true", "glibc-regression"]):
             # Match against the same decoded/newline-normalized text used below.
             # Byte offsets drift with CRLF or UTF-8 serial output.
             start = len(serial.read_text(errors="replace"))
             type_command(f"alter -t /alter/linux/bin/{program}")
+            if args.capture_running_after is not None:
+                wait_for(lambda text: re.search(
+                    r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)",
+                    text[start:]))
+                time.sleep(args.capture_running_after)
+                send(f"screendump {logs / f'running-{index}.png'} -f png")
             def guest_exit(text):
                 text = text[start:]
                 spawned = re.search(r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)", text)
@@ -94,6 +108,19 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 raise RuntimeError(f"{program} exited with status {exited[1]}")
             print(f"PASS {program} (smp={args.smp})", flush=True)
             time.sleep(1)
+        if args.visual_program:
+            start = len(serial.read_text(errors="replace"))
+            type_command(f"alter /alter/linux/bin/{args.visual_program}")
+            wait_for(lambda text: re.search(
+                r"managed rootfs process image=" + re.escape(args.visual_program.split()[0]) + r" pid=(\d+)",
+                text[start:]))
+            # Syscall traces share the application's terminal and disrupt curses
+            # rendering. Capture the real untraced screen separately; exit-code
+            # verification remains in the checked --program runs above.
+            for frame in range(2):
+                time.sleep(1)
+                send(f"screendump {logs / f'visual-{frame}.png'} -f png")
+            print(f"Captured untraced {args.visual_program}; inspect visual-*.png", flush=True)
         if args.ui_stress:
             type_command("clear")
             # Each help adds eight rows: exceed the shell's 128-row capacity.

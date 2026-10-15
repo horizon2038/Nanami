@@ -4,6 +4,7 @@ mod cpio;
 mod payload;
 mod qemu;
 mod rootfs;
+mod terminfo;
 mod util;
 
 use anyhow::{Context, Result};

@@ -261,8 +261,12 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[2],
         ),
-        SYS_NANOSLEEP => {
-            let action = sys_nanosleep_action(runtime, native_pid, context);
+        SYS_NANOSLEEP | SYS_CLOCK_NANOSLEEP => {
+            let action = if context.number == SYS_CLOCK_NANOSLEEP {
+                sys_clock_nanosleep_action(runtime, native_pid, context)
+            } else {
+                sys_nanosleep_action(runtime, native_pid, context)
+            };
             record_action_result(runtime, native_pid, context.number, action);
             trace_critical_action(runtime, native_pid, context, action);
             trace_syscall_action(runtime, native_pid, context, action);
@@ -546,6 +550,7 @@ pub fn dispatch_syscall(
             return action;
         }
         SYS_GETPPID => Ok(1),
+        SYS_TIME => sys_time(runtime, native_pid, context.args[0]),
         SYS_GETTIMEOFDAY => sys_gettimeofday(runtime, native_pid, context.args[0]),
         SYS_SETITIMER => sys_setitimer(
             runtime,

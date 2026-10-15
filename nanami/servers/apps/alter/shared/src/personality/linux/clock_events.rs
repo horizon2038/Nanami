@@ -1,6 +1,6 @@
 use super::{
     map_request_error, present_mapped_framebuffers, record_syscall_result, refresh_clock,
-    LinuxSyscallContext, Runtime, Word, ALTER_FB_PRESENT_HZ, SYS_NANOSLEEP,
+    LinuxSyscallContext, Runtime, Word, ALTER_FB_PRESENT_HZ,
 };
 
 pub(super) fn arm_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
@@ -82,7 +82,7 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
         runtime.managed[index].sleep_waiting = false;
         runtime.managed[index].sleep_deadline = 0;
         runtime.managed[index].sleep_context = LinuxSyscallContext::EMPTY;
-        record_syscall_result(runtime, pid, SYS_NANOSLEEP, 0);
+        record_syscall_result(runtime, pid, context.number, 0);
         if crate::process::write_personality_syscall_return(
             pcb,
             context,

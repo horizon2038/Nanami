@@ -10,6 +10,7 @@ const ALTER_FB_PRESENT_HZ: Word = 60;
 const EFAULT: i32 = 14;
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
+const EOPNOTSUPP: i32 = 95;
 const ESRCH: i32 = 3;
 const LINUX_CPU_MASK_BYTES: Word = 8;
 const LINUX_ITIMERVAL_BYTES: Word = 32;
@@ -17,13 +18,15 @@ const LINUX_ITIMER_PROF: Word = 2;
 const LINUX_PAGE_SIZE: Word = 4096;
 const LINUX_TIMESPEC_BYTES: Word = 16;
 const SYS_NANOSLEEP: Word = 35;
+const SYS_CLOCK_NANOSLEEP: Word = 230;
 
 #[derive(Default, Clone, Copy)]
 struct LinuxSyscallContext {
+    number: Word,
     args: [Word; 6],
 }
 impl LinuxSyscallContext {
-    const EMPTY: Self = Self { args: [0; 6] };
+    const EMPTY: Self = Self { number: 0, args: [0; 6] };
 }
 #[derive(Debug, PartialEq)]
 enum EmulationAction {
@@ -82,6 +85,11 @@ struct Fake {
     resumed: Vec<Word>,
     presented: usize,
     rtc_reads: usize,
+    rtc_error: bool,
+    write_error: bool,
+    memory_writes: Vec<(Word, Word, Word)>,
+    completed: Vec<(Word, Word)>,
+    read_error: bool,
 }
 pub mod abi { pub const SLOT_RTC_SERVICE: usize = 32; }
 pub mod ipc { pub fn process_slot_descriptor(slot: usize) -> usize { slot } }
@@ -93,7 +101,14 @@ pub mod rtc {
     #[derive(Clone, Copy)]
     pub struct RtcDateTime { pub year: u16, pub month: u8, pub day: u8, pub hour: u8, pub minute: u8, pub second: u8 }
     pub fn rtc_service_read(_: Word) -> Result<RtcDateTime, i32> {
-        FAKE.with(|f| f.borrow_mut().rtc_reads += 1);
+        FAKE.with(|f| {
+            let mut fake = f.borrow_mut();
+            fake.rtc_reads += 1;
+            if fake.rtc_error {
+                return Err(EIO);
+            }
+            Ok(())
+        })?;
         Ok(RtcDateTime { year: 2000, month: 2, day: 29, hour: 12, minute: 34, second: 56 })
     }
 }
@@ -151,12 +166,26 @@ pub mod arch {
 fn map_request_error(error: i32) -> i32 {
     error
 }
-fn record_syscall_result(_: &mut Runtime, _: Word, _: Word, _: isize) {}
-fn read_target_memory(_: &mut Runtime, _: Word, _: Word, _: Word) -> Result<(), i32> {
-    Ok(())
+fn record_syscall_result(_: &mut Runtime, pid: Word, number: Word, _: isize) {
+    FAKE.with(|f| f.borrow_mut().completed.push((pid, number)));
 }
-fn write_target_memory(_: &mut Runtime, _: Word, _: Word, _: Word) -> Result<(), i32> {
-    Ok(())
+fn read_target_memory(_: &mut Runtime, _: Word, _: Word, _: Word) -> Result<(), i32> {
+    FAKE.with(|f| {
+        if f.borrow().read_error {
+            return Err(EINVAL);
+        }
+        Ok(())
+    })
+}
+fn write_target_memory(_: &mut Runtime, pid: Word, target: Word, bytes: Word) -> Result<(), i32> {
+    FAKE.with(|f| {
+        let mut fake = f.borrow_mut();
+        fake.memory_writes.push((pid, target, bytes));
+        if fake.write_error {
+            return Err(EINVAL);
+        }
+        Ok(())
+    })
 }
 unsafe fn write_u64(address: Word, value: Word) {
     unsafe {
@@ -194,6 +223,7 @@ fn sleep(runtime: &mut Runtime, pid: Word, ns: Word) -> EmulationAction {
         runtime,
         pid,
         LinuxSyscallContext {
+            number: SYS_NANOSLEEP,
             args: [1, 0, 0, 0, 0, 0],
         },
     )
@@ -247,6 +277,138 @@ fn realtime_and_gettimeofday_share_one_rtc_anchor_but_always_sample_current_time
         assert_eq!(fake.borrow().clock_reads, 3);
         assert!(fake.borrow().alarms.is_empty());
     });
+}
+
+#[test]
+fn time_null_returns_unix_seconds_without_touching_guest_memory() {
+    let mut runtime = runtime(1_000_000_000);
+    assert_eq!(sys_time(&mut runtime, 1, 0), Ok(951827696));
+    FAKE.with(|f| f.borrow_mut().ticks = 1_999_999_999);
+    assert_eq!(sys_time(&mut runtime, 1, 0), Ok(951827697));
+    FAKE.with(|f| f.borrow_mut().ticks = 2_000_000_000);
+    assert_eq!(sys_time(&mut runtime, 1, 0), Ok(951827698));
+    FAKE.with(|f| {
+        let fake = f.borrow();
+        assert_eq!(fake.rtc_reads, 1);
+        assert_eq!(fake.clock_reads, 3);
+        assert!(fake.memory_writes.is_empty());
+        assert!(fake.alarms.is_empty());
+    });
+}
+
+#[test]
+fn time_writes_exactly_eight_bytes_and_shares_the_realtime_anchor() {
+    let mut runtime = runtime(3);
+    let mut staging = [0usize, Word::MAX];
+    runtime.posix_shm = staging.as_mut_ptr() as Word;
+    // The ABI uses a 64-bit time_t even after the 2038 boundary.
+    runtime.realtime_anchor = Some((2_200_000_000, 0));
+    FAKE.with(|f| f.borrow_mut().ticks = 7);
+    assert_eq!(sys_time(&mut runtime, 2, 0x1235), Ok(2_200_000_002));
+    assert_eq!(staging, [2_200_000_002, Word::MAX]);
+    sys_clock_gettime(&mut runtime, 2, 0, 0x1235).unwrap();
+    assert_eq!(staging, [2_200_000_002, 333333333]);
+    FAKE.with(|f| {
+        let fake = f.borrow();
+        assert_eq!(fake.rtc_reads, 0);
+        assert_eq!(fake.memory_writes, [(2, 0x1235, 8), (2, 0x1235, 16)]);
+    });
+}
+
+#[test]
+fn time_reports_bad_destinations_and_clock_failures() {
+    let mut runtime = runtime(1_000_000_000);
+    let mut staging = [0usize];
+    runtime.posix_shm = staging.as_mut_ptr() as Word;
+    FAKE.with(|f| f.borrow_mut().write_error = true);
+    assert_eq!(sys_time(&mut runtime, 1, 1), Err(EFAULT));
+    FAKE.with(|f| {
+        let mut fake = f.borrow_mut();
+        fake.memory_writes.clear();
+        fake.clock_error = true;
+    });
+    assert_eq!(sys_time(&mut runtime, 1, 1), Err(EIO));
+    runtime.realtime_anchor = None;
+    FAKE.with(|f| f.borrow_mut().rtc_error = true);
+    assert_eq!(sys_time(&mut runtime, 1, 1), Err(EIO));
+    FAKE.with(|f| assert!(f.borrow().memory_writes.is_empty()));
+}
+
+fn clock_sleep(runtime: &mut Runtime, clock: Word, flags: Word, request: &mut [Word; 2]) -> EmulationAction {
+    runtime.posix_shm = request.as_mut_ptr() as Word;
+    sys_clock_nanosleep_action(runtime, 1, LinuxSyscallContext {
+        number: SYS_CLOCK_NANOSLEEP,
+        args: [clock, flags, 1, Word::MAX, 0, 0],
+    })
+}
+
+#[test]
+fn clock_sleep_relative_uses_existing_alarm_and_preserves_syscall_context() {
+    for clock in [0, 1, 7] {
+        let mut runtime = runtime(1000);
+        FAKE.with(|f| f.borrow_mut().ticks = 500);
+        let mut request = [0, 1];
+        assert_eq!(clock_sleep(&mut runtime, clock, 0, &mut request), EmulationAction::Park);
+        assert_eq!(runtime.managed[0].sleep_deadline, 501);
+        assert_eq!(runtime.managed[0].sleep_context.args, [clock, 0, 1, Word::MAX, 0, 0]);
+        notify(&mut runtime, 500);
+        assert!(runtime.managed[0].sleep_waiting);
+        notify(&mut runtime, 501);
+        assert!(!runtime.managed[0].sleep_waiting);
+        FAKE.with(|f| {
+            let fake = f.borrow();
+            assert_eq!(fake.completed, [(1, SYS_CLOCK_NANOSLEEP)]);
+            assert_eq!(fake.resumed, [1]);
+            assert_eq!(fake.rtc_reads, 0);
+            assert!(fake.memory_writes.is_empty()); // remain is untouched on success.
+        });
+    }
+}
+
+#[test]
+fn absolute_clock_sleep_rounds_deadlines_and_past_deadlines_return_immediately() {
+    for clock in [1, 7] {
+        let mut runtime = runtime(3);
+        FAKE.with(|f| f.borrow_mut().ticks = 2);
+        assert_eq!(clock_sleep(&mut runtime, clock, 1, &mut [0, 999999999]), EmulationAction::Park);
+        assert_eq!(runtime.managed[0].sleep_deadline, 3);
+        notify(&mut runtime, 3);
+        assert_eq!(clock_sleep(&mut runtime, clock, 1, &mut [1, 0]), EmulationAction::Return(0));
+        assert!(!runtime.managed[0].sleep_waiting);
+    }
+    let mut runtime = runtime(3);
+    runtime.realtime_anchor = Some((951827696, 30));
+    FAKE.with(|f| f.borrow_mut().ticks = 31);
+    assert_eq!(clock_sleep(&mut runtime, 0, 1, &mut [951827697, 0]), EmulationAction::Park);
+    assert_eq!(runtime.managed[0].sleep_deadline, 33);
+    notify(&mut runtime, 33);
+    assert_eq!(clock_sleep(&mut runtime, 0, 1, &mut [951827697, 0]), EmulationAction::Return(0));
+    assert_eq!(clock_sleep(&mut runtime, 0, 1, &mut [0, 0]), EmulationAction::Return(0));
+}
+
+#[test]
+fn clock_sleep_validates_requests_and_rolls_back_failed_alarm() {
+    let mut runtime = runtime(1_000_000_000);
+    for clock in [3, 10, 12, Word::MAX] {
+        assert_eq!(clock_sleep(&mut runtime, clock, 0, &mut [0, 1]), EmulationAction::Return(-(EINVAL as isize)));
+    }
+    for clock in [2, 4, 5, 6, 8, 9, 11] {
+        assert_eq!(clock_sleep(&mut runtime, clock, 0, &mut [0, 1]), EmulationAction::Return(-(EOPNOTSUPP as isize)));
+    }
+    for mut request in [[Word::MAX, 0], [0, 1_000_000_000]] {
+        assert_eq!(clock_sleep(&mut runtime, 1, 0, &mut request), EmulationAction::Return(-(EINVAL as isize)));
+    }
+    FAKE.with(|f| f.borrow_mut().read_error = true);
+    assert_eq!(clock_sleep(&mut runtime, 1, 0, &mut [0, 1]), EmulationAction::Return(-(EFAULT as isize)));
+    FAKE.with(|f| {
+        let mut fake = f.borrow_mut();
+        fake.read_error = false;
+        fake.alarm_error = true;
+    });
+    assert_eq!(clock_sleep(&mut runtime, 1, 0, &mut [0, 1]), EmulationAction::Return(-(EIO as isize)));
+    assert!(!runtime.managed[0].sleep_waiting);
+    assert_eq!(runtime.clock_deadline, None);
+    assert_eq!(runtime.managed[0].sleep_context.number, 0);
 }
 
 #[test]

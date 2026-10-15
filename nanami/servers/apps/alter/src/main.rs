@@ -23,11 +23,12 @@ const ALTER_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << 1;
 const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 const ALTER_SHM_BYTES: Word = 0x4000;
 const ALTER_LAUNCH_MAX_ENVS: usize = 8;
-const ALTER_ENV: [&[u8]; 4] = [
+const ALTER_ENV: [&[u8]; 5] = [
     b"PATH=/bin:/usr/bin",
     b"HOME=/",
     b"USER=root",
     b"TERM=vt100",
+    b"TERMINFO=/usr/share/terminfo",
 ];
 
 #[panic_handler]

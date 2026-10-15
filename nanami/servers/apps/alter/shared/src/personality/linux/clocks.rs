@@ -1,9 +1,20 @@
 use super::{
     arm_clock_timer, map_request_error, read_target_memory, write_target_memory, write_u64,
-    EmulationAction, LinuxSyscallContext, Runtime, Word, EFAULT, EINVAL, EIO, ESRCH,
+    EmulationAction, LinuxSyscallContext, Runtime, Word, EFAULT, EINVAL, EIO, EOPNOTSUPP, ESRCH,
     LINUX_CPU_MASK_BYTES, LINUX_ITIMERVAL_BYTES, LINUX_ITIMER_PROF, LINUX_PAGE_SIZE,
     LINUX_TIMESPEC_BYTES,
 };
+
+pub(super) fn sys_time(runtime: &mut Runtime, pid: Word, tloc: Word) -> Result<Word, i32> {
+    let (seconds, _) = super::realtime::realtime(runtime)?;
+    if tloc != 0 {
+        unsafe {
+            write_u64(runtime.posix_shm, seconds);
+        }
+        write_target_memory(runtime, pid, tloc, 8).map_err(|_| EFAULT)?;
+    }
+    Ok(seconds)
+}
 
 pub(super) fn sys_gettimeofday(
     runtime: &mut Runtime,
@@ -117,31 +128,46 @@ pub(super) fn sys_nanosleep_action(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> EmulationAction {
-    let request = context.args[0];
-    if request == 0 {
-        return EmulationAction::Return(-(EFAULT as isize));
-    }
-    if let Err(errno) = read_target_memory(runtime, pid, request, LINUX_TIMESPEC_BYTES) {
-        return EmulationAction::Return(-(errno as isize));
-    }
+    sleep_action(runtime, pid, context, context.args[0], 1, false)
+}
 
-    let seconds = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const i64) };
-    let nanoseconds = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 8) as *const i64) };
-    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
-        return EmulationAction::Return(-(EINVAL as isize));
+pub(super) fn sys_clock_nanosleep_action(
+    runtime: &mut Runtime,
+    pid: Word,
+    context: LinuxSyscallContext,
+) -> EmulationAction {
+    match context.args[0] {
+        0 | 1 | 7 => {}
+        // Known clocks without a sleep backend. Never substitute uptime for
+        // CPU/TAI/alarm clocks, or imply that RAW/COARSE support sleeping.
+        2 | 4 | 5 | 6 | 8 | 9 | 11 => {
+            return EmulationAction::Return(-(EOPNOTSUPP as isize));
+        }
+        _ => return EmulationAction::Return(-(EINVAL as isize)),
     }
+    sleep_action(
+        runtime,
+        pid,
+        context,
+        context.args[2],
+        context.args[0],
+        context.args[1] & 1 != 0, // TIMER_ABSTIME; Linux ignores other flag bits.
+    )
+}
 
-    if seconds == 0 && nanoseconds == 0 {
-        return EmulationAction::Return(0);
-    }
-    if let Err(errno) = refresh_clock(runtime) {
-        return EmulationAction::Return(-(errno as isize));
-    }
-
-    let hz = runtime.monotonic_tick_hz as u128;
-    let ticks = (seconds as u128 * hz + (nanoseconds as u128 * hz).div_ceil(1_000_000_000))
-        .min(Word::MAX as u128) as Word;
-    let deadline = runtime.monotonic_ticks.saturating_add(ticks);
+fn sleep_action(
+    runtime: &mut Runtime,
+    pid: Word,
+    context: LinuxSyscallContext,
+    request: Word,
+    clock_id: Word,
+    absolute: bool,
+) -> EmulationAction {
+    let deadline = match sleep_deadline(runtime, pid, request, clock_id, absolute) {
+        Ok(Some(deadline)) => deadline,
+        Ok(None) => return EmulationAction::Return(0),
+        Err(errno) => return EmulationAction::Return(-(errno as isize)),
+    };
     let Some(process) = runtime.managed_process_mut(pid) else {
         return EmulationAction::Return(-(ESRCH as isize));
     };
@@ -156,6 +182,53 @@ pub(super) fn sys_nanosleep_action(
         return EmulationAction::Return(-(errno as isize));
     }
     EmulationAction::Park
+}
+
+fn sleep_deadline(
+    runtime: &mut Runtime,
+    pid: Word,
+    request: Word,
+    clock_id: Word,
+    absolute: bool,
+) -> Result<Option<Word>, i32> {
+    if request == 0 {
+        return Err(EFAULT);
+    }
+    read_target_memory(runtime, pid, request, LINUX_TIMESPEC_BYTES).map_err(|_| EFAULT)?;
+
+    let seconds = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const i64) };
+    let nanoseconds = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 8) as *const i64) };
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return Err(EINVAL);
+    }
+
+    if !absolute && seconds == 0 && nanoseconds == 0 {
+        return Ok(None);
+    }
+    let mut seconds = seconds as Word;
+    let nanoseconds = nanoseconds as Word;
+    let base = if absolute && clock_id == 0 {
+        super::realtime::realtime(runtime)?;
+        let (epoch, anchor) = runtime.realtime_anchor.ok_or(EIO)?;
+        if seconds < epoch {
+            return Ok(None);
+        }
+        seconds -= epoch;
+        // Convert from the same RTC anchor as CLOCK_REALTIME, avoiding a
+        // second rounding of now's fractional nanoseconds at low tick rates.
+        anchor
+    } else {
+        refresh_clock(runtime)?;
+        if absolute { 0 } else { runtime.monotonic_ticks }
+    };
+    let hz = runtime.monotonic_tick_hz as u128;
+    let ticks = (seconds as u128 * hz + (nanoseconds as u128 * hz).div_ceil(1_000_000_000))
+        .min(Word::MAX as u128) as Word;
+    let deadline = base.saturating_add(ticks);
+    if deadline <= runtime.monotonic_ticks {
+        return Ok(None);
+    }
+    Ok(Some(deadline))
 }
 
 pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {

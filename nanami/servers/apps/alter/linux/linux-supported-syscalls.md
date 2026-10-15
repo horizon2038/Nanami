@@ -63,6 +63,15 @@ Hardware enforcement of `mprotect` permissions and preservation of data across
 `PROT_NONE` transitions remain incomplete; this is not a security isolation
 boundary equivalent to Linux VM protection.
 
+## Terminal Applications
+
+The Alter launcher supplies `TERM=vt100` and `TERMINFO=/usr/share/terminfo`.
+New rootfs images include a compact terminfo entry for Shell's implemented
+cursor, erase, scrolling, text-attribute and application-cursor-key sequences.
+It deliberately does not advertise DEC line drawing or other unsupported
+features. Rebuild an existing rootfs explicitly to add the entry; recompiling
+Alter alone does not change an already-created filesystem image.
+
 ## Processes and Execution
 
 `clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `getpid`,
@@ -93,9 +102,22 @@ See `tests/alter-linux/README.md` at the repository root for reproducible tests.
 
 ## Time, Signals, and Scheduling
 
-`gettimeofday`, `clock_gettime`, `nanosleep`, `setitimer`, `rt_sigaction`,
+`time` (x86_64), `gettimeofday`, `clock_gettime`, `nanosleep`, `clock_nanosleep`,
+`setitimer`, `rt_sigaction`,
 `rt_sigprocmask`, `rt_sigsuspend`, `sigaltstack`, `sched_getaffinity`, and
 `futex`.
+
+`time` returns 64-bit Unix seconds and optionally stores the same value through
+`tloc`, using the same RTC epoch anchor and fresh monotonic sample as
+`gettimeofday`/`CLOCK_REALTIME`. AArch64 has no separate `time` syscall; its libc
+uses `clock_gettime` instead.
+
+`clock_nanosleep` supports relative and absolute waits against `CLOCK_REALTIME`,
+`CLOCK_MONOTONIC`, and `CLOCK_BOOTTIME`, sharing the existing one-shot alarm and
+park/resume path with `nanosleep`. Known clocks without a sleep backend return
+`EOPNOTSUPP`; invalid IDs and the calling thread's CPU clock return `EINVAL`.
+Successful waits leave `remain` untouched. Signal interruption and clock-setting
+semantics remain bounded by the existing signal/clock implementation.
 
 Several signal and synchronization calls currently provide compatibility
 behavior rather than a complete Linux signal/thread implementation.

@@ -1,5 +1,76 @@
 # Alter/Linux dynamic-loader regression
 
+## time(2), clock_nanosleep and ncurses regression (2026-10-15)
+
+The x86_64 `time` syscall (201) returns Unix seconds and optionally stores the
+same 64-bit value at `tloc`; invalid destinations return `EFAULT`. It shares the
+existing RTC epoch anchor and fresh timer-service samples with `CLOCK_REALTIME`.
+AArch64 has no separate `time` syscall; its libc uses `clock_gettime`.
+
+The real static `bin/sl` reproduced `Error opening terminal: vt100.` because the
+launcher selected `TERM=vt100` but the standard filesystem had no terminfo entry.
+The rootfs builder now writes a small, deterministic legacy-format entry to
+`/alter/linux/usr/share/terminfo/v/vt100`, hard-linked under `76/vt100` for ncurses
+builds using hexadecimal directories. The shared launcher sets `TERMINFO` to
+the guest path. The FreeBSD guest receives the same terminal data/environment.
+No host `tic`, personal terminfo, ncurses install, or new build dependency is
+required. The entry describes only Shell's supported controls, not a fictitious
+xterm or full DEC graphics implementation.
+
+After terminal initialization succeeded, the same `sl` revealed that glibc
+`usleep` uses syscall 230, `clock_nanosleep`, rather than syscall 35. Implementing
+relative/absolute REALTIME, MONOTONIC and BOOTTIME waits through the existing
+one-shot alarm fixes the missing animation delays as well. The saved original
+syscall context is used on resume and in completion tracing. Signals and CPU
+accounting are not replaced with success-returning stubs.
+
+References: [time(2)](https://man7.org/linux/man-pages/man2/time.2.html),
+[clock_nanosleep(2)](https://man7.org/linux/man-pages/man2/clock_nanosleep.2.html),
+[compiled terminfo format](https://invisible-island.net/ncurses/man/term.5.html).
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -O2 -Wall -Wextra -Werror \
+  -Wl,--image-base=0x400000,-z,norelro,-z,separate-loadable-segments \
+  tests/alter-linux/time.c -o out/alter-glibc-root/bin/time-test
+cargo xtask build --rootfs out/alter-time-ncurses-rootfs.img \
+  --output-image out/alter-time-ncurses.img \
+  --linux-bin out/alter-glibc-root/bin/time-test
+python3 tests/alter-linux/qemu-smoke.py --image out/alter-time-ncurses.img \
+  --program time-test --program 'sl -l' --smp 4
+python3 tests/alter-linux/qemu-smoke.py --image out/alter-time-ncurses.img \
+  --program time-test --program 'sl -l' --smp 1 --visual-program 'sl -l'
+cargo test -p nanami-xtask
+cargo test --manifest-path tests/native-performance/Cargo.toml \
+  --test linux-clocks -- --test-threads=1
+```
+
+The build uses `bin/sl` as an existing Linux payload and leaves it unchanged.
+Use fresh output filenames or explicitly pass `--rebuild-rootfs` to replace
+only this disposable test rootfs. The existing default rootfs is intentionally
+not overwritten: rebuilding services without rebuilding that rootfs will not
+install the new terminal data.
+
+The freestanding fixture bypasses libc/vDSO to check NULL/unaligned/bad `tloc`,
+eight-byte writes, realtime agreement, advancing seconds, and relative/absolute
+clock sleeps that do not wake early. Host tests cover 2038+, low/non-divisor
+tick rates, error propagation, invalid/unsupported clocks, context preservation,
+alarm rollback, and independent parsing of the entry by host `infocmp` when
+available. Traced guest runs verify exit status; `--visual-program` separately
+captures untraced frames because terminal-directed strace output disrupts curses
+screen updates. Every QEMU run uses snapshots, private firmware variables, and
+no network or physical disks.
+
+Validation: all 551 native tests pass (7 timing tests ignored), as do 22 xtask
+tests including the independent host-ncurses parser check. The 15 clock tests
+pass in debug, release and AddressSanitizer builds. x86_64 and AArch64 Alter/Linux
+compile successfully. The raw time/clock-sleep fixture and the unchanged static
+`sl -l` both exit with status zero on one- and four-CPU x86_64 QEMU; untraced
+frames show the train moving with no terminal-definition error. The rebuilt
+image is `out/alter-time-ncurses.img`; default images and A9N source are unchanged.
+
+## Dynamic loader fixtures
+
 The fixtures exercise real glibc startup, PIE relocation, executable/DSO TLS,
 `malloc`, `dlopen`/`dlsym`/`dlclose`, `fork`/`wait`, and dynamic `execve`.
 They also check positioned I/O through duplicate descriptors, append status,

@@ -14,7 +14,8 @@ pub const CONNECT_RETRY_MS: Word = 20;
 pub const MAX_INPUT_EVENTS_PER_FRAME: usize = 64;
 pub const MAX_COALESCED_MOUSE_MOVES: usize = 2;
 
-pub const CURSOR_SIZE: i32 = 11;
+pub const CURSOR_WIDTH: i32 = 18;
+pub const CURSOR_HEIGHT: i32 = 24;
 pub const MENU_BAR_HEIGHT: i32 = 30;
 pub const TITLE_BAR_HEIGHT: i32 = 30;
 pub const MAX_WINDOWS: usize = 16;

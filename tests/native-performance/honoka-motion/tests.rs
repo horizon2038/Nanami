@@ -190,7 +190,10 @@ fn cursor_burst_draws_two_regions_with_pixel_exact_results() {
     let moves: Vec<_> = (0..64).map(|_| move_by(-3, 1)).collect();
     let damage = compare(&moves, false);
     assert_eq!(damage.len(), 2);
-    assert_eq!(damage.iter().map(|r| r.width * r.height).sum::<i32>(), 968);
+    assert_eq!(
+        damage.iter().map(|r| r.width * r.height).sum::<i32>(),
+        2 * (constants::CURSOR_WIDTH + 2) * (constants::CURSOR_HEIGHT + 2)
+    );
 }
 
 #[test]

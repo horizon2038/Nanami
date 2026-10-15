@@ -187,7 +187,21 @@ path = "mmio-requests.rs"
 name = "mmio-runtime"
 path = "mmio-runtime.rs"
 
+[[test]]
+name = "text-editor"
+path = "text-editor.rs"
+
+[[test]]
+name = "text-editor-storage"
+path = "text-editor-storage.rs"
+
+[[test]]
+name = "desktop-tools"
+path = "desktop-tools.rs"
+
 [dependencies]
+nanami-ui = { path = "../../nanami/servers/libs/nanami-ui" }
+embedded-graphics = "0.8.2"
 nanami-uapi = { path = "../../nanami/servers/uapi" }
 nanami-gpt = { path = "../../nanami/servers/libs/gpt" }
 a9n-types = "0.4.0"

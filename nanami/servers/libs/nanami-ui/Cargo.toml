@@ -1,0 +1,13 @@
+[package]
+name = "nanami-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fontdue = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
+
+[target.'cfg(target_os = "none")'.dependencies]
+nanami-client = { path = "../nanami-client" }
+nanami-runtime = { path = "../nanami-runtime" }
+
+[workspace]

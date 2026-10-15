@@ -50,9 +50,9 @@ def exercise(qmp, logs, serial):
     clients = [
         ('eg-test', 640, 130, 552, 326),
         ('honoka-client', 760, 120, 512, 306),
-        ('performance-monitor', 180, 120, 520, 330),
+        ('performance-monitor', 180, 120, 760, 600),
         ('image-viewer', 260, 160, max(iw + 24, 420), abs(ih) + 78),
-        ('saran', 90, 78, 712, 396),
+        ('saran', 90, 78, 912, 620),
     ]
     for name, x, y, width, height in clients:
         move(300, 90)  # Focus Shell after the preceding client exits.

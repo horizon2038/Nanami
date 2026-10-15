@@ -225,6 +225,36 @@ input-service. USB storage requires 512-byte sectors and a valid Nanami GPT root
 partition. External hubs, UAS and AArch64 USB are unsupported.
 See [USB validation and limits](tests/usb/README.md).
 
+## GUI text editor
+
+Launch the native Honoka editor from Shell:
+
+```text
+text-editor
+text-editor /nanami/session-list
+```
+
+The editor supports open/save/save-as, selection, undo/redo, search, mouse
+selection and window resizing. `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S` and `Ctrl+F`
+perform the common file/search actions; `Ctrl+W` closes with an unsaved-change
+check. Paths refer to the native VFS, not Alter's guest root.
+See [editor controls, limits and validation](nanami/servers/apps/text-editor/README.md).
+Existing rootfs images need explicit regeneration to include a newly added app;
+use a separate `--rootfs` and `--output-image` to preserve guest files.
+
+## Performance monitor and Saran
+
+Launch `performance-monitor` or `saran` from Shell. Both use native Honoka
+windows and compact, neutral toolbars rather than dashboard cards or decorative
+widgets.
+
+- [Performance monitor](nanami/servers/apps/performance-monitor/README.md): physical
+  memory/process-count histories, min/max/average and changes, adjustable sampling,
+  pause/manual refresh, core assignments and system versions.
+- [Saran](nanami/servers/apps/saran/README.md): brush/eraser, shapes, fill, picker,
+  selections, undo/redo, zoom/pan, crop/rotate/flip and BMP open/save. Window resizing
+  changes the viewport, not the drawing.
+
 ## Boot on x86_64 hardware
 
 `cargo xtask build` produces the complete disk image at

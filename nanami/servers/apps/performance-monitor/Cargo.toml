@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 nanami-runtime = { path = "../../libs/nanami-runtime" }
 nanami-client = { path = "../../libs/nanami-client" }
-embedded-graphics = "0.8.2"
+nanami-ui = { path = "../../libs/nanami-ui" }
 
 [profile.dev]
 panic = "abort"

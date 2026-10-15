@@ -3,6 +3,7 @@ use nanami_runtime::Word;
 
 use crate::background::BackgroundCache;
 use crate::constants::{
+    CURSOR_WIDTH, CURSOR_HEIGHT,
     MAX_WINDOWS, MENU_BAR_HEIGHT, SLOT_WINDOW_INPUT_NOTIFICATION_BASE, TITLE_BAR_HEIGHT,
 };
 use crate::font::TextRenderer;
@@ -14,6 +15,8 @@ use crate::profile::Profile;
 
 #[path = "resize.rs"]
 mod resize;
+#[path = "shell_icon.rs"]
+mod shell_icon;
 
 const MAX_DIRTY_RECTS: usize = 256;
 const MAX_INDIVIDUAL_DIRTY_RECTS: usize = 64;
@@ -924,6 +927,7 @@ impl Compositor {
                 self.cursor_y,
                 theme.cursor,
                 theme.cursor_shadow,
+                dirty,
             );
         }
     }
@@ -995,7 +999,7 @@ impl Compositor {
     }
 
     fn cursor_rect(&self) -> Rect {
-        Rect::new(self.cursor_x, self.cursor_y, 18, 18).inflate(2)
+        Rect::new(self.cursor_x, self.cursor_y, CURSOR_WIDTH, CURSOR_HEIGHT).inflate(1)
     }
 
     fn clock_rect(&self) -> Rect {
@@ -1707,49 +1711,7 @@ fn draw_menu_bar(framebuffer: &Framebuffer, screen: ScreenInfo, theme: Theme, di
         1,
         theme.menu_edge,
     );
-    draw_shell_icon(framebuffer, dirty, theme);
-}
-
-fn draw_shell_icon(framebuffer: &Framebuffer, dirty: Rect, theme: Theme) {
-    let Some(_) = intersect_rect(SHELL_ICON_RECT, dirty) else {
-        return;
-    };
-    fill_clipped(
-        framebuffer,
-        dirty,
-        SHELL_ICON_RECT.x,
-        SHELL_ICON_RECT.y,
-        SHELL_ICON_RECT.width,
-        SHELL_ICON_RECT.height,
-        theme.window_frame,
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        SHELL_ICON_RECT.x + 5,
-        SHELL_ICON_RECT.y + 6,
-        7,
-        2,
-        theme.title_text,
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        SHELL_ICON_RECT.x + 10,
-        SHELL_ICON_RECT.y + 9,
-        7,
-        2,
-        theme.title_text,
-    );
-    fill_clipped(
-        framebuffer,
-        dirty,
-        SHELL_ICON_RECT.x + 5,
-        SHELL_ICON_RECT.y + 14,
-        16,
-        2,
-        theme.accent,
-    );
+    shell_icon::draw(framebuffer, dirty, theme);
 }
 
 fn draw_clock(

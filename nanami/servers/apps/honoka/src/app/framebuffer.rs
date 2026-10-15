@@ -1,7 +1,8 @@
 use core::sync::atomic::{fence, Ordering};
 use nanami_runtime::Word;
 
-use crate::constants::CURSOR_SIZE;
+#[path = "cursor.rs"]
+mod cursor;
 
 #[derive(Clone, Copy)]
 pub struct ScreenInfo {
@@ -272,24 +273,8 @@ impl Framebuffer {
         }
     }
 
-    pub fn draw_cursor(&self, cx: i32, cy: i32, color: u32, shadow: u32) {
-        let mut y = 0i32;
-        while y < CURSOR_SIZE {
-            let mut x = 0i32;
-            while x <= y / 2 {
-                self.put_pixel(cx + x + 1, cy + y + 1, shadow);
-                self.put_pixel(cx + x, cy + y, color);
-                x += 1;
-            }
-            y += 1;
-        }
-
-        let mut d = 0i32;
-        while d < CURSOR_SIZE {
-            self.put_pixel(cx + d + 1, cy + d + 1, shadow);
-            self.put_pixel(cx + d, cy + d, color);
-            d += 1;
-        }
+    pub fn draw_cursor(&self, cx: i32, cy: i32, color: u32, outline: u32, clip: Rect) {
+        cursor::draw(self, cx, cy, color, outline, clip);
     }
 
     pub fn put_pixel(&self, x: i32, y: i32, color: u32) {

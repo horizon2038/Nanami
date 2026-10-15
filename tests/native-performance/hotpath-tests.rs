@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
 extern crate alloc;
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 
 use std::collections::VecDeque;
 use std::hint::black_box;
@@ -16,7 +16,8 @@ impl NanamiError {
     pub const INVALID_ARGUMENT: Self = Self;
 }
 pub mod constants {
-    pub const CURSOR_SIZE: i32 = 16;
+    pub const CURSOR_WIDTH: i32 = 18;
+    pub const CURSOR_HEIGHT: i32 = 24;
 }
 pub mod gfx {
     pub fn display_service_present(

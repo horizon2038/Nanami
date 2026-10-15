@@ -1,9 +1,122 @@
 extern crate alloc;
+#[allow(dead_code)]
+#[path = "baseline-terminal/mod.rs"]
+mod baseline;
 #[path = "../../nanami/servers/apps/shell/src/editor.rs"]
 mod editor;
 #[path = "../../nanami/servers/apps/shell/src/terminal/mod.rs"]
 mod terminal;
 use terminal::Terminal;
+
+#[test]
+fn ring_screen_and_damage_match_original_terminal_through_random_operations() {
+    let mut actual = Terminal::new(13, 7);
+    let mut expected = baseline::Terminal::new(13, 7);
+    let mut seed = 91u64;
+    let operations: &[&[u8]] = &[
+        b"line\r\n",
+        b"abcdefghijklmN",
+        b"\x1b[2;5r",
+        b"\x1b[r",
+        b"\x1b[H",
+        b"\x1b[999S",
+        b"\x1b[999T",
+        b"\x1b[2L",
+        b"\x1b[3M",
+        b"\x1b[2P",
+        b"\x1b[3@",
+        b"\x1b[2X",
+        b"\x1b[0J",
+        b"\x1b[1J",
+        b"\x1b[2J",
+        b"\x1b[0K",
+        b"\x1b[1K",
+        b"\x1b[2K",
+        b"\x1b[31;44m",
+        b"\x1b[0m",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?25l",
+        b"\x1b[?25h",
+        b"\x1b[2;3H",
+        b"\x1b[6n",
+        b"\x1bM",
+        b"\x1bD",
+        b"\x1b[?6h",
+        b"\x1b[?6l",
+        b"\r\t\x08",
+        b"\x1b[3J",
+        b"\x1b[999;999H",
+    ];
+    for step in 0..6000 {
+        let before: Vec<_> = (0..actual.rows())
+            .map(|y| actual.view_row(y).to_vec())
+            .collect();
+        let cursor_before = (actual.cursor(), actual.cursor_visible, actual.at_bottom());
+        for row in 0..actual.rows() {
+            actual.take_damage(row);
+        }
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if step % 137 == 0 {
+            let (cols, rows) = (1 + seed as usize % 25, 1 + (seed >> 8) as usize % 13);
+            actual.resize(cols, rows);
+            expected.resize(cols, rows);
+        } else if step % 19 == 0 {
+            let rows = (seed >> 17) as i16 % 130;
+            assert_eq!(actual.scroll(rows), expected.scroll(rows));
+        } else {
+            for &byte in operations[seed as usize % operations.len()] {
+                actual.process_byte(byte);
+                expected.process_byte(byte);
+            }
+        }
+        assert_eq!(actual.cursor(), expected.cursor(), "step={step}");
+        assert_eq!(actual.history_len(), expected.history_len(), "step={step}");
+        for row in 0..actual.history_len() + actual.rows() {
+            let actual: Vec<_> = actual
+                .output_row(row)
+                .iter()
+                .map(|c| (c.byte, c.fg, c.bg, c.underline))
+                .collect();
+            let expected: Vec<_> = expected
+                .output_row(row)
+                .iter()
+                .map(|c| (c.byte, c.fg, c.bg, c.underline))
+                .collect();
+            assert_eq!(actual, expected, "step={step} row={row}");
+        }
+        for row in 0..actual.rows() {
+            let damage = actual.take_damage(row);
+            for x in 0..actual.cols() {
+                let old = before.get(row).and_then(|line| line.get(x));
+                let changed = old != actual.view_row(row).get(x);
+                let cursor_now = (actual.cursor(), actual.cursor_visible, actual.at_bottom());
+                let cursor_changed = cursor_before != cursor_now
+                    && ((cursor_before.0 == (x, row) && cursor_before.1 && cursor_before.2)
+                        || (cursor_now.0 == (x, row) && cursor_now.1 && cursor_now.2));
+                if changed || cursor_changed {
+                    assert!(
+                        damage.is_some_and(|(start, end)| start <= x && x < end),
+                        "missing damage step={step} cell=({x},{row})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn single_character_and_cursor_report_do_not_damage_the_whole_screen() {
+    let mut terminal = Terminal::new(89, 33);
+    for row in 0..terminal.rows() {
+        terminal.take_damage(row);
+    }
+    terminal.process_byte(b'a');
+    assert_eq!(terminal.take_damage(0), Some((0, 2)));
+    assert!((1..33).all(|row| terminal.take_damage(row).is_none()));
+    feed(&mut terminal, b"\x1b[6n");
+    assert!((0..33).all(|row| terminal.take_damage(row).is_none()));
+}
 
 fn feed(t: &mut Terminal, s: &[u8]) {
     for &b in s {

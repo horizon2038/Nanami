@@ -61,12 +61,19 @@ See [physical capability management](../../nanami/src/nanami_core/memory/README.
   transfers use bounded active polling without timer RPCs. Slower transfers
   unmask the IRQ and recheck the ring before waiting on the bound notification;
   their absolute timeout is not extended by unrelated notifications. Polling-only
-  controllers use one-shot checks. Debounce/reset delays still use a private
+  controllers use one-shot checks before maintenance is registered. Debounce/reset delays still use a private
   notification so IRQs and periodic maintenance cannot shorten them.
   Deadline expiry is followed by a final bounded event drain: a completion that
   arrived during the clock RPC is not discarded. Initial enumeration exercises
   the same path with interrupt delivery disabled and one-shot polling alarms.
-  No raw hardware timer counter is exposed.
+  Normal operation uses the independent 10-ms maintenance notification for
+  timeout checks, avoiding a per-transfer alarm arm/cancel pair. Driver Manager
+  permits only its selected USB PID to obtain an HPET counter view. USB reads a
+  running 64-bit counter in the timer owner's nanosecond epoch; it never writes
+  HPET configuration, comparators or counter registers, and owns no HPET IRQ.
+  Missing/disabled/narrow counters retain clock RPCs rather than inventing a wrap
+  epoch. This is read-only **usage** of the existing MMIO mapping API, not a new
+  page-protection guarantee or a clock API exposed to ordinary applications.
 - ERDP acknowledges only examined event entries; EHB is cleared at the end of
   every drain, including empty drains and synchronous-transfer returns. Posted
   interrupt acknowledgements are flushed before the kernel IRQ is unmasked.
@@ -78,6 +85,11 @@ See [physical capability management](../../nanami/src/nanami_core/memory/README.
   Failure-only diagnostics report the command/control operation and HC/event-ring
   registers, distinguishing a timeout from a Host Controller Event or timer IPC
   failure without enabling per-request serial tracing.
+  A control timeout first stops EP0 (or resets an already halted EP0) and waits
+  for command completion. Only then can enumeration disable the slot; other
+  devices remain active. A failed quiescence command still stops the controller
+  and retains all DMA. This does not guarantee that an unresponsive USB3 root
+  can be enumerated, and no uncertain writes are replayed.
 - AHCI probe DMA is quiesced before reusing buffers for another port.
   Driver failure paths retain DMA rather than exiting with a live controller.
 
@@ -86,6 +98,463 @@ storage sectors, report-only/NKRO/vendor or SuperSpeed HID, horizontal wheels,
 buttons beyond the first three, high-resolution wheel multiplier negotiation,
 keyboard LEDs, suspend/resume, PCI hotplug, MSI/MSI-X delivery or AArch64 USB.
 Attach test devices directly to xHCI root ports.
+
+## Completion waits and IPC latency
+
+The driver now rearms its IRQ on synchronous completion, including fast
+completions, instead of relying on a later HID/maintenance event. With a usable
+local HPET view and registered maintenance, even a slow normal transfer performs
+no clock/alarm/cancel RPCs. Initial enumeration retains its 1-ms polling alarms;
+debounce/reset delays retain the separate delay notification. Scheduling policy,
+process affinities, quantum accounting, and A9N are unchanged.
+
+Low-volume diagnostics (not per-TRB serial logging):
+
+```sh
+NANAMI_BOOT_PC_TRACE=0 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+NANAMI_USB_WAIT_TRACE=1 cargo xtask build --rebuild-rootfs \
+  --rootfs out/usb-ipc-rootfs.img --output-image out/usb-ipc.img
+```
+
+`completion clock=local-hpet` confirms the fast clock. Every 500 consumed
+maintenance notifications, `usb.io` reports successful read/write bytes, time
+inside the USB request handler and the actual local-clock sample interval;
+`usb.wait` reports completion counts, IRQ/timer wakes, empty wakes, time asleep,
+and time preparing waits. Totals use microseconds. They include scheduling delay
+while the driver is blocked, not device-only wire time. They do **not** measure
+IPC queue time before the driver receives a request or the VFS caller's wakeup
+after the reply. Nested timeout-recovery commands are included in completion
+totals. A fallback clock yields zero timing fields (`local-clock=false`), not an
+assertion of zero latency. Notifications coalesce, so 500 events is not necessarily
+five wall-clock seconds. The counters are reset after each sample.
+
+```sh
+cargo test --locked --offline --manifest-path tests/native-performance/Cargo.toml \
+  --test usb-completion --test usb-control-recovery --test usb-service \
+  --test hpet --test timer-wait --test ipc-notifications -- --test-threads=1
+```
+
+These production-source tests cover no-input waits with zero timer RPCs, lost
+IRQ timeout checks, fast-path rearming, stale/coalesced notifications, clock
+rollover sampling, and failure to quiesce a control pipe. MMIO and delivery are
+mocked: passing host/QEMU tests does not establish Intel-controller performance
+or resolve the reported hardware USB3 enumeration timeout. The ownership rules
+follow the [Intel xHCI specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf)
+(Stop/Reset Endpoint before slot cleanup); counter sampling follows the
+[HPET specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf).
+
+Validation on 2026-10-13: 167 host regressions passed (one timing benchmark
+ignored), and the wait-profile-enabled subset also passed. The x86_64 release
+image booted USB rootfs to Honoka without input, with the local HPET view active.
+The four-CPU, USB2-only QEMU fixture passed disk writes, keyboard-launched HTTP,
+mouse motion, keyboard/mouse hotplug, and held-Shift release on detach. A
+one-CPU, HPET-disabled fixture also booted through the timer-RPC fallback.
+QEMU used private firmware variables and disposable snapshot disks. A9N source
+and scheduling/quantum/affinity policy were unchanged. Physical hardware was not
+available for validation.
+
+## Same-core isolation (opt-in, no kernel changes)
+
+`NANAMI_SAME_CORE_DIAGNOSTIC=1` compiles Nanami with every spawned process on
+core 0, alongside Alpha. It does **not** disable the kernel's SMP build, change
+the reported online CPU count, reroute IRQs, or alter USB/HPET wait logic. It
+also covers processes spawned later from the rootfs. The ordinary round-robin
+assignment is unchanged when the variable is unset or is not exactly `1`.
+This is a diagnostic comparison, not a production affinity/performance fix.
+
+Keep the same physical USB2 connector, peripherals and firmware settings for
+both images. Build separate images with detailed traces disabled so synchronous
+per-character logging does not confound the comparison:
+
+```sh
+NANAMI_SAME_CORE_DIAGNOSTIC=1 \
+NANAMI_PIPELINE_TRACE=0 NANAMI_USB_WAIT_TRACE=0 \
+NANAMI_BOOT_PC_TRACE=0 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+NANAMI_FB_PROFILE=0 \
+cargo xtask build --rebuild-rootfs \
+  --rootfs out/same-core-rootfs.img --output-image out/same-core.img
+```
+
+The diagnostic image must print `[smp.diag] all-processes-core=0` and every
+`[smp] process` record must show `affinity=0`. With four physical CPUs the
+environment/Alpha still reports `cores=4`/`smp_cores=4`; do not mistake that for
+a failed override. Boot without input until Shell is visible, then press and
+release `a` once without moving the mouse. Record whether boot advances on its
+own and whether the character appears promptly. Only after a stall, try one
+wheel movement and record whether it resumes. Repeat from a fresh boot.
+
+For the normal-affinity baseline use the same command with
+`NANAMI_SAME_CORE_DIAGNOSTIC=0`, `--rootfs out/round-robin-rootfs.img` and
+`--output-image out/round-robin.img`. Normal boot-stage messages remain enabled
+in both builds; this comparison removes detailed diagnostic output only.
+
+If both boot and input improve only with core-0 assignment, cross-core
+wakeup/scheduling, contention and their interaction with process priorities
+become the leading suspects. This alone does not prove an IPI or giant-lock
+bug: it also changes competition for CPU time and selects same-core IPC paths.
+Only interpret a persistent stall after verifying that the same USB IRQ route
+was obtained in both modes. If one build timed out ACPI resolution and changed
+to `irq=false`, it is a different driver path, not a clean cross-core comparison.
+With matching IRQ setup, a persistent stall means cross-core IPC is not required
+to reproduce it; shared driver/IRQ/wait paths and same-core scheduling remain
+in scope. Improvement in only one symptom means boot and GUI input need
+separate investigation.
+
+QEMU validation must still use four CPUs, not `--smp 1`:
+
+```sh
+python3 tests/usb/qemu-hid.py --image out/same-core.img \
+  --usb-storage --usb2 --smp 4 --high-mmio
+```
+
+Validation: the core-process host suite passed in both build modes (21 passed,
+one benchmark ignored per mode); invalid flag values retained round-robin
+assignment. A four-CPU QEMU run reached the desktop without input, reported
+`kernel-cores=4` and `affinity=0` for every spawned process, and passed USB BOT
+filesystem writes, keyboard/HTTP, cursor, hotplug and held-Shift detach checks
+with PS/2 disabled. Physical-machine stall/latency results are still pending.
+
+## Initial-enumeration isolation (opt-in, no wait/IRQ changes)
+
+`NANAMI_USB_INIT_TRACE=1` adds bounded `usb.init` stage records around each
+controller's first `poll()` and subsequent IRQ enable, plus four service-startup
+IPC boundary records after enumeration. It does not move IRQ
+enable before enumeration, add timer requests, change priorities/affinity,
+extend timeouts or modify A9N. Each controller has at most 128 detail records
+and one explicit `trace.truncated` marker; `initial.end` is always printed if
+the initial poll/IRQ-enable block returns. An exhausted trace is not evidence
+that execution stopped at the last recorded phase. The four startup records are
+independent of this per-controller budget. No stage records are emitted for
+later maintenance, block I/O or hotplug.
+
+Use this after a same-core boot stops at `xHCI ports=... irq=true`, with the
+large pipeline/wait traces disabled:
+
+```sh
+NANAMI_SAME_CORE_DIAGNOSTIC=1 NANAMI_USB_INIT_TRACE=1 \
+NANAMI_PIPELINE_TRACE=0 NANAMI_USB_WAIT_TRACE=0 \
+NANAMI_BOOT_PC_TRACE=0 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+NANAMI_FB_PROFILE=0 \
+cargo xtask build --rebuild-rootfs \
+  --rootfs out/usb-init-rootfs.img --output-image out/usb-init.img
+```
+
+Boot the same USB2 connector without input for at least 30 seconds. Send the
+last `usb.init` records, including any `initial.end` or `trace.truncated` marker.
+The phase boundaries distinguish initial event drain, connected-port scan,
+private timer delay, port reset, xHCI command completion and control transfers:
+
+- `attach.begin` reports the connected port, protocol and original `PORTSC`;
+  VID/PID is normally printed only after full configuration succeeds.
+- `delay.begin ms=100 notification=26` without its matching `delay.end` places
+  the stall in the debounce timer-sleep call, not in a USB transfer. That call
+  includes the scheduling RPC and private-notification wait: these two are not
+  independently timed by this trace. Reset polling's 1 ms sleeps are deliberately
+  not logged individually; `reset.begin`/`reset.end` enclose them.
+- `command.begin` includes command kind, slot and TRB; `control.begin` includes
+  port, slot, packed setup and TRB. Their `.end` records show whether they returned
+  successfully. Error paths retain the existing timeout/failure messages.
+- `irq-cap=true` means the capability was acquired, whereas `irq-enabled` is
+  the driver's actual interrupt-enable state. Initial enumeration currently
+  runs with `irq-enabled=false`; `irq-enable.end` follows the existing enable
+  operation. Neither field alone proves interrupt delivery.
+- After `initial.end`, `service-register.begin`/`.end` enclose the existing
+  Alpha RPC registering `usb-service`, and `timer-interval.begin`/`.end` enclose
+  the existing Timer RPC registering 10 ms notifications on slot 21. An `.end`
+  reports `ok=true` or `ok=false` before propagating the original result. Failure
+  still prevents subsequent startup work; there are no retries or new timers.
+  These are exactly four extra lines on successful startup, not periodic logs.
+  The existing `online controllers=...` message and rootfs probing follow both
+  RPCs. If either `.begin` lacks its `.end`, isolate that RPC/server/wakeup path;
+  this alone does not establish a kernel scheduling or IRQ-delivery bug.
+
+Status samples read `USBCMD`, `USBSTS`, `IMAN` and `MFINDEX` without writes,
+acknowledgements or ring consumption. `hpet-ns=Some(...)` uses the existing local,
+read-only HPET view, never a clock RPC; `None` means that view is unavailable.
+Serial output still affects timing and may itself be delayed by scheduling or
+the kernel console lock. This is a phase-isolation tool, not a performance fix.
+Unset the flag (or use `NANAMI_USB_INIT_TRACE=0`) for ordinary builds.
+
+```sh
+NANAMI_USB_INIT_TRACE=1 cargo test --locked --offline \
+  --manifest-path tests/native-performance/Cargo.toml \
+  --test usb-init-trace --test usb-completion --test usb-control-recovery \
+  --test usb-service --test timer-wait --test hpet -- --test-threads=1
+```
+
+Validation on 2026-10-13: 156 related host cases passed with tracing enabled
+and disabled (two timing benchmarks ignored in each run). Four-CPU QEMU with
+the same-core diagnostic policy, high MMIO and a USB2 root produced 87 initial
+controller records without truncation. All three connected ports completed
+debounce, reset and configuration; `irq-enable.end` showed `irq-enabled=true`.
+No initial controller-detail records appeared after `initial.end`, including
+during keyboard/mouse hotplug and snapshot disk-write tests. The full
+HID/storage regression passed.
+This validates the diagnostic path, not the physical-machine stall's cause.
+
+Startup-boundary extension validation on the same date: 60 targeted host cases
+passed with the flag ON and OFF. Production-service tests assert the four logs'
+order and absence in steady state; both registration-error cases return the
+original error without maintenance or probing. The rebuilt four-CPU/same-core
+USB2 QEMU image emitted exactly four startup lines, both `.end ok=true`, between
+`initial.end` and `online controllers=1`. The full HID/hotplug/snapshot-storage
+regression passed again. Physical IPC/wakeup failure remains unverified.
+
+### Timer-side isolation and driver review
+
+The same `NANAMI_USB_INIT_TRACE=1` flag also selects the Timer server's first
+nonzero interval request with a 10 ms initial delay on the main notification
+(slot 21, including a default-slot argument of zero). `timer.init` reports the
+actual requesting PID; it does not assume USB's PID. In the reported boot USB
+is the first matching client, but check the PID against its spawn record.
+Private delays on slot 26 and other requests do not activate this trace.
+
+A cache-miss startup produces 12 records, once: `interval.receive`, notification
+ensure/copy boundaries, clock boundaries, `queue.end`, `event-complete.begin`,
+`hpet-arm.begin`/`.end`, and `reply-enter`. A cache hit reports
+`notification.cache-hit` instead of issuing or logging another copy RPC.
+`hpet-arm` encloses the existing architecture's `PreparedTimer::arm`; on the
+reported PC that is HPET (check the Timer server's ready-mode record).
+There are no extra clock reads, timers, retries, acknowledgements or changes
+to the existing combined Reply-Receive syscall. The trace ends before that
+syscall and never prints on subsequent periodic interrupts.
+
+Interpret a fresh boot together with USB's `timer-interval` records:
+
+- No matching `interval.receive`: the Timer handler has not reached this request
+  (or another PID consumed the one-shot trace). This is not proof of an HPET
+  comparator failure.
+- `notification-copy.begin` without its `.end`: the nested Timer-to-Alpha RPC
+  preparing the notification alias is the unresolved boundary.
+- Clock/arm `.begin` without `.end`: isolate that existing hardware operation.
+  `event-complete.begin` to `hpet-arm.begin` includes expiry notification work.
+- `reply-enter` means only that Timer is about to invoke Reply-Receive. Its
+  receive half can block after a successful reply, so no Timer-side "reply end"
+  is expected. USB's `timer-interval.end ok=true` confirms return to the caller.
+
+Source review covered USB startup, completion waits, ring/DMA ownership,
+control/BOT recovery, input publication, HPET scheduling and the Driver Manager's
+resource/IRQ/root selection. No implementation defect explaining the reported
+physical IPC stall was established. Two existing limitations remain: synchronous
+startup RPCs have no timeout, so hardware transfer deadlines cannot bound a
+blocked RPC; AHCI's `wait_clear`/command polling use a loop-count limit and
+`yield_now`, which does not guarantee service to lower-priority READY processes.
+The latter is a separate latency/starvation risk, not evidence that AHCI caused
+the observed higher-priority Timer registration stall. No driver algorithms,
+priorities, affinity policies, A9N or Spencer source were changed in this review.
+
+Validation on 2026-10-13: all 491 host cases passed with the flag ON and OFF
+(seven benchmarks ignored per run). Added tests use the production main-slot
+and timer-badge constants, cover private/default slot cache separation, copy
+failure/retry, first-interval/cache-hit trace ordering, no periodic logging and
+arm-error propagation. A HPET MMIO test uses the physical 41,666,667 fs period
+and verifies a 10 ms comparator without resetting the running counter epoch.
+Host tests mock syscall delivery/MMIO; they do not prove hardware IRQ routing,
+kernel liveness or physical-controller timing.
+
+Four disposable QEMU regressions passed: four CPUs/same-core/USB2 with the
+trace ON and OFF; four CPUs/ordinary round-robin with USB3-capable ports; and
+one CPU/AHCI root with HPET disabled (PIT fallback). Each reached Honoka/Shell
+without input and passed keyboard-launched HTTP, mouse movement and HID
+hotplug/held-Shift release. USB-root runs also exercised snapshot disk writes.
+The trace-enabled run produced exactly 12 Timer records, ending at
+`reply-enter`, followed by USB's successful `timer-interval.end`; no Timer trace
+records followed during steady-state/hotplug. The OFF image produced no
+`usb.init` or `timer.init` records. Firmware variables and guest disks were
+private; no physical devices or host guest-data images were modified.
+
+### First Timer reply-path comparison (experimental)
+
+The reported physical boot reached `hpet-arm.end ok=true` and
+`reply-enter status=0x0`, but USB never printed `timer-interval.end`. Those
+records precede Reply-Receive and do not establish whether the reply syscall
+was entered, completed, or the caller scheduled. For that boundary only,
+`NANAMI_TIMER_SPLIT_REPLY=1` **together with** `NANAMI_USB_INIT_TRACE=1` replaces
+the first selected Timer reply's combined operation with standalone Reply,
+then the existing service Receive helper. Both flags must be exactly `1`;
+unset, zero and other values leave the ordinary path unchanged.
+
+The selection remains the first nonzero 10 ms interval on notification slot 21
+(a default-slot argument is normalized before selection). Check its actual PID
+against USB's spawn record. Private sleeps, other requests and subsequent
+replies retain their original IPC path. No additional timers, clock reads,
+acknowledgements, RPC retries, priority/affinity changes or A9N/Spencer source
+changes are introduced. A reply failure does not proceed to Receive or retry.
+Saved notifications remain available to Receive, without consuming the next
+queued request or repeating the reply.
+
+Build the complete experimental image, including regenerated rootfs:
+
+```sh
+NANAMI_SAME_CORE_DIAGNOSTIC=1 \
+NANAMI_USB_INIT_TRACE=1 NANAMI_TIMER_SPLIT_REPLY=1 \
+NANAMI_PIPELINE_TRACE=0 NANAMI_USB_WAIT_TRACE=0 \
+NANAMI_BOOT_PC_TRACE=0 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+NANAMI_FB_PROFILE=0 \
+cargo xtask build --rebuild-rootfs \
+  --rootfs out/usb-split-rootfs.img --output-image out/usb-split.img
+```
+
+Keep the input devices stationary during the first boot. The expected boundary
+records are:
+
+```text
+[timer.init] stage=reply-enter status=0x0 path=split
+[timer.init] stage=reply-split.returned ok=true
+[timer.init] stage=receive-enter path=split
+[usb.init] stage=timer-interval.end ok=true
+```
+
+`reply-split.returned` is printed after the standalone Reply call returns, not
+after the caller runs. A missing record still leaves the call, scheduling and
+serial-output paths unresolved. `ok=false` reports a Reply error; no Receive is
+then attempted. `receive-enter` precedes the existing helper, which can deliver
+a deferred notification without entering kernel Receive. USB's `.end ok=true`
+is the confirmation that the caller's registration RPC returned successfully.
+Only this reply emits the two extra records (14 Timer records on a cache miss),
+never every periodic interrupt.
+
+For a paired comparison, use the same build command with
+`NANAMI_TIMER_SPLIT_REPLY=0` and separate `out/usb-combined-rootfs.img` /
+`out/usb-combined.img` outputs. Keep tracing and the other flags the same.
+Even if splitting changes the physical result, it does not uniquely prove a
+combined-syscall bug: serial timing and existing kernel scheduling paths differ.
+In particular, standalone Reply queues the caller through `mark_scheduled`
+(which resets its quantum), whereas the eligible direct Reply-Receive fast path
+preserves the caller's remaining budget. No kernel budget-accounting change or
+priority donation has been implemented by this experiment.
+
+```sh
+NANAMI_USB_INIT_TRACE=1 NANAMI_TIMER_SPLIT_REPLY=1 \
+cargo test --locked --offline --manifest-path tests/native-performance/Cargo.toml \
+  --test ipc-notifications --test timers -- --test-threads=1
+```
+
+The IPC tests compile the production Timer selector/reply helper and runtime IPC
+helpers together against a mock ABI. They cover exact payload/order, one-shot
+selection, opt-in gating, deferred notifications and Reply/Receive failures
+without replay. They do not simulate kernel scheduling or IRQ delivery.
+
+Validation on 2026-10-13: all 504 host cases passed with both flags ON and
+both flags OFF (seven benchmarks ignored per run). All 23 IPC cases also passed
+with tracing ON/splitting OFF, tracing OFF/splitting ON, an invalid split value,
+and both flags unset. Two separately rebuilt four-CPU/same-core/high-MMIO/USB2
+QEMU images passed the full HID/hotplug/snapshot-storage regression. The split
+image emitted exactly 14 Timer records, including one successful Reply return
+and one Receive entry, followed by USB's successful registration return. The
+combined image emitted exactly the original 12 records and no split records.
+Both reached Desktop/Shell without input; the physical stall remains unverified.
+
+## Pipeline isolation (opt-in)
+
+Use a separate disposable rootfs/image, leaving the ordinary image untouched:
+
+```sh
+NANAMI_PIPELINE_TRACE=1 NANAMI_USB_WAIT_TRACE=1 \
+NANAMI_BOOT_PC_TRACE=0 NANAMI_BOOT_IO_TRACE=0 NANAMI_USB_IO_TRACE=0 \
+cargo xtask build --rebuild-rootfs \
+  --rootfs out/pipeline-rootfs.img --output-image out/pipeline.img
+```
+
+On the physical machine, first boot without touching either input device. After
+Shell is visible/focused, press/release `a` once, leave the mouse stationary for
+at least five seconds, then move it once if the character has not appeared.
+Keep the **whole** serial log, including the beginning and the key/mouse test.
+Do not filter away records: SMP's per-character debug output can interleave lines.
+No character text or keycodes are logged. Record the approximate physical key
+press, visible-character and mouse-motion times separately.
+
+New records isolate these boundaries:
+
+| Record/stage | What is measured |
+| --- | --- |
+| `pipe.rpc load-stat/heap/open/read/close/spawn` | System Manager's synchronous calls, including time blocked/descheduled |
+| `pipe.rpc load-copy` | Copying a completed VFS chunk into the executable buffer |
+| `pipe.rpc vfs-serve` | VFS handler plus writeback preparation; captured before replying and reported only after Reply-Receive returns |
+| `pipe.rpc vfs-usb` | VFS's complete block-read RPC, including queue/wakeup time outside the USB handler |
+| `pipe.rpc shell-present/honoka-render` | Client presentation submission / compositor render path |
+| `pipe.rpc pci-scan` | virtio-net's PCI probe, including its failure path when no virtual NIC exists |
+| `pipe.key usb-publish` | Key events queued by USB and an input-server notification attempted |
+| `pipe.key input-distribute` | Authorized keys drained and subscriber notifications attempted |
+| `pipe.key honoka-pop/honoka-route/shell-pop` | Compositor input consumption, window queue delivery, and Shell consumption/handling |
+| `pipe.wake` | Badge returned by the existing wait; captured on return, printed after event handling |
+| `pipe.notify` | A failed Shell presentation notification/invalidation |
+| `pipe.td` / `pipe.td.state` | A >=100ms wait's BOT phase (CBW/data/CSW), expected TD, and read-only ring/endpoint snapshots |
+
+For input, compare cumulative `total` and `notifies` / `notify-errors`. A press
+and release normally gives two events at each stage for a focused Shell. Key
+logs cover batches containing the first 16 events, then batches crossing
+power-of-two cumulative counts. USB/Input/Honoka source `tag` is the existing
+8-bit sequence and can wrap. Window/Shell events are repacked, so their tag is
+**not** an end-to-end correlation ID. Notifications can coalesce, and a zero
+`notifies` for `honoka-pop`/`shell-pop` means that stage only measures consumption.
+
+USB's key records are buffered until the next existing main-loop maintenance
+tick (which can be later during a synchronous transfer), before polling that
+tick's HID events. This avoids printing concurrently with the just-notified
+Input Server. Shell's `deferred=true` records are captured during input processing and
+flushed on its **existing** 100-ms timer event, reducing contention with the
+compositor's logs without delaying key handling. A deferred key record's
+`work-ticks` sums measured handling time and excludes idle time between events;
+its first/last timestamps span the batch. Deferred wake badges are ORed from
+the actual returned badges in that batch, not invented from queue contents.
+Output time is not input receipt time. If the Shell timer never wakes it, the
+deferred record cannot be printed; compare the upstream records and wake logs.
+
+`pipe.rpc` includes batch and cumulative calls/ticks/bytes. Load byte counts are
+requested sizes; VFS/USB counts are returned read sizes. Each role's
+`pipe.clock` identifies the counter/frequency. **Ticks are not microseconds.**
+On x86_64, samples use ordered local RDTSC, without a clock RPC. CPUID frequency
+can be unknown (`tick-hz=0`); it is not guessed from CPU marketing frequency.
+`pipe.reference` pairs the USB core's local ticks and running HPET nanoseconds
+at the existing watch sample, without another timer. It is not a calibration
+of every CPU. Cross-core counter synchronization is unverified: do not subtract
+absolute timestamps across cores or blindly subtract differently scaled spans.
+Compare VFS handler and VFS-to-USB spans on the same core, or use independently
+verified counter frequencies for other comparisons. AArch64 uses CNTVCT units.
+
+RPC batches emit at 32 completions or a span of >=100,000,000 **counter ticks**;
+the latter is only a logging threshold, not a hardware timeout. Loader stages
+also flush after each completed spawn. In contrast, TD `wait-us` and
+`sampled-at-us` use the existing usable local HPET view. Without it, TD timing
+snapshots are unavailable. A snapshot is buffered at the first observation after
+100ms, not necessarily exactly at 100ms; zero `sampled-at-us` means only a final
+snapshot was possible. It never advances the ring, acknowledges an IRQ, or
+changes endpoint/controller state. HC-owned endpoint dequeue fields are hints,
+not proof of DMA ownership; quiescence still requires Stop/Reset Endpoint.
+
+These are diagnostic builds, not benchmarks. Serial output itself performs
+kernel calls and can change timing. Samples precede their own output, but other
+records may still influence execution. Compare an otherwise identical build
+with `NANAMI_PIPELINE_TRACE=0 NANAMI_USB_WAIT_TRACE=0` (all other trace flags also
+zero), using a different rootfs/image path. No new timer, clock IPC, kernel,
+quantum, priority, affinity, protocol or hardware configuration is introduced.
+
+```sh
+NANAMI_PIPELINE_TRACE=1 NANAMI_USB_WAIT_TRACE=1 \
+cargo test --locked --offline --manifest-path tests/native-performance/Cargo.toml \
+  --test usb --test usb-completion --test usb-service --test storage \
+  --test input-distribution --test ipc-notifications --test honoka-motion \
+  -- --test-threads=1
+
+python3 tests/usb/qemu-hid.py --image out/pipeline.img \
+  --usb-storage --usb2 --smp 4 --high-mmio --pipeline-smoke
+```
+
+The snapshot-only QEMU smoke sends no mouse events and requires both key press
+and release at all five stages within four host seconds, plus Shell's input
+badge rather than only its periodic timer. It saves before/after screenshots
+for inspection; it does not assert pixel correctness or physical IRQ behavior.
+Hardware root cause still requires the physical trace.
+
+Validation on 2026-10-13: 165 host test cases passed with diagnostics ON and OFF.
+The release image booted a USB2 root on four QEMU CPUs without input; the
+pipeline smoke observed all five stages and the input badge in about 0.2 host
+seconds. The normal USB regression also passed snapshot disk writes,
+keyboard-launched HTTP, pointer movement, keyboard/mouse hotplug and held-Shift
+release. These results validate the instrumentation, not the physical-machine
+latency. `pci-scan errors=1` is expected on a PC with no virtio NIC; its duration,
+not the mere absence of that virtual device, is the diagnostic signal.
 
 ## Physical-machine INTx routing
 
@@ -101,8 +570,29 @@ Resolution starts after timer-service is available and runs asynchronously,
 without a manager-to-ACPI blocking RPC. USB bounds the wait to 3,000 retries
 with 10 ms private timer sleeps (about 30 seconds plus IPC overhead).
 Existing valid PCI lines need no AML evaluation.
+Alpha assigns acpi-server priority 28, matching USB and above background probes
+such as AHCI (23). ACPI is an IRQ-resolution dependency: priority 4 can starve
+it behind a READY background probe on the same core, since yielding does not
+make a strict-priority scheduler select a lower-priority process. This default
+applies to both ordinary and same-core diagnostic builds; other default and
+explicit boot/rootfs priorities are unchanged. Kernel scheduling is unchanged.
+Spawn records now include the assigned `priority`; the initramfs ACPI record
+should show `image=./bin/acpi-server ... priority=28`.
 `_INI`, `_SRS`, ACPI power-mode changes and `_S5` are not run for routing.
 The interpreter is retained for a later shutdown request.
+
+Priority-change validation: the actual default-priority policy, process manager
+and USB-route host tests pass with ordinary/same-core modes (30 passed and one
+benchmark ignored per mode). Four-CPU QEMU USB2/BOT/HID/hotplug tests pass with
+both affinity policies. An additional disposable Q35 fixture was paused before
+Nanami, and qtest set only virtual xHCI's Interrupt Line byte to 255, retaining
+the Interrupt Pin. ACPI ran with priority 28 and reported GSI 22, level/high;
+the unsupported polarity was explicitly rejected, and polling fallback booted
+through the same USB regression checks without a pending-route timeout. This
+fixture also booted with the pre-change image: QEMU did **not** reproduce the
+physical-machine priority starvation, and the physical GSI 16/stall fix remains
+unverified. A forced-255 i440fx fixture instead hit the existing missing-MCFG
+AML-host panic and timed out; that separate failure path is not fixed here.
 
 For newly resolved routes, the current kernel API supports the GSI 16–23
 level/active-low policy. Other attributes are rejected rather than silently

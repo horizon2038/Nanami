@@ -38,16 +38,12 @@ impl InfoPanel {
         let inner_width = (width - 2 * PADDING).max(1);
         let mut lines = Vec::new();
         for field in fields {
-            let mut start = 0;
-            for (end, ch) in field.char_indices() {
-                if end > start
-                    && text.text_width(field[start..end + ch.len_utf8()].as_bytes()) > inner_width
-                {
-                    lines.push(String::from(&field[start..end]));
-                    start = end;
-                }
-            }
-            lines.push(String::from(&field[start..]));
+            wrap_line(
+                &field,
+                inner_width,
+                |bytes| text.text_width(bytes),
+                &mut lines,
+            );
         }
         let height = (lines.len() as i32 * LINE_HEIGHT + 2 * PADDING).min(available_height);
         Self {
@@ -93,6 +89,30 @@ impl InfoPanel {
             );
         }
     }
+}
+
+pub(super) fn wrap_line(
+    field: &str,
+    inner_width: i32,
+    mut text_width: impl FnMut(&[u8]) -> i32,
+    lines: &mut Vec<String>,
+) {
+    let mut start = 0;
+    let mut line_width = 0i32;
+    for (end, ch) in field.char_indices() {
+        // TextRenderer advances are additive. Measure each character once,
+        // not every growing prefix, while keeping UTF-8 wrap boundaries.
+        let char_width = text_width(&field.as_bytes()[end..end + ch.len_utf8()]);
+        let next_width = line_width.saturating_add(char_width);
+        if end > start && next_width > inner_width {
+            lines.push(String::from(&field[start..end]));
+            start = end;
+            line_width = char_width;
+        } else {
+            line_width = next_width;
+        }
+    }
+    lines.push(String::from(&field[start..]));
 }
 
 fn intersection(a: Rect, b: Rect) -> Option<Rect> {

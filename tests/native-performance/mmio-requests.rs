@@ -1,5 +1,8 @@
 //! Fault injection for the production Alpha MMIO handler's stage diagnostics.
 #![allow(dead_code)]
+extern crate self as nun;
+pub use a9n_abi::capability_call;
+use capability_call::address_space::Attribute;
 use std::cell::RefCell;
 type Word = usize;
 const PAGE_SIZE: usize = 4096;
@@ -10,6 +13,7 @@ struct OsRequestEvent {
     identifier: Word,
     arg0: Word,
     arg1: Word,
+    arg2: Word,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum CapabilityError {
@@ -23,6 +27,7 @@ struct Fake {
     skip: usize,
     calls: Vec<&'static str>,
     logs: Vec<String>,
+    mappings: Vec<Attribute>,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 macro_rules! info { ($($args:tt)*) => {{ let _ = format_args!($($args)*); }} }
@@ -85,7 +90,15 @@ impl Memory {
     fn physical_frame_descriptor_from_index(&self, index: usize) -> Option<Word> {
         Some(index + 1)
     }
-    fn map_frame(&mut self, _: Word, _: Word, _: Word, _: &mut ()) -> Result<(), CapabilityError> {
+    fn map_frame_with_attribute(
+        &mut self,
+        _: Word,
+        _: Word,
+        _: Word,
+        mapping: Attribute,
+        _: &mut (),
+    ) -> Result<(), CapabilityError> {
+        FAKE.with(|fake| fake.borrow_mut().mappings.push(mapping));
         step("map-frames")
     }
 }
@@ -146,6 +159,7 @@ fn request() -> OsRequestEvent {
         identifier: 1,
         arg0: 0x8c7c8000,
         arg1: 2 * PAGE_SIZE,
+        arg2: Attribute::UNCACHED.bits(),
     }
 }
 
@@ -227,7 +241,28 @@ fn overflowing_range_never_touches_allocators() {
             identifier: 1,
             arg0: physical,
             arg1: bytes,
+            arg2: Attribute::UNCACHED.bits(),
         };
+        assert_eq!(run(None, 0, request), Err(CapabilityError::InvalidArgument));
+        FAKE.with(|fake| assert!(fake.borrow().calls.is_empty()));
+    }
+}
+
+#[test]
+fn all_mapping_flags_reach_each_leaf_without_coercion() {
+    for mapping in [Attribute::NORMAL, Attribute::BUFFERED, Attribute::UNCACHED] {
+        let mut request = request();
+        request.arg2 = mapping.bits();
+        assert!(run(None, 0, request).is_ok());
+        FAKE.with(|fake| assert_eq!(fake.borrow().mappings, [Attribute::ALL | mapping; 2]));
+    }
+}
+
+#[test]
+fn reserved_mapping_flag_never_touches_allocators() {
+    for flag in [3, 0x30, 0xf0, 0x100, 0x08, usize::MAX] {
+        let mut request = request();
+        request.arg2 = flag;
         assert_eq!(run(None, 0, request), Err(CapabilityError::InvalidArgument));
         FAKE.with(|fake| assert!(fake.borrow().calls.is_empty()));
     }

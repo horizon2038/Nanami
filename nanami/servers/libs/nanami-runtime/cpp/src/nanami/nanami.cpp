@@ -369,9 +369,9 @@ a9n::NanamiStatus request_mmio(
         OS_REQUEST_MMIO_REQUEST,
         physical_address,
         size_bytes,
+        0x20, // Attribute::UNCACHED; ordinary MMIO is never WB/WC.
         0,
-        0,
-        3,
+        4, // code + paddr + bytes + mapping
         &status,
         &detail0,
         &detail1

@@ -46,9 +46,68 @@ mod shared_memory_reservations;
 
 #[path = "shared-memory-lifecycle.rs"]
 mod shared_memory_lifecycle;
+#[path = "allocation-index.rs"]
+mod allocation_index;
 
 fn manager() -> ProcessManager {
     ProcessManager::new_alpha(1, 2, 3, 4096, &[], 4).unwrap()
+}
+
+#[test]
+fn affinity_diagnostic_requires_explicit_one() {
+    assert_eq!(
+        nanami_core::process::SAME_CORE_DIAGNOSTIC,
+        option_env!("NANAMI_SAME_CORE_DIAGNOSTIC") == Some("1")
+    );
+}
+
+#[test]
+fn affinity_allocation_preserves_topology_and_normal_round_robin() {
+    for core_count in [1, 2, 4, 64] {
+        let mut manager = ProcessManager::new_alpha(1, 2, 3, 4096, &[], core_count).unwrap();
+        for index in 0..core_count * 3 {
+            let expected = if nanami_core::process::SAME_CORE_DIAGNOSTIC || core_count == 1 {
+                0
+            } else {
+                1 + index % (core_count - 1)
+            };
+            assert_eq!(manager.allocate_affinity(), expected);
+            assert_eq!(manager.online_core_count(), core_count);
+        }
+        assert_eq!(manager.alpha_entry().affinity, 0);
+    }
+}
+
+#[test]
+fn active_core_mask_uses_allocated_affinities_not_the_online_count() {
+    let mut manager = manager();
+    for pid in 1..=6 {
+        let affinity = manager.allocate_affinity();
+        let root = pid + 200;
+        manager
+            .install_process(
+                pid,
+                0,
+                root,
+                root + 1,
+                root + 2,
+                root + 3,
+                root + 4,
+                pid,
+                affinity,
+                0,
+                0x200000,
+                0x400000,
+            )
+            .unwrap();
+    }
+    let expected = if nanami_core::process::SAME_CORE_DIAGNOSTIC {
+        1
+    } else {
+        0xf
+    };
+    assert_eq!(manager.active_core_mask(), expected);
+    assert_eq!(manager.online_core_count(), 4);
 }
 
 fn install(manager: &mut ProcessManager, pid: usize, root: usize) {

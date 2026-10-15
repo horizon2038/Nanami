@@ -1,5 +1,6 @@
 mod bulk;
 mod capabilities;
+mod control_recovery;
 mod dma;
 mod enumerate;
 mod events;
@@ -12,6 +13,7 @@ pub mod ring;
 mod storage;
 mod transfer;
 mod wait;
+mod wait_trace;
 
 pub use storage::Disk;
 
@@ -71,6 +73,9 @@ pub struct Controller {
     doorbells: usize,
     pub irq: Option<Word>,
     timer: Word,
+    clock: crate::clock::Clock,
+    maintenance_started: bool,
+    wait_profile: wait::WaitProfile,
     dma: Dma,
     _scratch: Option<Dma>,
     command_ring: Producer,
@@ -93,12 +98,48 @@ pub struct Controller {
 }
 
 impl Controller {
+    #[inline]
+    pub(crate) fn trace_init(&self, stage: core::fmt::Arguments<'_>) {
+        crate::init_trace::record(|| {
+            let snapshot = unsafe {
+                crate::init_trace::Snapshot::capture(self.op, self.interrupter, self.runtime)
+            };
+            nanami_runtime::println!(
+                "[usb.init] {} irq-cap={} irq-enabled={} USBCMD={:#x} USBSTS={:#x} IMAN={:#x} MFINDEX={} hpet-ns={:?}",
+                stage,
+                self.irq.is_some(),
+                self.interrupts_enabled,
+                snapshot.command,
+                snapshot.status,
+                snapshot.iman,
+                snapshot.mfindex,
+                self.clock.local_nanoseconds()
+            );
+        });
+    }
+
     pub fn take_storage_change(&mut self) -> bool {
         core::mem::take(&mut self.storage_changed)
     }
 
     fn delay(&self, milliseconds: Word) -> Result<(), RequestError> {
-        crate::delay(self.timer, milliseconds)
+        // Do not flood reset polling with a pair of logs for every 1 ms wait.
+        if milliseconds > 1 {
+            self.trace_init(format_args!(
+                "stage=delay.begin ms={} notification={}",
+                milliseconds,
+                crate::SLOT_DELAY_NOTIFICATION
+            ));
+        }
+        let result = crate::delay(self.timer, milliseconds);
+        if milliseconds > 1 {
+            self.trace_init(format_args!(
+                "stage=delay.end ms={} ok={}",
+                milliseconds,
+                result.is_ok()
+            ));
+        }
+        result
     }
     fn wait_register(
         &self,
@@ -205,7 +246,10 @@ impl Controller {
                 }
             }
             37 => {
-                nanami_runtime::println!("[usb-server] host controller event code={}", event.code());
+                nanami_runtime::println!(
+                    "[usb-server] host controller event code={}",
+                    event.code()
+                );
                 self.fail(input);
             }
             _ => {}
@@ -284,7 +328,13 @@ impl Controller {
             .submit(&[trb])
             .ok_or(RequestError::Protocol)?;
         self.doorbell(0, 0);
-        self.wait_completion(1000, input, |this, input, event| {
+        self.trace_init(format_args!(
+            "stage=command.begin kind={} slot={} trb={:#x}",
+            trb.kind(),
+            trb.slot(),
+            pointer
+        ));
+        let result = self.wait_completion(1000, input, |this, input, event| {
             if event.kind() == 33 && event.parameter & !15 == pointer {
                 this.command_ring.complete();
                 if event.code() != 1 {
@@ -299,8 +349,14 @@ impl Controller {
             }
             this.dispatch(event, input);
             Ok(None)
-        })
-        .inspect_err(|error| {
+        });
+        self.trace_init(format_args!(
+            "stage=command.end kind={} slot={} ok={}",
+            trb.kind(),
+            trb.slot(),
+            result.is_ok()
+        ));
+        result.inspect_err(|error| {
             nanami_runtime::println!(
                 "[usb-server] command wait failed kind={} slot={} trb={:#x}: {}",
                 trb.kind(),
@@ -314,6 +370,7 @@ impl Controller {
         if !self.running {
             return;
         }
+        self.trace_init(format_args!("stage=event-drain.begin"));
         self.events.begin(self.op, self.interrupter);
         for _ in 0..ring::ENTRIES {
             let Some(event) = self.event() else {
@@ -322,9 +379,12 @@ impl Controller {
             self.dispatch(event, input);
         }
         self.events.finish(self.interrupter);
+        self.trace_init(format_args!("stage=event-drain.end dirty={}", self.dirty));
         if self.dirty {
             self.dirty = false;
+            self.trace_init(format_args!("stage=port-scan.begin ports={}", self.ports));
             self.scan_ports(input);
+            self.trace_init(format_args!("stage=port-scan.end running={}", self.running));
         }
     }
     pub fn counts(&self) -> (usize, usize) {

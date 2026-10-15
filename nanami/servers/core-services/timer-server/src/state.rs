@@ -35,6 +35,7 @@ impl PendingAsyncTimer {
 }
 
 pub(super) struct TimerState {
+    pub(super) init_trace: super::init_trace::Trace,
     pub(super) ticks: u64,
     pub(super) timer_started: bool,
     pub(super) clock_sampled: bool,
@@ -47,6 +48,7 @@ pub(super) struct TimerState {
 impl TimerState {
     pub(super) const fn new() -> Self {
         Self {
+            init_trace: super::init_trace::Trace::new(),
             ticks: 0,
             timer_started: false,
             clock_sampled: false,

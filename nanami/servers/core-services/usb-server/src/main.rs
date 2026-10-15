@@ -12,6 +12,8 @@ macro_rules! io_trace {
 }
 
 mod arch;
+mod clock;
+mod init_trace;
 mod input;
 mod service;
 mod storage;
@@ -66,6 +68,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let timer = nanami_runtime::ipc::process_slot_descriptor(24);
     nanami_runtime::connect_service_by_name(nanami_client::device::DEVICE_MANAGER_SERVICE, 25)?;
     let manager = nanami_runtime::ipc::process_slot_descriptor(25);
+    let clock = clock::Clock::prepare(manager, timer);
     let mut resources = Vec::new();
     for index in 0..4 {
         let Some(mut resource) = nanami_client::device::usb_controller(manager, index)? else {
@@ -94,11 +97,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let mut discovery_failed = false;
     for (index, resource) in resources.into_iter().enumerate() {
         let controller = arch::prepare(resource)
-            .and_then(|resource| xhci::Controller::initialize(resource, timer, 32 + index));
+            .and_then(|resource| xhci::Controller::initialize(resource, timer, clock, 32 + index));
         match controller {
             Ok(mut controller) => {
+                let _trace = init_trace::Session::begin(index);
                 controller.poll(&mut input);
                 controller.enable_interrupts();
+                controller.trace_init(format_args!("stage=irq-enable.end"));
                 controllers.push(controller);
             }
             Err(error) => {

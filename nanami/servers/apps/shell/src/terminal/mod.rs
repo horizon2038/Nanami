@@ -73,7 +73,13 @@ impl Terminal {
         (self.screen.x, self.screen.y)
     }
     pub fn row(&self, row: usize) -> &[Cell] {
-        &self.screen.cells[row * self.cols()..(row + 1) * self.cols()]
+        self.screen.row(row)
+    }
+    pub fn invalidate_all(&mut self) {
+        self.screen.mark_rows(0, self.rows() - 1);
+    }
+    pub fn take_damage(&mut self, row: usize) -> Option<(usize, usize)> {
+        self.screen.take_damage(row)
     }
     pub fn history_len(&self) -> usize {
         self.screen.history.len()
@@ -101,7 +107,11 @@ impl Terminal {
             self.view_offset
                 .saturating_sub(rows.unsigned_abs() as usize)
         };
-        self.view_offset != old
+        if self.view_offset != old {
+            self.invalidate_all();
+            return true;
+        }
+        false
     }
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.view_offset = 0;
@@ -155,6 +165,7 @@ impl Terminal {
                 core::mem::replace(&mut self.screen, screen),
                 self.saved_style,
             ));
+            self.invalidate_all();
         } else if !enabled {
             if let Some((screen, style)) = self.alternate.take() {
                 self.screen = screen;
@@ -162,6 +173,7 @@ impl Terminal {
                 if save {
                     self.restore_cursor();
                 }
+                self.invalidate_all();
             }
         }
     }

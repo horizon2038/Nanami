@@ -6,6 +6,6 @@ edition = "2021"
 [dependencies]
 nanami-runtime = { path = "../nanami-runtime" }
 nanami-uapi = { path = "../../uapi" }
-a9n_abi = "0.6.0"
+a9n_abi = "0.8.0"
 
 [workspace]

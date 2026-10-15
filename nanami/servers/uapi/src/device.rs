@@ -16,6 +16,10 @@ pub const DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE: Word = 0xd006;
 
 pub const DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT: Word = 0xd007;
 
+/// Counter reads for the boot-selected USB driver; does not delegate timer IRQs
+/// or ownership of HPET configuration/comparators.
+pub const DEVICE_MANAGER_REQUEST_HPET_COUNTER_BASE: Word = 0xd008;
+
 pub const ACPI_ROUTE_NOTIFICATION: Word = 1;
 
 pub const STORAGE_PENDING: Word = 0;

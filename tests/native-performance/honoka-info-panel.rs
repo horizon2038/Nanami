@@ -1,8 +1,8 @@
 //! Pixel tests with Honoka's real font rasterizer, framebuffer and panel renderer.
 #![allow(dead_code)]
 extern crate alloc;
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 pub use std::println;
 pub type Word = usize;
 pub struct NanamiError;
@@ -125,4 +125,68 @@ fn clipping_never_touches_pixels_outside_damage() {
             assert_eq!(pixel, WALLPAPER);
         }
     }
+}
+
+fn legacy_wrap(field: &str, width: i32, mut measure: impl FnMut(&[u8]) -> i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (end, ch) in field.char_indices() {
+        if end > start && measure(field[start..end + ch.len_utf8()].as_bytes()) > width {
+            lines.push(String::from(&field[start..end]));
+            start = end;
+        }
+    }
+    lines.push(String::from(&field[start..]));
+    lines
+}
+
+#[test]
+fn linear_wrapping_matches_previous_layout_for_real_font_and_fallback_advances() {
+    let text = font::TextRenderer::new();
+    for field in fields().into_iter().chain([
+        String::new(),
+        String::from("a"),
+        String::from("Aé日本語 B\t🙂XYZ"),
+        "wide and narrow chars Wi.".repeat(40),
+    ]) {
+        for width in [1, 7, 8, 17, 100, 1024, i32::MAX] {
+            for fallback in [false, true] {
+                let measure = |bytes: &[u8]| {
+                    if fallback {
+                        bytes.len() as i32 * 7
+                    } else {
+                        text.text_width(bytes)
+                    }
+                };
+                let expected = legacy_wrap(&field, width, measure);
+                let mut actual = Vec::new();
+                info_panel::wrap_line(&field, width, measure, &mut actual);
+                assert_eq!(actual, expected, "width={width} fallback={fallback}");
+            }
+        }
+    }
+}
+
+#[test]
+fn wrapping_measures_each_byte_once_instead_of_remeasuring_prefixes() {
+    let field = "a".repeat(1024);
+    let mut previous_bytes = 0;
+    let expected = legacy_wrap(&field, i32::MAX, |bytes| {
+        previous_bytes += bytes.len();
+        bytes.len() as i32
+    });
+    let mut measured_bytes = 0;
+    let mut actual = Vec::new();
+    info_panel::wrap_line(
+        &field,
+        i32::MAX,
+        |bytes| {
+            measured_bytes += bytes.len();
+            bytes.len() as i32
+        },
+        &mut actual,
+    );
+    assert_eq!(actual, expected);
+    assert_eq!(measured_bytes, 1024);
+    assert_eq!(previous_bytes, (1024 * 1025 / 2) - 1);
 }

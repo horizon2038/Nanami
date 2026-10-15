@@ -1,4 +1,5 @@
 use super::*;
+use nun::capability_call::address_space::Attribute;
 
 impl Alpha {
     pub(super) fn handle_mmio_request(
@@ -10,6 +11,13 @@ impl Alpha {
         let mut stage = "validate";
         let mut page = 0usize;
         let result = (|| {
+            let mapping = Attribute::from_bits(request.arg2)
+                .filter(|attr| {
+                    *attr == Attribute::NORMAL
+                        || *attr == Attribute::BUFFERED
+                        || *attr == Attribute::UNCACHED
+                })
+                .ok_or(CapabilityError::InvalidArgument)?;
             let pid = request.identifier;
             if pid == 0 {
                 return Err(CapabilityError::PermissionDenied);
@@ -81,7 +89,13 @@ impl Alpha {
                 let vm = processes
                     .vm_space_mut(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
-                memory.map_frame(address_space, frame, va, vm)?;
+                memory.map_frame_with_attribute(
+                    address_space,
+                    frame,
+                    va,
+                    Attribute::ALL | mapping,
+                    vm,
+                )?;
                 j += 1;
             }
 

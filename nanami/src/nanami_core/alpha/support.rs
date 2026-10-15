@@ -326,40 +326,6 @@ pub(super) fn pack_framebuffer_color_information(
         | ((blue_size & 0x1f) << 25)
 }
 
-pub(super) fn process_priority_for_image(image_name: &str) -> Word {
-    match strip_elf_suffix(basename(image_name)) {
-        // Timer must preempt clients promptly; animation and network timeouts depend on it.
-        "timer-server" | "hpet-server" => PROCESS_PRIORITY_TIMER_SERVER,
-        // Input pipeline must stay above the compositor and every input consumer.
-        "input-server" | "ps2-server" | "usb-server" => PROCESS_PRIORITY_INPUT_SERVER,
-        // GUI servers are above GUI clients, but below timer/input IRQ-facing services.
-        "fb-server" | "honoka" => PROCESS_PRIORITY_GUI_SERVER,
-        // Background servers stay above clients, but below the GUI critical path.
-        "block-device-server" | "virtio-blk-server" | "ahci-server" => {
-            PROCESS_PRIORITY_BACKGROUND_SERVER + 2
-        }
-        "driver-manager" => PROCESS_PRIORITY_TIMER_SERVER,
-        "virtio-net" => PROCESS_PRIORITY_BACKGROUND_SERVER + 2,
-        "ext2-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "net-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "rtc-server" => PROCESS_PRIORITY_BACKGROUND_SERVER + 1,
-        "http-server" => PROCESS_PRIORITY_BACKGROUND_SERVER,
-        "honoka-client" | "eg-test" | "image-viewer" | "performance-monitor" => {
-            PROCESS_PRIORITY_INTERACTIVE_CLIENT
-        }
-        "shell" => PROCESS_PRIORITY_CLIENT,
-        "cpp-hello" | "rust-hello" => PROCESS_PRIORITY_BACKGROUND_CLIENT,
-        _ => PROCESS_PRIORITY_LOW,
-    }
-}
-
-pub(super) fn basename(path: &str) -> &str {
-    match path.rsplit_once('/') {
-        Some((_, name)) => name,
-        None => path,
-    }
-}
-
 pub(super) fn decode_service_name_24(
     arg1: Word,
     arg2: Word,

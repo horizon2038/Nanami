@@ -30,6 +30,7 @@ parser.add_argument('--doom-first', action='store_true', help='Launch graphics D
 parser.add_argument('--doom-fb-size', help='Request a WIDTHxHEIGHT fbdev canvas for --doom-first')
 parser.add_argument('--framebuffer-smoke', action='store_true', help='Run fb-size-test for default, custom, odd and clamped dimensions, then exit')
 parser.add_argument('--desktop-info-smoke', action='store_true', help='Capture the desktop system-info panel after boot, then exit')
+parser.add_argument('--pipeline-smoke', action='store_true', help='Require a PIPELINE_TRACE image; verify a key traverses all input stages without any mouse event')
 parser.add_argument('--terminal-smoke', action='store_true', help='Exercise native history/editing, BusyBox vi and window resize (requires busybox)')
 parser.add_argument('--gui-resize-smoke', action='store_true', help='Shrink/grow and close every native GUI client')
 parser.add_argument('--framebuffer-case', choices=('all', 'default', 'clamped', 'stress'), default='all', help='Isolate a framebuffer case; clamped checks mapping/remapping only, stress repeats 128 mappings')
@@ -50,6 +51,8 @@ parser.add_argument('--unplug-root', action='store_true', help='Unplug/replug th
 parser.add_argument('--empty-sata', action='store_true', help='Probe a non-root SATA disk while booting from USB')
 parser.add_argument('--late-root', action='store_true', help='Boot firmware/initramfs from a private rootless SATA clone, then attach USB root after usb-server is online')
 args = parser.parse_args()
+if args.pipeline_smoke and (args.mouse_stress or args.stress or args.desktop_info_smoke):
+    parser.error('--pipeline-smoke must not inject mouse/modifier stress or exit at desktop-info')
 if args.doom_fb_size and (not args.doom_first or not re.fullmatch(r'[1-9][0-9]*x[1-9][0-9]*', args.doom_fb_size)):
     parser.error('--doom-fb-size requires --doom-first and WIDTHxHEIGHT')
 if args.framebuffer_smoke and (not args.bash_smoke or args.late_root or args.duplicate_root or args.unplug_root):
@@ -220,7 +223,7 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             print('USB BOT rootfs mounted; AHCI did not claim an empty controller', flush=True)
         print('USB keyboard/mouse enumerated; desktop ready', flush=True)
         print('Active pointers: ' + json.dumps(qmp('query-mice')), flush=True)
-        time.sleep(5)
+        time.sleep(1 if args.pipeline_smoke else 5)
         if args.desktop_info_smoke:
             log = serial.read_text(errors='replace')
             for field in ('kernel version', 'Nanami version', 'platform info'):
@@ -270,6 +273,11 @@ with (logs / 'qemu.log').open('w') as diagnostics:
                 key = {'-': 'minus', '\n': 'ret', ' ': 'spc', '/': 'slash', '.': 'dot'}.get(char, char)
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': key}], 'hold-time': 50})
                 time.sleep(0.8)
+
+        if args.pipeline_smoke:
+            from pipeline import exercise as exercise_pipeline
+            exercise_pipeline(qmp, serial, logs)
+            raise SystemExit(0)
 
         if args.terminal_smoke:
             from terminal_resize import exercise as exercise_terminal

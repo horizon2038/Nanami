@@ -6,6 +6,6 @@ edition = "2021"
 [dependencies]
 nanami-uapi = { path = "servers/uapi" }
 nun = { path = "../spencer/Nun" }
-a9n_abi = "=0.7.0"
+a9n_abi = "=0.8.0"
 crabtime = { version = "1.1.4", default-features = false }
 libm = { version = "0.2", default-features = false }

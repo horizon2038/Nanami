@@ -159,6 +159,7 @@ fn read_directory(
     _offset: usize,
     _len: usize,
     _out: usize,
+    _handle: usize,
 ) -> Result<(usize, usize), Word> {
     panic!("unexpected directory read")
 }

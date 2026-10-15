@@ -720,7 +720,11 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     }
 
     nanami_runtime::print!("[virtio-net] step: scan pci\n");
-    let found = match scan_virtio_net(pci_io_desc) {
+    nanami_runtime::diagnostics::clock_info("virtio-net");
+    let scan = nanami_runtime::diagnostics::measure(nanami_runtime::diagnostics::RpcStage::PciScan,
+        0, || scan_virtio_net(pci_io_desc));
+    nanami_runtime::diagnostics::flush_rpc(nanami_runtime::diagnostics::RpcStage::PciScan);
+    let found = match scan {
         Ok(v) => v,
         Err(_) => {
             return Err(log_device_failure(

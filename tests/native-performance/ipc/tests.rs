@@ -137,3 +137,87 @@ fn invalid_context_does_not_consume_a_deferred_notification() {
     assert_notification(service_receive_event(SERVICE).unwrap(), 4);
     FAKE.with(|fake| assert!(fake.borrow().operations.is_empty()));
 }
+
+#[test]
+fn standalone_reply_sends_the_same_payload_without_consuming_a_kernel_message() {
+    let _guard = setup();
+    incoming(MessageInfo::normal(true, 0, 0), 73);
+    service_reply(SERVICE, 7, 42, 99).unwrap();
+    FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.operations, ["reply"]);
+        assert_eq!(fake.replies, [vec![7, 42, 99]]);
+        assert_eq!(fake.incoming.len(), 1);
+    });
+    assert!(matches!(
+        service_receive_event(SERVICE).unwrap(),
+        ServiceEvent::Request(ServiceRequest { identifier: 73, .. })
+    ));
+    FAKE.with(|fake| assert_eq!(fake.borrow().operations, ["reply", "receive"]));
+}
+
+#[test]
+fn standalone_reply_keeps_deferred_flags_for_the_following_receive() {
+    let _guard = setup();
+    preserve_interrupted_notification(1);
+    incoming(MessageInfo::normal(true, 0, 0), 73);
+    service_reply(SERVICE, 0, 42, 99).unwrap();
+    preserve_interrupted_notification(4);
+    assert_notification(service_receive_event(SERVICE).unwrap(), 5);
+    FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.operations, ["reply"]);
+        assert_eq!(fake.incoming.len(), 1);
+    });
+    assert_eq!(notification_poll(BOUND).unwrap(), 0);
+    assert!(matches!(
+        service_receive_event(SERVICE).unwrap(),
+        ServiceEvent::Request(ServiceRequest { identifier: 73, .. })
+    ));
+}
+
+#[test]
+fn failed_standalone_reply_preserves_deferred_flags_and_queued_request() {
+    let _guard = setup();
+    preserve_interrupted_notification(4);
+    incoming(MessageInfo::normal(true, 0, 0), 73);
+    FAKE.with(|fake| fake.borrow_mut().reply_error = Some(CapabilityError::Other));
+    assert_eq!(
+        service_reply(SERVICE, 0, 42, 99),
+        Err(RequestError::Transport)
+    );
+    assert_notification(service_receive_event(SERVICE).unwrap(), 4);
+    FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.operations, ["reply"]);
+        assert!(fake.replies.is_empty());
+        assert_eq!(fake.incoming.len(), 1);
+    });
+}
+
+#[test]
+fn standalone_reply_preserves_capability_error_mapping() {
+    let _guard = setup();
+    FAKE.with(|fake| fake.borrow_mut().reply_error = Some(CapabilityError::InvalidArgument));
+    assert_eq!(
+        service_reply(SERVICE, 0, 42, 99),
+        Err(RequestError::InvalidArgument)
+    );
+    FAKE.with(|fake| assert_eq!(fake.borrow().operations, ["reply"]));
+}
+
+#[test]
+fn receive_error_after_standalone_reply_does_not_replay_the_reply() {
+    let _guard = setup();
+    FAKE.with(|fake| fake.borrow_mut().receive_error = Some(CapabilityError::Other));
+    service_reply(SERVICE, 0, 42, 99).unwrap();
+    assert!(matches!(
+        service_receive_event(SERVICE),
+        Err(RequestError::Transport)
+    ));
+    FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.operations, ["reply", "receive"]);
+        assert_eq!(fake.replies, [vec![0, 42, 99]]);
+    });
+}

@@ -143,6 +143,7 @@ impl Controller {
         buffer: Dma,
         len: usize,
         input: &mut Input,
+        phase: &'static str,
     ) -> Result<usize, RequestError> {
         if !self.running || endpoint.halted {
             return Err(RequestError::Transport);
@@ -166,7 +167,25 @@ impl Controller {
             len
         );
         self.doorbell(slot, endpoint.dci());
-        self.wait_completion(5000, input, |this, input, event| {
+        let context = if nanami_runtime::diagnostics::ENABLED {
+            self.dma.virtual_at(
+                SLOT_BASE
+                    + (slot as usize - 1) * SLOT_BYTES
+                    + 0x1000
+                    + endpoint.dci() as usize * self.context_bytes,
+            )
+        } else {
+            0
+        };
+        let target = super::wait_trace::Target {
+            phase,
+            slot,
+            dci: endpoint.dci(),
+            td: pointer,
+            bytes: len,
+            context,
+        };
+        self.wait_completion_target(5000, input, target, |this, input, event| {
             if event.kind() == 32 && event.slot() == slot && event.endpoint() == endpoint.dci() {
                 if event.parameter & !15 != pointer {
                     this.fail(input);

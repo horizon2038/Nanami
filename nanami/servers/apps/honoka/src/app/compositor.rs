@@ -481,7 +481,8 @@ impl Compositor {
             .and_then(|v| v.checked_mul(4))
             .filter(|bytes| *bytes != 0)
             .ok_or(nanami_runtime::RequestError::InvalidArgument)?;
-        let (local_vaddr, peer_vaddr) = nanami_runtime::request_shared_memory(target_pid, pixel_bytes)?;
+        let (local_vaddr, peer_vaddr) =
+            nanami_runtime::request_shared_memory(target_pid, pixel_bytes)?;
         self.windows[index].damage_queue = 0;
         self.windows[index].local_fb = local_vaddr;
         self.windows[index].fb_size = pixel_bytes;
@@ -1232,8 +1233,25 @@ impl Compositor {
             return;
         }
         push_raw_input_event(window.input_queue, packed);
+        let before = if packed & 255 == nanami_client::input::INPUT_EVENT_KIND_KEY {
+            nanami_runtime::diagnostics::stamp()
+        } else {
+            None
+        };
+        let mut errors = 0;
         if window.input_notify != 0 {
-            let _ = nanami_runtime::ipc::notification_notify(window.input_notify);
+            errors +=
+                usize::from(nanami_runtime::ipc::notification_notify(window.input_notify).is_err());
+        }
+        if packed & 255 == nanami_client::input::INPUT_EVENT_KIND_KEY {
+            nanami_runtime::diagnostics::keys(
+                nanami_runtime::diagnostics::InputStage::Window,
+                1,
+                packed >> 56,
+                before,
+                errors,
+                usize::from(window.input_notify != 0),
+            );
         }
     }
 

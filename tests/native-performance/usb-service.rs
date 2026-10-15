@@ -1,8 +1,13 @@
 //! Exercise the production loop: no blocking maintenance may delay a completed reply.
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
-pub use std::println;
+extern crate self as nanami_runtime;
+#[macro_export]
+macro_rules! println {
+    ($($arg:tt)*) => { $crate::capture_log(format_args!($($arg)*)); };
+}
+#[path = "../../nanami/servers/libs/nanami-runtime/src/diagnostics.rs"]
+pub mod diagnostics;
 use std::{cell::RefCell, collections::VecDeque};
 
 macro_rules! io_trace {
@@ -20,6 +25,9 @@ pub enum RequestError {
 
 #[derive(Default)]
 struct State {
+    startup: Vec<String>,
+    register_fails: bool,
+    interval_fails: bool,
     events: VecDeque<ipc::ServiceEvent>,
     pending_reply: bool,
     received: usize,
@@ -35,9 +43,25 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::default();
 }
 
+fn capture_log(args: std::fmt::Arguments<'_>) {
+    let line = args.to_string();
+    if line.starts_with("[usb.init] ") {
+        STATE.with_borrow_mut(|s| s.startup.push(line));
+    } else {
+        std::println!("{line}");
+    }
+}
+
 pub fn register_service_by_name(name: &str, slot: Word) -> Result<(), RequestError> {
     assert_eq!((name, slot), ("usb-service", 20));
-    Ok(())
+    STATE.with_borrow_mut(|s| {
+        s.startup.push("rpc:register".into());
+        if s.register_fails {
+            Err(RequestError::Unavailable)
+        } else {
+            Ok(())
+        }
+    })
 }
 pub fn request_nanami_control(property: &str, value: &str) -> Result<(), RequestError> {
     assert_eq!((property, value), ("boot.pc", "sample"));
@@ -50,6 +74,10 @@ pub fn request_nanami_control(property: &str, value: &str) -> Result<(), Request
 pub mod usb {
     pub const USB_SERVICE_REQUEST_INFO: usize = 1;
 }
+pub mod block {
+    pub const BLOCK_DEVICE_REQUEST_READ: usize = 2;
+    pub const BLOCK_DEVICE_REQUEST_WRITE: usize = 3;
+}
 pub mod timer {
     use super::*;
     pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: Word = 1 << 63;
@@ -59,7 +87,14 @@ pub mod timer {
         notification: Word,
     ) -> Result<(), RequestError> {
         assert_eq!((timer, delay, notification), (24, 10, 21));
-        Ok(())
+        STATE.with_borrow_mut(|s| {
+            s.startup.push("rpc:interval".into());
+            if s.interval_fails {
+                Err(RequestError::Unavailable)
+            } else {
+                Ok(())
+            }
+        })
     }
 }
 pub mod ipc {
@@ -140,6 +175,13 @@ pub mod xhci {
         pub irq: Option<Word>,
     }
     impl Controller {
+        pub fn start_maintenance(&mut self) {
+            STATE.with_borrow_mut(|s| s.startup.push("maintenance-start".into()));
+        }
+        pub fn print_wait_profile(&mut self) {}
+        pub fn profile_clock(&self) -> Option<Word> {
+            None
+        }
         pub fn poll(&mut self, _: &mut input::Input) {
             STATE.with_borrow_mut(|s| {
                 assert!(
@@ -166,6 +208,9 @@ pub mod storage {
         ) -> Result<(), RequestError> {
             STATE.with_borrow_mut(|s| {
                 assert!(!s.pending_reply, "root probe postponed the block reply");
+                if s.discoveries == 0 {
+                    s.startup.push("root-probe".into());
+                }
                 s.discoveries += 1;
             });
             Ok(())
@@ -203,6 +248,101 @@ fn run(events: Vec<ipc::ServiceEvent>, irq: Option<Word>) {
     STATE.with_borrow(|s| {
         assert_eq!(s.received, s.replied);
         assert!(!s.pending_reply);
+    });
+}
+
+fn expected_startup(register_ok: bool, interval_ok: Option<bool>) -> Vec<String> {
+    let trace = option_env!("NANAMI_USB_INIT_TRACE") == Some("1");
+    let mut expected = Vec::new();
+    if trace {
+        expected.push("[usb.init] stage=service-register.begin service=usb-service slot=20".into());
+    }
+    expected.push("rpc:register".into());
+    if trace {
+        expected.push(format!(
+            "[usb.init] stage=service-register.end ok={register_ok}"
+        ));
+    }
+    if let Some(ok) = interval_ok {
+        if trace {
+            expected.push("[usb.init] stage=timer-interval.begin ms=10 notification=21".into());
+        }
+        expected.push("rpc:interval".into());
+        if trace {
+            expected.push(format!("[usb.init] stage=timer-interval.end ok={ok}"));
+        }
+        if ok {
+            expected.push("maintenance-start".into());
+            expected.push("root-probe".into());
+        }
+    }
+    expected
+}
+
+#[test]
+fn startup_records_bracket_each_rpc_once_before_maintenance_and_root_probe() {
+    // Multiple requests and maintenance ticks must not repeat startup records.
+    run(
+        vec![
+            ipc::ServiceEvent::Notification {
+                identifier: timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+            },
+            ipc::ServiceEvent::Request(ipc::ServiceRequest { code: 2 }),
+            ipc::ServiceEvent::Notification {
+                identifier: timer::TIMER_NOTIFICATION_IDENTIFIER_BIT,
+            },
+        ],
+        None,
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.startup, expected_startup(true, Some(true)));
+        assert_eq!(s.discoveries, 3);
+    });
+}
+
+#[test]
+fn register_error_is_logged_then_returned_without_timer_or_maintenance() {
+    STATE.with_borrow_mut(|s| {
+        *s = State {
+            register_fails: true,
+            ..State::default()
+        };
+    });
+    assert_eq!(
+        service::serve(
+            &mut [xhci::Controller { irq: Some(32) }],
+            &mut input::Input,
+            &mut storage::Storage,
+            24
+        ),
+        Err(RequestError::Unavailable)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.startup, expected_startup(false, None));
+        assert_eq!((s.polls, s.acks, s.discoveries, s.received), (0, 0, 0, 0));
+    });
+}
+
+#[test]
+fn interval_error_is_logged_then_returned_without_maintenance_or_root_probe() {
+    STATE.with_borrow_mut(|s| {
+        *s = State {
+            interval_fails: true,
+            ..State::default()
+        };
+    });
+    assert_eq!(
+        service::serve(
+            &mut [xhci::Controller { irq: Some(32) }],
+            &mut input::Input,
+            &mut storage::Storage,
+            24
+        ),
+        Err(RequestError::Unavailable)
+    );
+    STATE.with_borrow(|s| {
+        assert_eq!(s.startup, expected_startup(true, Some(false)));
+        assert_eq!((s.polls, s.acks, s.discoveries, s.received), (0, 0, 0, 0));
     });
 }
 

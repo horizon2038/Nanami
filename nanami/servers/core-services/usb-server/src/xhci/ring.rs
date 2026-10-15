@@ -148,4 +148,10 @@ impl Consumer {
     pub fn next_physical(&self) -> u64 {
         self.physical + (self.dequeue * 16) as u64
     }
+
+    /// Do not consume or change DMA ownership; only inspect the next Cycle bit.
+    pub fn diagnostic_position(&self) -> (u64, u32, u32) {
+        let src = (self.virtual_address as *const Trb).wrapping_add(self.dequeue);
+        (self.next_physical(), unsafe { ptr::read_volatile(&(*src).control) }, self.cycle as u32)
+    }
 }

@@ -134,7 +134,11 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let fb_offset = fb_phys - fb_base;
     let map_size = align_up(fb_offset.saturating_add(fb_size), PAGE_SIZE);
 
-    let (_, mapped_base) = match nanami_runtime::request_mmio(fb_base, map_size) {
+    let (_, mapped_base) = match nanami_runtime::request_mmio_with_mapping(
+        fb_base,
+        map_size,
+        nanami_runtime::Attribute::BUFFERED,
+    ) {
         Ok(v) => v,
         Err(e) => return Err(log_error("[fb-server] framebuffer mmio map failed: ", e)),
     };
@@ -266,6 +270,7 @@ fn fill_screen(screen_info: &ScreenInfo, mapped_address: usize) {
     for chunk in framebuffer.chunks_exact_mut((screen_info.bits_per_pixel / 8) as usize) {
         chunk.copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
     }
+    presentation::complete_framebuffer_writes();
 }
 
 fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word, Word, Word) {

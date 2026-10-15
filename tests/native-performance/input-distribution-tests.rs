@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+pub use std::println;
+#[path = "../../nanami/servers/libs/nanami-runtime/src/diagnostics.rs"]
+pub mod diagnostics;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},

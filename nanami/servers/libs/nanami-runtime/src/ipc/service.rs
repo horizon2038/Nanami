@@ -124,6 +124,26 @@ pub fn service_reply_receive(
     }
 }
 
+/// Complete an outstanding normal reply without receiving another event.
+/// Deferred bound notifications remain saved for `service_receive_event`,
+/// including when Reply fails. This does not wait for the caller to run.
+pub fn service_reply(
+    port_descriptor: CapabilityDescriptor,
+    status: Word,
+    detail0: Word,
+    detail1: Word,
+) -> Result<(), RequestError> {
+    init_ipc_tls()?;
+
+    let ipc = a9n_abi::arch::ipc_buffer::get_ipc_buffer();
+    ipc.configure_message(4, status);
+    ipc.configure_message(5, detail0);
+    ipc.configure_message(6, detail1);
+
+    a9n_abi::arch::ipc_port::reply(port_descriptor, MessageInfo::normal(false, 3, 0))
+        .map_err(map_capability_error)
+}
+
 pub fn service_reply_receive_event(
     port_descriptor: CapabilityDescriptor,
     status: Word,

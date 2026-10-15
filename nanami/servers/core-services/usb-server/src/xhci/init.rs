@@ -7,6 +7,7 @@ impl Controller {
     pub fn initialize(
         resource: ControllerResource,
         timer: Word,
+        clock: crate::clock::Clock,
         irq_slot: Word,
     ) -> Result<Self, RequestError> {
         if resource.bytes < 0x20 {
@@ -81,6 +82,9 @@ impl Controller {
             doorbells: base + doorbells,
             irq: None,
             timer,
+            clock,
+            maintenance_started: false,
+            wait_profile: Default::default(),
             dma,
             _scratch: scratch,
             command_ring: unsafe { Producer::new(dma.physical_at(0x1000), dma.virtual_at(0x1000)) },
@@ -108,8 +112,14 @@ impl Controller {
         controller.wait_register(USBCMD, 2, 0, 1000)?;
         controller.wait_register(USBSTS, 1 << 11, 0, 1000)?;
         if let Some(line) = resource.irq {
-            match nanami_runtime::request_irq(line, nanami_runtime::PROCESS_SLOT_NOTIFICATION, irq_slot) {
-                Ok(()) => controller.irq = Some(nanami_runtime::ipc::process_slot_descriptor(irq_slot)),
+            match nanami_runtime::request_irq(
+                line,
+                nanami_runtime::PROCESS_SLOT_NOTIFICATION,
+                irq_slot,
+            ) {
+                Ok(()) => {
+                    controller.irq = Some(nanami_runtime::ipc::process_slot_descriptor(irq_slot))
+                }
                 Err(error) => nanami_runtime::println!(
                     "[usb-server] IRQ {} unavailable: {}; timer polling fallback",
                     line,

@@ -50,6 +50,10 @@ impl Events {
         self.ring.next_physical()
     }
 
+    pub fn diagnostic_position(&self) -> (u64, u32, u32) {
+        self.ring.diagnostic_position()
+    }
+
     pub fn finish(&mut self, interrupter: usize) {
         // Also clear EHB for an empty drain (e.g. an IRQ whose events were
         // already consumed by a synchronous transfer). Otherwise IRQs stay gated.

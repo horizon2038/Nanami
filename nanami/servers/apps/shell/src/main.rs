@@ -16,6 +16,7 @@ mod foreground;
 mod resize;
 mod scrollback;
 mod terminal;
+mod terminal_render;
 
 use font::{TextRenderer, DEFAULT_TEXT_COLOR};
 
@@ -108,15 +109,16 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     start_shell_timer();
 
     let mut input_queue = nanami_client::gfx::honoka::WindowEventQueue::new(input_base);
+    nanami_runtime::diagnostics::clock_info("shell");
     loop {
         drain_input(&mut input_queue, &mut shell);
         if shell.drain_foreground_output() {
-            shell.repaint_all();
-            shell.present_full();
+            shell.repaint_output();
             continue;
         }
         let waited = nanami_runtime::ipc::notification_wait(notification)
             .map_err(|e| log_error("[shell] notification wait failed: ", e))?;
+        let received = nanami_runtime::diagnostics::stamp();
         if (waited & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_INPUT) != 0 {
             drain_input(&mut input_queue, &mut shell);
         }
@@ -124,8 +126,16 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             shell.on_timer();
         }
         if shell.drain_foreground_output() {
-            shell.repaint_all();
-            shell.present_full();
+            shell.repaint_output();
+        }
+        nanami_runtime::diagnostics::defer_wake(
+            nanami_runtime::diagnostics::InputStage::Shell,
+            waited,
+            received,
+        );
+        if waited & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
+            nanami_runtime::diagnostics::flush_keys(nanami_runtime::diagnostics::InputStage::Shell);
+            nanami_runtime::diagnostics::flush_wake(nanami_runtime::diagnostics::InputStage::Shell);
         }
     }
 }
@@ -213,24 +223,35 @@ impl Shell {
     }
 
     fn present_full(&self) {
-        if push_damage_rect(
+        let before = nanami_runtime::diagnostics::stamp();
+        let result = if push_damage_rect(
             self.surface.base,
             0,
             0,
             self.surface.width,
             self.surface.height,
         ) {
-            let _ = nanami_runtime::ipc::notification_notify(self.present_notification);
+            nanami_runtime::ipc::notification_notify(self.present_notification)
         } else {
-            let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
+            nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
                 self.honoka_port,
                 self.window_id,
                 0,
                 0,
                 self.surface.width as Word,
                 self.surface.height as Word,
-            );
+            )
+        };
+        if result.is_err() {
+            nanami_runtime::diagnostics::notify_error("shell-present-full");
         }
+        nanami_runtime::diagnostics::rpc(
+            nanami_runtime::diagnostics::RpcStage::ShellPresent,
+            before,
+            nanami_runtime::diagnostics::stamp(),
+            0,
+            result.is_err(),
+        );
     }
 
     fn repaint_row(&mut self, row: usize) {
@@ -282,24 +303,39 @@ impl Shell {
         if row >= self.rows() {
             return;
         }
-        if push_damage_rect(
+        self.present_band(row * FONT_H, FONT_H);
+    }
+
+    fn present_band(&self, y: usize, height: usize) {
+        let before = nanami_runtime::diagnostics::stamp();
+        let result = if push_damage_rect(
             self.surface.base,
             0,
-            row * FONT_H,
+            y,
             self.surface.width,
-            FONT_H,
+            height,
         ) {
-            let _ = nanami_runtime::ipc::notification_notify(self.present_notification);
+            nanami_runtime::ipc::notification_notify(self.present_notification)
         } else {
-            let _ = nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
+            nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
                 self.honoka_port,
                 self.window_id,
                 0,
-                (row * FONT_H) as Word,
+                y as Word,
                 self.surface.width as Word,
-                FONT_H as Word,
-            );
+                height as Word,
+            )
+        };
+        if result.is_err() {
+            nanami_runtime::diagnostics::notify_error("shell-present-row");
         }
+        nanami_runtime::diagnostics::rpc(
+            nanami_runtime::diagnostics::RpcStage::ShellPresent,
+            before,
+            nanami_runtime::diagnostics::stamp(),
+            0,
+            result.is_err(),
+        );
     }
 
     fn on_key(&mut self, code: Word, pressed: bool) {
@@ -404,8 +440,7 @@ impl Shell {
             self.push_line_bytes(b"[foreground input failed]");
         }
         if self.drain_foreground_output() {
-            self.repaint_all();
-            self.present_full();
+            self.repaint_output();
         }
     }
 
@@ -457,7 +492,9 @@ impl Shell {
                         nanami_client::power::ACPI_SERVICE,
                         SLOT_ACPI_SERVICE,
                     )?;
-                    self.acpi_port = Some(nanami_runtime::ipc::process_slot_descriptor(SLOT_ACPI_SERVICE));
+                    self.acpi_port = Some(nanami_runtime::ipc::process_slot_descriptor(
+                        SLOT_ACPI_SERVICE,
+                    ));
                 }
                 nanami_client::power::shutdown(self.acpi_port.unwrap())
             })();
@@ -655,8 +692,7 @@ impl Shell {
         self.push_line_bytes(b"fstest: connect vfs-service");
         let _ = nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE);
         let vfs_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE);
-        let (shm, shm_size) = match nanami_client::vfs::vfs_attach_shared_memory(vfs_port, 0x4000)
-        {
+        let (shm, shm_size) = match nanami_client::vfs::vfs_attach_shared_memory(vfs_port, 0x4000) {
             Ok(v) => v,
             Err(_) => {
                 self.push_line_bytes(b"fstest: vfs-service unavailable");
@@ -1145,7 +1181,8 @@ impl Shell {
 
     fn wait_posix_child(&mut self, posix_port: Word, pid: Word) -> Option<Word> {
         let _ = nanami_client::registry::connect_timer_service(SLOT_POSIX_TEST_TIMER_SERVICE);
-        let timer_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_POSIX_TEST_TIMER_SERVICE);
+        let timer_port =
+            nanami_runtime::ipc::process_slot_descriptor(SLOT_POSIX_TEST_TIMER_SERVICE);
         let mut retry = 0usize;
         while retry < 64 {
             match nanami_client::posix::posix_waitpid(
@@ -1315,13 +1352,8 @@ impl Shell {
                 return false;
             }
         }
-        if nanami_client::posix::posix_seek(
-            posix_port,
-            fd,
-            0,
-            nanami_client::posix::POSIX_SEEK_SET,
-        )
-        .is_err()
+        if nanami_client::posix::posix_seek(posix_port, fd, 0, nanami_client::posix::POSIX_SEEK_SET)
+            .is_err()
         {
             let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: seek failed");
@@ -1337,13 +1369,8 @@ impl Shell {
             self.push_line_bytes(b"posixtest: seek read mismatch");
             return false;
         }
-        if nanami_client::posix::posix_seek(
-            posix_port,
-            fd,
-            0,
-            nanami_client::posix::POSIX_SEEK_SET,
-        )
-        .is_err()
+        if nanami_client::posix::posix_seek(posix_port, fd, 0, nanami_client::posix::POSIX_SEEK_SET)
+            .is_err()
         {
             let _ = nanami_client::posix::posix_close(posix_port, fd);
             self.push_line_bytes(b"posixtest: dup seek failed");
@@ -1428,8 +1455,7 @@ impl Shell {
 
     fn posix_stat_test(&mut self, posix_port: Word, shm: Word) -> bool {
         write_shm_bytes(shm, 0, b"/dev/null");
-        let (_, _, kind, major, minor) = match nanami_client::posix::posix_stat(posix_port, 0, 9)
-        {
+        let (_, _, kind, major, minor) = match nanami_client::posix::posix_stat(posix_port, 0, 9) {
             Ok(v) => v,
             Err(_) => {
                 self.push_line_bytes(b"posixtest: stat /dev/null failed");
@@ -1534,8 +1560,7 @@ impl Shell {
                 if should_restore_prompt {
                     self.push_colored_line(self.prompt_line(), [DEFAULT_TEXT_COLOR; COLS]);
                 }
-                self.repaint_all();
-                self.present_full();
+                self.repaint_output();
             }
             return;
         }
@@ -1671,11 +1696,10 @@ impl Shell {
     }
 }
 
-fn drain_input(
-    input_queue: &mut nanami_client::gfx::honoka::WindowEventQueue,
-    shell: &mut Shell,
-) {
+fn drain_input(input_queue: &mut nanami_client::gfx::honoka::WindowEventQueue, shell: &mut Shell) {
     let mut drained = 0usize;
+    let mut trace_keys = 0;
+    let mut trace_before = None;
     while drained < 256 {
         let Some(packed) = input_queue.pop() else {
             break;
@@ -1684,6 +1708,12 @@ fn drain_input(
         if kind == nanami_client::input::INPUT_EVENT_KIND_WINDOW_RESIZE {
             shell.resize(value0 as u16 as usize, value1 as u16 as usize);
         } else if kind == nanami_client::input::INPUT_EVENT_KIND_KEY {
+            if nanami_runtime::diagnostics::ENABLED {
+                if trace_keys == 0 {
+                    trace_before = nanami_runtime::diagnostics::stamp();
+                }
+                trace_keys += 1;
+            }
             shell.on_key(code, value0 != 0);
         } else if kind == nanami_client::input::INPUT_EVENT_KIND_MOUSE_WHEEL {
             shell.scroll_lines(value0.saturating_mul(3));
@@ -1700,6 +1730,19 @@ fn drain_input(
         }
         drained += 1;
     }
+    nanami_runtime::diagnostics::defer_keys(
+        nanami_runtime::diagnostics::InputStage::Shell,
+        trace_keys,
+        0,
+        trace_before,
+        if trace_keys != 0 {
+            nanami_runtime::diagnostics::stamp()
+        } else {
+            None
+        },
+        0,
+        0,
+    );
 }
 
 fn start_shell_timer() {
@@ -2088,7 +2131,9 @@ fn shm_zeroes(base: Word, offset: usize, len: usize) -> bool {
 fn is_unsupported<T>(result: Result<T, RequestError>) -> bool {
     match result {
         Err(RequestError::Unsupported) => true,
-        Err(RequestError::Status(status)) if status == nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION => {
+        Err(RequestError::Status(status))
+            if status == nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION =>
+        {
             true
         }
         _ => false,

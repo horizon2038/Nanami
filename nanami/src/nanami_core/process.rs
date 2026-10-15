@@ -4,6 +4,9 @@ use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 mod shared_memory;
 pub use shared_memory::SharedMemoryReservation;
 use shared_memory::SharedMemorySpace;
+#[path = "process/physical_allocations.rs"]
+mod physical_allocations;
+use physical_allocations::PhysicalAllocations;
 
 use crate::nanami_core::elf_loader::ElfImage;
 use crate::nanami_core::vm_space::{BootstrapVmSpace, VmSpace};
@@ -13,6 +16,14 @@ pub const PROCESS_ROOT_SLOT_BASE: usize = 200;
 pub const MAX_IO_RANGES_PER_PROCESS: usize = 16;
 pub const MAX_IRQS_PER_PROCESS: usize = 8;
 pub const A9N_CPU_COUNT_MAX: Word = 64;
+
+/// Diagnostic A/B switch only: keep Alpha and every spawned process on the BSP
+/// without changing the kernel's SMP build, online CPU count or IRQ routing.
+/// An unset value (including "0") retains the normal round-robin policy.
+pub const SAME_CORE_DIAGNOSTIC: bool = match option_env!("NANAMI_SAME_CORE_DIAGNOSTIC") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => false,
+};
 
 const INVALID_IRQ: Word = usize::MAX;
 const USER_PAGE_SIZE: usize = 4096;
@@ -89,8 +100,8 @@ pub struct ProcessManager {
     used_root_slots: Vec<usize>,
     vm_spaces: Vec<ProcessVmSpace>,
     frame_chunks: Vec<ProcessFrameChunk>,
-    physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
-    deferred_physical_allocations: Vec<ProcessPhysicalAllocationEntry>,
+    physical_allocations: PhysicalAllocations,
+    deferred_physical_allocations: PhysicalAllocations,
     shared_memory: BTreeMap<usize, SharedMemorySpace>,
     lazy_mappings: Vec<ProcessLazyMappingEntry>,
 }
@@ -130,11 +141,6 @@ pub struct ProcessPhysicalAllocation {
     pub start_slot: usize,
     pub base_page: usize,
     pub page_count: usize,
-}
-
-struct ProcessPhysicalAllocationEntry {
-    pid: usize,
-    allocation: ProcessPhysicalAllocation,
 }
 
 impl ProcessManager {
@@ -189,8 +195,8 @@ impl ProcessManager {
             used_root_slots: Vec::new(),
             vm_spaces: Vec::new(),
             frame_chunks: Vec::new(),
-            physical_allocations: Vec::new(),
-            deferred_physical_allocations: Vec::new(),
+            physical_allocations: PhysicalAllocations::default(),
+            deferred_physical_allocations: PhysicalAllocations::default(),
             shared_memory: BTreeMap::new(),
             lazy_mappings: Vec::new(),
         })
@@ -209,7 +215,7 @@ impl ProcessManager {
     }
 
     pub fn allocate_affinity(&mut self) -> Word {
-        if self.online_core_count <= 1 {
+        if SAME_CORE_DIAGNOSTIC || self.online_core_count <= 1 {
             return 0;
         }
 
@@ -304,16 +310,15 @@ impl ProcessManager {
         if pid == 0 || page_count == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
-        self.physical_allocations
-            .push(ProcessPhysicalAllocationEntry {
-                pid,
-                allocation: ProcessPhysicalAllocation {
-                    base_va,
-                    start_slot,
-                    base_page,
-                    page_count,
-                },
-            });
+        self.physical_allocations.insert(
+            pid,
+            ProcessPhysicalAllocation {
+                base_va,
+                start_slot,
+                base_page,
+                page_count,
+            },
+        );
         Ok(())
     }
 
@@ -369,30 +374,17 @@ impl ProcessManager {
         &self,
         pid: usize,
     ) -> Vec<ProcessPhysicalAllocation> {
-        let mut allocations = Vec::new();
-        for entry in self.physical_allocations.iter() {
-            if entry.pid == pid {
-                let mut ref_count = 0usize;
-                for candidate in self.physical_allocations.iter() {
-                    if candidate.allocation.base_page == entry.allocation.base_page
-                        && candidate.allocation.page_count == entry.allocation.page_count
-                    {
-                        ref_count += 1;
-                    }
-                }
-                if ref_count == 1 {
-                    allocations.push(entry.allocation);
-                }
-            }
-        }
-        allocations
+        self.physical_allocations
+            .for_pid(pid)
+            .filter(|&allocation| self.physical_allocations.count(allocation) == 1)
+            .collect()
     }
 
     pub fn drop_physical_allocations_for_pid(&mut self, pid: usize) {
         self.shared_memory.remove(&pid);
-        self.physical_allocations.retain(|entry| entry.pid != pid);
+        self.physical_allocations.remove_pid(pid, |_, _| {});
         self.deferred_physical_allocations
-            .retain(|entry| entry.pid != pid);
+            .remove_pid(pid, |_, _| {});
     }
 
     pub fn defer_physical_allocation_for_pid(
@@ -400,8 +392,7 @@ impl ProcessManager {
         pid: usize,
         allocation: ProcessPhysicalAllocation,
     ) {
-        self.deferred_physical_allocations
-            .push(ProcessPhysicalAllocationEntry { pid, allocation });
+        self.deferred_physical_allocations.insert(pid, allocation);
     }
 
     pub fn take_deferred_physical_allocation(
@@ -410,54 +401,28 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
-        let index = self
-            .deferred_physical_allocations
-            .iter()
-            .position(|entry| {
-                entry.pid == pid
-                    && entry.allocation.base_va == base_va
-                    && entry.allocation.page_count == page_count
-            })?;
-        Some(
-            self.deferred_physical_allocations
-                .swap_remove(index)
-                .allocation,
-        )
+        self.deferred_physical_allocations
+            .take(pid, base_va, page_count)
+            .map(|(allocation, _)| allocation)
     }
 
     pub fn releasable_deferred_physical_allocations_for_pid(
         &self,
         pid: usize,
     ) -> Vec<ProcessPhysicalAllocation> {
-        let mut allocations = Vec::new();
-        for entry in self.deferred_physical_allocations.iter() {
-            if entry.pid == pid {
-                let mut ref_count = 0usize;
-                for active in self.physical_allocations.iter() {
-                    if active.allocation.base_page == entry.allocation.base_page
-                        && active.allocation.page_count == entry.allocation.page_count
-                    {
-                        ref_count += 1;
-                    }
-                }
-                for deferred in self.deferred_physical_allocations.iter() {
-                    if deferred.allocation.base_page == entry.allocation.base_page
-                        && deferred.allocation.page_count == entry.allocation.page_count
-                    {
-                        ref_count += 1;
-                    }
-                }
-                if ref_count == 1 {
-                    allocations.push(entry.allocation);
-                }
-            }
-        }
-        allocations
+        self.deferred_physical_allocations
+            .for_pid(pid)
+            .filter(|&allocation| {
+                self.physical_allocations.count(allocation)
+                    + self.deferred_physical_allocations.count(allocation)
+                    == 1
+            })
+            .collect()
     }
 
     pub fn drop_deferred_physical_allocations_for_pid(&mut self, pid: usize) {
         self.deferred_physical_allocations
-            .retain(|entry| entry.pid != pid);
+            .remove_pid(pid, |_, _| {});
     }
 
     pub fn reset_runtime_memory_for_exec(
@@ -476,32 +441,16 @@ impl ProcessManager {
         entry.exited = false;
         entry.exit_is_ok = 0;
         entry.exit_code = 0;
-
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
         self.shared_memory.remove(&pid);
         if let Some(vm) = self.vm_space_mut(pid) {
             *vm = VmSpace::new();
         }
-
         let mut allocations = Vec::new();
-        let mut index = 0usize;
-        while index < self.physical_allocations.len() {
-            if self.physical_allocations[index].pid != pid {
-                index += 1;
-                continue;
-            }
-            let allocation = self.physical_allocations[index].allocation;
-            let mut ref_count = 0usize;
-            for entry in self.physical_allocations.iter() {
-                if entry.allocation.base_page == allocation.base_page
-                    && entry.allocation.page_count == allocation.page_count
-                {
-                    ref_count += 1;
-                }
-            }
-            self.physical_allocations.swap_remove(index);
-            allocations.push((allocation, ref_count == 1));
-        }
+        self.physical_allocations
+            .remove_pid(pid, |allocation, last| {
+                allocations.push((allocation, last));
+            });
         Ok(allocations)
     }
 
@@ -511,15 +460,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
-        for entry in self.physical_allocations.iter() {
-            if entry.pid == pid
-                && entry.allocation.base_va == base_va
-                && entry.allocation.page_count == page_count
-            {
-                return Some(entry.allocation);
-            }
-        }
-        None
+        self.physical_allocations.find(pid, base_va, page_count)
     }
 
     pub fn release_physical_allocation_reference(
@@ -528,25 +469,9 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Result<(ProcessPhysicalAllocation, bool), CapabilityError> {
-        let Some(index) = self.physical_allocations.iter().position(|entry| {
-            entry.pid == pid
-                && entry.allocation.base_va == base_va
-                && entry.allocation.page_count == page_count
-        }) else {
-            return Err(CapabilityError::InvalidArgument);
-        };
-
-        let allocation = self.physical_allocations[index].allocation;
-        let mut ref_count = 0usize;
-        for entry in self.physical_allocations.iter() {
-            if entry.allocation.base_page == allocation.base_page
-                && entry.allocation.page_count == allocation.page_count
-            {
-                ref_count += 1;
-            }
-        }
-        self.physical_allocations.swap_remove(index);
-        Ok((allocation, ref_count == 1))
+        self.physical_allocations
+            .take(pid, base_va, page_count)
+            .ok_or(CapabilityError::InvalidArgument)
     }
 
     pub fn install_process(

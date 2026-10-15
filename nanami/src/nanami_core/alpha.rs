@@ -5,6 +5,7 @@ mod control_requests;
 mod memory_copy;
 mod memory_requests;
 mod mmio;
+mod process_priority;
 mod process_requests;
 mod shared_memory;
 mod support;
@@ -18,6 +19,7 @@ mod arch_impl;
 #[path = "alpha/arch/aarch64.rs"]
 mod arch_impl;
 
+use self::process_priority::process_priority_for_image;
 use self::support::*;
 
 use crate::nanami_core::capability_space::RootCapabilitySpace;
@@ -81,14 +83,6 @@ const PAGE_SIZE: usize = 4096;
 const USER_STACK_BASE: usize = 0x0400_0000;
 const USER_STACK_PAGES: usize = 64;
 const USER_ANONYMOUS_MAP_BASE: usize = 0x1000_0000;
-const PROCESS_PRIORITY_LOW: Word = 4;
-const PROCESS_PRIORITY_BACKGROUND_CLIENT: Word = 8;
-const PROCESS_PRIORITY_CLIENT: Word = 16;
-const PROCESS_PRIORITY_INTERACTIVE_CLIENT: Word = 18;
-const PROCESS_PRIORITY_BACKGROUND_SERVER: Word = 21;
-const PROCESS_PRIORITY_GUI_SERVER: Word = 24;
-const PROCESS_PRIORITY_INPUT_SERVER: Word = 28;
-const PROCESS_PRIORITY_TIMER_SERVER: Word = 30;
 const USER_HEAP_GUARD_PAGES: usize = 8;
 const USER_HEAP_LIMIT: usize = 0x7000_0000;
 const TEMP_MAP_BASE: usize = 0x7000_0000;
@@ -334,6 +328,12 @@ impl Alpha {
     }
 
     pub fn start(&mut self) {
+        if crate::nanami_core::process::SAME_CORE_DIAGNOSTIC {
+            crate::force_info!(
+                "[smp.diag] all-processes-core=0 kernel-cores={} kernel-smp-unchanged=true",
+                self.processes.online_core_count()
+            );
+        }
         self.spawn_components_from_initramfs();
         crate::force_info!(
             "alpha online: smp_cores={} alpha_core=0",

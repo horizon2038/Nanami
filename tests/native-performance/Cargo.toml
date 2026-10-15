@@ -16,6 +16,18 @@ name = "shell-terminal"
 path = "shell-terminal.rs"
 
 [[test]]
+name = "shell-output"
+path = "shell-output.rs"
+
+[[test]]
+name = "shell-render"
+path = "shell-render.rs"
+
+[[test]]
+name = "image-loader"
+path = "image-loader.rs"
+
+[[test]]
 name = "framebuffer"
 path = "framebuffer-tests.rs"
 
@@ -52,6 +64,10 @@ name = "core-process"
 path = "core-process-tests.rs"
 
 [[test]]
+name = "boot-priority"
+path = "boot-priority.rs"
+
+[[test]]
 name = "system-version"
 path = "system-version.rs"
 
@@ -76,6 +92,14 @@ name = "usb-completion"
 path = "usb/completion.rs"
 
 [[test]]
+name = "usb-init-trace"
+path = "usb/init-trace.rs"
+
+[[test]]
+name = "usb-control-recovery"
+path = "usb/control-recovery.rs"
+
+[[test]]
 name = "linux-clocks"
 path = "linux-clocks.rs"
 
@@ -98,6 +122,10 @@ path = "storage/main.rs"
 [[test]]
 name = "ext2-truncate"
 path = "ext2-truncate.rs"
+
+[[test]]
+name = "ext2-directory"
+path = "ext2-directory.rs"
 
 [[test]]
 name = "input-distribution"
@@ -155,10 +183,15 @@ path = "acpi-tests.rs"
 name = "mmio-requests"
 path = "mmio-requests.rs"
 
+[[test]]
+name = "mmio-runtime"
+path = "mmio-runtime.rs"
+
 [dependencies]
 nanami-uapi = { path = "../../nanami/servers/uapi" }
 nanami-gpt = { path = "../../nanami/servers/libs/gpt" }
-a9n-types = "0.3.0"
+a9n-types = "0.4.0"
+a9n_abi = "0.8.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 
 [dev-dependencies]

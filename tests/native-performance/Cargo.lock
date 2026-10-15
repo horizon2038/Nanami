@@ -4,9 +4,19 @@ version = 4
 
 [[package]]
 name = "a9n-types"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f13feb37ee5cfc4b43d8bd78a4c1fcd2d8e9a4c653d971b54b2c6c886a34b4ff"
+checksum = "8f57fbfb986c183548f5bc794f5fbf8f2a7347315b3479cfa19d20de035f8f9a"
+
+[[package]]
+name = "a9n_abi"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "709c9ba51a0fadb7ef2ebd08e9938f7a43729d4352bd33dd61a6b25bcce07fd3"
+dependencies = [
+ "a9n-types",
+ "bitflags",
+]
 
 [[package]]
 name = "allocator-api2"
@@ -92,6 +102,7 @@ name = "nanami-native-performance-tests"
 version = "0.1.0"
 dependencies = [
  "a9n-types",
+ "a9n_abi",
  "fontdue",
  "nanami-gpt",
  "nanami-uapi",

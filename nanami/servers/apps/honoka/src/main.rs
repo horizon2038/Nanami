@@ -14,10 +14,10 @@ pub mod constants;
 pub mod font;
 #[path = "app/framebuffer.rs"]
 pub mod framebuffer;
-#[path = "app/input.rs"]
-pub mod input;
 #[path = "app/info_panel.rs"]
 pub mod info_panel;
+#[path = "app/input.rs"]
+pub mod input;
 #[path = "app/logging.rs"]
 pub mod logging;
 #[path = "app/motion_damage.rs"]
@@ -69,7 +69,8 @@ fn alloc_error(layout: core::alloc::Layout) -> ! {
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::print!("[honoka] start\n");
-    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[honoka] ipc tls init failed: ", e))?;
+    nanami_runtime::ipc::init_ipc_tls()
+        .map_err(|e| log_error("[honoka] ipc tls init failed: ", e))?;
     nanami_runtime::print!("[honoka] ipc ready\n");
     let (heap_base, heap_size) = nanami_runtime::heap::init_heap(9 * 1024 * 1024)
         .map_err(|e| log_error("[honoka] heap init failed: ", e))?;
@@ -126,6 +127,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::print!("[honoka] initial render done\n");
 
     nanami_runtime::print!("[honoka] online\n");
+    nanami_runtime::diagnostics::clock_info("honoka");
     let mut input_queue = nanami_client::input::InputEventQueue::new(input_queue_vaddr);
     run_event_loop(ports.rtc, &mut compositor, &mut input_queue)
 }
@@ -171,8 +173,14 @@ fn run_event_loop(
                 render_until_idle(compositor);
             }
             ServiceEvent::Notification { identifier, .. } => {
+                let received = nanami_runtime::diagnostics::stamp();
                 handle_notification(identifier, rtc_port, input_queue, compositor);
                 render_until_idle(compositor);
+                nanami_runtime::diagnostics::wake(
+                    nanami_runtime::diagnostics::InputStage::Honoka,
+                    identifier,
+                    received,
+                );
             }
             ServiceEvent::Fault {
                 identifier, reason, ..
@@ -230,7 +238,15 @@ fn present_window_id(identifier: nanami_runtime::Word) -> nanami_runtime::Word {
 }
 
 fn render_until_idle(compositor: &mut Compositor) {
+    let before = nanami_runtime::diagnostics::stamp();
     while compositor.render_if_needed() {}
+    nanami_runtime::diagnostics::rpc(
+        nanami_runtime::diagnostics::RpcStage::HonokaRender,
+        before,
+        nanami_runtime::diagnostics::stamp(),
+        0,
+        false,
+    );
 }
 
 fn log_framebuffer_ready(framebuffer: &crate::framebuffer::Framebuffer) {
@@ -254,11 +270,23 @@ fn pump_input(
     let mut pending_dx = 0i32;
     let mut pending_dy = 0i32;
     let mut pending_moves = 0usize;
+    let mut trace_keys = 0;
+    let mut trace_tag = 0;
+    let mut trace_before = None;
     while processed < MAX_INPUT_EVENTS_PER_FRAME {
         let Some(packed) = input_queue.pop() else {
             break;
         };
         let event = decode_input_event(packed);
+        if nanami_runtime::diagnostics::ENABLED
+            && packed & 255 == nanami_client::input::INPUT_EVENT_KIND_KEY
+        {
+            if trace_keys == 0 {
+                trace_before = nanami_runtime::diagnostics::stamp();
+            }
+            trace_keys += 1;
+            trace_tag = packed >> 56;
+        }
 
         match event {
             InputEvent::MouseMove { dx, dy } => {
@@ -279,6 +307,14 @@ fn pump_input(
         processed += 1;
     }
     flush_mouse_move(compositor, &mut pending_dx, &mut pending_dy);
+    nanami_runtime::diagnostics::keys(
+        nanami_runtime::diagnostics::InputStage::Honoka,
+        trace_keys,
+        trace_tag,
+        trace_before,
+        0,
+        0,
+    );
     processed
 }
 

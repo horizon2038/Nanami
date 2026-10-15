@@ -5,6 +5,9 @@ const _: () = assert!(MAX_SUBSCRIBERS <= Word::BITS as usize);
 pub(super) fn drain_driver_queues(state: &mut InputState) -> usize {
     let mut delivered_total = 0usize;
     let mut notifications = 0;
+    let mut trace_keys = 0;
+    let mut trace_tag = 0;
+    let mut trace_before = None;
     let mut i = 0usize;
     while i < MAX_DRIVER_QUEUES {
         if state.driver_queues[i].used && state.driver_queues[i].local_vaddr != 0 {
@@ -18,6 +21,15 @@ pub(super) fn drain_driver_queues(state: &mut InputState) -> usize {
                 };
                 let event_kind = packed & 0xff;
                 if mask & mask_for_event_kind(event_kind) != 0 {
+                    if nanami_runtime::diagnostics::ENABLED
+                        && event_kind == nanami_client::input::INPUT_EVENT_KIND_KEY
+                    {
+                        if trace_keys == 0 {
+                            trace_before = nanami_runtime::diagnostics::stamp();
+                        }
+                        trace_keys += 1;
+                        trace_tag = packed >> 56;
+                    }
                     let (delivered, pending) = enqueue_event(state, event_kind, packed);
                     delivered_total = delivered_total.wrapping_add(delivered);
                     notifications |= pending;
@@ -30,13 +42,36 @@ pub(super) fn drain_driver_queues(state: &mut InputState) -> usize {
     }
     // Publish all events before waking consumers. Always notify at the end of this
     // batch, even if a consumer on another core drained the shared queue meanwhile.
-    notify_subscribers(state, notifications);
+    let errors = notify_subscribers(state, notifications);
+    nanami_runtime::diagnostics::keys(
+        nanami_runtime::diagnostics::InputStage::Input,
+        trace_keys,
+        trace_tag,
+        trace_before,
+        errors,
+        notifications.count_ones() as usize,
+    );
     delivered_total
 }
 
 pub(super) fn distribute_event(state: &mut InputState, event_kind: Word, packed: Word) -> usize {
+    let before = if event_kind == nanami_client::input::INPUT_EVENT_KIND_KEY {
+        nanami_runtime::diagnostics::stamp()
+    } else {
+        None
+    };
     let (delivered, notifications) = enqueue_event(state, event_kind, packed);
-    notify_subscribers(state, notifications);
+    let errors = notify_subscribers(state, notifications);
+    if event_kind == nanami_client::input::INPUT_EVENT_KIND_KEY {
+        nanami_runtime::diagnostics::keys(
+            nanami_runtime::diagnostics::InputStage::Input,
+            1,
+            packed >> 56,
+            before,
+            errors,
+            notifications.count_ones() as usize,
+        );
+    }
     delivered
 }
 
@@ -63,13 +98,19 @@ fn enqueue_event(state: &mut InputState, event_kind: Word, packed: Word) -> (usi
     (delivered, notifications)
 }
 
-fn notify_subscribers(state: &InputState, mut pending: Word) {
+fn notify_subscribers(state: &InputState, mut pending: Word) -> usize {
+    let mut errors = 0;
     while pending != 0 {
         let index = pending.trailing_zeros() as usize;
-        let _ =
-            nanami_runtime::ipc::notification_notify(state.subscribers[index].notification_descriptor);
+        errors += usize::from(
+            nanami_runtime::ipc::notification_notify(
+                state.subscribers[index].notification_descriptor,
+            )
+            .is_err(),
+        );
         pending &= pending - 1;
     }
+    errors
 }
 
 fn distribute_local_event(subscriber: &mut Subscriber, event_kind: Word, packed: Word) -> bool {

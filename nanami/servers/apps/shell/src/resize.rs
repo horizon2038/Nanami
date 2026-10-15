@@ -21,42 +21,53 @@ impl Shell {
     }
 
     pub(super) fn repaint_terminal(&mut self) {
-        let width = self.surface.width;
-        let height = self.surface.height;
-        let pixels = self.surface.pixels();
-        fill_rect(pixels, (width, height), (0, 0, width, height), 0x0010_1418);
-        let terminal = &self.foreground.terminal;
-        let cursor = terminal.cursor();
-        for y in 0..terminal.rows().min(height / FONT_H) {
-            for (x, cell) in terminal.view_row(y).iter().enumerate().take(width / FONT_W) {
-                let mut cell = *cell;
-                if terminal.cursor_visible && terminal.at_bottom() && cursor == (x, y) {
-                    core::mem::swap(&mut cell.fg, &mut cell.bg);
-                }
-                fill_rect(
-                    pixels,
-                    (width, height),
-                    (x * FONT_W, y * FONT_H, FONT_W, FONT_H),
-                    cell.bg,
-                );
-                self.text.draw_cell(
-                    pixels,
-                    width,
-                    height,
-                    x * FONT_W,
-                    y * FONT_H,
-                    cell.byte,
-                    cell.fg,
-                );
-                if cell.underline {
-                    fill_rect(
-                        pixels,
-                        (width, height),
-                        (x * FONT_W, (y + 1) * FONT_H - 1, FONT_W, 1),
-                        cell.fg,
-                    );
-                }
+        terminal_render::paint(
+            &self.foreground.terminal,
+            &mut self.text,
+            self.surface.pixels(),
+            self.surface.width,
+            self.surface.height,
+            0,
+            self.surface.height,
+        );
+        for row in 0..self.foreground.terminal.rows() {
+            self.foreground.terminal.take_damage(row);
+        }
+    }
+
+    pub(super) fn repaint_output(&mut self) {
+        if !self.foreground.is_active() {
+            self.repaint_all();
+            self.present_full();
+            return;
+        }
+        let rows = self.foreground.terminal.rows();
+        let mut row = 0;
+        while row < rows {
+            if self.foreground.terminal.take_damage(row).is_none() {
+                row += 1;
+                continue;
             }
+            let first = row;
+            row += 1;
+            while row < rows && self.foreground.terminal.take_damage(row).is_some() {
+                row += 1;
+            }
+            let (top, bottom) =
+                terminal_render::damage_band(&self.text, first, row, self.surface.height);
+            if top == bottom {
+                continue;
+            }
+            terminal_render::paint(
+                &self.foreground.terminal,
+                &mut self.text,
+                self.surface.pixels(),
+                self.surface.width,
+                self.surface.height,
+                top,
+                bottom,
+            );
+            self.present_band(top, bottom - top);
         }
     }
 

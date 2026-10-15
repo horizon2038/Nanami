@@ -54,6 +54,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
     let mut request_count = 0usize;
+    nanami_runtime::diagnostics::clock_info("input");
 
     loop {
         let used_reply_receive = has_pending_reply;
@@ -88,6 +89,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 }
             }
             ServiceEvent::Notification { identifier, value } => {
+                let received = nanami_runtime::diagnostics::stamp();
                 if (identifier & INPUT_DRIVER_NOTIFICATION_IDENTIFIER) != 0 {
                     let _ = drain_driver_queues(&mut state);
                 } else {
@@ -97,6 +99,11 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     nanami_runtime::print!("{:#x}", value);
                     nanami_runtime::print!("\n");
                 }
+                nanami_runtime::diagnostics::wake(
+                    nanami_runtime::diagnostics::InputStage::Input,
+                    identifier,
+                    received,
+                );
             }
             // usually, this path is unreachable
             ServiceEvent::Fault {
@@ -130,7 +137,9 @@ fn handle_request(request: ServiceRequest, state: &mut InputState) -> (Word, Wor
                     match attach_subscriber_notification(index, request.identifier) {
                         Ok(descriptor) => {
                             state.subscribers[index].notification_descriptor = descriptor;
-                            nanami_runtime::print!("[input-server] subscriber notify attached pid=");
+                            nanami_runtime::print!(
+                                "[input-server] subscriber notify attached pid="
+                            );
                             nanami_runtime::print!("{}", request.identifier);
                             nanami_runtime::print!(" slot=");
                             nanami_runtime::print!(
@@ -195,7 +204,9 @@ fn handle_request(request: ServiceRequest, state: &mut InputState) -> (Word, Wor
                     match attach_subscriber_notification(index, request.identifier) {
                         Ok(descriptor) => {
                             state.subscribers[index].notification_descriptor = descriptor;
-                            nanami_runtime::print!("[input-server] subscriber notify attached pid=");
+                            nanami_runtime::print!(
+                                "[input-server] subscriber notify attached pid="
+                            );
                             nanami_runtime::print!("{}", request.identifier);
                             nanami_runtime::print!(" slot=");
                             nanami_runtime::print!(
@@ -483,7 +494,9 @@ fn attach_subscriber_notification(index: usize, pid: Word) -> Result<Word, Reque
         destination_slot,
         INPUT_NOTIFICATION_IDENTIFIER,
     )?;
-    Ok(nanami_runtime::ipc::process_slot_descriptor(destination_slot))
+    Ok(nanami_runtime::ipc::process_slot_descriptor(
+        destination_slot,
+    ))
 }
 
 fn map_request_error_to_status(err: RequestError) -> Word {

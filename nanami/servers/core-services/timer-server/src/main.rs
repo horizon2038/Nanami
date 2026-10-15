@@ -8,6 +8,8 @@ use nanami_runtime::{self, RequestError, Word};
 mod arch;
 
 mod deadlines;
+mod init_trace;
+mod reply;
 mod state;
 mod timers;
 use state::*;
@@ -64,7 +66,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     loop {
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
-            match nanami_runtime::ipc::service_reply_receive_event(
+            match reply::receive_after_reply(
+                &mut state.init_trace,
                 service_port,
                 pending_status.0,
                 pending_status.1,

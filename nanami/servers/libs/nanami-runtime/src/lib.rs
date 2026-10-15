@@ -1,10 +1,12 @@
 #![no_std]
 
 pub mod debug;
+pub mod diagnostics;
 pub mod hal;
 pub mod heap;
 pub mod io;
 pub mod ipc;
+mod mmio;
 mod platform;
 mod version;
 
@@ -14,6 +16,7 @@ pub use version::{request_kernel_version, request_nanami_version};
 use a9n_abi::capability_call::ipc_port::MessageInfo;
 pub use a9n_abi::Word;
 use a9n_abi::{CapabilityDescriptor, CapabilityError};
+pub use a9n_abi::capability_call::address_space::Attribute;
 
 pub use nanami_uapi::os::*;
 pub use nanami_uapi::{NanamiError, NanamiResult, RequestError};
@@ -247,26 +250,7 @@ pub fn request_dma(size_bytes: Word) -> Result<(Word, Word), RequestError> {
     Ok((paddr, vaddr))
 }
 
-pub fn request_mmio(
-    physical_address: Word,
-    size_bytes: Word,
-) -> Result<(Word, Word), RequestError> {
-    if physical_address == 0 || size_bytes == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    let (status, paddr, vaddr) = call_os_port(
-        OS_REQUEST_MMIO_REQUEST,
-        physical_address,
-        size_bytes,
-        0,
-        0,
-        3,
-    )?;
-    if status != OS_RESPONSE_OK {
-        return Err(RequestError::Status(status));
-    }
-    Ok((paddr, vaddr))
-}
+pub use mmio::{request_mmio, request_mmio_with_mapping};
 
 pub fn request_shared_memory(
     peer_pid: Word,

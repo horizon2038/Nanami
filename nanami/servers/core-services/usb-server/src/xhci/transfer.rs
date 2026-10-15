@@ -55,38 +55,55 @@ impl Controller {
             .ok_or(RequestError::Protocol)?;
         self.doorbell(slot, 1);
         let mut received = len;
-        self.wait_completion(1000, input, |this, input, event| {
-            if event.kind() == 32 && event.slot() == slot && event.endpoint() == 1 {
-                if event.code() == 13 {
-                    let residual = (event.status & 0xffffff) as usize;
-                    if residual > len {
+        let port = device.port;
+        self.trace_init(format_args!(
+            "stage=control.begin port={} slot={} setup={:#x} trb={:#x}",
+            port, slot, setup, pointer
+        ));
+        let result = self.wait_completion_recovering(
+            1000,
+            input,
+            |this, input, event| {
+                if event.kind() == 32 && event.slot() == slot && event.endpoint() == 1 {
+                    if event.code() == 13 {
+                        let residual = (event.status & 0xffffff) as usize;
+                        if residual > len {
+                            return Err(RequestError::Protocol);
+                        }
+                        received = len - residual;
+                    } else if event.code() == 6 {
+                        // Optional requests (e.g. GET_MAX_LUN) may stall. Restore
+                        // EP0's dequeue before a fallback or subsequent request.
+                        this.reset_endpoint(slot, 1, &mut device.control, true, input)?;
+                        return Err(RequestError::Unsupported);
+                    } else if event.code() != 1 {
+                        nanami_runtime::println!(
+                            "[usb-server] control req={:#x} slot={} code={}",
+                            request,
+                            slot,
+                            event.code()
+                        );
                         return Err(RequestError::Protocol);
                     }
-                    received = len - residual;
-                } else if event.code() == 6 {
-                    // Optional requests (e.g. GET_MAX_LUN) may stall. Restore
-                    // EP0's dequeue before a fallback or subsequent request.
-                    this.reset_endpoint(slot, 1, &mut device.control, true, input)?;
-                    return Err(RequestError::Unsupported);
-                } else if event.code() != 1 {
-                    nanami_runtime::println!(
-                        "[usb-server] control req={:#x} slot={} code={}",
-                        request,
-                        slot,
-                        event.code()
-                    );
-                    return Err(RequestError::Protocol);
+                    if event.parameter & !15 == pointer {
+                        device.control.complete();
+                        return Ok(Some(received));
+                    }
+                } else {
+                    this.dispatch(event, input);
                 }
-                if event.parameter & !15 == pointer {
-                    device.control.complete();
-                    return Ok(Some(received));
-                }
-            } else {
-                this.dispatch(event, input);
-            }
-            Ok(None)
-        })
-        .inspect_err(|error| {
+                Ok(None)
+            },
+            |this, input| this.stop_control_after_timeout(slot, port, input),
+        );
+        self.trace_init(format_args!(
+            "stage=control.end port={} slot={} setup={:#x} ok={}",
+            port,
+            slot,
+            setup,
+            result.is_ok()
+        ));
+        result.inspect_err(|error| {
             if !matches!(error, RequestError::Unsupported) {
                 nanami_runtime::println!(
                     "[usb-server] control wait failed port={} slot={} setup={:#x} trb={:#x}: {}",

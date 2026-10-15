@@ -44,9 +44,11 @@ fn spawn(image: &str) -> Result<Word, RequestError> {
 fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Word, Word) {
     match request.code {
         nanami_client::device::DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE
-        | nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => state
-            .usb_routes
-            .handle(request, state.acpi_pid, &mut state.usb_controllers),
+        | nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => {
+            state
+                .usb_routes
+                .handle(request, state.acpi_pid, &mut state.usb_controllers)
+        }
         nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ => {
             if state.usb_pid == 0 || request.identifier != state.usb_pid {
                 return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
@@ -64,7 +66,10 @@ fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Wo
                         .unwrap_or(0),
                 ),
                 Err(error) => {
-                    nanami_runtime::println!("[driver-manager] ACPI IRQ dispatch failed: {}", error);
+                    nanami_runtime::println!(
+                        "[driver-manager] ACPI IRQ dispatch failed: {}",
+                        error
+                    );
                     (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
                 }
             }
@@ -104,6 +109,17 @@ fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Wo
             (nanami_runtime::OS_RESPONSE_OK, state.hpet_mmio_base, 0)
         }
         nanami_client::device::DEVICE_MANAGER_REQUEST_HPET_MMIO_BASE => {
+            (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
+        }
+        nanami_client::device::DEVICE_MANAGER_REQUEST_HPET_COUNTER_BASE
+            if state.usb_pid != 0
+                && request.identifier == state.usb_pid
+                && state.hpet_pid != 0
+                && state.hpet_mmio_base != 0 =>
+        {
+            (nanami_runtime::OS_RESPONSE_OK, state.hpet_mmio_base, 0)
+        }
+        nanami_client::device::DEVICE_MANAGER_REQUEST_HPET_COUNTER_BASE => {
             (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0)
         }
         _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
@@ -185,13 +201,16 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        state.acpi_rsdp =
-            nanami_runtime::request_driver_platform_info(nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?
-                .0;
+        state.acpi_rsdp = nanami_runtime::request_driver_platform_info(
+            nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS,
+        )?
+        .0;
         if state.acpi_rsdp != 0 {
             match spawn("./bin/acpi-server") {
                 Ok(pid) => state.acpi_pid = pid,
-                Err(error) => nanami_runtime::println!("[driver-manager] ACPI spawn failed: {}", error),
+                Err(error) => {
+                    nanami_runtime::println!("[driver-manager] ACPI spawn failed: {}", error)
+                }
             }
         }
     }

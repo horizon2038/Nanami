@@ -16,7 +16,9 @@ pub struct Fake {
     pub operations: Vec<&'static str>,
     pub replies: Vec<Vec<Word>>,
     pub reply_error: Option<CapabilityError>,
+    pub receive_error: Option<CapabilityError>,
     pub notification: Word,
+    pub logs: Vec<String>,
 }
 thread_local! { pub static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub fn setup() -> MutexGuard<'static, ()> {
@@ -33,15 +35,30 @@ pub fn setup() -> MutexGuard<'static, ()> {
 pub fn incoming(info: MessageInfo, id: Word) {
     FAKE.with(|fake| fake.borrow_mut().incoming.push_back((info, id)));
 }
-fn receive(info: &mut MessageInfo, id: &mut Word, operation: &'static str) {
+pub fn capture_log(args: core::fmt::Arguments<'_>) {
+    FAKE.with(|fake| {
+        let mut fake = fake.borrow_mut();
+        fake.operations.push("log");
+        fake.logs.push(args.to_string());
+    });
+}
+fn receive(
+    info: &mut MessageInfo,
+    id: &mut Word,
+    operation: &'static str,
+) -> Result<(), CapabilityError> {
     FAKE.with(|fake| {
         let mut fake = fake.borrow_mut();
         fake.operations.push(operation);
+        if let Some(error) = fake.receive_error.take() {
+            return Err(error);
+        }
         (*info, *id) = fake
             .incoming
             .pop_front()
             .expect("kernel receive would block: notification was already consumed by Call");
-    });
+        Ok(())
+    })
 }
 fn reply(info: MessageInfo, operation: &'static str) -> Result<(), CapabilityError> {
     FAKE.with(|fake| {
@@ -103,8 +120,7 @@ pub mod arch {
             info: &mut MessageInfo,
             id: &mut Word,
         ) -> Result<(), CapabilityError> {
-            super::super::receive(info, id, "receive");
-            Ok(())
+            super::super::receive(info, id, "receive")
         }
         pub fn reply(_: Word, info: MessageInfo) -> Result<(), CapabilityError> {
             super::super::reply(info, "reply")
@@ -115,8 +131,7 @@ pub mod arch {
             id: &mut Word,
         ) -> Result<(), CapabilityError> {
             super::super::reply(*info, "reply_receive")?;
-            super::super::receive(info, id, "receive part");
-            Ok(())
+            super::super::receive(info, id, "receive part")
         }
     }
     pub mod process_control_block {

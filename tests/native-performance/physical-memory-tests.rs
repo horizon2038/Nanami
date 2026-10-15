@@ -38,15 +38,7 @@ pub struct InitInfo {
 pub enum InitSlotOffset {
     GenericNode = 6,
 }
-pub mod capability_call {
-    pub mod address_space {
-        #[derive(Clone, Copy)]
-        pub struct Attribute;
-        impl Attribute {
-            pub const ALL: Self = Self;
-        }
-    }
-}
+pub use a9n_abi::capability_call;
 #[macro_export]
 macro_rules! info { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }} }
 #[path = "../../nanami/src/nanami_utils/descriptor.rs"]
@@ -92,6 +84,7 @@ struct Fake {
     calls: usize,
     nodes: usize,
     batches: usize,
+    map_attributes: Vec<usize>,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod arch {
@@ -183,8 +176,9 @@ pub mod arch {
             _: usize,
             _: usize,
             _: usize,
-            _: capability_call::address_space::Attribute,
+            attribute: capability_call::address_space::Attribute,
         ) -> CapabilityResult {
+            FAKE.with(|fake| fake.borrow_mut().map_attributes.push(attribute.bits()));
             Ok(())
         }
         pub fn get_unset_depth(_: usize, _: usize, _: usize) -> Result<usize, CapabilityError> {
@@ -411,4 +405,31 @@ fn invalid_requests_do_not_allocate_metadata() {
             .is_err());
     }
     assert_eq!(FAKE.with(|fake| fake.borrow().calls), calls);
+}
+
+#[test]
+fn mapping_flags_use_the_existing_attribute_word_and_keep_default_normal() {
+    use capability_call::address_space::Attribute;
+    struct Vm;
+    impl nanami_core::vm_space::VmTracker for Vm {
+        fn page_tables_ready(&self, _: usize) -> bool {
+            true
+        }
+        fn record_frame(&mut self, _: usize, _: usize) -> Result<(), ()> {
+            Ok(())
+        }
+        fn record_page_table(&mut self, _: usize, _: usize) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+    let (mut memory, _) = boot(33, true);
+    let mut vm = Vm;
+    memory.map_frame(1, 2, 0x1000, &mut vm).unwrap();
+    for mapping in [Attribute::NORMAL, Attribute::BUFFERED, Attribute::UNCACHED] {
+        memory
+            .map_frame_with_attribute(1, 2, 0x2000, Attribute::ALL | mapping, &mut vm)
+            .unwrap();
+    }
+    memory.map_frame_strict(1, 2, 0x3000, &mut vm).unwrap();
+    FAKE.with(|fake| assert_eq!(fake.borrow().map_attributes, [7, 7, 0x17, 0x27, 7]));
 }

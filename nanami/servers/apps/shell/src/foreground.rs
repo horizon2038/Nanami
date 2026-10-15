@@ -8,7 +8,9 @@ const SLOT_ALTER_SERVICE: Word = 28;
 const SLOT_EXEC_SERVICE: Word = 31;
 const TERMINAL_SHM_BYTES: Word = 0x4000;
 const ALTER_REQUEST_KILL_TERMINAL: Word = 0xb107;
-const TERMINAL_READ_BYTES: usize = 256;
+// Read one processing budget per IPC. Keep a private copy: terminal replies
+// (e.g. cursor reports) write into the same shared buffer while parsing output.
+const TERMINAL_READ_BYTES: usize = 4096;
 const OUTPUT_LINES: usize = 4;
 
 pub struct ForegroundApp {
@@ -286,7 +288,7 @@ impl ForegroundApp {
 
     fn drain_terminal_output_into(&mut self, out: &mut CommandOutput) -> bool {
         // Bound work per event so a continuous writer cannot starve GUI input.
-        for _ in 0..4096 {
+        for _ in 0..TERMINAL_READ_BYTES {
             if self.pending_pos >= self.pending_len {
                 match self.refill_pending() {
                     Ok(true) => {}
@@ -419,19 +421,19 @@ impl ForegroundApp {
                     self.terminal_port,
                     self.terminal_id,
                     0,
-                    256,
+                    TERMINAL_READ_BYTES as Word,
                 )
             } else {
                 nanami_client::terminal::terminal_read_output(
                     self.terminal_port,
                     self.terminal_id,
                     0,
-                    256,
+                    TERMINAL_READ_BYTES as Word,
                 )
             };
             match bytes {
                 Ok(0) | Err(_) => return,
-                Ok(bytes) if bytes < 256 => return,
+                Ok(bytes) if bytes < TERMINAL_READ_BYTES as Word => return,
                 Ok(_) => {}
             }
         }

@@ -5,6 +5,8 @@ extern crate self as nanami_runtime;
 extern crate self as nanami_client;
 use std::{cell::RefCell, cmp::min, ptr};
 pub use std::{print, println};
+#[path = "../../../nanami/servers/libs/nanami-runtime/src/diagnostics.rs"]
+pub mod diagnostics;
 pub type Word = usize;
 pub const OS_RESPONSE_OK: Word = 0;
 pub const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
@@ -48,6 +50,13 @@ struct Ext2Runtime {
     handles: [FileHandle; 2],
     mapping: Vec<u32>,
     scratch: Box<[u8; BUFFER_SIZE]>,
+    directory_invalidations: usize,
+}
+
+mod directory {
+    pub(super) fn invalidate(runtime: &mut super::Ext2Runtime) {
+        runtime.directory_invalidations += 1;
+    }
 }
 
 struct FileHandle {
@@ -287,6 +296,7 @@ fn runtime(mapping: Vec<u32>) -> Ext2Runtime {
         ],
         mapping,
         scratch,
+        directory_invalidations: 0,
     }
 }
 fn write(

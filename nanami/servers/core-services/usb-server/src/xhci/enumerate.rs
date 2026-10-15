@@ -34,7 +34,17 @@ impl Controller {
             if status & 1 == 0 {
                 continue;
             }
-            if let Err(error) = self.attach(port as u8, input) {
+            self.trace_init(format_args!(
+                "stage=attach.begin port={} protocol={} PORTSC={:#010x}",
+                port, self.port_major[port], status
+            ));
+            let result = self.attach(port as u8, input);
+            self.trace_init(format_args!(
+                "stage=attach.end port={} ok={}",
+                port,
+                result.is_ok()
+            ));
+            if let Err(error) = result {
                 nanami_runtime::println!("[usb-server] port {} skipped: {}", port, error);
             }
         }
@@ -70,6 +80,10 @@ impl Controller {
         if status & 1 == 0 {
             return Ok(());
         }
+        self.trace_init(format_args!(
+            "stage=reset.begin port={} protocol={} PORTSC={:#010x}",
+            port, self.port_major[port as usize], status
+        ));
         match self.port_major[port as usize] {
             2 => {
                 unsafe { write(self.op, offset, port_controls(status) | PORT_RESET) };
@@ -86,6 +100,10 @@ impl Controller {
             _ => return Err(RequestError::Unsupported),
         }
         let status = unsafe { read(self.op, offset) };
+        self.trace_init(format_args!(
+            "stage=reset.end port={} PORTSC={:#010x}",
+            port, status
+        ));
         if status & 3 != 3 {
             return Err(RequestError::Transport);
         }

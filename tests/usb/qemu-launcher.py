@@ -59,7 +59,7 @@ def check_devices(arguments, storage, usb_input):
         assert sum(d.startswith(prefix) for d in devices) == int(expected), devices
 
 
-def boot(arguments, qemu, repo, logs):
+def boot(arguments, qemu, repo, logs, hold_after_online=0):
     serial = logs / "serial.log"
     arguments = arguments.copy()
     arguments[arguments.index("-serial") + 1] = f"file:{serial}"
@@ -77,11 +77,15 @@ def boot(arguments, qemu, repo, logs):
                                    stdout=diagnostics, stderr=diagnostics)
         try:
             deadline = time.monotonic() + 120
+            online_at = None
             while time.monotonic() < deadline:
                 text = serial.read_text(errors="replace") if serial.exists() else ""
                 if "[              honoka] online" in text:
-                    print("PASS: Rust launcher boots USB rootfs to Honoka without mouse input", flush=True)
-                    return
+                    if online_at is None:
+                        online_at = time.monotonic()
+                    if time.monotonic() - online_at >= hold_after_online:
+                        print("PASS: Rust launcher boots USB rootfs to Honoka without mouse input", flush=True)
+                        return
                 if process.poll() is not None:
                     raise RuntimeError(f"QEMU exited during boot; inspect {logs / 'qemu.log'}")
                 time.sleep(0.2)
@@ -100,7 +104,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--boot-image", type=Path, help="Also boot this image with snapshot=on")
     parser.add_argument("--qemu", default="qemu-system-x86_64")
+    parser.add_argument("--hold-after-online", type=float, default=0,
+                        help="Keep the no-input snapshot VM running 0-30 seconds for periodic diagnostics")
     options = parser.parse_args()
+    if not 0 <= options.hold_after_online <= 30:
+        parser.error("--hold-after-online must be between 0 and 30 seconds")
     repo = Path(__file__).resolve().parents[2]
     for storage in ("ahci", "virtio", "usb"):
         for usb_input in (False, True):
@@ -118,7 +126,7 @@ def main():
         command = launch(repo, ["--net", "none", "--storage", "usb",
                                 "--image", str(options.boot_image.resolve())])
         check_devices(command[1:], "usb", True)
-        boot(command[1:], options.qemu, repo, logs)
+        boot(command[1:], options.qemu, repo, logs, options.hold_after_online)
 
 
 if __name__ == "__main__":

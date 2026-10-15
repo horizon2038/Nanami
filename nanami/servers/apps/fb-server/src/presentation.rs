@@ -1,5 +1,20 @@
 use super::*;
 
+// Atomic release fences order ordinary shared RAM; they do not drain x86 WC
+// stores. Finish hardware writes before acknowledging PRESENT to the producer.
+pub(super) fn complete_framebuffer_writes() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("sfence", options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fence(Ordering::SeqCst);
+}
+
 pub(super) fn present_shared_framebuffer(
     display: &mut DisplayState,
     owner_pid: Word,
@@ -44,6 +59,9 @@ pub(super) fn present_shared_framebuffer(
         for row in 0..height {
             written += copy_to_hardware(display, first + row * stride, row_bytes);
         }
+    }
+    if written != 0 {
+        complete_framebuffer_writes();
     }
     fence(Ordering::Release);
     // Preserve PRESENT's pixel count: it acknowledges the requested region,

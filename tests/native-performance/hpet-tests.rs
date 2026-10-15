@@ -1,6 +1,6 @@
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 pub use std::println;
 pub type Word = usize;
 #[derive(Debug)]
@@ -129,4 +129,24 @@ fn unchanged_alarm_uses_event_sample_and_fired_alarm_can_be_rearmed() {
     timer.now();
     timer.arm(Some(1_000_000)).unwrap();
     assert!(mmio[0x108 / 8] > 100_001);
+}
+
+#[test]
+fn physical_24mhz_period_arms_ten_milliseconds_without_resetting_the_epoch() {
+    let mut mmio = device(true);
+    mmio[0] = (41_666_667u64 << 32) | (1 << 15) | (1 << 13);
+    let mut timer = hpet::prepare(16).unwrap();
+    timer.start().unwrap();
+    mmio[0xf0 / 8] = 48_000_000;
+    let now = timer.now();
+    assert_eq!(now, 2_000_000_016);
+    let deadline = now + 10_000_000;
+    timer.arm(Some(deadline)).unwrap();
+    let comparator = mmio[0x108 / 8];
+    let comparator_ns = u128::from(comparator) * 41_666_667 / 1_000_000;
+    assert!(comparator_ns >= u128::from(deadline));
+    assert_eq!(mmio[0xf0 / 8], 48_000_000);
+    assert_ne!(mmio[0x100 / 8] & (1 << 2), 0);
+    assert_eq!(mmio[0x100 / 8] & (1 << 3), 0);
+    assert_eq!(mmio[0x10 / 8], 3);
 }

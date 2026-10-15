@@ -6,6 +6,8 @@ extern crate self as nanami_runtime;
 extern crate self as nanami_client;
 use std::cell::RefCell;
 pub use std::println;
+#[path = "../../../nanami/servers/libs/nanami-runtime/src/diagnostics.rs"]
+pub mod diagnostics;
 pub type Word = usize;
 pub type CapabilityDescriptor = Word;
 pub const PROCESS_SLOT_NOTIFICATION: Word = 21;

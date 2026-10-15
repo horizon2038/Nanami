@@ -5,6 +5,8 @@ use core::ptr;
 use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
 use nanami_runtime::{self, RequestError, Word};
 
+mod image_loader;
+
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_VFS_SERVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
@@ -52,11 +54,11 @@ struct SystemEntry<'a> {
     path: &'a str,
 }
 
-#[derive(Clone, Copy)]
 struct VfsClient {
     port: Word,
     shm: Word,
     shm_size: Word,
+    image: image_loader::ImageBuffer,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +128,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::diagnostics::clock_info("system-manager");
     nanami_runtime::ipc::init_ipc_tls()
         .map_err(|e| log_error("[system-manager] ipc tls failed: ", e))?;
     nanami_runtime::print!("[system-manager] bootstrap\n");
@@ -202,6 +205,7 @@ fn connect_vfs_client() -> Result<VfsClient, RequestError> {
         port: vfs_port,
         shm,
         shm_size,
+        image: image_loader::ImageBuffer::new(),
     })
 }
 
@@ -342,7 +346,11 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
         return Err(RequestError::InvalidArgument);
     }
     write_shm_bytes(vfs.shm, PATH_OFFSET, path);
-    nanami_runtime::println!("[system-manager] loading {} path={}", entry.name, entry.path);
+    nanami_runtime::println!(
+        "[system-manager] loading {} path={}",
+        entry.name,
+        entry.path
+    );
     spawn_vfs_path::<true>(vfs, path.len(), entry.priority)
 }
 
@@ -354,77 +362,35 @@ fn spawn_vfs_path<const BOOT_TRACE: bool>(
     path_len: usize,
     priority: Word,
 ) -> Result<Word, RequestError> {
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=stat");
-    }
-    let (_, size, kind) =
-        nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
-            .map_err(|error| log_spawn_stage("stat", error))?;
-    if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=heap bytes={:#x}", size);
-    }
-    let (image_base, mapped_size) =
-        nanami_runtime::request_heap(size).map_err(|error| log_spawn_stage("heap", error))?;
-    if image_base == 0 || mapped_size < size {
-        return Err(RequestError::Protocol);
-    }
-
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=open");
-    }
-    let handle = nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
-        .map_err(|error| log_spawn_stage("open", error))?;
-    let mut offset = 0usize;
-    while offset < size as usize {
-        let remaining = size as usize - offset;
-        let chunk = remaining.min(vfs.shm_size as usize);
-        if BOOT_TRACE {
-            nanami_runtime::println!(
-                "[system-manager] load stage=read offset={:#x} bytes={:#x}",
-                offset,
-                chunk
-            );
-        }
-        let read = match nanami_client::vfs::vfs_read(
-            vfs.port,
-            handle,
-            offset as Word,
-            chunk as Word,
-            FILE_CHUNK_OFFSET as Word,
-        ) {
-            Ok(read) => read as usize,
-            Err(error) => {
-                let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
-                return Err(log_spawn_stage("read", error));
-            }
-        };
-        if read == 0 {
-            let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
-            return Err(RequestError::Protocol);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(
-                (vfs.shm as usize + FILE_CHUNK_OFFSET) as *const u8,
-                (image_base as usize + offset) as *mut u8,
-                read,
-            );
-        }
-        offset += read;
-    }
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=close");
-    }
-    let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
+    use nanami_runtime::diagnostics::{measure, RpcStage};
+    let (image_base, size) = image_loader::load::<BOOT_TRACE>(vfs, path_len)?;
 
     if BOOT_TRACE {
         nanami_runtime::println!("[system-manager] load stage=spawn");
     }
-    nanami_runtime::request_process_spawn_memory(image_base, size, priority)
-        .map_err(|error| log_spawn_stage("process", error))
+    let result = measure(RpcStage::LoadSpawn, size, || {
+        nanami_runtime::request_process_spawn_memory(image_base, size, priority)
+    })
+    .map_err(|error| log_spawn_stage("process", error));
+    if nanami_runtime::diagnostics::ENABLED {
+        nanami_runtime::println!(
+            "[pipe.load] image-bytes={} success={}",
+            size,
+            result.is_ok()
+        );
+        for stage in [
+            RpcStage::LoadStat,
+            RpcStage::LoadHeap,
+            RpcStage::LoadOpen,
+            RpcStage::LoadRead,
+            RpcStage::LoadCopy,
+            RpcStage::LoadClose,
+            RpcStage::LoadSpawn,
+        ] {
+            nanami_runtime::diagnostics::flush_rpc(stage);
+        }
+    }
+    result
 }
 
 fn log_spawn_stage(stage: &str, error: RequestError) -> RequestError {
@@ -442,43 +408,7 @@ fn spawn_vfs_path_with_launch(
     client_shm: Word,
     launch: LaunchInfo,
 ) -> Result<Word, RequestError> {
-    let (_, size, kind) =
-        nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
-    if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-
-    let (image_base, mapped_size) = nanami_runtime::request_heap(size)?;
-    if image_base == 0 || mapped_size < size {
-        return Err(RequestError::Protocol);
-    }
-
-    let handle = nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)?;
-    let mut offset = 0usize;
-    while offset < size as usize {
-        let remaining = size as usize - offset;
-        let chunk = remaining.min(vfs.shm_size as usize);
-        let read = nanami_client::vfs::vfs_read(
-            vfs.port,
-            handle,
-            offset as Word,
-            chunk as Word,
-            FILE_CHUNK_OFFSET as Word,
-        )? as usize;
-        if read == 0 {
-            let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
-            return Err(RequestError::Protocol);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(
-                (vfs.shm as usize + FILE_CHUNK_OFFSET) as *const u8,
-                (image_base as usize + offset) as *mut u8,
-                read,
-            );
-        }
-        offset += read;
-    }
-    let _ = nanami_client::vfs::vfs_close(vfs.port, handle);
+    let (image_base, size) = image_loader::load::<false>(vfs, path_len)?;
 
     let pid = nanami_runtime::request_process_spawn_memory_suspended(
         image_base,
@@ -630,7 +560,8 @@ fn install_initial_stack(
         let stack_pointer = read_register_value(pcb, REG_STACK_POINTER).unwrap_or(0);
         let mut stack_argc = 0;
         let mut stack_argv0 = 0;
-        if nanami_runtime::request_process_memory_read(pid, guest_sp, local, STACK_VERIFY_BYTES).is_ok()
+        if nanami_runtime::request_process_memory_read(pid, guest_sp, local, STACK_VERIFY_BYTES)
+            .is_ok()
         {
             stack_argc = read_word_from_buffer(&stack, 0);
             stack_argv0 = read_word_from_buffer(&stack, core::mem::size_of::<Word>());
@@ -725,7 +656,12 @@ fn run_exec_service(mut runtime: ExecRuntime) -> nanami_runtime::NanamiResult {
     loop {
         let event = match pending {
             ExecReply::Send(status, detail0, detail1) => {
-                nanami_runtime::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
+                nanami_runtime::ipc::service_reply_receive_event(
+                    service_port,
+                    status,
+                    detail0,
+                    detail1,
+                )
             }
             ExecReply::Drop => nanami_runtime::ipc::service_receive_event(service_port),
         };

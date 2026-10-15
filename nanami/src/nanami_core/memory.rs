@@ -193,13 +193,29 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        self.map_frame_with_attribute(
+            address_space,
+            frame_descriptor,
+            virtual_address,
+            Attribute::ALL,
+            vm_space,
+        )
+    }
+
+    pub fn map_frame_with_attribute(
+        &mut self,
+        address_space: CapabilityDescriptor,
+        frame_descriptor: CapabilityDescriptor,
+        virtual_address: usize,
+        attribute: Attribute,
+        vm_space: &mut impl VmTracker,
+    ) -> CapabilityResult {
         if !vm_space.page_tables_ready(virtual_address) {
             self.ensure_page_tables(address_space, virtual_address, vm_space)?;
         }
 
-        let attr = Attribute::ALL;
-
-        match arch::address_space::map(address_space, frame_descriptor, virtual_address, attr) {
+        match arch::address_space::map(address_space, frame_descriptor, virtual_address, attribute)
+        {
             Ok(()) | Err(CapabilityError::IllegalOperation) => {
                 vm_space
                     .record_frame(virtual_address, frame_descriptor)

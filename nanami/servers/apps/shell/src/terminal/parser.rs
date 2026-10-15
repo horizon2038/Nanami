@@ -2,7 +2,22 @@ use super::{State, Terminal};
 
 impl Terminal {
     pub fn process_byte(&mut self, byte: u8) {
+        let old_cursor = self.cursor();
+        let old_visible = self.cursor_visible;
+        if self.view_offset != 0 {
+            self.invalidate_all();
+        }
         self.view_offset = 0;
+        self.process_byte_inner(byte);
+        if old_cursor != self.cursor() || old_visible != self.cursor_visible {
+            self.screen
+                .mark(old_cursor.1, old_cursor.0, old_cursor.0 + 1);
+            self.screen
+                .mark(self.screen.y, self.screen.x, self.screen.x + 1);
+        }
+    }
+
+    fn process_byte_inner(&mut self, byte: u8) {
         // CAN/SUB cancel even incomplete escape sequences.
         if matches!(byte, 0x18 | 0x1a) {
             self.state = State::Ground;
@@ -174,32 +189,23 @@ impl Terminal {
                 self.screen.x = self.param(1, 1).saturating_sub(1).min(self.cols() - 1);
             }
             b'J' => {
-                let p = self.screen.y * self.cols() + self.screen.x;
-                match self.params[0] {
-                    0 => self.screen.cells[p..].fill(blank),
-                    1 => self.screen.cells[..=p].fill(blank),
-                    2 => self.screen.cells.fill(blank),
-                    3 => self.screen.history.clear(),
-                    _ => {}
-                }
+                self.screen.erase_display(self.params[0], blank);
             }
             b'K' => {
-                let start = self.screen.y * self.cols();
-                let end = start + self.cols();
-                let p = start + self.screen.x;
+                let (row, x, cols) = (self.screen.y, self.screen.x, self.cols());
                 match self.params[0] {
-                    0 => self.screen.cells[p..end].fill(blank),
-                    1 => self.screen.cells[start..=p].fill(blank),
-                    2 => self.screen.cells[start..end].fill(blank),
+                    0 => self.screen.erase_line(row, x, cols, blank),
+                    1 => self.screen.erase_line(row, 0, x + 1, blank),
+                    2 => self.screen.erase_line(row, 0, cols, blank),
                     _ => {}
                 }
             }
             b'@' => self.screen.insert_cells(n, blank),
             b'P' => self.screen.delete_cells(n, blank),
             b'X' => {
-                let p = self.screen.y * self.cols() + self.screen.x;
-                let end = p + n.min(self.cols() - self.screen.x);
-                self.screen.cells[p..end].fill(blank);
+                let x = self.screen.x;
+                let end = x + n.min(self.cols() - x);
+                self.screen.erase_line(self.screen.y, x, end, blank);
             }
             b'L' if (self.screen.top..=self.screen.bottom).contains(&self.screen.y) => self
                 .screen

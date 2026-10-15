@@ -17,6 +17,8 @@ mod usb {
 mod capabilities;
 #[path = "capability-tests.rs"]
 mod capability_tests;
+#[path = "completion-poll.rs"]
+mod completion_poll;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/descriptors.rs"]
 mod descriptors;
 #[path = "../../../nanami/servers/core-services/usb-server/src/usb/hid.rs"]
@@ -25,12 +27,10 @@ pub(crate) mod hid;
 mod hid_negotiation;
 #[path = "hid-reports.rs"]
 mod hid_reports;
-#[path = "../../../nanami/servers/core-services/usb-server/src/xhci/protocol.rs"]
-mod protocol;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/poll.rs"]
 mod poll;
-#[path = "completion-poll.rs"]
-mod completion_poll;
+#[path = "../../../nanami/servers/core-services/usb-server/src/xhci/protocol.rs"]
+mod protocol;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/registers.rs"]
 mod registers;
 #[path = "../../../nanami/servers/core-services/usb-server/src/xhci/ring.rs"]
@@ -275,6 +275,29 @@ fn producer_requires_completion_before_reusing_dma() {
     assert_eq!(memory.0[1], Trb::default());
     producer.complete();
     assert_eq!(producer.submit(&[trb(456)]), Some(0x10010));
+}
+
+#[test]
+fn diagnostic_position_neither_consumes_events_nor_changes_cycle_ownership() {
+    let mut memory = page();
+    memory.0[0] = Trb {
+        control: (32 << 10) | CYCLE,
+        parameter: 123,
+        status: 1 << 24,
+    };
+    let original = memory.0[0];
+    let mut consumer = unsafe { Consumer::new(0x10000, memory.0.as_mut_ptr() as usize) };
+    assert_eq!(
+        consumer.diagnostic_position(),
+        (0x10000, original.control, 1)
+    );
+    assert_eq!(
+        consumer.diagnostic_position(),
+        (0x10000, original.control, 1)
+    );
+    assert_eq!(memory.0[0], original);
+    assert_eq!(consumer.pop(), Some(original));
+    assert_eq!(consumer.next_physical(), 0x10010);
 }
 
 #[test]

@@ -43,6 +43,7 @@ impl CachedGlyph {
 pub struct TextRenderer {
     glyphs: Box<[CachedGlyph; COUNT]>,
     use_fontdue: bool,
+    row_ink_bounds: (i32, i32),
 }
 
 impl TextRenderer {
@@ -64,9 +65,23 @@ impl TextRenderer {
             false
         };
         log_heap_stats("[shell] font init end");
+        let row_ink_bounds = if use_fontdue {
+            glyphs
+                .iter()
+                .filter(|glyph| glyph.cached)
+                .fold((0i32, 12i32), |bounds, glyph| {
+                    (
+                        bounds.0.min(glyph.y_offset),
+                        bounds.1.max(glyph.y_offset + glyph.height as i32),
+                    )
+                })
+        } else {
+            (0, 12)
+        };
         Self {
             glyphs,
             use_fontdue,
+            row_ink_bounds,
         }
     }
 
@@ -85,7 +100,16 @@ impl TextRenderer {
             let ch = text[i];
             if ch != 0 {
                 if self.use_fontdue {
-                    self.draw_cached_glyph(vaddr, fb_width, fb_height, x, y, ch, colors[i]);
+                    self.draw_cached_glyph(
+                        vaddr,
+                        fb_width,
+                        fb_height,
+                        x,
+                        y,
+                        ch,
+                        colors[i],
+                        (0, fb_height),
+                    );
                 } else {
                     draw_bitmap_char(vaddr, fb_width, x, y, ch, colors[i]);
                 }
@@ -104,6 +128,7 @@ impl TextRenderer {
         y: usize,
         ch: u8,
         text_color: u32,
+        band: (usize, usize),
     ) {
         if !(FIRST as u8..(FIRST + COUNT) as u8).contains(&ch) {
             return;
@@ -123,7 +148,13 @@ impl TextRenderer {
                 if alpha != 0 {
                     let px = base_x + gx as i32;
                     let py = base_y + gy as i32;
-                    if px >= 0 && py >= 0 && (px as usize) < fb_width && (py as usize) < fb_height {
+                    if px >= 0
+                        && py >= 0
+                        && (px as usize) < fb_width
+                        && (py as usize) < fb_height
+                        && (py as usize) >= band.0
+                        && (py as usize) < band.1
+                    {
                         let background = get_pixel(vaddr, fb_width, px as usize, py as usize);
                         let color = blend_over(background, text_color, alpha);
                         put_pixel(vaddr, fb_width, px as usize, py as usize, color);
@@ -145,10 +176,28 @@ impl TextRenderer {
         ch: u8,
         color: u32,
     ) {
+        self.draw_cell_in_band(vaddr, width, height, x, y, ch, color, (0, height));
+    }
+
+    pub fn row_ink_bounds(&self) -> (i32, i32) {
+        self.row_ink_bounds
+    }
+
+    pub fn draw_cell_in_band(
+        &mut self,
+        vaddr: Word,
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        ch: u8,
+        color: u32,
+        band: (usize, usize),
+    ) {
         if self.use_fontdue {
-            self.draw_cached_glyph(vaddr, width, height, x, y, ch, color);
+            self.draw_cached_glyph(vaddr, width, height, x, y, ch, color, band);
         } else if x + FONT_W <= width && y + 12 <= height {
-            draw_bitmap_char(vaddr, width, x, y, ch, color);
+            draw_bitmap_char_in_band(vaddr, width, x, y, ch, color, band);
         }
     }
 }
@@ -230,13 +279,25 @@ fn blend_over(background: u32, foreground: u32, alpha: u8) -> u32 {
 }
 
 fn draw_bitmap_char(vaddr: Word, fb_width: usize, x: usize, y: usize, ch: u8, color: u32) {
+    draw_bitmap_char_in_band(vaddr, fb_width, x, y, ch, color, (0, usize::MAX));
+}
+
+fn draw_bitmap_char_in_band(
+    vaddr: Word,
+    fb_width: usize,
+    x: usize,
+    y: usize,
+    ch: u8,
+    color: u32,
+    band: (usize, usize),
+) {
     let glyph = glyph5x7(ch);
     let mut gy = 0usize;
     while gy < 7 {
         let row = glyph[gy];
         let mut gx = 0usize;
         while gx < 5 {
-            if ((row >> (4 - gx)) & 1) != 0 {
+            if ((row >> (4 - gx)) & 1) != 0 && y + gy + 2 >= band.0 && y + gy + 2 < band.1 {
                 put_pixel(vaddr, fb_width, x + gx + 1, y + gy + 2, color);
             }
             gx += 1;

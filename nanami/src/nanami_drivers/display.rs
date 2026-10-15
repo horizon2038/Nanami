@@ -84,7 +84,14 @@ impl DisplayDriver {
                 }
             }
             let va = FB_MAP_BASE_VA + i * PAGE_SIZE;
-            if let Err(e) = memory.map_frame(address_space, frame, va, vm_space) {
+            if let Err(e) = memory.map_frame_with_attribute(
+                address_space,
+                frame,
+                va,
+                nun::capability_call::address_space::Attribute::ALL
+                    | nun::capability_call::address_space::Attribute::BUFFERED,
+                vm_space,
+            ) {
                 crate::info!(
                     "page={:>6} frame={:#018x} va={:#018x} err={:?}",
                     i,
@@ -117,6 +124,7 @@ impl DisplayDriver {
             }
             y += 1;
         }
+        complete_framebuffer_writes();
     }
 
     pub fn draw_test_pattern(&mut self) {
@@ -132,6 +140,7 @@ impl DisplayDriver {
             }
             y += 1;
         }
+        complete_framebuffer_writes();
     }
 
     fn put_pixel(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8) {
@@ -157,6 +166,17 @@ impl DisplayDriver {
             let p = (self.info.address as *mut u8).add(offset) as *mut u32;
             p.write_volatile(pixel);
         }
+    }
+}
+
+fn complete_framebuffer_writes() {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("sfence", options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("dsb oshst", options(nostack, preserves_flags));
     }
 }
 

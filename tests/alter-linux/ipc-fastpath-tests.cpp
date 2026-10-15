@@ -208,7 +208,7 @@ struct conversation {
   }
   void call() { CHECK(invoke(client, 3)); }
   void reply(a9n::word info = 1) { CHECK(invoke(server, 5, info)); }
-  void check_replied() {
+  void check_replied(a9n::sword expected_quantum = QUANTUM_MAX) {
     CHECK(client.status == process_status::READY);
     CHECK(client.source_reply_state ==
           process::source_reply_state_object::NONE);
@@ -216,7 +216,7 @@ struct conversation {
     CHECK(server.destination_reply_state ==
           process::destination_reply_state_object::NONE);
     CHECK(server.destination_reply_target == nullptr);
-    CHECK(client.quantum == QUANTUM_MAX);
+    CHECK(client.quantum == expected_quantum);
   }
 };
 
@@ -240,7 +240,7 @@ static void ipc_tests() {
       c.server.registers[4] = 0xfeed;
       c.server.registers[9] = 0xbeef;
       c.reply(i & 1 ? 1 | (6 << 1) : 1);
-      c.check_replied();
+      c.check_replied(2); // Fast Reply-Receive preserves the caller's budget.
       CHECK(cpu_local_variables[0].current_process == &c.client);
       CHECK(!c.client.is_in_ready_queue);
       CHECK(c.server.status == process_status::BLOCKED_RECEIVE);
@@ -267,13 +267,13 @@ static void ipc_tests() {
     CHECK(mark_scheduled(c.server, other));
     other.quantum = 7;
     c.reply();
-    c.check_replied();
+    c.check_replied(2);
     // Only a strictly higher-priority queued process prevents direct return.
     CHECK(cpu_local_variables[0].current_process ==
           (priority > 3 ? &other : &c.client));
     CHECK(c.client.is_in_ready_queue == (priority > 3));
     CHECK(other.is_in_ready_queue == (priority <= 3));
-    CHECK(other.quantum == 7); // Replenish the client, not a fallback selection.
+    CHECK(other.quantum == 7); // The fallback selection also keeps its budget.
     CHECK(cpu_local_variables[0].process_manager_core.yield());
     CHECK(cpu_local_variables[0].current_process ==
           (priority < 3 ? &c.client : &other));

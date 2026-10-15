@@ -200,3 +200,24 @@ pub fn hpet_mmio_base(service_port: CapabilityDescriptor) -> Result<Word, Reques
     }
     Ok(base)
 }
+
+/// Only the boot-selected USB driver may request this counter view. It must
+/// never write HPET registers: hpet-server remains the sole timer owner.
+pub fn hpet_counter_base(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
+    let (status, base, _) = call_port(
+        service_port,
+        DEVICE_MANAGER_REQUEST_HPET_COUNTER_BASE,
+        0,
+        0,
+        0,
+        0,
+        1,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if base == 0 {
+        return Err(RequestError::Unsupported);
+    }
+    Ok(base)
+}

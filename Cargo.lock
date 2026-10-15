@@ -10,9 +10,9 @@ checksum = "8f57fbfb986c183548f5bc794f5fbf8f2a7347315b3479cfa19d20de035f8f9a"
 
 [[package]]
 name = "a9n_abi"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f652e93ae03b67bf9a6964b26727a40b48d6615ae9d24fbe99633f5d3decaa1"
+checksum = "709c9ba51a0fadb7ef2ebd08e9938f7a43729d4352bd33dd61a6b25bcce07fd3"
 dependencies = [
  "a9n-types",
  "bitflags 2.13.2",

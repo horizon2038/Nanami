@@ -439,7 +439,14 @@ impl Alpha {
             let peer_vm = processes
                 .vm_space_mut(peer_pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            if let Err(e) = memory.map_frame(peer_as, peer_frame, peer_page_va, peer_vm) {
+            if let Err(e) = memory.map_frame_with_attribute(
+                peer_as,
+                peer_frame,
+                peer_page_va,
+                nun::capability_call::address_space::Attribute::ALL
+                    | nun::capability_call::address_space::Attribute::BUFFERED,
+                peer_vm,
+            ) {
                 info!(
                     "[fb-shm.err] map frame j={} va={:#018x} frame={:#018x} as={:#018x} err={:?}",
                     j, peer_page_va, peer_frame, peer_as, e

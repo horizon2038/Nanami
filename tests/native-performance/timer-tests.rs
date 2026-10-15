@@ -1,10 +1,15 @@
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 use std::cell::RefCell;
 
+#[macro_export]
+macro_rules! println {
+    ($($arg:tt)*) => { $crate::capture_log(format_args!($($arg)*)); };
+}
+
 pub type Word = usize;
-pub const PROCESS_SLOT_NOTIFICATION: Word = 18;
+pub const PROCESS_SLOT_NOTIFICATION: Word = nanami_uapi::os::PROCESS_SLOT_NOTIFICATION;
 const SLOT_CLIENT_NOTIFICATION_BASE: Word = 32;
 const MAX_CLIENT_NOTIFICATIONS: usize = 128;
 const MAX_PENDING_ASYNC_TIMERS: usize = 512;
@@ -16,10 +21,14 @@ pub enum RequestError {
 }
 
 pub mod timer {
-    pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: usize = 0x100;
+    pub use nanami_uapi::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT;
 }
 #[derive(Default)]
 struct Fake {
+    trace: Vec<String>,
+    copy_requests: Vec<(Word, Word, Word, Word)>,
+    copy_fails: bool,
+    arm_fails: bool,
     notified: Vec<Word>,
     failed_descriptor: Option<Word>,
     copies: usize,
@@ -28,6 +37,10 @@ struct Fake {
     arms: Vec<Option<u64>>,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
+fn capture_log(args: std::fmt::Arguments<'_>) {
+    let line = args.to_string();
+    FAKE.with(|state| state.borrow_mut().trace.push(line));
+}
 pub mod ipc {
     use super::*;
     pub fn process_slot_descriptor(slot: Word) -> Word {
@@ -49,13 +62,21 @@ pub mod ipc {
     }
 }
 pub fn request_notification_port_copy(
-    _pid: Word,
-    _source: Word,
-    _dest: Word,
-    _id: Word,
+    pid: Word,
+    source: Word,
+    dest: Word,
+    id: Word,
 ) -> Result<(), RequestError> {
-    FAKE.with(|state| state.borrow_mut().copies += 1);
-    Ok(())
+    FAKE.with(|state| {
+        let mut f = state.borrow_mut();
+        f.copies += 1;
+        f.copy_requests.push((pid, source, dest, id));
+        if f.copy_fails {
+            Err(RequestError::Transport)
+        } else {
+            Ok(())
+        }
+    })
 }
 mod arch {
     use super::*;
@@ -73,12 +94,21 @@ mod arch {
             self.ticks
         }
         pub fn arm(&mut self, deadline: Option<u64>) -> Result<(), RequestError> {
-            FAKE.with(|state| state.borrow_mut().arms.push(deadline));
-            Ok(())
+            FAKE.with(|state| {
+                let mut f = state.borrow_mut();
+                f.arms.push(deadline);
+                if f.arm_fails {
+                    Err(RequestError::Transport)
+                } else {
+                    Ok(())
+                }
+            })
         }
     }
 }
 fn log_request_error(_message: &str, _error: RequestError) {}
+#[path = "../../nanami/servers/core-services/timer-server/src/init_trace.rs"]
+mod init_trace;
 #[path = "../../nanami/servers/core-services/timer-server/src/state.rs"]
 mod state;
 use state::*;
@@ -94,6 +124,187 @@ use timers::*;
 fn reset() -> TimerState {
     FAKE.with(|state| *state.borrow_mut() = Fake::default());
     TimerState::new()
+}
+
+#[test]
+fn private_delay_and_default_notification_have_distinct_cached_capabilities() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 100 };
+    for (pid, slot) in [(77, 26), (77, 0), (77, PROCESS_SLOT_NOTIFICATION), (91, 21)] {
+        schedule_timer(&mut state, &mut timer, 19, pid, slot, 1, 0).unwrap();
+    }
+    FAKE.with(|fake| {
+        let f = fake.borrow();
+        let badge = timer::TIMER_NOTIFICATION_IDENTIFIER_BIT;
+        assert_eq!(
+            f.copy_requests,
+            [
+                (77, 26, 32, badge),
+                (77, 21, 33, badge),
+                (91, 21, 34, badge)
+            ]
+        );
+        assert_eq!((f.copies, f.starts, f.clock_reads), (3, 1, 4));
+        assert!(f.trace.is_empty());
+    });
+}
+
+fn trace_stages() -> Vec<String> {
+    FAKE.with(|fake| {
+        fake.borrow()
+            .trace
+            .iter()
+            .map(|line| {
+                line.split("stage=")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect()
+    })
+}
+
+fn expected_trace(stages: &[&str]) -> Vec<String> {
+    if option_env!("NANAMI_USB_INIT_TRACE") == Some("1") {
+        stages.iter().map(|stage| (*stage).to_owned()).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+#[test]
+fn first_interval_trace_covers_copy_clock_queue_arm_and_reply_without_extra_work() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 100 };
+    schedule_timer(&mut state, &mut timer, 19, 77, 21, 10, 10).unwrap();
+    complete_event(&mut state, &mut timer).unwrap();
+    state.init_trace.reply_enter(0);
+    assert_eq!(
+        trace_stages(),
+        expected_trace(&[
+            "interval.receive",
+            "notification-ensure.begin",
+            "notification-copy.begin",
+            "notification-copy.end",
+            "notification-ensure.end",
+            "clock.begin",
+            "clock.end",
+            "queue.end",
+            "event-complete.begin",
+            "hpet-arm.begin",
+            "hpet-arm.end",
+            "reply-enter",
+        ])
+    );
+    FAKE.with(|fake| {
+        let f = fake.borrow();
+        assert_eq!((f.copies, f.starts, f.clock_reads), (1, 1, 1));
+        assert_eq!(f.arms, [Some(110)]);
+        assert!(f.notified.is_empty());
+    });
+    let log_count = trace_stages().len();
+    for now in [110, 120, 1000] {
+        timer.ticks = now;
+        complete_event(&mut state, &mut timer).unwrap();
+    }
+    // Do not trace a later matching registration or its IRQ/expiry work.
+    schedule_timer(&mut state, &mut timer, 19, 91, 21, 10, 10).unwrap();
+    complete_event(&mut state, &mut timer).unwrap();
+    state.init_trace.reply_enter(0);
+    assert_eq!(trace_stages().len(), log_count);
+}
+
+#[test]
+fn notification_copy_failure_does_not_cache_a_capability_or_schedule_a_timer() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 100 };
+    FAKE.with(|fake| fake.borrow_mut().copy_fails = true);
+    assert_eq!(
+        schedule_timer(&mut state, &mut timer, 19, 77, 21, 10, 10),
+        Err(RequestError::Transport)
+    );
+    state.init_trace.reply_enter(1);
+    assert_eq!(
+        trace_stages(),
+        expected_trace(&[
+            "interval.receive",
+            "notification-ensure.begin",
+            "notification-copy.begin",
+            "notification-copy.end",
+            "notification-ensure.end",
+            "reply-enter",
+        ])
+    );
+    assert!(state.client_notifications.iter().all(|entry| !entry.used));
+    assert_eq!(state.pending_timers.next(), None);
+    FAKE.with(|fake| {
+        let f = fake.borrow();
+        assert_eq!((f.starts, f.clock_reads), (0, 0));
+        assert!(f.arms.is_empty());
+        if !f.trace.is_empty() {
+            assert!(f
+                .trace
+                .iter()
+                .any(|line| line.contains("notification-copy.end ok=false")));
+        }
+    });
+    FAKE.with(|fake| fake.borrow_mut().copy_fails = false);
+    schedule_timer(&mut state, &mut timer, 19, 77, 21, 10, 10).unwrap();
+    FAKE.with(|fake| {
+        let f = fake.borrow();
+        assert_eq!(f.copy_requests.len(), 2);
+        assert_eq!(f.copy_requests[0], f.copy_requests[1]);
+    });
+}
+
+#[test]
+fn cached_notification_trace_does_not_issue_another_copy() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 100 };
+    schedule_timer(&mut state, &mut timer, 19, 77, 21, 2, 0).unwrap();
+    schedule_timer(&mut state, &mut timer, 19, 77, 21, 10, 10).unwrap();
+    complete_event(&mut state, &mut timer).unwrap();
+    state.init_trace.reply_enter(0);
+    assert_eq!(
+        trace_stages(),
+        expected_trace(&[
+            "interval.receive",
+            "notification-ensure.begin",
+            "notification.cache-hit",
+            "notification-ensure.end",
+            "clock.begin",
+            "clock.end",
+            "queue.end",
+            "event-complete.begin",
+            "hpet-arm.begin",
+            "hpet-arm.end",
+            "reply-enter",
+        ])
+    );
+    FAKE.with(|fake| assert_eq!(fake.borrow().copies, 1));
+}
+
+#[test]
+fn arm_failure_retains_the_original_error_and_does_not_claim_a_reply() {
+    let mut state = reset();
+    let mut timer = arch::PreparedTimer { ticks: 100 };
+    schedule_timer(&mut state, &mut timer, 19, 77, 21, 10, 10).unwrap();
+    FAKE.with(|fake| fake.borrow_mut().arm_fails = true);
+    assert_eq!(
+        complete_event(&mut state, &mut timer),
+        Err(RequestError::Transport)
+    );
+    FAKE.with(|fake| {
+        let f = fake.borrow();
+        assert_eq!(f.arms, [Some(110)]);
+        assert!(f.trace.iter().all(|line| !line.contains("reply-enter")));
+        if !f.trace.is_empty() {
+            assert!(f.trace.last().unwrap().contains("hpet-arm.end ok=false"));
+        }
+    });
 }
 
 #[test]

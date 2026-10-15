@@ -84,8 +84,16 @@ fn read_blocks_uncached(
                 attempt + 1
             );
         }
+        let before = nanami_runtime::diagnostics::stamp();
         let result =
             nanami_client::block::block_device_read(runtime.block_port, block, count, offset);
+        nanami_runtime::diagnostics::rpc(
+            nanami_runtime::diagnostics::RpcStage::VfsUsb,
+            before,
+            nanami_runtime::diagnostics::stamp(),
+            result.as_ref().copied().unwrap_or(0),
+            result.is_err(),
+        );
         if option_env!("NANAMI_BOOT_IO_TRACE") == Some("1") {
             nanami_runtime::println!(
                 "[vfs.trace] block-read end block={} result={:?}",
@@ -124,6 +132,9 @@ fn read_blocks_uncached(
 }
 
 pub(super) fn write_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
+    // Directory contents, inode tables and allocation metadata all use this
+    // path. Invalidate before a write attempt, including partial/error paths.
+    directory::invalidate(runtime);
     cache_write(runtime, block, 1, block_cache::BlockKind::Metadata)
 }
 

@@ -140,6 +140,7 @@ pub(crate) fn handle_read_dir(
         request.arg1 as usize,
         request.arg2 as usize,
         request.arg3 as usize,
+        handle,
     ) {
         Ok((entries, next_index)) => (
             nanami_runtime::OS_RESPONSE_OK,

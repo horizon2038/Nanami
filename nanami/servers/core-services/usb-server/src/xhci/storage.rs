@@ -157,6 +157,7 @@ impl Controller {
                 storage.scratch,
                 cbw.len(),
                 input,
+                "cbw",
             )? != cbw.len()
             {
                 return Err(RequestError::Protocol);
@@ -173,15 +174,15 @@ impl Controller {
                     };
                 }
                 let endpoint = &mut storage.endpoints[receive as usize];
-                transferred = match self.bulk(disk.slot, endpoint, storage.data, data.len(), input)
-                {
-                    Ok(bytes) => bytes,
-                    Err(RequestError::Unsupported) => {
-                        self.clear_halt(disk.slot, device, endpoint, input)?;
-                        0 // Fetch CSW; the failed SCSI command can then request sense.
-                    }
-                    Err(error) => return Err(error),
-                };
+                transferred =
+                    match self.bulk(disk.slot, endpoint, storage.data, data.len(), input, "data") {
+                        Ok(bytes) => bytes,
+                        Err(RequestError::Unsupported) => {
+                            self.clear_halt(disk.slot, device, endpoint, input)?;
+                            0 // Fetch CSW; the failed SCSI command can then request sense.
+                        }
+                        Err(error) => return Err(error),
+                    };
             }
             let csw_len = match self.bulk(
                 disk.slot,
@@ -189,6 +190,7 @@ impl Controller {
                 storage.scratch,
                 13,
                 input,
+                "csw",
             ) {
                 Err(RequestError::Unsupported) => {
                     self.clear_halt(disk.slot, device, &mut storage.endpoints[1], input)?;
@@ -198,6 +200,7 @@ impl Controller {
                         storage.scratch,
                         13,
                         input,
+                        "csw-retry",
                     )?
                 }
                 other => other?,

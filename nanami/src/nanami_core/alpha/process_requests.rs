@@ -434,10 +434,11 @@ impl Alpha {
             spawn_try!(arch::process_control_block::resume(child_pcb));
         }
         crate::force_info!(
-            "[smp] process pid={:>3} image={} affinity={}",
+            "[smp] process pid={:>3} image={} affinity={} priority={}",
             pid,
             image_name,
-            affinity
+            affinity,
+            priority
         );
         info!(
             "[proc] child {} image={} pid={:>3} priority={:>2} core={:>2} root={:#018x} entry={:#018x}",

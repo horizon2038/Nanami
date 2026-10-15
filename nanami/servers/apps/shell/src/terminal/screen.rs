@@ -13,6 +13,29 @@ pub struct Cell {
     pub underline: bool,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn full_scroll_recycles_only_the_new_row_without_moving_other_cells() {
+        let mut screen = Screen::new(89, 33);
+        for row in 0..screen.rows {
+            screen.row_mut(row).fill(Cell {
+                byte: row as u8,
+                ..Cell::BLANK
+            });
+        }
+        let backing = screen.cells.clone();
+        let pointer = screen.cells.as_ptr();
+        screen.scroll_up(0, 32, 1, Cell::BLANK);
+        assert_eq!(screen.cells.as_ptr(), pointer);
+        assert_eq!(&screen.cells[89..], &backing[89..]);
+        assert!(screen.row(32).iter().all(|cell| *cell == Cell::BLANK));
+        screen.scroll_down(0, 32, 1, Cell::BLANK);
+        assert_eq!(&screen.cells[89..], &backing[89..]);
+    }
+}
+
 impl Cell {
     pub const BLANK: Self = Self {
         byte: b' ',
@@ -26,6 +49,8 @@ pub struct Screen {
     pub history: VecDeque<Vec<Cell>>,
     pub history_enabled: bool,
     pub cells: Vec<Cell>,
+    first_row: usize,
+    damage: Vec<(usize, usize)>,
     pub cols: usize,
     pub rows: usize,
     pub x: usize,
@@ -42,6 +67,8 @@ impl Screen {
             history: VecDeque::new(),
             history_enabled: true,
             cells: vec![Cell::BLANK; cols * rows],
+            first_row: 0,
+            damage: vec![(0, cols); rows],
             cols,
             rows,
             x: 0,
@@ -64,9 +91,7 @@ impl Screen {
         next.history_enabled = self.history_enabled;
         for y in 0..rows.min(self.rows - start) {
             let width = cols.min(self.cols);
-            next.cells[y * cols..y * cols + width].copy_from_slice(
-                &self.cells[(y + start) * self.cols..(y + start) * self.cols + width],
-            );
+            next.row_mut(y)[..width].copy_from_slice(&self.row(y + start)[..width]);
         }
         next.x = self.x.min(cols - 1);
         next.y = self.y.saturating_sub(start).min(rows - 1);
@@ -79,20 +104,38 @@ impl Screen {
 
     pub fn scroll_up(&mut self, top: usize, bottom: usize, count: usize, blank: Cell) {
         let count = count.min(bottom + 1 - top);
-        self.cells.copy_within(
-            (top + count) * self.cols..(bottom + 1) * self.cols,
-            top * self.cols,
-        );
-        self.cells[(bottom + 1 - count) * self.cols..(bottom + 1) * self.cols].fill(blank);
+        if count == 0 {
+            return;
+        }
+        if top == 0 && bottom == self.rows - 1 {
+            self.first_row = (self.first_row + count) % self.rows;
+        } else {
+            for row in top..bottom + 1 - count {
+                self.copy_row(row + count, row);
+            }
+        }
+        for row in bottom + 1 - count..=bottom {
+            self.row_mut(row).fill(blank);
+        }
+        self.mark_rows(top, bottom);
     }
 
     pub fn scroll_down(&mut self, top: usize, bottom: usize, count: usize, blank: Cell) {
         let count = count.min(bottom + 1 - top);
-        self.cells.copy_within(
-            top * self.cols..(bottom + 1 - count) * self.cols,
-            (top + count) * self.cols,
-        );
-        self.cells[top * self.cols..(top + count) * self.cols].fill(blank);
+        if count == 0 {
+            return;
+        }
+        if top == 0 && bottom == self.rows - 1 {
+            self.first_row = (self.first_row + self.rows - count) % self.rows;
+        } else {
+            for row in (top + count..=bottom).rev() {
+                self.copy_row(row - count, row);
+            }
+        }
+        for row in top..top + count {
+            self.row_mut(row).fill(blank);
+        }
+        self.mark_rows(top, bottom);
     }
 
     pub fn index(&mut self, blank: Cell) {
@@ -117,7 +160,7 @@ impl Screen {
             Vec::new()
         };
         cells.clear();
-        cells.extend_from_slice(&self.cells[row * self.cols..(row + 1) * self.cols]);
+        cells.extend_from_slice(self.row(row));
         self.history.push_back(cells);
     }
 
@@ -132,18 +175,20 @@ impl Screen {
 
     pub fn insert_cells(&mut self, n: usize, blank: Cell) {
         let n = n.min(self.cols - self.x);
-        let base = self.y * self.cols;
-        self.cells
-            .copy_within(base + self.x..base + self.cols - n, base + self.x + n);
-        self.cells[base + self.x..base + self.x + n].fill(blank);
+        let (x, cols) = (self.x, self.cols);
+        let row = self.row_mut(self.y);
+        row.copy_within(x..cols - n, x + n);
+        row[x..x + n].fill(blank);
+        self.mark(self.y, x, cols);
     }
 
     pub fn delete_cells(&mut self, n: usize, blank: Cell) {
         let n = n.min(self.cols - self.x);
-        let base = self.y * self.cols;
-        self.cells
-            .copy_within(base + self.x + n..base + self.cols, base + self.x);
-        self.cells[base + self.cols - n..base + self.cols].fill(blank);
+        let (x, cols) = (self.x, self.cols);
+        let row = self.row_mut(self.y);
+        row.copy_within(x + n..cols, x);
+        row[cols - n..].fill(blank);
+        self.mark(self.y, x, cols);
     }
 
     pub fn put(&mut self, cell: Cell, blank: Cell, wrap: bool, insert: bool) {
@@ -154,11 +199,85 @@ impl Screen {
         if insert {
             self.insert_cells(1, blank);
         }
-        self.cells[self.y * self.cols + self.x] = cell;
+        let x = self.x;
+        self.row_mut(self.y)[x] = cell;
+        self.mark(self.y, x, x + 1);
         if self.x + 1 == self.cols {
             self.wrap_pending = wrap;
         } else {
             self.x += 1;
+        }
+    }
+
+    fn row_offset(&self, row: usize) -> usize {
+        assert!(row < self.rows);
+        ((self.first_row + row) % self.rows) * self.cols
+    }
+
+    pub fn row(&self, row: usize) -> &[Cell] {
+        let base = self.row_offset(row);
+        &self.cells[base..base + self.cols]
+    }
+
+    fn row_mut(&mut self, row: usize) -> &mut [Cell] {
+        let base = self.row_offset(row);
+        &mut self.cells[base..base + self.cols]
+    }
+
+    fn copy_row(&mut self, source: usize, destination: usize) {
+        let source = self.row_offset(source);
+        let destination = self.row_offset(destination);
+        self.cells
+            .copy_within(source..source + self.cols, destination);
+    }
+
+    pub fn mark(&mut self, row: usize, start: usize, end: usize) {
+        if start >= end || row >= self.rows {
+            return;
+        }
+        let damage = &mut self.damage[row];
+        if damage.0 == damage.1 {
+            *damage = (start, end);
+        } else {
+            damage.0 = damage.0.min(start);
+            damage.1 = damage.1.max(end);
+        }
+    }
+
+    pub fn mark_rows(&mut self, top: usize, bottom: usize) {
+        self.damage[top..=bottom].fill((0, self.cols));
+    }
+
+    pub fn take_damage(&mut self, row: usize) -> Option<(usize, usize)> {
+        let span = core::mem::replace(&mut self.damage[row], (0, 0));
+        (span.0 != span.1).then_some(span)
+    }
+
+    pub fn erase_line(&mut self, row: usize, start: usize, end: usize, blank: Cell) {
+        self.row_mut(row)[start..end].fill(blank);
+        self.mark(row, start, end);
+    }
+
+    pub fn erase_display(&mut self, mode: usize, blank: Cell) {
+        match mode {
+            0 => {
+                self.erase_line(self.y, self.x, self.cols, blank);
+                for row in self.y + 1..self.rows {
+                    self.erase_line(row, 0, self.cols, blank);
+                }
+            }
+            1 => {
+                for row in 0..self.y {
+                    self.erase_line(row, 0, self.cols, blank);
+                }
+                self.erase_line(self.y, 0, self.x + 1, blank);
+            }
+            2 => {
+                self.cells.fill(blank);
+                self.mark_rows(0, self.rows - 1);
+            }
+            3 => self.history.clear(),
+            _ => {}
         }
     }
 }

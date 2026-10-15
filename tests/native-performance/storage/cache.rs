@@ -1,6 +1,17 @@
 use super::*;
 
 #[test]
+fn metadata_write_attempts_invalidate_directory_positions_but_data_writes_do_not() {
+    let mut runtime = runtime(vec![]);
+    write_block(&mut runtime, 32).unwrap();
+    assert_eq!(runtime.directory_invalidations, 1);
+    write_blocks(&mut runtime, 40, 2).unwrap();
+    assert_eq!(runtime.directory_invalidations, 1);
+    assert!(write_block(&mut runtime, usize::MAX).is_err());
+    assert_eq!(runtime.directory_invalidations, 2);
+}
+
+#[test]
 fn each_block_in_a_batch_gets_its_own_cache_contents() {
     let mut runtime = runtime(vec![]);
     for i in 0..4 {

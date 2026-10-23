@@ -20,6 +20,13 @@ The module split and POSIX delegated-write follow-up is documented in
 The lookup, timer, storage and input follow-up is documented in
 [Core and server hot-path review](core-servers.md).
 
+Negoto's rootfs-context/path and startup-argument regressions are in `negoto`;
+OCI configuration/lifecycle tests are in the root workspace's `negoto-oci`
+crate. `linux-readiness` covers blocking pipe reads/writes and EOF wakeups;
+`linux-pipe` checks circular I/O, atomic writes and copy-failure rollback.
+The [Negoto application guide](../../nanami/docs/application.md#negoto-oci-bundles)
+documents the unmodified BusyBox fixture and real QEMU lifecycle tests.
+
 The HTTP ARP, TCP receive-flow-control, and NIC backlog regression tests are documented in
 [HTTP / network regressions](../network/README.md).
 

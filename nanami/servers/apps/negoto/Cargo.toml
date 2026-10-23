@@ -1,0 +1,18 @@
+[package]
+name = "negoto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+negoto-oci = { path = "../../../../crates/negoto-oci" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

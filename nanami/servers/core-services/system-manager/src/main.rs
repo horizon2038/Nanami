@@ -6,6 +6,8 @@ use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
 use nanami_runtime::{self, RequestError, Word};
 
 mod image_loader;
+mod startup_manifest;
+use startup_manifest::{parse_system_list_line, SystemEntry};
 
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_VFS_SERVICE: Word = 23;
@@ -46,13 +48,6 @@ const FALLBACK_SESSION_LIST: &str = include_str!("../../../session-list");
 const FALLBACK_SYSTEM_LIST: &str = include_str!("../../../system-list.aarch64");
 #[cfg(target_arch = "aarch64")]
 const FALLBACK_SESSION_LIST: &str = include_str!("../../../session-list.aarch64");
-
-#[derive(Clone, Copy)]
-struct SystemEntry<'a> {
-    name: &'a str,
-    priority: Word,
-    path: &'a str,
-}
 
 struct VfsClient {
     port: Word,
@@ -351,7 +346,28 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
         entry.name,
         entry.path
     );
-    spawn_vfs_path::<true>(vfs, path.len(), entry.priority)
+    if entry.arguments.is_empty() {
+        return spawn_vfs_path::<true>(vfs, path.len(), entry.priority);
+    }
+    // Image loading overwrites VFS SHM, so keep argv in private stack storage.
+    let mut strings = [0; MANIFEST_MAX_BYTES];
+    let mut cursor = 0usize;
+    let mut launch = LaunchInfo::EMPTY;
+    launch.priority = entry.priority;
+    for argument in core::iter::once(entry.path).chain(entry.arguments.split_whitespace()) {
+        let end = cursor
+            .checked_add(argument.len())
+            .filter(|end| *end < strings.len())
+            .ok_or(RequestError::InvalidArgument)?;
+        if launch.argc == EXEC_LAUNCH_MAX_ARGS {
+            return Err(RequestError::InvalidArgument);
+        }
+        strings[cursor..end].copy_from_slice(argument.as_bytes());
+        launch.argv[launch.argc] = (cursor, argument.len());
+        launch.argc += 1;
+        cursor = end + 1;
+    }
+    spawn_vfs_path_with_launch(vfs, path.len(), strings.as_ptr() as Word, launch)
 }
 
 // Boot diagnostics must precede blocking calls; logging only errors cannot
@@ -929,19 +945,6 @@ fn find_exec_child(runtime: &ExecRuntime, owner_pid: Word, child_pid: Word) -> O
         i += 1;
     }
     None
-}
-
-fn parse_system_list_line(line: &str) -> Option<SystemEntry<'_>> {
-    let line = line.split('#').next().unwrap_or("");
-    let mut tokens = line.split_whitespace();
-    let name = tokens.next()?;
-    let priority = parse_decimal_word(tokens.next()?)?;
-    let path = tokens.next()?;
-    Some(SystemEntry {
-        name,
-        priority,
-        path,
-    })
 }
 
 fn sort_entries_by_priority(entries: &mut [Option<SystemEntry<'_>>; MAX_ENTRIES], count: usize) {

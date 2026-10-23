@@ -1,6 +1,6 @@
 use super::{
     bounded_len, read_target_memory, write_target_memory, write_u32, LinuxFile, LinuxFileKind,
-    Runtime, Word, EBADF, EFAULT, EINVAL, EMFILE, EPIPE, LINUX_FD_CLOEXEC, LINUX_O_CLOEXEC,
+    Runtime, Word, EAGAIN, EBADF, EFAULT, EINVAL, EMFILE, EPIPE, LINUX_FD_CLOEXEC, LINUX_O_CLOEXEC,
     LINUX_PIPE_BYTES,
 };
 
@@ -21,18 +21,26 @@ pub(super) fn sys_pipe_read(
     let shm = runtime.posix_shm;
     let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
     if pipe.len == 0 {
-        return Ok(0);
+        return if pipe.writers == 0 {
+            Ok(0)
+        } else {
+            Err(EAGAIN)
+        };
     }
     let mut done = 0usize;
-    while done < max && pipe.len != 0 {
+    let mut cursor = pipe.read;
+    let count = max.min(pipe.len);
+    while done < count {
         unsafe {
-            ::core::ptr::write((shm + done as Word) as *mut u8, pipe.buffer[pipe.read]);
+            ::core::ptr::write((shm + done as Word) as *mut u8, pipe.read_byte(cursor));
         }
-        pipe.read = (pipe.read + 1) % LINUX_PIPE_BYTES;
-        pipe.len -= 1;
+        cursor = (cursor + 1) % LINUX_PIPE_BYTES;
         done += 1;
     }
     write_target_memory(runtime, pid, user_buffer, done as Word)?;
+    let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
+    pipe.read = cursor;
+    pipe.len -= done;
     runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
     Ok(done as Word)
 }
@@ -51,16 +59,26 @@ pub(super) fn sys_pipe_write(
     if max == 0 {
         return Ok(0);
     }
-    read_target_memory(runtime, pid, user_buffer, max)?;
+    let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
+    if pipe.readers == 0 {
+        return Err(EPIPE);
+    }
+    let available = LINUX_PIPE_BYTES - pipe.len;
+    // Writes up to PIPE_BUF are atomic; larger writes may return a short count.
+    if available == 0 || (max as usize <= LINUX_PIPE_BYTES && available < max as usize) {
+        return Err(EAGAIN);
+    }
+    let accepted = (max as usize).min(available);
+    read_target_memory(runtime, pid, user_buffer, accepted)?;
     let shm = runtime.posix_shm;
     let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
     if pipe.readers == 0 {
         return Err(EPIPE);
     }
     let mut done = 0usize;
-    while done < max as usize && pipe.len < LINUX_PIPE_BYTES {
+    while done < accepted {
         let byte = unsafe { ::core::ptr::read((shm + done as Word) as *const u8) };
-        pipe.buffer[pipe.write] = byte;
+        pipe.write_byte(pipe.write, byte);
         pipe.write = (pipe.write + 1) % LINUX_PIPE_BYTES;
         pipe.len += 1;
         done += 1;
@@ -108,7 +126,12 @@ pub(super) fn sys_pipe(
         write_u32(runtime.posix_shm, read_fd as u32);
         write_u32(runtime.posix_shm + 4, write_fd as u32);
     }
-    write_target_memory(runtime, pid, pipefd_ptr, 8)?;
+    if let Err(error) = write_target_memory(runtime, pid, pipefd_ptr, 8) {
+        runtime.clear_linux_file(pid, read_fd);
+        runtime.clear_linux_file(pid, write_fd);
+        release_pipe_id(runtime, pipe_id);
+        return Err(error);
+    }
     Ok(0)
 }
 
@@ -132,8 +155,5 @@ pub(super) fn release_pipe_file(runtime: &mut Runtime, file: LinuxFile) {
 }
 
 pub(super) fn release_pipe_id(runtime: &mut Runtime, pipe_id: Word) {
-    let index = pipe_id as usize;
-    if index < runtime.pipes.len() {
-        runtime.pipes[index] = crate::state::LinuxPipe::EMPTY;
-    }
+    runtime.release_pipe(pipe_id);
 }

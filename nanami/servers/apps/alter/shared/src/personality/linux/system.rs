@@ -140,10 +140,25 @@ pub(super) fn sys_getpgid(
 
 pub(super) fn sys_kill(
     runtime: &mut Runtime,
-    _current_pid: Word,
+    current_pid: Word,
     target_pid: Word,
     signal: Word,
 ) -> Result<Word, i32> {
+    let leader = runtime
+        .managed_process(current_pid)
+        .ok_or(ESRCH)?
+        .rootfs
+        .leader;
+    if leader != 0
+        || runtime
+            .managed_process(target_pid)
+            .is_some_and(|p| p.rootfs.leader != 0)
+    {
+        let target = runtime.managed_process(target_pid).ok_or(ESRCH)?;
+        if target.rootfs.leader != leader {
+            return Err(ESRCH);
+        }
+    }
     if target_pid == 0 || (target_pid as isize) < 0 {
         return Ok(0);
     }

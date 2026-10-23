@@ -270,7 +270,7 @@ starts no services.
 ### System Services
 
 System services live in the ext2 root filesystem under `/bin`. The
-`system-manager` reads `/nanami/system-list` and starts terminal, POSIX, Alter,
+`system-manager` reads `/nanami/system-list` and starts terminal, POSIX, Alter, Negoto,
 input, display, desktop, and network services.
 
 ### Session Applications
@@ -288,6 +288,40 @@ returns the updated context in the fault reply.
 
 This keeps foreign ABI policy in user space while avoiding a separate register
 read and write kernel call for every emulated syscall.
+
+### Negoto Execution Contexts
+
+`negoto-service` owns OCI configuration validation, container IDs, annotations
+and lifecycle state. Alter/Linux exposes a generic prepared-execution context,
+not OCI-specific policy: backing root, cwd, executable, argv/env and readonly
+mode. Prepare loads a suspended process; start resumes it. Public protocols
+are in `nanami-uapi::{alter,negoto}`. Alpha and A9N are unchanged.
+
+The control path is CLI -> Negoto -> Alter -> Alpha. Guest syscalls continue
+on the existing fault -> Alter -> native-service path, without a Negoto hop.
+Unsupported environment requests fail before process creation. See
+[Negoto OCI Bundles](application.md#negoto-oci-bundles) for the restricted
+profile, limits and QEMU commands.
+
+Execution-context control is scoped to the native owner PID. Children inherit
+root and readonly policy; exec and PT_INTERP use that root. Normalization
+precedes host-prefix insertion. Cross-context signals and host keyboard/mouse/
+raw-socket access are denied. These checks do not implement Linux namespaces
+or make the partial Linux ABI a security sandbox.
+
+Each Alter control client has its own shared-memory view; fork/exec use private
+scratch. Prepare snapshots client bytes before parsing offsets. Negoto also
+snapshots management JSON and explicitly detaches client views. Context
+records survive ordinary Alter zombie cleanup until Negoto deletes them.
+Deletion closes resources before native reaping and retains failed records
+for retry. CLI exit does not destroy a container.
+
+Empty blocking pipe reads park on existing readiness waiters while a writer
+remains; EOF requires the last writer to close. Full writes use the same
+wake/retry path. Exit closes FDs before wait/reap, so zombie pipe writers cannot
+deadlock shell command substitution. Pipe data uses lazily allocated 4-KiB
+buffers, released with the last endpoint, instead of enlarging Alter's
+stack-resident Runtime by 64 KiB.
 
 ## Boot Policy
 
@@ -442,6 +476,7 @@ Current service names include:
 | `posix-service` | `posix-server` | POSIX-oriented process and FD facade |
 | `alter-linux` | Alter/Linux | Linux ABI personality |
 | `alter-freebsd` | Alter/FreeBSD | FreeBSD ABI personality |
+| `negoto-service` | Negoto | OCI bundle/lifecycle management over Alter/Linux |
 | `input-service` | `input-server` | Input event distribution |
 | `display_service` | `fb-server` | Boot framebuffer sharing |
 | `honoka-service` | Honoka | Compositor and window service |

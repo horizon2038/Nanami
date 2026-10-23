@@ -2,3 +2,4 @@
 terminal-service 21 /bin/terminal-service
 posix-service 21 /bin/posix-server
 alter-linux 21 /bin/alter-linux
+negoto-service 20 /bin/negoto serve

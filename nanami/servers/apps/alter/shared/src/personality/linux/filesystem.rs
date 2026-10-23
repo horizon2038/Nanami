@@ -1,13 +1,11 @@
 use super::{
     bounded_len, current_virtual_node, is_at_fdcwd, is_linux_virtual_path,
     map_create_request_error, map_link_request_error, map_path_request_error, map_request_error,
-    map_unit, move_shm_bytes,
-    path_equals, path_is_absolute, posix, read_c_string, reject_virtual_fs_mutation,
-    resolve_current_shm_path, resolve_path, translate_guest_path_at,
-    translate_guest_path_for_vfs, write_target_memory,
-    Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG, ENOENT, ENOSYS,
-    ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW, LINUX_CWD_MAX,
-    LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
+    map_unit, move_shm_bytes, path_equals, path_is_absolute, posix, read_c_string,
+    reject_virtual_fs_mutation, resolve_current_shm_path, resolve_path, translate_guest_path_at,
+    translate_guest_path_for_vfs, write_target_memory, Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG,
+    ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW,
+    LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
 };
 
 pub(super) fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
@@ -72,7 +70,7 @@ pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Res
 
 pub(super) fn sys_mkdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
         .map(|_| 0)
@@ -90,7 +88,7 @@ pub(super) fn sys_mkdirat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
         .map(|_| 0)
@@ -131,7 +129,7 @@ pub(super) fn mknod_current_path(
     mode: Word,
     _dev: Word,
 ) -> Result<Word, i32> {
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let file_type = mode & LINUX_S_IFMT;
     if file_type == LINUX_S_IFCHR || file_type == LINUX_S_IFBLK {
         return Err(ENOSYS);
@@ -150,7 +148,7 @@ pub(super) fn mknod_current_path(
 
 pub(super) fn sys_unlink(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_unlink(runtime.posix_port, 0, vfs_len), 0)
 }
@@ -162,11 +160,11 @@ pub(super) fn sys_link(
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
     let old_len = resolve_path(runtime, pid, old_path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_len = resolve_path(runtime, pid, new_path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_link(
         runtime.posix_port,
@@ -191,7 +189,7 @@ pub(super) fn sys_unlinkat(
         return Err(ENOSYS);
     }
     let len = resolve_current_shm_path(runtime, pid, raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     if (flags & LINUX_AT_REMOVEDIR) != 0 {
         return map_unit(posix::posix_rmdir(runtime.posix_port, 0, vfs_len), 0);
@@ -216,7 +214,7 @@ pub(super) fn sys_linkat(
         return Err(ENOSYS);
     }
     let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
 
@@ -225,7 +223,7 @@ pub(super) fn sys_linkat(
         return Err(ENOSYS);
     }
     let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_link(
         runtime.posix_port,
@@ -240,7 +238,7 @@ pub(super) fn sys_linkat(
 
 pub(super) fn sys_rmdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_rmdir(runtime.posix_port, 0, vfs_len), 0)
 }
@@ -252,11 +250,11 @@ pub(super) fn sys_rename(
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
     let old_len = resolve_path(runtime, pid, old_path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_len = resolve_path(runtime, pid, new_path_ptr)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
@@ -282,7 +280,7 @@ pub(super) fn sys_renameat(
         return Err(ENOSYS);
     }
     let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, old_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
@@ -290,7 +288,7 @@ pub(super) fn sys_renameat(
         return Err(ENOSYS);
     }
     let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
-    reject_virtual_fs_mutation(runtime.posix_shm, new_len)?;
+    reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
         runtime.posix_port,
@@ -344,6 +342,18 @@ pub(super) fn readlink_from_current_path(
         let Some(process) = runtime.managed_process(pid) else {
             return Err(ESRCH);
         };
+        if process.rootfs.root_len != 0 {
+            let bytes = process.rootfs.executable_len.min(len);
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    process.rootfs.executable.as_ptr(),
+                    runtime.posix_shm as *mut u8,
+                    bytes,
+                );
+            }
+            write_target_memory(runtime, pid, user_buffer, bytes)?;
+            return Ok(bytes);
+        }
         // Managed rootfs executables are exposed to Linux under /bin.  A
         // basename-only target makes BusyBox --install call link(2) with a
         // nonexistent path relative to the current directory.

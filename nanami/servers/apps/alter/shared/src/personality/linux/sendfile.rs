@@ -139,7 +139,7 @@ pub(super) fn sys_sendfile(
         LinuxFileKind::PipeWrite => {
             let pipe = runtime.pipe_mut(output.posix_fd).ok_or(EBADF)?;
             for index in 0..bytes {
-                pipe.buffer[pipe.write] = unsafe { *((source + index) as *const u8) };
+                pipe.write_byte(pipe.write, unsafe { *((source + index) as *const u8) });
                 pipe.write = (pipe.write + 1) % LINUX_PIPE_BYTES;
             }
             pipe.len += bytes;

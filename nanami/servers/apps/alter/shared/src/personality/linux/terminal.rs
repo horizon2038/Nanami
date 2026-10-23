@@ -341,7 +341,10 @@ pub(super) fn sys_ioctl(
             .map_err(map_request_error)?;
         return Ok(0);
     }
-    Ok(0)
+    // Never claim that an unsupported query filled the caller's output buffer.
+    // In particular, a fake TIOCGPGRP success traps interactive shells in their
+    // foreground-process-group wait loop. Job control is not implemented.
+    Err(ENOTTY)
 }
 
 pub(super) fn write_linux_termios(base: Word, canonical: bool, echo: bool) {

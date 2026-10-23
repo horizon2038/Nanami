@@ -1,5 +1,7 @@
 use super::Word;
 
+pub(super) const EPERM: i32 = 1;
+
 pub(super) const ENOENT: i32 = 2;
 
 pub(super) const EAGAIN: i32 = 11;

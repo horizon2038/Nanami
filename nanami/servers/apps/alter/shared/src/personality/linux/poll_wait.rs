@@ -1,7 +1,7 @@
 use super::{
     arm_clock_timer, poll_deadline, poll_timeout, read_poll_set, record_syscall_result,
     refresh_clock, scan_readiness, write_poll_set, write_poll_timeout, EmulationAction,
-    LinuxSyscallContext, Runtime, Word, ESRCH,
+    LinuxSyscallContext, Runtime, Word, EAGAIN, ESRCH,
 };
 use crate::state::readiness::*;
 
@@ -53,6 +53,9 @@ fn start_wait(
 }
 
 fn complete_wait(runtime: &mut Runtime, pid: Word, wait: &ReadinessWait) -> Result<Word, i32> {
+    if let Some(result) = super::pipe_wait::retry(runtime, pid, wait.context) {
+        return result;
+    }
     let ready = write_poll_set(runtime, pid, wait)?;
     write_poll_timeout(runtime, pid, wait)?;
     Ok(ready)
@@ -87,7 +90,10 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
                 refresh_clock(runtime)?;
                 clock_sampled = true;
             }
-            complete_wait(runtime, pid, &wait).map(Some)
+            match complete_wait(runtime, pid, &wait) {
+                Err(EAGAIN) => Ok(None),
+                result => result.map(Some),
+            }
         });
         let value = match result {
             Ok(None) => continue,

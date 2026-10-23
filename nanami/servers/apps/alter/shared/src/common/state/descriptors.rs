@@ -118,11 +118,16 @@ impl Runtime {
         let mut i = 0usize;
         while i < self.pipes.len() {
             if !self.pipes[i].active {
+                let layout = ::core::alloc::Layout::new::<[u8; LINUX_PIPE_BYTES]>();
+                let buffer = unsafe { alloc::alloc::alloc_zeroed(layout) };
+                if buffer.is_null() {
+                    return None;
+                }
                 self.pipes[i] = LinuxPipe {
                     active: true,
                     readers: 1,
                     writers: 1,
-                    buffer: [0; LINUX_PIPE_BYTES],
+                    buffer: buffer as Word,
                     read: 0,
                     write: 0,
                     len: 0,
@@ -132,6 +137,19 @@ impl Runtime {
             i += 1;
         }
         None
+    }
+
+    pub fn release_pipe(&mut self, pipe_id: Word) {
+        let Some(pipe) = self.pipes.get_mut(pipe_id as usize) else {
+            return;
+        };
+        if pipe.active {
+            let layout = ::core::alloc::Layout::new::<[u8; LINUX_PIPE_BYTES]>();
+            unsafe {
+                alloc::alloc::dealloc(pipe.buffer as *mut u8, layout);
+            }
+            *pipe = LinuxPipe::EMPTY;
+        }
     }
 
     pub fn pipe(&self, pipe_id: Word) -> Option<LinuxPipe> {

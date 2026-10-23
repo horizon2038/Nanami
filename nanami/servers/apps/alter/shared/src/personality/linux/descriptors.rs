@@ -5,8 +5,8 @@ use super::{
     virtual_node_stat, LinuxFile, LinuxFileKind, Runtime, Word, EBADF, EINVAL, EMFILE, ENOSYS,
     ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX, LINUX_F_DUPFD, LINUX_F_DUPFD_CLOEXEC,
     LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD, LINUX_F_SETFL, LINUX_O_APPEND, LINUX_O_CLOEXEC,
-    LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_LARGEFILE, LINUX_O_NONBLOCK, LINUX_O_TRUNC,
-    LINUX_SOCK_NONBLOCK, LINUX_O_DSYNC, LINUX_O_SYNC,
+    LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_DSYNC, LINUX_O_LARGEFILE, LINUX_O_NONBLOCK,
+    LINUX_O_SYNC, LINUX_O_TRUNC, LINUX_SOCK_NONBLOCK,
 };
 
 pub(super) fn sys_open(
@@ -25,6 +25,14 @@ fn open_current_path(
     len: Word,
     linux_flags: Word,
 ) -> Result<Word, i32> {
+    if linux_flags & (super::LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_TRUNC) != 0
+        && runtime
+            .managed_process(pid)
+            .is_some_and(|process| process.rootfs.readonly)
+        && !super::is_linux_virtual_path(runtime.posix_shm, len)
+    {
+        return Err(super::EROFS);
+    }
     if let Some(fd) = open_virtual_path(runtime, pid, len, linux_flags)? {
         return Ok(fd);
     }
@@ -32,9 +40,14 @@ fn open_current_path(
     let fallback = super::virtual_fs::fallback_file(path);
     let flags = translate_open_flags(linux_flags);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    let fd = match (posix::posix_open(runtime.posix_port, 0, vfs_len, flags), fallback) {
+    let fd = match (
+        posix::posix_open(runtime.posix_port, 0, vfs_len, flags),
+        fallback,
+    ) {
         (
-            Err(nanami_runtime::RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Err(nanami_runtime::RequestError::Status(
+                nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR,
+            )),
             Some(node),
         ) if linux_flags & (super::LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_TRUNC) == 0 => {
             return super::open_virtual_node(runtime, pid, node, linux_flags);
@@ -176,7 +189,12 @@ pub(super) fn sys_lseek(
         if whence > posix::POSIX_SEEK_CUR {
             return Err(EINVAL);
         }
-        return map_word(posix::posix_seek(runtime.posix_port, file.posix_fd, offset, whence));
+        return map_word(posix::posix_seek(
+            runtime.posix_port,
+            file.posix_fd,
+            offset,
+            whence,
+        ));
     }
     if file.kind == LinuxFileKind::PipeRead
         || file.kind == LinuxFileKind::PipeWrite
@@ -347,7 +365,10 @@ pub(super) fn duplicate_linux_file(
     match file.kind {
         _ if file.has_posix_backend() => {
             let fd = duplicate_posix_backend_fd(runtime, file.posix_fd)?;
-            Ok(LinuxFile { posix_fd: fd, ..file })
+            Ok(LinuxFile {
+                posix_fd: fd,
+                ..file
+            })
         }
         LinuxFileKind::Empty => Err(EBADF),
         LinuxFileKind::Terminal
@@ -403,11 +424,14 @@ pub(super) fn duplicate_posix_backend_fd(runtime: &mut Runtime, old_fd: Word) ->
 }
 
 pub(super) fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<(), i32> {
-    if let Some(file) = runtime.clear_linux_file(pid, fd) {
+    if let Some(file) = runtime.linux_file(pid, fd) {
+        if file.has_posix_backend() {
+            // Retain ownership if backend close fails, allowing a later retry.
+            posix::posix_close(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
+        }
+        // Socket last-reference checks must not count the FD being closed.
+        runtime.clear_linux_file(pid, fd);
         match file.kind {
-            _ if file.has_posix_backend() => {
-                posix::posix_close(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
-            }
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
             LinuxFileKind::SocketUdp
             | LinuxFileKind::SocketTcp
@@ -428,12 +452,20 @@ pub(super) fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Resu
 }
 
 pub fn close_process_files(runtime: &mut Runtime, pid: Word) {
+    let _ = close_process_files_checked(runtime, pid);
+}
+
+pub fn close_process_files_checked(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    let mut first_error = None;
     let mut fd = 0usize;
     while fd < LINUX_FD_MAX {
-        let _ = close_linux_fd(runtime, pid, fd as Word);
+        if let Err(error) = close_linux_fd(runtime, pid, fd as Word) {
+            first_error.get_or_insert(error);
+        }
         fd += 1;
     }
     cleanup_graphics_for_process(runtime, pid);
+    first_error.map_or(Ok(()), Err)
 }
 
 pub(super) fn close_cloexec_files(runtime: &mut Runtime, pid: Word) {

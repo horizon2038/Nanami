@@ -14,6 +14,7 @@ pub mod terminal;
 pub mod timer;
 pub mod usb;
 pub mod vfs;
+pub use nanami_uapi as uapi;
 
 use a9n_abi::CapabilityDescriptor;
 

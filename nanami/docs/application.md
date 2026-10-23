@@ -389,6 +389,132 @@ the root filesystem with arguments and environment data.
 Use these services instead of embedding application-specific launch logic in a
 GUI client or Alpha.
 
+## Negoto OCI Bundles
+
+Negoto is a native application and management service using Alter/Linux to run
+unmodified Linux ELF binaries. Its `alter-rootfs-v1` profile implements the
+[OCI 1.3 bundle format](https://github.com/opencontainers/runtime-spec/blob/v1.3.0/bundle.md)
+and create/start/state/kill/delete lifecycle. It is not a full OCI Linux
+runtime or a hardened multi-tenant sandbox. It consumes an already unpacked
+bundle; it does not pull registry images or unpack OCI layers.
+
+The default system manifest starts `/bin/negoto serve` as `negoto-service`.
+State persists across CLI invocations for the service's lifetime, not across
+reboots. The checked-in x86_64 BusyBox sample is at
+[`samples/negoto/bundles/busybox/config.json`](../../samples/negoto/bundles/busybox/config.json).
+It starts `/bin/busybox sh -i` with a readonly rootfs. `process.terminal` stays
+false: the invoking Nanami Shell's terminal is used without allocating a PTY.
+Unsupported terminal ioctls return `ENOTTY`; BusyBox disables job control
+instead of looping on an uninitialized foreground process-group query.
+
+From the host repository root, copy the existing static Linux BusyBox into
+the bundle. Binary payloads are ignored by Git and must be copied again in a
+fresh checkout:
+
+```sh
+mkdir -p samples/negoto/bundles/busybox/rootfs/bin
+cp bin/busybox samples/negoto/bundles/busybox/rootfs/bin/busybox
+chmod 755 samples/negoto/bundles/busybox/rootfs/bin/busybox
+```
+
+Import `samples/negoto` under `/alter/linux`. Regeneration replaces the default
+rootfs and boot image, discarding saved guest files; back up needed data first.
+
+```sh
+cargo xtask build --rebuild-rootfs --linux-rootfs-dir samples/negoto
+cargo xtask run
+```
+
+For a non-destructive build, choose new paths for both `--rootfs` and
+`--output-image`, omit `--rebuild-rootfs`, and use `run --image` for that image.
+The guest bundle pathname is `/alter/linux/bundles/busybox`. In Nanami Shell:
+
+```text
+negoto run --bundle /alter/linux/bundles/busybox demo
+```
+
+Inside the BusyBox shell, for example:
+
+```sh
+pwd
+/bin/busybox ls /
+exit
+```
+
+`exit` lets `negoto run` reclaim the container and return to Nanami Shell.
+The bundle contains only the BusyBox executable, not applet links; invoke
+external applets as `/bin/busybox ls` rather than assuming `/bin/ls` exists.
+The sample rootfs is readonly, so commands that modify it fail.
+
+To use the individual lifecycle commands, stop the interactive process before
+deleting its container:
+
+```text
+negoto create --bundle /alter/linux/bundles/busybox demo
+negoto state demo
+negoto start demo
+negoto kill demo TERM
+negoto state demo
+negoto delete demo
+```
+
+`create` snapshots execution parameters, loads the image and initial stack,
+and leaves the process suspended. `start` resumes that process; later edits to
+`config.json` do not change those parameters. Rootfs file contents remain
+externally mutable. `delete` requires a stopped container and reclaims its
+process tree without removing the supplied bundle. The ID can then be reused.
+`negoto kill demo KILL` stops a running process; `TERM` and signal `0` are also
+accepted. `negoto run --bundle PATH ID` combines create/start/wait/delete using
+the timer service. `negoto features` prints supported features. CLI bundle
+paths must be absolute.
+
+Supported inputs include argv, environment, absolute cwd, relative/absolute
+`root.path`, `root.readonly`, and string annotations. Guest paths are normalized
+before the backing-root prefix is added, including host-looking guest paths.
+Fork/exec inherit the context and resolve ELF interpreters under the same root.
+Existing Alter syscall support determines which Linux applications run. The
+tested executable is a static x86_64 BusyBox, copied without ELF rewriting.
+
+Requested namespaces, mount entries, cgroups/resources, seccomp, hooks, nonempty
+capability sets, additional groups, nonzero UID/GID, custom rlimits, and PTY
+allocation are rejected, not silently ignored. Empty capability sets and
+`noNewPrivileges` do not grant privileges; a supplied `umask` must be 022.
+Stream I/O can use the invoking Nanami terminal; headless contexts start with
+three `/dev/null` descriptors. This is not a separate PTY. Network and virtual
+`/proc`, `/sys`, `/dev` behavior comes from Alter, not Linux namespaces. Do not
+use this profile for hostile workloads. General rootfs symlink resolution is
+not provided by the current ext2/Alter path; the importer rejects host links
+and special files. Use real files for this profile.
+
+Limits: 8 containers, 16 simultaneous management clients, 32-KiB configurations,
+64 arguments and 64 environment entries with 12 KiB combined string storage,
+and 64 annotations with 8 KiB key/value storage. Backing paths must fit Alter's
+256-byte buffer and cwd its 128-byte buffer. Native Negoto/Alter code builds
+for x86_64 and AArch64; the execution regression exercises x86_64 BusyBox.
+
+Verification on private, disposable images:
+
+```sh
+python3 tests/negoto/build-fixture.py --busybox bin/busybox \
+  --rootfs out/negoto-rootfs.img --image out/negoto.img
+python3 tests/negoto/qemu-smoke.py --image out/negoto.img --smp 1
+python3 tests/negoto/qemu-smoke.py --image out/negoto.img --smp 4
+cargo test -p negoto-oci -p nanami-uapi
+cargo test --manifest-path tests/native-performance/Cargo.toml \
+  --test negoto --test linux-pipe --test linux-readiness --test linux-sendfile -- --test-threads=1
+```
+
+The builder refuses existing output paths and reports the BusyBox SHA-256.
+QEMU uses a disk snapshot and private firmware variables. The guest verifies
+that create does not execute, argv/env/cwd survive, shell command substitution
+and fork/exec work, native-root paths stay inaccessible, readonly writes fail,
+kill/delete work, and one ID can be reused 20 times. It also launches the real
+native CLI for features/create/state/start/delete and 18 run/wait/delete cycles
+to check management-client detach/reuse.
+The interactive regression uses the real CLI and a native terminal, verifies
+a shell prompt and command output distinct from input echo, then exits and
+checks container cleanup.
+
 ## Honoka Applications
 
 A Honoka client:

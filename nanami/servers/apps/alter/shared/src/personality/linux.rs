@@ -50,6 +50,8 @@ use terminal::*;
 #[path = "linux/pipe.rs"]
 mod pipe;
 use pipe::*;
+#[path = "linux/pipe_wait.rs"]
+mod pipe_wait;
 
 #[path = "linux/filesystem.rs"]
 mod filesystem;
@@ -133,10 +135,10 @@ use socket_readiness::socket_readiness;
 #[path = "linux/clocks.rs"]
 mod clocks;
 use clocks::*;
-#[path = "linux/realtime.rs"]
-mod realtime;
 #[path = "linux/clock_events.rs"]
 mod clock_events;
+#[path = "linux/realtime.rs"]
+mod realtime;
 use clock_events::arm_clock_timer;
 
 #[path = "linux/tracing.rs"]
@@ -167,8 +169,8 @@ use errors::*;
 mod constants;
 use constants::*;
 
-use nanami_runtime::{RequestError, Word};
 use nanami_client::{gfx::honoka, input, net, posix, vfs};
+use nanami_runtime::{RequestError, Word};
 
 use crate::abi::{
     ALTER_DEFAULT_SHM_BYTES, ALTER_IO_OFFSET, ALTER_LAUNCH_MAX_ARGS, ALTER_LAUNCH_MAX_ENVS,
@@ -215,7 +217,7 @@ pub fn dispatch_syscall(
 ) -> EmulationAction {
     let result = match context.number {
         SYS_READ => {
-            let action = sys_read_action(
+            let mut action = sys_read_action(
                 runtime,
                 native_pid,
                 context.args[0],
@@ -223,6 +225,11 @@ pub fn dispatch_syscall(
                 context.args[2],
                 context,
             );
+            if matches!(action, EmulationAction::Return(value) if value == -(EAGAIN as isize))
+                && pipe_wait::park(runtime, native_pid, context)
+            {
+                action = EmulationAction::Park;
+            }
             record_action_result(runtime, native_pid, context.number, action);
             trace_critical_action(runtime, native_pid, context, action);
             trace_syscall_action(runtime, native_pid, context, action);
@@ -236,7 +243,12 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_SENDFILE => sendfile::sys_sendfile(
-            runtime, native_pid, context.args[0], context.args[1], context.args[2], context.args[3],
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
         ),
         SYS_PREAD64 | SYS_PWRITE64 => sys_positioned_io(
             runtime,
@@ -296,7 +308,9 @@ pub fn dispatch_syscall(
         SYS_CLOSE => sys_close(runtime, native_pid, context.args[0]),
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => sys_fsync(runtime, native_pid, context.args[0]),
         SYS_SYNC => sys_sync(runtime),
-        SYS_FTRUNCATE => truncate::sys_ftruncate(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_FTRUNCATE => {
+            truncate::sys_ftruncate(runtime, native_pid, context.args[0], context.args[1])
+        }
         SYS_DUP => sys_dup(runtime, native_pid, context.args[0]),
         SYS_DUP2 => sys_dup2(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP3 => sys_dup3(
@@ -707,6 +721,11 @@ pub fn dispatch_syscall(
         }
     };
 
+    if result == Err(EAGAIN) && pipe_wait::park(runtime, native_pid, context) {
+        let action = EmulationAction::Park;
+        trace_syscall_action(runtime, native_pid, context, action);
+        return action;
+    }
     let value = result_to_linux_return(result);
     record_syscall_result(runtime, native_pid, context.number, value);
     trace_critical_syscall(runtime, native_pid, context, value);
@@ -716,9 +735,11 @@ pub fn dispatch_syscall(
 }
 
 pub use clock_events::handle_timer_notification;
-pub use poll_wait::{handle_readiness_changes, handle_readiness_notification, wake_readiness_waiters};
-pub use descriptors::close_process_files;
+pub use descriptors::{close_process_files, close_process_files_checked};
 pub use input_device::wake_device_readers;
 pub use network_wait::wake_network_waiters;
+pub use poll_wait::{
+    handle_readiness_changes, handle_readiness_notification, wake_readiness_waiters,
+};
 pub use terminal::wake_terminal_readers;
 pub use wait_signals::wake_waiter_for_child;

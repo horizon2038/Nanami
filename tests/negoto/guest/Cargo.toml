@@ -1,0 +1,16 @@
+[package]
+name = "negoto-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+nanami-runtime = { path = "../../../nanami/servers/libs/nanami-runtime" }
+nanami-client = { path = "../../../nanami/servers/libs/nanami-client" }
+negoto-oci = { path = "../../../crates/negoto-oci" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+panic = "abort"
+
+[workspace]

@@ -8,6 +8,14 @@ publish = false
 path = "heap-tests.rs"
 
 [[test]]
+name = "negoto"
+path = "negoto.rs"
+
+[[test]]
+name = "linux-pipe"
+path = "linux-pipe.rs"
+
+[[test]]
 name = "hotpaths"
 path = "hotpath-tests.rs"
 

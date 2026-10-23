@@ -11,7 +11,7 @@ mod state {
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/constants.rs"]
 mod constants;
 use constants::*;
-const LINUX_PIPE_BYTES: usize = 1024;
+const LINUX_PIPE_BYTES: usize = 4096;
 #[derive(Clone, Copy, PartialEq)]
 enum LinuxFileKind {
     Posix,
@@ -47,6 +47,11 @@ struct Pipe {
     write: usize,
     len: usize,
     readers: usize,
+}
+impl Pipe {
+    fn write_byte(&mut self, index: usize, value: u8) {
+        self.buffer[index] = value;
+    }
 }
 struct Runtime {
     posix_port: Word,

@@ -1,0 +1,17 @@
+{
+  "ociVersion": "1.3.0",
+  "root": {
+    "path": "rootfs",
+    "readonly": true
+  },
+  "process": {
+    "terminal": false,
+    "user": {
+      "uid": 0,
+      "gid": 0
+    },
+    "cwd": "/",
+    "args": ["/bin/busybox", "sh", "-i"],
+    "env": ["PATH=/bin:/usr/bin"]
+  }
+}

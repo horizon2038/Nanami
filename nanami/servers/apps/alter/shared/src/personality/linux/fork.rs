@@ -35,7 +35,20 @@ pub(super) fn sys_fork(
     };
 
     let pcb_slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
-    let child_pid = match spawn_fork_child(runtime, image_name.as_bytes(), pcb_slot, personality) {
+    let mut host_image = [0; crate::abi::ALTER_PATH_MAX];
+    let fork_image = if parent.rootfs.root_len != 0 {
+        let len = parent
+            .rootfs
+            .host_path(
+                &parent.rootfs.executable[..parent.rootfs.executable_len],
+                &mut host_image,
+            )
+            .ok_or(EINVAL)?;
+        &host_image[..len]
+    } else {
+        image_name.as_bytes()
+    };
+    let child_pid = match spawn_fork_child(runtime, fork_image, pcb_slot, personality) {
         Ok(pid) => pid,
         Err(errno) => {
             nanami_runtime::println!(

@@ -15,8 +15,7 @@ pub(super) fn ensure_network(runtime: &mut Runtime) -> Result<(), i32> {
     if runtime.network_port != 0 && runtime.network_shm != 0 {
         return Ok(());
     }
-    nanami_client::registry::connect_network_service(SLOT_NETWORK_SERVICE)
-        .map_err(|_| ENETDOWN)?;
+    nanami_client::registry::connect_network_service(SLOT_NETWORK_SERVICE).map_err(|_| ENETDOWN)?;
     let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
     let self_pid = nanami_runtime::get_self_pid().map_err(|_| ENETDOWN)?;
     let (status, peer, size) = net::net_service_control_ex(
@@ -45,6 +44,15 @@ pub(super) fn sys_socket(
     protocol: Word,
 ) -> Result<Word, i32> {
     let base_type = socket_type & LINUX_SOCK_TYPE_MASK;
+    if domain == LINUX_AF_INET
+        && base_type == LINUX_SOCK_RAW
+        && runtime
+            .managed_process(pid)
+            .is_some_and(|process| process.rootfs.leader != 0)
+    {
+        // Execution contexts do not receive Linux CAP_NET_RAW authority.
+        return Err(super::EPERM);
+    }
     let flags = (if (socket_type & LINUX_SOCK_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {

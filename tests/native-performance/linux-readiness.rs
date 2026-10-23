@@ -1,7 +1,7 @@
 #![allow(dead_code, private_interfaces)]
 extern crate self as a9n_abi;
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 pub mod terminal {
     pub const TERMINAL_NOTIFICATION_INPUT: usize = 1 << 52;
 }
@@ -18,9 +18,15 @@ const EINVAL: i32 = 22;
 const EBADF: i32 = 9;
 const ESRCH: i32 = 3;
 const EIO: i32 = 5;
+const EAGAIN: i32 = 11;
+const SYS_READ: usize = 0;
+const SYS_WRITE: usize = 1;
+const SYS_READV: usize = 19;
+const SYS_WRITEV: usize = 20;
+const LINUX_O_NONBLOCK: usize = 0x800;
 const EOPNOTSUPP: i32 = 95;
 const LINUX_FD_MAX: usize = 64;
-const LINUX_PIPE_BYTES: usize = 1024;
+const LINUX_PIPE_BYTES: usize = 4096;
 const LINUX_POLLFD_BYTES: usize = 8;
 const LINUX_POLLFD_MAX: usize = LINUX_FD_MAX;
 const LINUX_TIMESPEC_BYTES: usize = 16;
@@ -74,6 +80,7 @@ enum LinuxFileKind {
 }
 #[derive(Clone, Copy)]
 struct LinuxFile {
+    flags: Word,
     kind: LinuxFileKind,
     posix_fd: Word,
     resource: Word,
@@ -94,6 +101,8 @@ struct Process {
     readiness_wait: Option<ReadinessWait>,
 }
 struct Runtime {
+    io_calls: usize,
+    io_result: Result<Word, i32>,
     posix_shm: Word,
     scratch: Box<[u8]>,
     files: Vec<LinuxFile>,
@@ -222,11 +231,25 @@ use poll_timeout::*;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/poll_wait.rs"]
 mod poll_wait;
 use poll_wait::*;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/pipe_wait.rs"]
+mod pipe_wait;
+
+// Guest-memory I/O is mocked; parking and wake dispatch are production code.
+fn simulated_io(runtime: &mut Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<Word, i32> {
+    runtime.io_calls += 1;
+    runtime.io_result
+}
+use self::simulated_io as sys_read;
+use self::simulated_io as sys_write;
+use self::simulated_io as sys_readv;
+use self::simulated_io as sys_writev;
 
 fn runtime() -> Runtime {
     RETURNS.with(|v| v.borrow_mut().clear());
     let mut scratch = vec![0; 4096].into_boxed_slice();
     Runtime {
+        io_calls: 0,
+        io_result: Ok(0),
         posix_shm: scratch.as_mut_ptr() as Word,
         scratch,
         files: [
@@ -241,6 +264,7 @@ fn runtime() -> Runtime {
         ]
         .into_iter()
         .map(|kind| LinuxFile {
+            flags: 0,
             kind,
             posix_fd: 0,
             resource: 0,
@@ -275,6 +299,63 @@ fn runtime() -> Runtime {
         clock_error: false,
         alarm_error: false,
     }
+}
+
+#[test]
+fn blocking_pipe_reads_wait_for_data_or_last_writer_close() {
+    let mut runtime = runtime();
+    let context = LinuxSyscallContext {
+        number: SYS_READ,
+        args: [4, 4096, 32, 0, 0, 0],
+    };
+    assert!(pipe_wait::park(&mut runtime, 1, context));
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    assert_eq!(runtime.io_calls, 0, "an empty live pipe is not EOF");
+    runtime.pipe.len = 7;
+    runtime.io_result = Ok(7);
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 7)]));
+    assert!(runtime.managed[0].readiness_wait.is_none());
+    assert!(pipe_wait::park(&mut runtime, 1, context));
+    runtime.pipe.len = 0;
+    runtime.pipe.writers = 0;
+    runtime.io_result = Ok(0);
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 7), (101, 0)]));
+}
+
+#[test]
+fn full_or_atomic_pipe_writes_stay_parked_until_retry_can_commit() {
+    let mut runtime = runtime();
+    let context = LinuxSyscallContext {
+        number: SYS_WRITEV,
+        args: [5, 4096, 2, 0, 0, 0],
+    };
+    runtime.pipe.len = LINUX_PIPE_BYTES;
+    assert!(pipe_wait::park(&mut runtime, 1, context));
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    assert_eq!(runtime.io_calls, 0);
+    runtime.pipe.len -= 1;
+    runtime.io_result = Err(EAGAIN);
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    assert!(runtime.managed[0].readiness_wait.is_some());
+    RETURNS.with(|values| assert!(values.borrow().is_empty()));
+    runtime.pipe.len = 0;
+    runtime.io_result = Ok(1024);
+    wake_readiness_waiters(&mut runtime, READY_PIPE);
+    RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 1024)]));
+}
+
+#[test]
+fn nonblocking_pipe_io_does_not_install_a_waiter() {
+    let mut runtime = runtime();
+    runtime.files[4].flags = LINUX_O_NONBLOCK;
+    let context = LinuxSyscallContext {
+        number: SYS_READV,
+        args: [4, 4096, 1, 0, 0, 0],
+    };
+    assert!(!pipe_wait::park(&mut runtime, 1, context));
+    assert!(runtime.managed[0].readiness_wait.is_none());
 }
 fn fd(fd: i32, events: i16) -> PollFd {
     PollFd {

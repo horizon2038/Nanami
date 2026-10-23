@@ -20,6 +20,14 @@ pub fn prepare(
     runtime: &mut Runtime,
     executable: &LoadedElfImage,
 ) -> Result<Option<Interpreter>, LoadError> {
+    prepare_in_root(runtime, executable, b"/alter/linux")
+}
+
+pub fn prepare_in_root(
+    runtime: &mut Runtime,
+    executable: &LoadedElfImage,
+    root: &[u8],
+) -> Result<Option<Interpreter>, LoadError> {
     let meta = executable.metadata;
     if !meta.has_interpreter {
         return Ok(None);
@@ -37,9 +45,7 @@ pub fn prepare(
             meta.interpreter_size as usize,
         )
     };
-    if path.last() != Some(&0)
-        || path[..path.len() - 1].contains(&0)
-        || path.first() != Some(&b'/')
+    if path.last() != Some(&0) || path[..path.len() - 1].contains(&0) || path.first() != Some(&b'/')
     {
         return Err(LoadError::InvalidElf);
     }
@@ -51,7 +57,7 @@ pub fn prepare(
     {
         return Err(LoadError::UnsupportedElf);
     }
-    let prefix = b"/alter/linux";
+    let prefix = root;
     let mut host_path = [0u8; 256];
     let len = prefix
         .len()
@@ -178,8 +184,7 @@ pub fn track(
             return false;
         };
         let base = start & !(PAGE - 1);
-        let prot =
-            ((segment.flags & 4) >> 2) | (segment.flags & 2) | ((segment.flags & 1) << 2);
+        let prot = ((segment.flags & 4) >> 2) | (segment.flags & 2) | ((segment.flags & 1) << 2);
         if !runtime.add_mapping(pid, base, (end & !(PAGE - 1)) - base, prot) {
             return false;
         }

@@ -31,7 +31,7 @@ pub const ALTER_MANAGED_PROCESS_MAX: usize = 16;
 pub const ALTER_PROCESS_MAPPING_MAX: usize = 32;
 pub const ALTER_MANAGED_PCB_SLOT_BASE: Word = 40;
 pub const ALTER_IMAGE_NAME_MAX: usize = 24;
-pub const ALTER_LAUNCH_MAX_ARGS: usize = 8;
-pub const ALTER_LAUNCH_MAX_ENVS: usize = 8;
+pub const ALTER_LAUNCH_MAX_ARGS: usize = 64;
+pub const ALTER_LAUNCH_MAX_ENVS: usize = 64;
 
 pub const A9N_FAULT_INVALID_KERNEL_CALL: Word = 5;

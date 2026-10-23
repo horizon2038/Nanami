@@ -65,7 +65,13 @@ impl Runtime {
         if image_name.is_empty() || image_name.len() > ALTER_IMAGE_NAME_MAX {
             return false;
         }
-        let (terminal_canonical, terminal_echo, terminal_termios) = self.managed.iter()
+        let rootfs = self
+            .managed_process(parent_pid)
+            .map(|parent| parent.rootfs)
+            .unwrap_or(super::super::context::RootfsContext::DEFAULT);
+        let (terminal_canonical, terminal_echo, terminal_termios) = self
+            .managed
+            .iter()
             .find(|p| terminal_id != 0 && p.pid != 0 && !p.exited && p.terminal_id == terminal_id)
             .map(|p| (p.terminal_canonical, p.terminal_echo, p.terminal_termios))
             .unwrap_or((true, true, None));
@@ -78,6 +84,7 @@ impl Runtime {
                     pid,
                     parent_pid,
                     owner_pid,
+                    rootfs,
                     pcb,
                     program_break: 0,
                     mapped_break: 0,
@@ -257,7 +264,11 @@ impl Runtime {
         let mut i = 0usize;
         while i < self.managed.len() {
             let process = self.managed[i];
-            if process.pid != 0 && process.parent_pid == 0 && process.terminal_id == terminal_id {
+            if process.pid != 0
+                && process.parent_pid == 0
+                && process.terminal_id == terminal_id
+                && process.rootfs.leader == 0
+            {
                 return Some(process);
             }
             i += 1;
@@ -269,7 +280,7 @@ impl Runtime {
         let mut i = 0usize;
         while i < self.managed.len() {
             let process = self.managed[i];
-            if process.pid != 0 && process.exited {
+            if process.pid != 0 && process.exited && process.rootfs.root_len == 0 {
                 return Some(process);
             }
             i += 1;

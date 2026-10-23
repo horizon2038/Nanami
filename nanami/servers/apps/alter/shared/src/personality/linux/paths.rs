@@ -67,6 +67,26 @@ pub(super) fn translate_guest_path_at(
     }
 
     let base = runtime.posix_shm + offset;
+    let rootfs = runtime.managed_process(pid).ok_or(ESRCH)?.rootfs;
+    if rootfs.root_len != 0 {
+        if is_linux_virtual_path(base, len) {
+            return Ok(len);
+        }
+        let guest = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
+        let mut host = [0; crate::abi::ALTER_PATH_MAX];
+        let host_len = rootfs.host_path(guest, &mut host).ok_or(ENAMETOOLONG)?;
+        if offset
+            .checked_add(host_len + 1)
+            .is_none_or(|end| end > runtime.posix_shm_size)
+        {
+            return Err(ENAMETOOLONG);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(host.as_ptr(), base as *mut u8, host_len);
+            core::ptr::write((base + host_len) as *mut u8, 0);
+        }
+        return Ok(host_len);
+    }
     if !path_is_absolute(base, len) || is_linux_virtual_path(base, len) {
         return Ok(len);
     }
@@ -138,8 +158,17 @@ pub(super) fn is_linux_virtual_path(base: Word, len: Word) -> bool {
         || path_has_component_prefix(base, len, b"/sys")
 }
 
-pub(super) fn reject_virtual_fs_mutation(base: Word, len: Word) -> Result<(), i32> {
-    if is_linux_virtual_path(base, len) {
+pub(super) fn reject_virtual_fs_mutation(
+    runtime: &Runtime,
+    pid: Word,
+    base: Word,
+    len: Word,
+) -> Result<(), i32> {
+    if runtime
+        .managed_process(pid)
+        .is_some_and(|process| process.rootfs.readonly)
+        || is_linux_virtual_path(base, len)
+    {
         Err(EROFS)
     } else {
         Ok(())
@@ -160,10 +189,13 @@ pub(super) fn current_virtual_node(runtime: &Runtime, pid: Word, len: Word) -> O
     virtual_fs::lookup(path, graphics_enabled(runtime, pid))
 }
 
-pub(super) fn guest_root_for_process(runtime: &Runtime, pid: Word) -> Result<&'static [u8], i32> {
+pub(super) fn guest_root_for_process(runtime: &Runtime, pid: Word) -> Result<&[u8], i32> {
     let Some(process) = runtime.managed_process(pid) else {
         return Err(ESRCH);
     };
+    if process.rootfs.root_len != 0 {
+        return Ok(&process.rootfs.root[..process.rootfs.root_len]);
+    }
     Ok(personality::root(process.personality))
 }
 

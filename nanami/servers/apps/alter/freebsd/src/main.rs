@@ -53,7 +53,8 @@ fn alloc_error(layout: ::core::alloc::Layout) -> ! {
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::print!("[alter] bootstrap\n");
-    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[alter] ipc tls init failed: ", e))?;
+    nanami_runtime::ipc::init_ipc_tls()
+        .map_err(|e| log_error("[alter] ipc tls init failed: ", e))?;
     let _ = nanami_runtime::heap::init_heap(ALTER_LINUX_HEAP_BYTES)
         .map_err(|e| log_error("[alter] heap init failed: ", e))?;
     let notification =
@@ -91,7 +92,12 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     loop {
         let event = match pending {
             ReplyAction::Reply(status, detail0, detail1) => {
-                nanami_runtime::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
+                nanami_runtime::ipc::service_reply_receive_event(
+                    service_port,
+                    status,
+                    detail0,
+                    detail1,
+                )
             }
             ReplyAction::FaultContinue {
                 hardware_context,
@@ -150,6 +156,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     },
                     FaultAction::Park => ReplyAction::DropReply,
                     FaultAction::Terminate { pid, status } => {
+                        linux::close_process_files(&mut runtime, pid);
                         runtime.mark_process_exited(pid, status);
                         notify_terminal_process_exit(&mut runtime, pid, status);
                         let parent_pid = runtime

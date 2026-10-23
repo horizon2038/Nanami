@@ -234,12 +234,21 @@ pub(super) fn open_virtual_node(
         VirtualNode::Root => {
             let root = super::guest_root_for_process(runtime, pid)?;
             unsafe {
-                core::ptr::copy_nonoverlapping(root.as_ptr(), runtime.posix_shm as *mut u8, root.len());
+                core::ptr::copy_nonoverlapping(
+                    root.as_ptr(),
+                    runtime.posix_shm as *mut u8,
+                    root.len(),
+                );
             }
             let backing = super::posix::posix_open(
-                runtime.posix_port, 0, root.len() as Word, super::posix::POSIX_O_DIRECTORY,
-            ).map_err(super::map_path_request_error)?;
-            let mut file = LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, node.id(), fd_flags);
+                runtime.posix_port,
+                0,
+                root.len() as Word,
+                super::posix::POSIX_O_DIRECTORY,
+            )
+            .map_err(super::map_path_request_error)?;
+            let mut file =
+                LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, node.id(), fd_flags);
             file.posix_fd = backing;
             file
         }
@@ -248,6 +257,12 @@ pub(super) fn open_virtual_node(
             LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)
         }
         VirtualNode::DevKeyboard => {
+            if runtime
+                .managed_process(pid)
+                .is_some_and(|process| process.rootfs.leader != 0)
+            {
+                return Err(super::EPERM);
+            }
             ensure_input(runtime, pid)?;
             LinuxFile::virtual_node(
                 LinuxFileKind::EvdevKeyboard,
@@ -256,6 +271,12 @@ pub(super) fn open_virtual_node(
             )
         }
         VirtualNode::DevMouse => {
+            if runtime
+                .managed_process(pid)
+                .is_some_and(|process| process.rootfs.leader != 0)
+            {
+                return Err(super::EPERM);
+            }
             ensure_input(runtime, pid)?;
             LinuxFile::virtual_node(
                 LinuxFileKind::EvdevMouse,

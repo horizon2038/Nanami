@@ -1,6 +1,8 @@
 use nanami_runtime::ipc::ServiceRequest;
 use nanami_runtime::Word;
 
+use super::context::RootfsContext;
+use super::framebuffer_size::{FramebufferSize, ALTER_LAUNCH_FLAG_FB_SIZE};
 use crate::abi::*;
 use crate::arch::PLATFORM_NUL;
 use crate::elf::ElfMetadata;
@@ -8,11 +10,19 @@ use crate::loader::{load_cached_fork_linux_elf_image, map_request_error_to_statu
 use crate::personality;
 use crate::process::{read_register_value, write_exec_registers, REG_PC, REG_RSP};
 use crate::state::{OsPersonality, ReplyAction, Runtime};
-use super::framebuffer_size::{FramebufferSize, ALTER_LAUNCH_FLAG_FB_SIZE};
+
+struct PreparedContext {
+    rootfs: RootfsContext,
+    cwd: [u8; crate::state::LINUX_CWD_MAX],
+    cwd_len: usize,
+    executable_offset: usize,
+    executable_len: usize,
+}
 
 pub struct LaunchInfo {
     pub image_name: [u8; ALTER_IMAGE_NAME_MAX],
     pub image_name_len: usize,
+    context: Option<PreparedContext>,
     framebuffer_size: FramebufferSize,
     argc: usize,
     envc: usize,
@@ -26,6 +36,7 @@ impl LaunchInfo {
     const EMPTY: Self = Self {
         image_name: [0; ALTER_IMAGE_NAME_MAX],
         image_name_len: 0,
+        context: None,
         framebuffer_size: FramebufferSize::DEFAULT,
         argc: 0,
         envc: 0,
@@ -36,12 +47,97 @@ impl LaunchInfo {
     };
 }
 
+/// Prepare a real process and initial stack, without executing guest code.
+pub fn handle_prepare_context(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
+    use nanami_client::uapi::alter::*;
+    let prepare = (|| {
+        let offset = request.arg0;
+        let len = request.arg1;
+        let end = offset
+            .checked_add(len)
+            .filter(|end| *end <= runtime.client_shm_size)?;
+        if runtime.client_shm == 0 {
+            return None;
+        }
+        let bytes =
+            unsafe { core::slice::from_raw_parts((runtime.client_shm + offset) as *const u8, len) };
+        let input = ExecutionRequest::decode(bytes)?;
+        if !super::context::normalized(input.cwd) || input.cwd.len() >= crate::state::LINUX_CWD_MAX
+        {
+            return None;
+        }
+        let rootfs = RootfsContext::new(
+            input.root,
+            input.executable,
+            input.flags & ALTER_CONTEXT_READONLY != 0,
+        )?;
+        let launch_offset = offset
+            + ALTER_CONTEXT_HEADER_BYTES
+            + input.root.len()
+            + input.cwd.len()
+            + input.executable.len();
+        let mut info = parse_launch_arguments(runtime, launch_offset, input.launch.len(), 0)?;
+        // Process labels are bounded metadata, not the guest's argv[0].
+        let name = core::str::from_utf8(input.executable)
+            .ok()?
+            .rsplit('/')
+            .next()?;
+        let mut name_len = name.len().min(ALTER_IMAGE_NAME_MAX);
+        while !name.is_char_boundary(name_len) {
+            name_len -= 1;
+        }
+        info.image_name[..name_len].copy_from_slice(&name.as_bytes()[..name_len]);
+        info.image_name_len = name_len;
+        let mut cwd = [0; crate::state::LINUX_CWD_MAX];
+        cwd[..input.cwd.len()].copy_from_slice(input.cwd);
+        let mut host = [0; ALTER_PATH_MAX];
+        let host_len = rootfs.host_path(input.executable, &mut host)?;
+        if end.checked_add(host_len)? > runtime.client_shm_size {
+            return None;
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                host.as_ptr(),
+                (runtime.client_shm + end) as *mut u8,
+                host_len,
+            );
+        }
+        info.context = Some(PreparedContext {
+            rootfs,
+            cwd,
+            cwd_len: input.cwd.len(),
+            executable_offset: end,
+            executable_len: host_len,
+        });
+        Some(info)
+    })();
+    let Some(info) = prepare else {
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some(slot) = runtime.next_pcb_slot() else {
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    };
+    let Ok(name) = core::str::from_utf8(&info.image_name[..info.image_name_len]) else {
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    if request.arg2 != 0 {
+        if let Err(status) = ensure_terminal_client(runtime, request.arg2) {
+            return ReplyAction::Reply(status, 0, 0);
+        }
+    }
+    spawn_rootfs_linux_image(runtime, request, &info, name, slot, OsPersonality::Linux)
+}
+
 pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     if runtime.client_shm == 0 {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
-    let Some(info) = parse_launch_info(runtime, request.arg0 as usize, request.arg1 as usize, request.arg3)
-    else {
+    let Some(info) = parse_launch_info(
+        runtime,
+        request.arg0 as usize,
+        request.arg1 as usize,
+        request.arg3,
+    ) else {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let Ok(image_name) = ::core::str::from_utf8(&info.image_name[..info.image_name_len]) else {
@@ -74,9 +170,16 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
     match nanami_runtime::request_process_spawn_fault_handler_suspended(image_name, pcb_slot) {
         Ok(pid) => {
             let pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
-            if let Err(status) =
-                prepare_initial_stack(runtime, pid, pcb, &info, personality, diagnostics, None, None)
-            {
+            if let Err(status) = prepare_initial_stack(
+                runtime,
+                pid,
+                pcb,
+                &info,
+                personality,
+                diagnostics,
+                None,
+                None,
+            ) {
                 nanami_runtime::println!(
                     "[alter] spawn failed stage=stack image={} pid={} status={}",
                     image_name,
@@ -153,10 +256,15 @@ fn spawn_rootfs_linux_image(
     pcb_slot: Word,
     personality: OsPersonality,
 ) -> ReplyAction {
+    let (executable_offset, executable_len) = info
+        .context
+        .as_ref()
+        .map(|context| (context.executable_offset, context.executable_len))
+        .unwrap_or((info.argv_offsets[0], info.argv_lens[0]));
     let loaded = match load_cached_fork_linux_elf_image(
         runtime,
-        info.argv_offsets[0] as Word,
-        info.argv_lens[0] as Word,
+        executable_offset as Word,
+        executable_len as Word,
     ) {
         Ok(loaded) => loaded,
         Err(error) => {
@@ -167,7 +275,12 @@ fn spawn_rootfs_linux_image(
     if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
-    let interpreter = match crate::common::dynamic::prepare(runtime, &loaded) {
+    let root = info
+        .context
+        .as_ref()
+        .map(|context| &context.rootfs.root[..context.rootfs.root_len])
+        .unwrap_or(b"/alter/linux");
+    let interpreter = match crate::common::dynamic::prepare_in_root(runtime, &loaded, root) {
         Ok(image) => image,
         Err(error) => {
             return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0)
@@ -186,7 +299,11 @@ fn spawn_rootfs_linux_image(
             if let Some(interpreter) = interpreter.as_ref() {
                 if let Err(error) = crate::common::dynamic::install(pid, interpreter) {
                     discard_spawned_process(pid);
-                    return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0);
+                    return ReplyAction::Reply(
+                        crate::loader::map_load_error_to_status(error),
+                        0,
+                        0,
+                    );
                 }
             }
             if let Err(status) = prepare_initial_stack(
@@ -224,7 +341,12 @@ fn spawn_rootfs_linux_image(
                 return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
             }
             if !register_linux_stack_mappings(runtime, pid)
-                || !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref())
+                || !crate::common::dynamic::track(
+                    runtime,
+                    pid,
+                    &loaded.metadata,
+                    interpreter.as_ref(),
+                )
             {
                 nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-stack-track image={} pid={}",
@@ -240,6 +362,30 @@ fn spawn_rootfs_linux_image(
             let _ = runtime.set_diagnostics_enabled(pid, diagnostics);
             let _ = runtime.configure_graphics(pid, graphics, info.framebuffer_size);
             let _ = runtime.set_personality(pid, personality);
+            if let Some(context) = info.context.as_ref() {
+                let Some(process) = runtime.managed_process_mut(pid) else {
+                    discard_spawned_process(pid);
+                    return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
+                };
+                process.rootfs = context.rootfs;
+                process.rootfs.leader = pid;
+                process.cwd[..context.cwd_len].copy_from_slice(&context.cwd[..context.cwd_len]);
+                process.cwd_len = context.cwd_len;
+                if request.arg2 == 0 {
+                    let null = crate::state::LinuxFile::virtual_node(
+                        crate::state::LinuxFileKind::VirtualFile,
+                        super::virtual_fs::VirtualNode::DevNull.id(),
+                        0,
+                    );
+                    process.files[..3].fill(null);
+                }
+                nanami_runtime::println!(
+                    "[alter/linux] context prepared pid={} image={}",
+                    pid,
+                    image_name
+                );
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_OK, pid, pcb);
+            }
             if a9n_abi::arch::process_control_block::resume(pcb).is_err() {
                 nanami_runtime::println!(
                     "[alter] spawn failed stage=rootfs-resume image={} pid={} pcb={:#x}",
@@ -290,24 +436,45 @@ fn ensure_terminal_client(runtime: &mut Runtime, _terminal_id: Word) -> Result<(
     nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
         .map_err(map_request_error_to_status)?;
     let terminal_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
-    let (terminal_shm, terminal_shm_size) =
-        nanami_client::terminal::terminal_attach_shared_memory(
-            terminal_port,
-            ALTER_DEFAULT_SHM_BYTES,
-        )
-        .map_err(map_request_error_to_status)?;
+    let (terminal_shm, terminal_shm_size) = nanami_client::terminal::terminal_attach_shared_memory(
+        terminal_port,
+        ALTER_DEFAULT_SHM_BYTES,
+    )
+    .map_err(map_request_error_to_status)?;
     runtime.terminal_port = terminal_port;
     runtime.terminal_shm = terminal_shm;
     runtime.terminal_shm_size = terminal_shm_size;
     Ok(())
 }
 
-fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize, flags: Word) -> Option<LaunchInfo> {
+fn parse_launch_info(
+    runtime: &Runtime,
+    offset: usize,
+    len: usize,
+    flags: Word,
+) -> Option<LaunchInfo> {
+    let mut info = parse_launch_arguments(runtime, offset, len, flags)?;
+    let image = basename(runtime, info.argv_offsets[0], info.argv_lens[0])?;
+    if image.1 == 0 || image.1 > ALTER_IMAGE_NAME_MAX {
+        return None;
+    }
+    copy_client_bytes(runtime, image.0, image.1, &mut info.image_name);
+    info.image_name_len = image.1;
+    Some(info)
+}
+
+fn parse_launch_arguments(
+    runtime: &Runtime,
+    offset: usize,
+    len: usize,
+    flags: Word,
+) -> Option<LaunchInfo> {
     // Legacy callers keep the 16-byte argc/envc header. The optional third
     // word carries width/height, not guest argv or environment variables.
     let has_size = flags & ALTER_LAUNCH_FLAG_FB_SIZE != 0;
     let header_bytes = if has_size { 24 } else { 16 };
-    if len < header_bytes || offset.checked_add(len)? > runtime.client_shm_size as usize
+    if len < header_bytes
+        || offset.checked_add(len)? > runtime.client_shm_size as usize
         || (has_size && flags & ALTER_LAUNCH_FLAG_GRAPHICS == 0)
     {
         return None;
@@ -320,7 +487,8 @@ fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize, flags: Word) 
 
     let mut info = LaunchInfo::EMPTY;
     if has_size {
-        info.framebuffer_size = FramebufferSize::from_packed(read_client_word(runtime, offset + 16)?)?;
+        info.framebuffer_size =
+            FramebufferSize::from_packed(read_client_word(runtime, offset + 16)?)?;
     }
     info.argc = argc;
     info.envc = envc;
@@ -329,7 +497,7 @@ fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize, flags: Word) 
     let mut index = 0usize;
     while index < argc {
         let (start, string_len, next) = read_nul_string(runtime, cursor, end)?;
-        if string_len == 0 {
+        if string_len == 0 && index == 0 {
             return None;
         }
         info.argv_offsets[index] = start;
@@ -349,12 +517,9 @@ fn parse_launch_info(runtime: &Runtime, offset: usize, len: usize, flags: Word) 
         index += 1;
     }
 
-    let image = basename(runtime, info.argv_offsets[0], info.argv_lens[0])?;
-    if image.1 == 0 || image.1 > ALTER_IMAGE_NAME_MAX {
+    if cursor != end {
         return None;
     }
-    copy_client_bytes(runtime, image.0, image.1, &mut info.image_name);
-    info.image_name_len = image.1;
     Some(info)
 }
 
@@ -634,6 +799,9 @@ fn contains_slash(runtime: &Runtime, offset: usize, len: usize) -> bool {
 }
 
 fn linux_argv0(runtime: &Runtime, info: &LaunchInfo) -> Result<(usize, usize), Word> {
+    if info.context.is_some() {
+        return Ok((info.argv_offsets[0], info.argv_lens[0]));
+    }
     let (offset, mut len) = basename(runtime, info.argv_offsets[0], info.argv_lens[0])
         .ok_or(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)?;
     if len == 0 {

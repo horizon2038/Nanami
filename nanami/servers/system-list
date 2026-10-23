@@ -6,6 +6,7 @@
 terminal-service 21 /bin/terminal-service
 posix-service 21 /bin/posix-server
 alter-linux 21 /bin/alter-linux
+negoto-service 20 /bin/negoto serve
 alter-freebsd 21 /bin/alter-freebsd
 input-service 28 /bin/input-server
 ps2-service 28 /bin/ps2-server

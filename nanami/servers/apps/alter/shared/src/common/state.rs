@@ -1,3 +1,5 @@
+#[path = "state/clients.rs"]
+mod clients;
 #[path = "state/descriptors.rs"]
 mod descriptors;
 #[path = "state/events.rs"]
@@ -8,25 +10,25 @@ mod io;
 mod mappings;
 #[path = "state/processes.rs"]
 mod processes;
-#[path = "state/waiters.rs"]
-mod waiters;
 #[path = "state/readiness.rs"]
 pub mod readiness;
+#[path = "state/waiters.rs"]
+mod waiters;
 
 use nanami_runtime::{RequestError, Word};
 
+use super::framebuffer_size::FramebufferSize;
 use crate::abi::{
     ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PATH_MAX, ALTER_PROCESS_MAPPING_MAX,
 };
 use crate::elf::ElfMetadata;
 use crate::process::LinuxSyscallContext;
-use super::framebuffer_size::FramebufferSize;
 
 pub const LINUX_FD_MAX: usize = 64;
 pub const LINUX_CWD_MAX: usize = 128;
 pub const LINUX_TERMINAL_LINE_MAX: usize = 256;
 pub const LINUX_PIPE_MAX: usize = 16;
-pub const LINUX_PIPE_BYTES: usize = 1024;
+pub const LINUX_PIPE_BYTES: usize = 4096;
 pub const ALTER_GRAPHICS_SESSION_MAX: usize = 4;
 pub const ALTER_EVDEV_QUEUE_CAPACITY: usize = 128;
 const FORK_IMAGE_CACHE_ENTRIES: usize = 2;
@@ -218,7 +220,8 @@ pub struct LinuxPipe {
     pub active: bool,
     pub readers: Word,
     pub writers: Word,
-    pub buffer: [u8; LINUX_PIPE_BYTES],
+    // Runtime owns this allocation; copying pipe metadata does not transfer ownership.
+    pub(super) buffer: Word,
     pub read: usize,
     pub write: usize,
     pub len: usize,
@@ -229,11 +232,23 @@ impl LinuxPipe {
         active: false,
         readers: 0,
         writers: 0,
-        buffer: [0; LINUX_PIPE_BYTES],
+        buffer: 0,
         read: 0,
         write: 0,
         len: 0,
     };
+
+    pub fn read_byte(&self, index: usize) -> u8 {
+        debug_assert!(self.active && self.buffer != 0 && index < LINUX_PIPE_BYTES);
+        unsafe { ::core::ptr::read((self.buffer as *const u8).add(index)) }
+    }
+
+    pub fn write_byte(&mut self, index: usize, value: u8) {
+        debug_assert!(self.active && self.buffer != 0 && index < LINUX_PIPE_BYTES);
+        unsafe {
+            ::core::ptr::write((self.buffer as *mut u8).add(index), value);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -265,6 +280,7 @@ pub struct ManagedProcess {
     pub pid: Word,
     pub parent_pid: Word,
     pub owner_pid: Word,
+    pub rootfs: super::context::RootfsContext,
     pub pcb: Word,
     pub program_break: Word,
     pub mapped_break: Word,
@@ -325,6 +341,7 @@ impl ManagedProcess {
         pid: 0,
         parent_pid: 0,
         owner_pid: 0,
+        rootfs: super::context::RootfsContext::DEFAULT,
         pcb: 0,
         program_break: 0,
         mapped_break: 0,
@@ -431,6 +448,9 @@ impl GraphicsSession {
 
 #[derive(Clone, Copy)]
 pub struct Runtime {
+    pub clients: [clients::ClientMemory; ALTER_MANAGED_PROCESS_MAX],
+    pub internal_shm: Word,
+    pub internal_shm_size: Word,
     pub posix_port: Word,
     pub posix_shm: Word,
     pub posix_shm_size: Word,
@@ -496,6 +516,9 @@ impl Runtime {
         terminal_shm_size: Word,
     ) -> Self {
         Self {
+            clients: [clients::ClientMemory::EMPTY; ALTER_MANAGED_PROCESS_MAX],
+            internal_shm: 0,
+            internal_shm_size: 0,
             posix_port,
             posix_shm,
             posix_shm_size,

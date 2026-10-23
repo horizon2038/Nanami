@@ -73,10 +73,18 @@ pub(super) fn sys_execve(
     if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
         return Err(ExecError::Errno(ENOEXEC));
     }
-    let interpreter = crate::common::dynamic::prepare(runtime, &loaded).map_err(map_load_error)?;
+    let rootfs = runtime.managed_process(pid).ok_or(ESRCH)?.rootfs;
+    let root = if rootfs.root_len != 0 {
+        &rootfs.root[..rootfs.root_len]
+    } else {
+        b"/alter/linux"
+    };
+    let interpreter =
+        crate::common::dynamic::prepare_in_root(runtime, &loaded, root).map_err(map_load_error)?;
     let preferred_image_base = preferred_exec_image_base(personality, &loaded.metadata);
     let exec_elf = current_elf_metadata_from_loaded(&loaded.metadata, preferred_image_base);
-    if let Err(error) = nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
+    if let Err(error) =
+        nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
     {
         let errno = map_request_error(error);
         nanami_runtime::println!(
@@ -103,6 +111,17 @@ pub(super) fn sys_execve(
     let (base, base_len) = basename_in_bytes(&exec_path, path_len);
     if !runtime.set_process_image_name(pid, &exec_path[base..base + base_len]) {
         return Err(ExecError::ImageReplaced);
+    }
+    if rootfs.root_len != 0 {
+        if runtime
+            .managed_process_mut(pid)
+            .ok_or(ExecError::ImageReplaced)?
+            .rootfs
+            .set_executable(&exec_path[..path_len])
+            .is_none()
+        {
+            return Err(ExecError::ImageReplaced);
+        }
     }
     if let Err(errno) = rewrite_linux_stack(
         runtime,

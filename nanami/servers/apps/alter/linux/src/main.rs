@@ -3,6 +3,7 @@
 #![feature(alloc_error_handler)]
 
 extern crate alloc;
+mod context_api;
 
 use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
 use nanami_runtime::{RequestError, Word};
@@ -53,7 +54,8 @@ fn alloc_error(layout: ::core::alloc::Layout) -> ! {
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::print!("[alter] bootstrap\n");
-    nanami_runtime::ipc::init_ipc_tls().map_err(|e| log_error("[alter] ipc tls init failed: ", e))?;
+    nanami_runtime::ipc::init_ipc_tls()
+        .map_err(|e| log_error("[alter] ipc tls init failed: ", e))?;
     let _ = nanami_runtime::heap::init_heap(ALTER_LINUX_HEAP_BYTES)
         .map_err(|e| log_error("[alter] heap init failed: ", e))?;
     let notification =
@@ -86,12 +88,22 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         0,
     );
     runtime.timer_port = timer_port;
+    let (scratch, scratch_bytes) = nanami_runtime::request_heap(ALTER_DEFAULT_SHM_BYTES)?;
+    runtime.internal_shm = scratch;
+    runtime.internal_shm_size = scratch_bytes;
+    runtime.client_shm = scratch;
+    runtime.client_shm_size = scratch_bytes;
     let mut pending = ReplyAction::DropReply;
 
     loop {
         let event = match pending {
             ReplyAction::Reply(status, detail0, detail1) => {
-                nanami_runtime::ipc::service_reply_receive_event(service_port, status, detail0, detail1)
+                nanami_runtime::ipc::service_reply_receive_event(
+                    service_port,
+                    status,
+                    detail0,
+                    detail1,
+                )
             }
             ReplyAction::FaultContinue {
                 hardware_context,
@@ -109,7 +121,14 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         };
 
         pending = match event {
-            ServiceEvent::Request(request) => handle_request(&mut runtime, request),
+            ServiceEvent::Request(request) => {
+                let reply = handle_request(&mut runtime, request);
+                // Fork/exec scratch must never overwrite another client's
+                // pending launch payload while it is being assembled.
+                runtime.client_shm = runtime.internal_shm;
+                runtime.client_shm_size = runtime.internal_shm_size;
+                reply
+            }
             ServiceEvent::Notification { identifier, .. } => {
                 if identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
                     linux::handle_timer_notification(&mut runtime, identifier);
@@ -157,6 +176,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     FaultAction::Park => ReplyAction::DropReply,
                     FaultAction::Terminate { pid, status } => {
                         runtime.mark_process_exited(pid, status);
+                        // Zombies retain exit status, not open pipe writers.
+                        linux::close_process_files(&mut runtime, pid);
                         notify_terminal_process_exit(&mut runtime, pid, status);
                         let parent_pid = runtime
                             .managed_process(pid)
@@ -297,7 +318,16 @@ fn connect_timer_service() -> Word {
 }
 
 fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
+    if let Some((address, bytes)) = runtime.client_memory(request.identifier) {
+        runtime.client_shm = address;
+        runtime.client_shm_size = bytes;
+    }
+    use nanami_client::uapi::alter::*;
     match request.code {
+        ALTER_REQUEST_PREPARE_CONTEXT
+        | ALTER_REQUEST_START_CONTEXT
+        | ALTER_REQUEST_DELETE_CONTEXT
+        | ALTER_REQUEST_SIGNAL_CONTEXT => context_api::handle(runtime, request),
         ALTER_REQUEST_CONTROL => handle_control(runtime, request),
         ALTER_REQUEST_LOAD_ELF => handle_load_elf(runtime, request),
         ALTER_REQUEST_SPAWN_INITRAMFS => handle_spawn_initramfs(runtime, request),
@@ -309,7 +339,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
     }
 }
 
-fn handle_status(runtime: &Runtime, request: ServiceRequest) -> ReplyAction {
+fn handle_status(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     if request.arg0 == 0 {
         return ReplyAction::Reply(
             nanami_runtime::OS_RESPONSE_OK,
@@ -317,9 +347,26 @@ fn handle_status(runtime: &Runtime, request: ServiceRequest) -> ReplyAction {
             runtime.loaded_entry,
         );
     }
-    let Some(process) = runtime.managed_process(request.arg0) else {
+    let Some(mut process) = runtime.managed_process(request.arg0).copied() else {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_OK, 1, 1);
     };
+    if process.rootfs.leader != 0 && process.owner_pid != request.identifier {
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+    }
+    // Also observe native faults/external termination. Ordinary Alter status
+    // queries retain their existing local-only path.
+    if process.rootfs.leader != 0 && !process.exited {
+        match nanami_runtime::request_process_status(process.pid) {
+            Ok((true, status)) => {
+                runtime.mark_process_exited(process.pid, status);
+                linux::close_process_files(runtime, process.pid);
+                process.exited = true;
+                process.exit_status = status;
+            }
+            Ok((false, _)) => {}
+            Err(error) => return ReplyAction::Reply(map_request_error_to_status(error), 0, 0),
+        }
+    }
     ReplyAction::Reply(
         nanami_runtime::OS_RESPONSE_OK,
         if process.exited { 1 } else { 0 },
@@ -331,6 +378,12 @@ fn handle_kill(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
     let pid = request.arg0;
     if pid == 0 || runtime.managed_process(pid).is_none() {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    if runtime
+        .managed_process(pid)
+        .is_some_and(|process| process.owner_pid != request.identifier)
+    {
+        return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
     }
     let signal = if request.arg1 == 0 { 1 } else { request.arg1 };
     let cleaned = cleanup_process_tree(runtime, pid, signal);
@@ -362,8 +415,28 @@ fn handle_control(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
             } else {
                 request.arg1
             };
+            if let Some(client) = runtime.attached_client(request.identifier) {
+                if size > client.bytes {
+                    return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+                }
+                return ReplyAction::Reply(
+                    nanami_runtime::OS_RESPONSE_OK,
+                    client.peer,
+                    client.bytes,
+                );
+            }
+            if !runtime.has_client_slot() {
+                return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            }
             match nanami_runtime::request_shared_memory(request.identifier, size) {
                 Ok((local, peer)) => {
+                    if !runtime.remember_client(request.identifier, local, peer, size) {
+                        return ReplyAction::Reply(
+                            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION,
+                            0,
+                            0,
+                        );
+                    }
                     runtime.client_shm = local;
                     runtime.client_shm_size = size;
                     ReplyAction::Reply(nanami_runtime::OS_RESPONSE_OK, peer, size)

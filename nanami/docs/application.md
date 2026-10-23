@@ -404,8 +404,13 @@ reboots. The checked-in x86_64 BusyBox sample is at
 [`samples/negoto/bundles/busybox/config.json`](../../samples/negoto/bundles/busybox/config.json).
 It starts `/bin/busybox sh -i` with a readonly rootfs. `process.terminal` stays
 false: the invoking Nanami Shell's terminal is used without allocating a PTY.
-Unsupported terminal ioctls return `ENOTTY`; BusyBox disables job control
-instead of looping on an uninitialized foreground process-group query.
+Alter implements `TIOCGPGRP`, `TIOCSPGRP` and `TIOCGSID` using tracked session
+and process-group state. `TIOCSCTTY` and `TIOCNOTTY` manage controlling-terminal
+association; another session's terminal cannot be stolen. Fork inherits the
+session/group and exec preserves them. Unknown ioctls still return `ENOTTY`.
+Stop-signal delivery and general guest signal handlers are outside these
+terminal-group operations; stop signals return `EOPNOTSUPP`, not a fake success
+or process termination. This is not a complete POSIX job-control subsystem.
 
 From the host repository root, copy the existing static Linux BusyBox into
 the bundle. Binary payloads are ignored by Git and must be copied again in a
@@ -512,8 +517,9 @@ kill/delete work, and one ID can be reused 20 times. It also launches the real
 native CLI for features/create/state/start/delete and 18 run/wait/delete cycles
 to check management-client detach/reuse.
 The interactive regression uses the real CLI and a native terminal, verifies
-a shell prompt and command output distinct from input echo, then exits and
-checks container cleanup.
+a shell prompt without a job-control-disabled warning, command output distinct
+from input echo, external fork/exec, pipelines and foreground transfer, then
+exits and checks container cleanup.
 
 ## Honoka Applications
 

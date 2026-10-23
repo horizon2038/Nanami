@@ -129,13 +129,9 @@ pub(super) fn sys_getpgid(
     current_pid: Word,
     target_pid: Word,
 ) -> Result<Word, i32> {
-    if target_pid == 0 {
-        return Ok(current_pid);
-    }
-    if runtime.managed_process(target_pid).is_some() {
-        return Ok(target_pid);
-    }
-    map_word(posix::posix_getpgid(runtime.posix_port, target_pid))
+    runtime
+        .process_group(current_pid, target_pid)
+        .map_err(super::job_control::errno)
 }
 
 pub(super) fn sys_kill(
@@ -144,6 +140,51 @@ pub(super) fn sys_kill(
     target_pid: Word,
     signal: Word,
 ) -> Result<Word, i32> {
+    if signal > super::LINUX_NSIG {
+        return Err(EINVAL);
+    }
+    if target_pid == 0 || (target_pid as isize) < 0 {
+        let current = runtime.managed_process(current_pid).ok_or(ESRCH)?;
+        let domain = current.rootfs.leader;
+        let group = if target_pid == 0 {
+            Some(current.job.group)
+        } else if target_pid == Word::MAX {
+            None
+        } else {
+            Some((target_pid as isize).checked_neg().ok_or(ESRCH)? as Word)
+        };
+        let mut targets = [0; crate::abi::ALTER_MANAGED_PROCESS_MAX];
+        let mut count = 0;
+        let mut signal_current = false;
+        for process in &runtime.managed {
+            if process.pid != 0
+                && !process.exited
+                && process.rootfs.leader == domain
+                && group.is_none_or(|group| process.job.group == group)
+                && (target_pid != Word::MAX || process.pid != current_pid)
+            {
+                if process.pid == current_pid {
+                    signal_current = true;
+                } else {
+                    targets[count] = process.pid;
+                    count += 1;
+                }
+            }
+        }
+        // A self-termination may wake a parent that immediately reaps the
+        // caller's record. Finish selecting/delivering to the other members first.
+        if signal_current {
+            targets[count] = current_pid;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(ESRCH);
+        }
+        for &target in &targets[..count] {
+            sys_kill(runtime, current_pid, target, signal)?;
+        }
+        return Ok(0);
+    }
     let leader = runtime
         .managed_process(current_pid)
         .ok_or(ESRCH)?
@@ -159,9 +200,6 @@ pub(super) fn sys_kill(
             return Err(ESRCH);
         }
     }
-    if target_pid == 0 || (target_pid as isize) < 0 {
-        return Ok(0);
-    }
     if signal == 0 {
         return if runtime.managed_process(target_pid).is_some() {
             Ok(0)
@@ -170,7 +208,24 @@ pub(super) fn sys_kill(
         };
     }
     if runtime.managed_process(target_pid).is_some() {
+        // A running task is unchanged by SIGCONT. Stop-signal delivery needs
+        // guest signal/stop state, and must not be confused with termination.
+        if signal == super::LINUX_SIGCONT {
+            return Ok(0);
+        }
+        if matches!(
+            signal,
+            super::LINUX_SIGSTOP
+                | super::LINUX_SIGTSTP
+                | super::LINUX_SIGTTIN
+                | super::LINUX_SIGTTOU
+        ) {
+            return Err(super::EOPNOTSUPP);
+        }
         nanami_runtime::request_process_kill(target_pid, signal).map_err(map_request_error)?;
+        runtime.mark_process_exited(target_pid, 128 + signal);
+        super::close_process_files(runtime, target_pid);
+        super::wake_waiter_for_child(runtime, target_pid);
         return Ok(0);
     }
     map_unit(posix::posix_kill(runtime.posix_port, target_pid, signal), 0)

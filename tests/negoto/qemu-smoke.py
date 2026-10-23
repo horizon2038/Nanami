@@ -57,7 +57,10 @@ with (logs / "qemu.log").open("w") as diagnostics:
                     raise RuntimeError("QEMU monitor timed out")
                 data += os.read(process.stdout.fileno(), 4096)
 
-        wait_for(lambda text: re.search(r"\[\s*negoto\] online", text) and re.search(r"\[\s*shell\] font init end", text)
+        # SMP serial output can interleave inside Negoto's one-off startup
+        # line. The guest verifies its service connection directly; use GUI
+        # readiness here only to avoid typing before the shell accepts input.
+        wait_for(lambda text: re.search(r"\[\s*shell\] font init end", text)
                  and "[              honoka] online" in text)
         time.sleep(2)
         keys = {"/": "slash", "-": "minus", "\n": "ret"}

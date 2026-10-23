@@ -6,6 +6,9 @@ mod descriptors;
 mod events;
 #[path = "state/io.rs"]
 mod io;
+#[path = "state/job_control.rs"]
+pub mod job_control;
+pub use job_control::{JobControlError, ProcessJobControl, TerminalControl};
 #[path = "state/mappings.rs"]
 mod mappings;
 #[path = "state/processes.rs"]
@@ -279,6 +282,7 @@ impl ProcessMapping {
 pub struct ManagedProcess {
     pub pid: Word,
     pub parent_pid: Word,
+    pub job: ProcessJobControl,
     pub owner_pid: Word,
     pub rootfs: super::context::RootfsContext,
     pub pcb: Word,
@@ -340,6 +344,7 @@ impl ManagedProcess {
     pub const EMPTY: Self = Self {
         pid: 0,
         parent_pid: 0,
+        job: ProcessJobControl::EMPTY,
         owner_pid: 0,
         rootfs: super::context::RootfsContext::DEFAULT,
         pcb: 0,
@@ -448,6 +453,7 @@ impl GraphicsSession {
 
 #[derive(Clone, Copy)]
 pub struct Runtime {
+    pub terminal_controls: [TerminalControl; ALTER_MANAGED_PROCESS_MAX],
     pub clients: [clients::ClientMemory; ALTER_MANAGED_PROCESS_MAX],
     pub internal_shm: Word,
     pub internal_shm_size: Word,
@@ -516,6 +522,7 @@ impl Runtime {
         terminal_shm_size: Word,
     ) -> Self {
         Self {
+            terminal_controls: [TerminalControl::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             clients: [clients::ClientMemory::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             internal_shm: 0,
             internal_shm_size: 0,
@@ -588,8 +595,24 @@ fn default_files(terminal_id: Word) -> [LinuxFile; LINUX_FD_MAX] {
     files
 }
 
-fn wait_target_matches(child_pid: Word, target_pid: Word) -> bool {
-    target_pid == 0 || target_pid == usize::MAX as Word || target_pid == child_pid
+fn wait_target_matches(
+    child_pid: Word,
+    target_pid: Word,
+    child_group: Word,
+    parent_group: Word,
+) -> bool {
+    if target_pid == Word::MAX {
+        return true;
+    }
+    if target_pid == 0 {
+        return child_group == parent_group;
+    }
+    if (target_pid as isize) < 0 {
+        return (target_pid as isize)
+            .checked_neg()
+            .is_some_and(|group| group as Word == child_group);
+    }
+    target_pid == child_pid
 }
 
 #[derive(Clone, Copy)]

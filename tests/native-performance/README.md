@@ -26,6 +26,9 @@ crate. `linux-readiness` covers blocking pipe reads/writes and EOF wakeups;
 `linux-pipe` checks circular I/O, atomic writes and copy-failure rollback.
 The [Negoto application guide](../../nanami/docs/application.md#negoto-oci-bundles)
 documents the unmodified BusyBox fixture and real QEMU lifecycle tests.
+`linux-job-control` exercises the production session/process-group model and
+tty ioctl marshaling, including fork inheritance, exec restrictions, foreground
+group transfer, controlling-terminal ownership, invalid groups and bad pointers.
 
 The HTTP ARP, TCP receive-flow-control, and NIC backlog regression tests are documented in
 [HTTP / network regressions](../network/README.md).

@@ -31,6 +31,7 @@ pub(super) const EINVAL: i32 = 22;
 pub(super) const EMFILE: i32 = 24;
 
 pub(super) const ENOTTY: i32 = 25;
+pub(super) const ENXIO: i32 = 6;
 
 pub(super) const ESPIPE: i32 = 29;
 
@@ -256,6 +257,11 @@ pub(super) const TCP_FLAG_PSH: Word = 0x08;
 pub(super) const TCP_FLAG_ACK: Word = 0x10;
 
 pub(super) const LINUX_SIGCHLD: Word = 17;
+pub(super) const LINUX_SIGCONT: Word = 18;
+pub(super) const LINUX_SIGSTOP: Word = 19;
+pub(super) const LINUX_SIGTSTP: Word = 20;
+pub(super) const LINUX_SIGTTIN: Word = 21;
+pub(super) const LINUX_SIGTTOU: Word = 22;
 
 pub(super) const LINUX_CLONE_VM: Word = 0x0000_0100;
 
@@ -362,6 +368,12 @@ pub(super) const LINUX_TCSETSW: Word = 0x5403;
 pub(super) const LINUX_TCSETSF: Word = 0x5404;
 
 pub(super) const LINUX_TIOCGWINSZ: Word = 0x5413;
+pub(super) const LINUX_TIOCSWINSZ: Word = 0x5414;
+pub(super) const LINUX_TIOCSCTTY: Word = 0x540e;
+pub(super) const LINUX_TIOCGPGRP: Word = 0x540f;
+pub(super) const LINUX_TIOCSPGRP: Word = 0x5410;
+pub(super) const LINUX_TIOCNOTTY: Word = 0x5422;
+pub(super) const LINUX_TIOCGSID: Word = 0x5429;
 
 pub(super) const LINUX_INPUT_EVENT_BYTES: Word = 24;
 
@@ -474,6 +486,7 @@ pub(super) const LINUX_VSUSP: Word = 10;
 pub(super) const LINUX_VEOL: Word = 11;
 
 pub(super) const LINUX_WNOHANG: Word = 1;
+pub(super) const LINUX_WUNTRACED: Word = 2;
 
 pub(super) const LINUX_STACK_T_BYTES: Word = 24;
 

@@ -126,6 +126,12 @@ impl Console {
             let bytes = unsafe { core::slice::from_raw_parts(self.shm as *const u8, count) };
             output.extend_from_slice(bytes);
             assert!(
+                !output
+                    .windows(b"job control turned off".len())
+                    .any(|window| window == b"job control turned off"),
+                "interactive shell disabled job control"
+            );
+            assert!(
                 output.len() <= 64 * 1024,
                 "unexpected terminal output volume"
             );
@@ -269,11 +275,17 @@ fn main() -> nanami_runtime::NanamiResult {
     // The expected marker is not contiguous in the input, avoiding echo-only passes.
     console.send(b"printf 'nego''to-interactive-ok\\n'\n");
     console.expect(b"negoto-interactive-ok", timer);
+    console.send(b"/bin/busybox true || exit 71; printf 'nego''to-exec-ok\\n'\n");
+    console.expect(b"negoto-exec-ok", timer);
+    console.send(b"/bin/busybox echo pipe-ok | /bin/busybox cat || exit 72\n");
+    console.expect(b"pipe-ok\r\n", timer);
+    console.send(b"/bin/busybox sleep 0.05 & fg || exit 73; printf 'nego''to-fg-ok\\n'\n");
+    console.expect(b"negoto-fg-ok", timer);
     console.send(b"exit\n");
     native.wait(pid, timer);
     assert!(client.command("state", "tty").is_err());
     nanami_runtime::println!(
-        "NEGOTO-INTERACTIVE-PASS prompt=true input=true exit=true cleanup=true"
+        "NEGOTO-INTERACTIVE-PASS prompt=true input=true job-control=true fork-exec=true pipeline=true exit=true cleanup=true"
     );
     let (status, _, _) =
         nanami_runtime::call_service_port(port, NEGOTO_REQUEST_DETACH, 0, 0, 0, 0, 1)?;

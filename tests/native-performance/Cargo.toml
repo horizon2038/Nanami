@@ -12,6 +12,10 @@ name = "negoto"
 path = "negoto.rs"
 
 [[test]]
+name = "linux-job-control"
+path = "linux-job-control.rs"
+
+[[test]]
 name = "linux-pipe"
 path = "linux-pipe.rs"
 

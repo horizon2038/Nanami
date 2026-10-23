@@ -83,6 +83,7 @@ impl Runtime {
                 self.managed[i] = ManagedProcess {
                     pid,
                     parent_pid,
+                    job: ProcessJobControl::EMPTY,
                     owner_pid,
                     rootfs,
                     pcb,
@@ -132,6 +133,7 @@ impl Runtime {
                     readiness_wait: None,
                     mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
                 };
+                self.initialize_job_control(pid, parent_pid);
                 return true;
             }
             i += 1;
@@ -140,12 +142,15 @@ impl Runtime {
     }
 
     pub fn has_child(&self, parent_pid: Word, target_pid: Word) -> bool {
+        let group = self
+            .managed_process(parent_pid)
+            .map_or(0, |process| process.job.group);
         let mut i = 0usize;
         while i < self.managed.len() {
             let child = self.managed[i];
             if child.pid != 0
                 && child.parent_pid == parent_pid
-                && wait_target_matches(child.pid, target_pid)
+                && wait_target_matches(child.pid, target_pid, child.job.group, group)
             {
                 return true;
             }
@@ -155,13 +160,16 @@ impl Runtime {
     }
 
     pub fn exited_child(&self, parent_pid: Word, target_pid: Word) -> Option<(Word, Word)> {
+        let group = self
+            .managed_process(parent_pid)
+            .map_or(0, |process| process.job.group);
         let mut i = 0usize;
         while i < self.managed.len() {
             let child = self.managed[i];
             if child.pid != 0
                 && child.parent_pid == parent_pid
                 && child.exited
-                && wait_target_matches(child.pid, target_pid)
+                && wait_target_matches(child.pid, target_pid, child.job.group, group)
             {
                 return Some((child.pid, child.exit_status));
             }
@@ -200,6 +208,7 @@ impl Runtime {
             return false;
         };
         process.program_break = 0;
+        process.job.executed = true;
         process.mapped_break = 0;
         process.fs_base = 0;
         process.exited = false;
@@ -397,6 +406,12 @@ impl Runtime {
     }
 
     pub fn mark_process_exited(&mut self, pid: Word, status: Word) {
+        if self
+            .managed_process(pid)
+            .is_some_and(|process| process.job.session == pid)
+        {
+            self.release_session_terminal(pid);
+        }
         if let Some(process) = self.managed_process_mut(pid) {
             process.exited = true;
             process.readiness_wait = None;

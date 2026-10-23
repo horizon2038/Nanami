@@ -316,6 +316,13 @@ records survive ordinary Alter zombie cleanup until Negoto deletes them.
 Deletion closes resources before native reaping and retains failed records
 for retry. CLI exit does not destroy a container.
 
+Alter owns session/process-group identity and controlling-terminal association;
+these are not added to Alpha or A9N. `TIOCGPGRP`/`TIOCSPGRP`/`TIOCGSID` read and
+update actual foreground-group/session state. Fork inherits group membership,
+exec preserves it, and foreign-session/group changes are rejected. Wait targets
+and group-directed signals use the same PGIDs. Stop-signal and general signal
+handler delivery remain separate from this terminal-group implementation.
+
 Empty blocking pipe reads park on existing readiness waiters while a writer
 remains; EOF requires the last writer to close. Full writes use the same
 wake/retry path. Exit closes FDs before wait/reap, so zombie pipe writers cannot

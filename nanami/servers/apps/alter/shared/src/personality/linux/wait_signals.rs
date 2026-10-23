@@ -3,7 +3,7 @@ use super::{
     write_target_memory, write_u32_to_target, EmulationAction, LinuxSyscallContext, Runtime, Word,
     ECHILD, EFAULT, EINTR, EINVAL, ENOMEM, ESRCH, LINUX_KERNEL_SIGACTION_BYTES, LINUX_MINSIGSTKSZ,
     LINUX_NSIG, LINUX_SIGSET_BYTES, LINUX_SS_AUTODISARM, LINUX_SS_DISABLE, LINUX_STACK_T_BYTES,
-    LINUX_WNOHANG, SYS_VFORK, SYS_WAIT4,
+    LINUX_WNOHANG, LINUX_WUNTRACED, SYS_VFORK, SYS_WAIT4,
 };
 
 pub(super) fn sys_wait4(
@@ -14,7 +14,7 @@ pub(super) fn sys_wait4(
     let target_pid = context.args[0];
     let status_ptr = context.args[1];
     let options = context.args[2];
-    if (options & !LINUX_WNOHANG) != 0 {
+    if (options & !(LINUX_WNOHANG | LINUX_WUNTRACED)) != 0 {
         return EmulationAction::Return(-(EINVAL as isize));
     }
     if let Some((child_pid, exit_status)) = runtime.exited_child(pid, target_pid) {
@@ -128,10 +128,10 @@ pub(super) fn sys_rt_sigsuspend(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> EmulationAction {
-    if runtime.exited_child(pid, 0).is_some() || !runtime.has_child(pid, 0) {
+    if runtime.exited_child(pid, Word::MAX).is_some() || !runtime.has_child(pid, Word::MAX) {
         return EmulationAction::Return(-(EINTR as isize));
     }
-    if runtime.park_signal_waiter(pid, 0, context) {
+    if runtime.park_signal_waiter(pid, Word::MAX, context) {
         EmulationAction::Park
     } else {
         EmulationAction::Return(-(ESRCH as isize))

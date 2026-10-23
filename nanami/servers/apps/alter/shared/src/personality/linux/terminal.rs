@@ -39,8 +39,13 @@ pub(super) fn sys_terminal_read_now(
     };
     if let Some(bytes) = bytes {
         if bytes != 0 {
-            nanami_runtime::request_process_memory_write(pid, user_buffer, runtime.terminal_shm, bytes)
-                .map_err(map_request_error)?;
+            nanami_runtime::request_process_memory_write(
+                pid,
+                user_buffer,
+                runtime.terminal_shm,
+                bytes,
+            )
+            .map_err(map_request_error)?;
         }
         return Ok(Some(bytes));
     }
@@ -76,24 +81,28 @@ pub(super) fn drain_terminal_canonical_line(
 }
 
 fn fill_terminal_canonical_line(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
-    if runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready {
+    if runtime
+        .managed_process(pid)
+        .ok_or(ESRCH)?
+        .terminal_line_ready
+    {
         return Ok(());
     }
     let terminal_id = terminal_id_for_pid(runtime, pid)?;
     loop {
-        let bytes = nanami_client::terminal::terminal_read_input(
-            runtime.terminal_port,
-            terminal_id,
-            0,
-            1,
-        )
-        .map_err(map_request_error)?;
+        let bytes =
+            nanami_client::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 1)
+                .map_err(map_request_error)?;
         if bytes == 0 {
             return Ok(());
         }
         let byte = unsafe { ::core::ptr::read(runtime.terminal_shm as *const u8) };
         push_terminal_input_byte(runtime, pid, byte)?;
-        if runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready {
+        if runtime
+            .managed_process(pid)
+            .ok_or(ESRCH)?
+            .terminal_line_ready
+        {
             return Ok(());
         }
     }
@@ -104,11 +113,15 @@ pub(super) fn terminal_readable(runtime: &mut Runtime, pid: Word) -> Result<bool
     ensure_terminal_input_notification(runtime, terminal_id)?;
     if runtime.terminal_canonical(pid).unwrap_or(true) {
         fill_terminal_canonical_line(runtime, pid)?;
-        Ok(runtime.managed_process(pid).ok_or(ESRCH)?.terminal_line_ready)
+        Ok(runtime
+            .managed_process(pid)
+            .ok_or(ESRCH)?
+            .terminal_line_ready)
     } else {
         // A zero-length service read reports queued bytes without consuming.
         nanami_client::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 0)
-            .map(|bytes| bytes != 0).map_err(map_request_error)
+            .map(|bytes| bytes != 0)
+            .map_err(map_request_error)
     }
 }
 
@@ -261,6 +274,9 @@ pub(super) fn sys_ioctl(
         }
         _ => return Err(ENOTTY),
     }
+    if let Some(result) = super::job_control::terminal_ioctl(runtime, pid, request, argument) {
+        return result;
+    }
     if request == LINUX_TCGETS {
         if argument == 0 {
             return Err(EFAULT);
@@ -270,8 +286,17 @@ pub(super) fn sys_ioctl(
             .map(|process| (process.terminal_canonical, process.terminal_echo))
             .unwrap_or((true, true));
         write_linux_termios(runtime.posix_shm, canonical, echo);
-        if let Some(termios) = runtime.managed_process(pid).and_then(|p| p.terminal_termios) {
-            unsafe { ::core::ptr::copy_nonoverlapping(termios.as_ptr(), runtime.posix_shm as *mut u8, termios.len()); }
+        if let Some(termios) = runtime
+            .managed_process(pid)
+            .and_then(|p| p.terminal_termios)
+        {
+            unsafe {
+                ::core::ptr::copy_nonoverlapping(
+                    termios.as_ptr(),
+                    runtime.posix_shm as *mut u8,
+                    termios.len(),
+                );
+            }
         }
         write_target_memory(runtime, pid, argument, LINUX_TERMIOS_BYTES)?;
         return Ok(0);
@@ -282,7 +307,13 @@ pub(super) fn sys_ioctl(
         }
         read_target_memory(runtime, pid, argument, LINUX_TERMIOS_BYTES)?;
         let mut termios = [0; 36];
-        unsafe { ::core::ptr::copy_nonoverlapping(runtime.posix_shm as *const u8, termios.as_mut_ptr(), termios.len()); }
+        unsafe {
+            ::core::ptr::copy_nonoverlapping(
+                runtime.posix_shm as *const u8,
+                termios.as_mut_ptr(),
+                termios.len(),
+            );
+        }
         let lflag = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 12) as *const u32) };
         let oflag = u32::from_ne_bytes(termios[4..8].try_into().unwrap());
         let echo_enabled = (lflag & LINUX_ECHO) != 0;
@@ -300,11 +331,19 @@ pub(super) fn sys_ioctl(
                 }
             }
         }
-        nanami_client::terminal::terminal_set_output_crlf(runtime.terminal_port, terminal_id,
-            oflag & LINUX_OPOST != 0 && oflag & LINUX_ONLCR != 0).map_err(map_request_error)?;
+        nanami_client::terminal::terminal_set_output_crlf(
+            runtime.terminal_port,
+            terminal_id,
+            oflag & LINUX_OPOST != 0 && oflag & LINUX_ONLCR != 0,
+        )
+        .map_err(map_request_error)?;
         if request == LINUX_TCSETSF {
-            nanami_client::terminal::terminal_clear(runtime.terminal_port, terminal_id,
-                nanami_client::terminal::TERMINAL_CLEAR_INPUT).map_err(map_request_error)?;
+            nanami_client::terminal::terminal_clear(
+                runtime.terminal_port,
+                terminal_id,
+                nanami_client::terminal::TERMINAL_CLEAR_INPUT,
+            )
+            .map_err(map_request_error)?;
         }
         nanami_client::terminal::terminal_set_echo(
             runtime.terminal_port,
@@ -331,19 +370,25 @@ pub(super) fn sys_ioctl(
         write_target_memory(runtime, pid, argument, 8)?;
         return Ok(0);
     }
-    if request == 0x5414 { // TIOCSWINSZ
-        if argument == 0 { return Err(EFAULT); }
+    if request == super::LINUX_TIOCSWINSZ {
+        // TIOCSWINSZ
+        if argument == 0 {
+            return Err(EFAULT);
+        }
         read_target_memory(runtime, pid, argument, 8)?;
         let rows = unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const u16) };
         let cols = unsafe { ::core::ptr::read_unaligned((runtime.posix_shm + 2) as *const u16) };
         let terminal_id = terminal_id_for_pid(runtime, pid)?;
-        nanami_client::terminal::terminal_set_size(runtime.terminal_port, terminal_id, cols as Word, rows as Word)
-            .map_err(map_request_error)?;
+        nanami_client::terminal::terminal_set_size(
+            runtime.terminal_port,
+            terminal_id,
+            cols as Word,
+            rows as Word,
+        )
+        .map_err(map_request_error)?;
         return Ok(0);
     }
-    // Never claim that an unsupported query filled the caller's output buffer.
-    // In particular, a fake TIOCGPGRP success traps interactive shells in their
-    // foreground-process-group wait loop. Job control is not implemented.
+    // Unrecognized requests must not claim to have filled an output buffer.
     Err(ENOTTY)
 }
 

@@ -252,7 +252,13 @@ pub(super) fn open_virtual_node(
             file.posix_fd = backing;
             file
         }
-        VirtualNode::DevTty => LinuxFile::terminal(),
+        VirtualNode::DevTty => {
+            let process = runtime.managed_process(pid).ok_or(ESRCH)?;
+            if process.job.controlling_terminal == 0 {
+                return Err(super::ENXIO);
+            }
+            LinuxFile::terminal()
+        }
         VirtualNode::DevNull | VirtualNode::DevZero => {
             LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)
         }

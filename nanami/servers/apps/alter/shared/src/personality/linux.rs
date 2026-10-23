@@ -46,6 +46,8 @@ use network_packet::*;
 #[path = "linux/terminal.rs"]
 mod terminal;
 use terminal::*;
+#[path = "linux/job_control.rs"]
+mod job_control;
 
 #[path = "linux/pipe.rs"]
 mod pipe;
@@ -690,9 +692,31 @@ pub fn dispatch_syscall(
             context.args[2],
             false,
         ),
-        SYS_SETPGID => Ok(0),
+        SYS_SETPGID => runtime
+            .set_process_group(native_pid, context.args[0], context.args[1])
+            .map(|_| 0)
+            .map_err(job_control::errno),
         SYS_GETPGID => sys_getpgid(runtime, native_pid, context.args[0]),
-        SYS_KILL => sys_kill(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_GETPGRP => runtime
+            .process_group(native_pid, 0)
+            .map_err(job_control::errno),
+        SYS_SETSID => runtime
+            .create_session(native_pid)
+            .map_err(job_control::errno),
+        SYS_GETSID => runtime
+            .process_session(native_pid, context.args[0])
+            .map_err(job_control::errno),
+        SYS_KILL => {
+            let result = sys_kill(runtime, native_pid, context.args[0], context.args[1]);
+            if context.args[1] != 0
+                && runtime
+                    .managed_process(native_pid)
+                    .is_none_or(|process| process.exited)
+            {
+                return EmulationAction::Exit(128 + context.args[1]);
+            }
+            result
+        }
         SYS_ARCH_PRCTL => sys_arch_prctl(runtime, native_pid, context.args[0], context.args[1]),
         SYS_GETTID => Ok(native_pid),
         SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(

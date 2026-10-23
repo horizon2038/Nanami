@@ -308,13 +308,7 @@ impl Shell {
 
     fn present_band(&self, y: usize, height: usize) {
         let before = nanami_runtime::diagnostics::stamp();
-        let result = if push_damage_rect(
-            self.surface.base,
-            0,
-            y,
-            self.surface.width,
-            height,
-        ) {
+        let result = if push_damage_rect(self.surface.base, 0, y, self.surface.width, height) {
             nanami_runtime::ipc::notification_notify(self.present_notification)
         } else {
             nanami_client::gfx::honoka::honoka_invalidate_logical_framebuffer(
@@ -648,13 +642,13 @@ impl Shell {
         let mut ordinal = 0usize;
         while ordinal < 64 {
             match nanami_runtime::service_info_by_ordinal(ordinal as Word) {
-                Ok((pid, service_kind)) => {
+                Ok(service) => {
                     let mut line = [0u8; COLS];
                     let mut pos = 0usize;
                     pos = append_bytes(&mut line, pos, b"  pid=");
-                    pos = append_decimal(&mut line, pos, pid);
+                    pos = append_decimal(&mut line, pos, service.owner_pid);
                     pos = append_bytes(&mut line, pos, b"  ");
-                    let _ = append_bytes(&mut line, pos, service_name(service_kind));
+                    let _ = append_bytes(&mut line, pos, service.name().as_bytes());
                     self.push_line(line);
                 }
                 Err(_) => break,
@@ -2224,20 +2218,6 @@ fn format_mac_line(prefix: &[u8], mac: [u8; 6]) -> [u8; COLS] {
         i += 1;
     }
     line
-}
-
-fn service_name(kind: Word) -> &'static [u8] {
-    match kind {
-        nanami_client::registry::SERVICE_KIND_NET_DEVICE => b"net-device",
-        nanami_client::registry::SERVICE_KIND_NETWORK_SERVICE => b"network-service",
-        nanami_client::registry::SERVICE_KIND_TIMER_SERVICE => b"timer-service",
-        nanami_client::registry::SERVICE_KIND_DISPLAY_SERVICE => b"display_service",
-        nanami_client::registry::SERVICE_KIND_INPUT_SERVICE => b"input-service",
-        nanami_client::registry::SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
-        nanami_client::registry::SERVICE_KIND_VFS_SERVICE => b"vfs-service",
-        nanami_client::registry::SERVICE_KIND_BLOCK_DEVICE => b"block-device",
-        _ => b"unknown-service",
-    }
 }
 
 fn bytes_eq(a: &[u8], b: &[u8]) -> bool {

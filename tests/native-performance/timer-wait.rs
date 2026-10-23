@@ -8,12 +8,16 @@ pub const OS_RESPONSE_OK: Word = 0;
 pub const PROCESS_SLOT_NOTIFICATION: Word = 21;
 #[derive(Debug, PartialEq)]
 pub enum RequestError {
+    InvalidArgument,
     Status(Word),
     Protocol,
     Exhausted,
 }
 #[derive(Default)]
 struct State {
+    bound: Word,
+    requested_slot: Word,
+    fires_during_rpc: bool,
     now: Word,
     requested: Word,
     deferred: Word,
@@ -24,7 +28,7 @@ pub fn call_port(
     _: Word,
     code: Word,
     delay: Word,
-    _: Word,
+    source_slot: Word,
     _: Word,
     _: Word,
     _: u8,
@@ -34,6 +38,11 @@ pub fn call_port(
             return Ok((0, s.now, 1000));
         }
         s.requested = delay;
+        s.requested_slot = source_slot;
+        if s.fires_during_rpc {
+            s.now = delay;
+            s.deferred |= TIMER;
+        }
         Ok((0, 0, 0))
     })
 }
@@ -42,12 +51,15 @@ pub mod ipc {
     pub fn process_slot_descriptor(slot: Word) -> Word {
         slot
     }
+    pub fn bound_notification_slot() -> Result<Word, RequestError> {
+        STATE.with_borrow(|s| Ok(s.bound))
+    }
     pub fn preserve_interrupted_notification(badge: Word) {
         STATE.with_borrow_mut(|s| s.deferred |= badge);
     }
     pub fn notification_wait(slot: Word) -> Result<Word, RequestError> {
         STATE.with_borrow_mut(|s| {
-            if slot == 21 && s.deferred != 0 {
+            if slot == s.bound && s.deferred != 0 {
                 return Ok(std::mem::take(&mut s.deferred));
             }
             let (time, badge) = s.notifications.pop_front().ok_or(RequestError::Exhausted)?;
@@ -63,10 +75,24 @@ const IRQ: Word = 1 << 16;
 fn setup(events: &[(Word, Word)]) {
     STATE.with_borrow_mut(|s| {
         *s = State {
+            bound: 21,
             notifications: events.iter().copied().collect(),
             ..State::default()
         }
     });
+}
+
+#[test]
+fn sleep_on_irq_alias_consumes_a_timer_badge_deferred_during_its_rpc() {
+    setup(&[]);
+    STATE.with_borrow_mut(|s| {
+        s.bound = 18;
+        s.deferred = IRQ;
+        s.fires_during_rpc = true;
+    });
+    timer::timer_service_sleep_milliseconds(24, 100).unwrap();
+    STATE.with_borrow(|s| assert_eq!(s.requested_slot, 18));
+    assert_eq!(ipc::notification_wait(18), Ok(IRQ));
 }
 #[test]
 fn sleep_preserves_unrelated_and_combined_irq_badges() {

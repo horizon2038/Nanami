@@ -2,11 +2,16 @@ mod boot;
 #[cfg(target_arch = "x86_64")]
 mod boot_trace;
 mod control_requests;
+mod domain_manifest;
+mod domains;
 mod memory_copy;
 mod memory_requests;
 mod mmio;
-mod process_priority;
+mod process_policy;
 mod process_requests;
+mod service_buffers;
+mod service_events;
+mod service_requests;
 mod shared_memory;
 mod support;
 mod version_info;
@@ -19,7 +24,7 @@ mod arch_impl;
 #[path = "alpha/arch/aarch64.rs"]
 mod arch_impl;
 
-use self::process_priority::process_priority_for_image;
+use self::process_policy::{ComponentSpec, ProcessPolicies, ProcessPolicy};
 use self::support::*;
 
 use crate::nanami_core::capability_space::RootCapabilitySpace;
@@ -52,16 +57,20 @@ use crate::nanami_utils::heap::init_global_heap;
 use crate::{debug, error, info, warn};
 use alloc::vec::Vec;
 use core::ptr;
+use nanami_uapi::alpha::{
+    AlphaEnvironment, FramebufferInformation as InitialFramebufferInformation,
+};
 use nanami_uapi::os::{
     NANAMI_INFO_ARCHITECTURE_NAME, NANAMI_INFO_KERNEL_VERSION, NANAMI_INFO_MEMORY,
     NANAMI_INFO_OS_VERSION, NANAMI_INFO_PLATFORM_NAME, NANAMI_INFO_PROCESS, NANAMI_INFO_SMP,
 };
-use nun::{
-    arch, CapabilityDescriptor, CapabilityError, CapabilityType, FramebufferInfo, InitInfo,
-    InitSlotOffset, Word,
-};
+use nun::{arch, CapabilityDescriptor, CapabilityError, CapabilityType, Word};
 
 const ORIGINAL_OS_PORT_SLOT: usize = 64;
+const SERVICE_DIRECTORY_SLOT: usize = 65;
+const EVENT_DIRECTORY_SLOT: usize = 66;
+const NOTIFICATION_COPY_TEMP_SLOT: usize = 67;
+const SERVICE_DIRECTORY_RADIX: usize = 8;
 const PROCESS_ROOT_RADIX: usize = 8;
 const PROCESS_SLOT_PCB: usize = 1;
 const PROCESS_SLOT_OS_PORT: usize = 2;
@@ -73,6 +82,9 @@ const PROCESS_SLOT_FRAME_NODE: usize = 7;
 const PROCESS_SLOT_SERVICE_PORT: usize = 20;
 const PROCESS_SLOT_NOTIFICATION_PORT: usize = 21;
 const PROCESS_SLOT_FAULT_RESOLVER: usize = 22;
+// A9N ObjectRights READ|WRITE: fixed identity, no COPY or MODIFY.
+// READ is temporarily retained for the current target-slot cleanup contract.
+const IDENTIFIED_IPC_RIGHTS: Word = 0b11;
 const PROCESS_FRAME_DIRECTORY_RADIX: usize = 10;
 const PROCESS_FRAME_NODE_RADIX: usize = 9;
 const PROCESS_FRAME_CHUNK_PAGES: usize = 1 << PROCESS_FRAME_NODE_RADIX;
@@ -102,7 +114,6 @@ const ALPHA_RUNTIME_STACK_BASE: usize = 0x5000_0000;
 const ALPHA_RUNTIME_STACK_PAGES: usize = 1024;
 const ALPHA_HEAP_BASE: usize = 0x5800_0000;
 const ALPHA_HEAP_PAGES: usize = 8192;
-const GENERIC_NODE_RADIX: usize = 7;
 const PROCESS_DEVICE_SLOT_MIN: usize = 8;
 const PROCESS_DEVICE_SLOT_MAX: usize = (1 << PROCESS_ROOT_RADIX) - 1;
 const PROCESS_IRQ_NOTIFICATION_ALIAS_MIN: usize = 224;
@@ -113,11 +124,19 @@ const FRAMEBUFFER_INFORMATION_REGION: usize = 0;
 const FRAMEBUFFER_INFORMATION_GEOMETRY: usize = 1;
 const FRAMEBUFFER_INFORMATION_FORMAT: usize = 2;
 const FRAMEBUFFER_INFORMATION_COLOR_AND_ID: usize = 3;
-const PROCESS_ROOT_RESERVED_SLOTS: [usize; 17] = [
+const PROCESS_ROOT_RESERVED_SLOTS: [usize; 25] = [
     1024,
     1025,
     1026,
     1027, // physical generic node candidates
+    1028,
+    1029,
+    1030,
+    1031, // kernel-object pool candidates
+    1040,
+    1041,
+    1042,
+    1043, // initial frame metadata pool candidates
     1100,
     1101,
     1102,
@@ -133,12 +152,9 @@ const PROCESS_ROOT_RESERVED_SLOTS: [usize; 17] = [
     ALPHA_RUNTIME_STACK_NODE_SLOT,
 ];
 
-const INITRAMFS_IMAGE: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/servers/initramfs.cpio"
-));
-
 pub struct Alpha {
+    initramfs_image: &'static [u8],
+    boot_configuration: &'static [u8],
     root: RootCapabilitySpace,
     memory: MemoryManager,
     processes: ProcessManager,
@@ -146,55 +162,26 @@ pub struct Alpha {
     initial_framebuffer: InitialFramebufferInformation,
     interrupt_region: CapabilityDescriptor,
     root_io_port: CapabilityDescriptor,
-    driver_manager_pid: usize,
     architecture_name: [u8; 32],
     platform_name: [u8; 32],
     kernel_version: alloc::string::String,
     platform_rsdp_address: usize,
     runtime_stack_top: usize,
     copy_window: memory_copy::CopyWindow,
-}
-
-#[derive(Clone, Copy)]
-struct InitialFramebufferInformation {
-    display_id: usize,
-    address: usize,
-    size_bytes: usize,
-    width: usize,
-    height: usize,
-    stride: usize,
-    bits_per_pixel: usize,
-    red_position: usize,
-    red_size: usize,
-    green_position: usize,
-    green_size: usize,
-    blue_position: usize,
-    blue_size: usize,
-}
-
-impl InitialFramebufferInformation {
-    const UNAVAILABLE: Self = Self {
-        display_id: 0,
-        address: 0,
-        size_bytes: 0,
-        width: 0,
-        height: 0,
-        stride: 0,
-        bits_per_pixel: 0,
-        red_position: 0,
-        red_size: 0,
-        green_position: 0,
-        green_size: 0,
-        blue_position: 0,
-        blue_size: 0,
-    };
-}
-
-#[derive(Clone, Copy)]
-struct BootListEntry<'a> {
-    name: &'a str,
-    priority: Word,
-    image_path: &'a str,
+    launch_capabilities: nanami_uapi::alpha::SelfCapabilities,
+    platform_information: nanami_uapi::alpha::PlatformInformation,
+    domain_id: usize,
+    children: Vec<domains::ChildDomain>,
+    pending_children: Vec<domain_manifest::ChildSpec<'static>>,
+    process_policies: ProcessPolicies<'static>,
+    service_endpoints: [bool; 32],
+    service_endpoint_poisoned: [bool; 32],
+    service_wake_slots: [Option<Word>; 32],
+    imported_services: [Option<nanami_uapi::alpha::ImportedService>; 32],
+    import_policies: Vec<domain_manifest::ImportSpec<'static>>,
+    managed_buffers: crate::nanami_core::communication::buffers::Buffers,
+    managed_events: crate::nanami_core::communication::events::Events,
+    event_directory_ready: bool,
 }
 
 enum FaultDisposition {
@@ -208,25 +195,22 @@ enum PendingReply {
 }
 
 impl Alpha {
-    pub fn bootstrap(init_info: &InitInfo) -> Result<Self, CapabilityError> {
+    /// The launcher's mapped inputs must be readable and owned for this Alpha's lifetime.
+    pub unsafe fn bootstrap(environment: &AlphaEnvironment) -> Result<Self, CapabilityError> {
+        environment
+            .validate()
+            .map_err(|_| CapabilityError::InvalidArgument)?;
         info!("alpha bootstrap start");
 
         info!("root capability space bootstrap");
-        let mut root = RootCapabilitySpace::bootstrap(init_info)?;
+        let mut root = RootCapabilitySpace::from_environment(environment);
         info!(
             "root={:#018x} radix={:>2} bootstrap_generic={:#018x}",
             root.root_descriptor, root.root_radix, root.bootstrap_generic
         );
 
         info!("memory manager bootstrap");
-        let mut memory = MemoryManager::bootstrap(
-            init_info,
-            root.root_descriptor,
-            root.root_radix,
-            root.bootstrap_generic_index,
-            root.root_generic_index,
-            root.root_generic_consumed_bytes,
-        )?;
+        let mut memory = MemoryManager::bootstrap(environment)?;
         root.bootstrap_generic = memory.kernel_object_generic();
         info!("memory manager ready");
 
@@ -237,12 +221,17 @@ impl Alpha {
             root.bootstrap_generic,
         )?;
         info!("os port={:#018x}", os_port);
+        arch::generic::convert(
+            root.bootstrap_generic,
+            CapabilityType::Node,
+            SERVICE_DIRECTORY_RADIX,
+            1,
+            root.root_descriptor,
+            SERVICE_DIRECTORY_SLOT,
+        )?;
 
         info!("process manager / communication manager init");
-        let alpha_address_space = make_root_slot_descriptor(
-            root.root_radix,
-            InitSlotOffset::ProcessAddressSpace as usize,
-        );
+        let alpha_address_space = environment.capabilities.address_space;
         debug!(
             "alpha address space descriptor={:#018x}",
             alpha_address_space
@@ -250,21 +239,21 @@ impl Alpha {
         let mut processes = ProcessManager::new_alpha(
             root.root_descriptor,
             alpha_address_space,
+            environment.capabilities.process_control_block,
             os_port,
             1usize << root.root_radix,
             &PROCESS_ROOT_RESERVED_SLOTS,
-            init_info.core_count,
+            environment.platform.core_count,
         )?;
-        let communication = CommunicationManager::new(os_port);
+        let mut communication = CommunicationManager::new(os_port);
         info!("managers ready");
 
         info!("alpha heap bootstrap");
         let heap_physical_base = {
             let vm_space = processes.alpha_vm_space_mut();
             Self::prepare_alpha_heap(
-                init_info,
+                environment,
                 &mut memory,
-                root.root_radix,
                 root.bootstrap_generic,
                 alpha_address_space,
                 vm_space,
@@ -281,16 +270,12 @@ impl Alpha {
         );
 
         info!("physical allocator bootstrap");
-        memory.initialize_physical_allocator(init_info)?;
+        memory.initialize_physical_allocator()?;
         memory.allocate_physical_at(heap_physical_base, ALPHA_HEAP_PAGES * PAGE_SIZE, false)?;
         info!("physical allocator ready");
 
         info!("capture initial framebuffer information");
-        let initial_framebuffer = extract_initial_framebuffer_information(init_info)
-            .unwrap_or_else(|| {
-                info!("framebuffer unavailable; continuing without display services");
-                InitialFramebufferInformation::UNAVAILABLE
-            });
+        let initial_framebuffer = environment.framebuffer;
         if initial_framebuffer.address != 0 {
             info!(
                 "framebuffer phys={:#018x} size={:#x} {}x{} stride={} bpp={}",
@@ -304,12 +289,32 @@ impl Alpha {
         }
 
         info!("alpha bootstrap complete");
-        let interrupt_region =
-            make_root_slot_descriptor(root.root_radix, InitSlotOffset::InterruptRegion as usize);
-        let root_io_port =
-            make_root_slot_descriptor(root.root_radix, InitSlotOffset::IoPort as usize);
+        let interrupt_region = environment.capabilities.interrupt_region;
+        let root_io_port = environment.capabilities.io_ports;
+        let mut imported_services = [None; 32];
+        for &import in environment
+            .imports()
+            .map_err(|_| CapabilityError::InvalidArgument)?
+        {
+            let name = import
+                .name()
+                .map_err(|_| CapabilityError::InvalidArgument)?;
+            communication.services.can_publish(name)?;
+            let id = communication
+                .bindings
+                .import_service(import.session_limit)?;
+            communication
+                .services
+                .publish(name, id.0, import.endpoint)?;
+            imported_services[id.0 - 1] = Some(import);
+        }
+        let configuration =
+            core::str::from_utf8(unsafe { environment.boot_configuration.as_slice() })
+                .map_err(|_| CapabilityError::InvalidArgument)?;
 
         Ok(Self {
+            initramfs_image: unsafe { environment.boot_archive.as_slice() },
+            boot_configuration: unsafe { environment.boot_configuration.as_slice() },
             root,
             memory,
             processes,
@@ -317,13 +322,30 @@ impl Alpha {
             initial_framebuffer,
             interrupt_region,
             root_io_port,
-            driver_manager_pid: 0,
-            architecture_name: init_info.architecture_name,
-            platform_name: init_info.platform_name,
-            kernel_version: version_info::kernel_version(init_info),
-            platform_rsdp_address: init_info.arch_info[0],
+            architecture_name: environment.platform.architecture,
+            platform_name: environment.platform.platform,
+            kernel_version: version_info::kernel_version(&environment.platform.kernel),
+            platform_rsdp_address: environment.platform.rsdp_address,
             runtime_stack_top: 0,
             copy_window: memory_copy::CopyWindow::new(),
+            launch_capabilities: environment.capabilities,
+            platform_information: environment.platform,
+            domain_id: environment.domain_id,
+            children: Vec::new(),
+            pending_children: Vec::new(),
+            process_policies: ProcessPolicies::parse(
+                core::str::from_utf8(unsafe { environment.boot_configuration.as_slice() })
+                    .map_err(|_| CapabilityError::InvalidArgument)?,
+                environment.platform.core_count,
+            )?,
+            service_endpoints: [false; 32],
+            service_endpoint_poisoned: [false; 32],
+            service_wake_slots: [None; 32],
+            imported_services,
+            import_policies: domain_manifest::imports(configuration)?,
+            managed_buffers: crate::nanami_core::communication::buffers::Buffers::new(),
+            managed_events: crate::nanami_core::communication::events::Events::new(),
+            event_directory_ready: false,
         })
     }
 
@@ -336,6 +358,11 @@ impl Alpha {
         }
         self.spawn_components_from_initramfs();
         crate::force_info!(
+            "[alpha] domain={} children={} online",
+            self.domain_id,
+            self.children.len()
+        );
+        crate::force_info!(
             "alpha online: smp_cores={} alpha_core=0",
             self.processes.online_core_count()
         );
@@ -346,42 +373,81 @@ impl Alpha {
         let mut spawned = 0usize;
         let mut failed = 0usize;
 
-        if let Some(boot_list) = initramfs_entry_data("./nanami/boot-list") {
+        {
+            let boot_list = self.boot_configuration;
             let mut line_number = 0usize;
             for line in core::str::from_utf8(boot_list).unwrap_or("").lines() {
                 line_number += 1;
-                let Some(entry) = parse_boot_list_line(line) else {
+                if line
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .next()
+                    .is_some_and(|directive| matches!(directive, "@process" | "@import"))
+                {
                     continue;
+                }
+                match domains::ChildSpec::parse(line) {
+                    Ok(Some(spec)) => {
+                        let ready = match self.child_ready(spec) {
+                            Ok(ready) => ready,
+                            Err(error) => {
+                                failed += 1;
+                                error!(
+                                    "[domain] launch failed label={} import={:?}",
+                                    spec.label, error
+                                );
+                                continue;
+                            }
+                        };
+                        if !ready {
+                            self.pending_children.push(spec);
+                            continue;
+                        }
+                        match self.spawn_child_alpha(spec) {
+                            Ok(()) => spawned += 1,
+                            Err(error) => {
+                                failed += 1;
+                                error!(
+                                    "[domain] launch failed line={} err={:?}",
+                                    line_number, error
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        error!(
+                            "[domain] invalid manifest line={} err={:?}",
+                            line_number, error
+                        );
+                        continue;
+                    }
+                    Ok(None) => {}
+                }
+                let entry = match ComponentSpec::parse(line) {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        failed += 1;
+                        error!(
+                            "[proc.err] boot-list invalid line={} err={:?}",
+                            line_number, error
+                        );
+                        continue;
+                    }
                 };
-                let is_driver_manager = entry.name == "device-manager";
                 match self.spawn_initramfs_image(
                     entry.image_path,
                     0,
                     None,
-                    !is_driver_manager,
+                    true,
                     Some(entry.priority),
                 ) {
                     Ok(pid) => {
-                        if is_driver_manager {
-                            self.driver_manager_pid = pid;
-                            let manager = self
-                                .processes
-                                .find_entry_by_pid(pid)
-                                .ok_or(CapabilityError::InvalidArgument);
-                            match manager
-                                .and_then(|entry| arch::process_control_block::resume(entry.pcb))
-                            {
-                                Ok(()) => info!("[driver-manager] privileged pid={}", pid),
-                                Err(error) => {
-                                    failed += 1;
-                                    error!(
-                                        "[proc.err] driver manager resume failed pid={} err={:?}",
-                                        pid, error
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
+                        info!("[proc] configured component={} pid={}", entry.name, pid);
                         spawned += 1;
                     }
                     Err(e) => {
@@ -397,46 +463,7 @@ impl Alpha {
                 "[proc] boot-list spawn summary ok={:>3} failed={:>3}",
                 spawned, failed
             );
-            return;
         }
-
-        warn!("[proc] missing /nanami/boot-list; fallback to legacy initramfs scan");
-        let result = cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
-            if !initramfs_image_is_auto_spawn_candidate(entry.name) {
-                return Ok(());
-            }
-            if initramfs_image_is_explicit_only(entry.name) {
-                info!("[proc] skip explicit-only image: {}", entry.name);
-                return Ok(());
-            }
-            match self.spawn_process_from_elf(entry.name, entry.data, 0, None, true, None) {
-                Ok(_) => {
-                    spawned += 1;
-
-                    // busy wait
-                    /*
-                    for _ in 0..10000 {
-                        // architecture-independent
-                        spin_loop();
-                    }
-                    */
-                    Ok(())
-                }
-                Err(e) => {
-                    failed += 1;
-                    error!("[proc.err] spawn failed image={} err={:?}", entry.name, e);
-                    Ok(())
-                }
-            }
-        });
-
-        if let Err(e) = result {
-            error!("[proc.err] initramfs parse failed: {:?}", e);
-        }
-        info!(
-            "[proc] initramfs spawn summary ok={:>3} failed={:>3}",
-            spawned, failed
-        );
     }
 
     fn run_event_loop(&mut self) -> ! {
@@ -469,7 +496,24 @@ impl Alpha {
                         request.identifier, request.code
                     );
                     let (status, detail0, detail1) = self.handle_os_request(request);
-                    if request.code == OS_REQUEST_EXIT && status == OS_RESPONSE_OK {
+                    if matches!(
+                        request.code,
+                        OS_REQUEST_SERVICE_REGISTER
+                            | nanami_uapi::service::OS_REQUEST_SERVICE_PUBLISH
+                    ) && status == OS_RESPONSE_OK
+                    {
+                        self.start_ready_children();
+                    }
+                    let stopped_session_caller = request.code
+                        == nanami_uapi::service::OS_REQUEST_SESSION_CONNECT
+                        && status == OS_RESPONSE_FATAL
+                        && self
+                            .processes
+                            .find_entry_by_pid(request.identifier)
+                            .is_some_and(|entry| entry.exited);
+                    if (request.code == OS_REQUEST_EXIT && status == OS_RESPONSE_OK)
+                        || stopped_session_caller
+                    {
                         None
                     } else {
                         Some(PendingReply::Status(status, detail0, detail1))
@@ -632,11 +676,23 @@ impl Alpha {
             OS_REQUEST_SERVICE_CONNECT => {
                 response_from_detail_result(self.handle_service_connect_request(request))
             }
+            nanami_uapi::service::OS_REQUEST_PROVIDER_REGISTER => {
+                response_from_detail_result(self.handle_provider_register(request))
+            }
+            nanami_uapi::service::OS_REQUEST_SERVICE_PUBLISH => {
+                response_from_detail_result(self.handle_service_publish(request))
+            }
+            nanami_uapi::service::OS_REQUEST_SESSION_CONNECT => {
+                response_from_details_result(self.handle_session_connect(request))
+            }
+            nanami_uapi::service::OS_REQUEST_BINDING_CONTROL => {
+                response_from_details_result(self.handle_binding_control(request))
+            }
             OS_REQUEST_SERVICE_REGISTER => {
                 response_from_detail_result(self.handle_service_register_request(request))
             }
             OS_REQUEST_SERVICE_LIST => match self.handle_service_list_request(request) {
-                Some((owner_pid, service_kind)) => (OS_RESPONSE_OK, owner_pid, service_kind),
+                Some((detail0, detail1)) => (OS_RESPONSE_OK, detail0, detail1),
                 None => (OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
             },
             OS_REQUEST_PROCESS_SPAWN => {

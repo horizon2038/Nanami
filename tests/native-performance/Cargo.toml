@@ -64,12 +64,40 @@ name = "core-process"
 path = "core-process-tests.rs"
 
 [[test]]
-name = "boot-priority"
-path = "boot-priority.rs"
+name = "boot-policy"
+path = "boot-policy.rs"
+
+[[test]]
+name = "services"
+path = "services.rs"
+
+[[test]]
+name = "service-bindings"
+path = "service-bindings.rs"
+
+[[test]]
+name = "service-buffers"
+path = "service-buffers.rs"
+
+[[test]]
+name = "service-receiver"
+path = "service-receiver.rs"
 
 [[test]]
 name = "system-version"
 path = "system-version.rs"
+
+[[test]]
+name = "alpha-environment"
+path = "alpha-environment.rs"
+
+[[test]]
+name = "alpha-launch"
+path = "alpha-launch.rs"
+
+[[test]]
+name = "alpha-domains"
+path = "alpha-domains.rs"
 
 [[test]]
 name = "honoka-info-panel"
@@ -198,6 +226,10 @@ path = "text-editor-storage.rs"
 [[test]]
 name = "desktop-tools"
 path = "desktop-tools.rs"
+
+[[test]]
+name = "service-events"
+path = "service-events.rs"
 
 [dependencies]
 nanami-ui = { path = "../../nanami/servers/libs/nanami-ui" }

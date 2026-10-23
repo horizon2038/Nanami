@@ -1,6 +1,6 @@
 use super::*;
 
-// Names in init_info are 32-byte C strings. Return two words per request,
+// Environment names are 32-byte C strings. Return two words per request,
 // preserving the complete field rather than truncating it to one IPC reply.
 pub(super) fn encode_info_name_chunk(
     name: &[u8; 32],
@@ -24,6 +24,36 @@ pub(super) fn validate_process_device_slot(slot: usize) -> Result<(), Capability
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(())
+}
+
+impl Alpha {
+    /// Legacy transfers cannot overwrite framework-owned control/event aliases.
+    /// Their removal must follow the Session/Binding withdrawal protocol.
+    pub(super) fn validate_legacy_destination(
+        &self,
+        pid: Word,
+        slot: Word,
+    ) -> Result<(), CapabilityError> {
+        validate_process_device_slot(slot)?;
+        if self.communication.bindings.owns_process_slot(pid, slot)
+            || self.managed_events.owns_process_slot(pid, slot)
+            || self
+                .service_wake_slots
+                .iter()
+                .enumerate()
+                .any(|(index, wake)| {
+                    *wake == Some(slot)
+                        && self
+                            .communication
+                            .bindings
+                            .service(nanami_uapi::service::ServiceId(index + 1))
+                            .is_ok_and(|service| service.manager == pid)
+                })
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn validate_process_observer(
@@ -232,7 +262,7 @@ pub(super) fn align_up_checked(value: usize, align: usize) -> Option<usize> {
 
 pub(super) fn create_alpha_os_port(
     root_descriptor: CapabilityDescriptor,
-    _root_radix: usize,
+    root_radix: usize,
     bootstrap_generic: CapabilityDescriptor,
 ) -> Result<CapabilityDescriptor, CapabilityError> {
     info!(
@@ -249,65 +279,16 @@ pub(super) fn create_alpha_os_port(
         ORIGINAL_OS_PORT_SLOT,
     )?;
 
-    let descriptor =
-        crate::nanami_utils::descriptor::make_root_slot_descriptor(12, ORIGINAL_OS_PORT_SLOT);
+    let descriptor = crate::nanami_utils::descriptor::make_root_slot_descriptor(
+        root_radix,
+        ORIGINAL_OS_PORT_SLOT,
+    );
     let _ = arch::ipc_port::identify(descriptor, 0);
     info!(
         "slot {:>3} descriptor={:#018x}",
         ORIGINAL_OS_PORT_SLOT, descriptor
     );
     Ok(descriptor)
-}
-
-pub(super) fn make_generic_descriptor(
-    root_radix: usize,
-    generic_index: usize,
-) -> CapabilityDescriptor {
-    let generic_node = make_root_slot_descriptor(root_radix, InitSlotOffset::GenericNode as usize);
-    make_child_slot_descriptor(generic_node, GENERIC_NODE_RADIX, generic_index)
-}
-
-pub(super) fn extract_initial_framebuffer_information(
-    init_info: &InitInfo,
-) -> Option<InitialFramebufferInformation> {
-    let mut raw = [0usize; 13];
-    raw.copy_from_slice(&init_info.arch_info[1..14]);
-    let fb = FramebufferInfo::deserialize(&raw);
-    if fb.address == 0 || fb.width == 0 || fb.height == 0 || fb.bits_per_pixel == 0 {
-        return None;
-    }
-
-    let bytes_per_pixel = (fb.bits_per_pixel as usize).saturating_div(8);
-    if bytes_per_pixel == 0 {
-        return None;
-    }
-
-    let stride_raw = fb.stride as usize;
-    let stride_bytes = if stride_raw >= fb.width as usize * bytes_per_pixel {
-        stride_raw
-    } else {
-        stride_raw.saturating_mul(bytes_per_pixel)
-    };
-    let size_bytes = stride_bytes.saturating_mul(fb.height as usize);
-    if size_bytes == 0 {
-        return None;
-    }
-
-    Some(InitialFramebufferInformation {
-        display_id: 0,
-        address: fb.address,
-        size_bytes,
-        width: fb.width as usize,
-        height: fb.height as usize,
-        stride: fb.stride as usize,
-        bits_per_pixel: fb.bits_per_pixel as usize,
-        red_position: fb.red.position as usize,
-        red_size: fb.red.size as usize,
-        green_position: fb.green.position as usize,
-        green_size: fb.green.size as usize,
-        blue_position: fb.blue.position as usize,
-        blue_size: fb.blue.size as usize,
-    })
 }
 
 pub(super) fn pack_framebuffer_color_information(
@@ -364,94 +345,4 @@ pub(super) fn decode_control_text(arg0: Word, arg1: Word) -> ControlText {
 
 pub(super) fn bytes_equal(text: &ControlText, expected: &[u8]) -> bool {
     text.len == expected.len() && &text.raw[..text.len] == expected
-}
-
-pub(super) fn initramfs_entry_data(requested_name: &str) -> Option<&'static [u8]> {
-    let mut found = None;
-    let _ = cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
-        if found.is_none() && initramfs_path_matches(entry.name, requested_name) {
-            found = Some(entry.data);
-        }
-        Ok(())
-    });
-    found
-}
-
-pub(super) fn parse_boot_list_line(line: &str) -> Option<BootListEntry<'_>> {
-    let line = line.split('#').next().unwrap_or("");
-    let mut tokens = line.split_whitespace();
-    let name = tokens.next()?;
-    let priority = parse_decimal_word(tokens.next()?)?;
-    let image_path = tokens.next()?;
-    Some(BootListEntry {
-        name,
-        priority,
-        image_path,
-    })
-}
-
-pub(super) fn parse_decimal_word(text: &str) -> Option<Word> {
-    if text.is_empty() {
-        return None;
-    }
-    let mut value = 0usize;
-    for byte in text.bytes() {
-        if !byte.is_ascii_digit() {
-            return None;
-        }
-        value = value.checked_mul(10)?;
-        value = value.checked_add((byte - b'0') as usize)?;
-    }
-    Some(value as Word)
-}
-
-pub(super) fn initramfs_image_name_matches(entry_name: &str, requested_name: &str) -> bool {
-    if initramfs_path_matches(entry_name, requested_name) {
-        return true;
-    }
-    let entry_base = path_basename(entry_name);
-    let requested_base = path_basename(requested_name);
-    if initramfs_path_matches(entry_base, requested_name)
-        || initramfs_path_matches(entry_name, requested_base)
-        || entry_base == requested_base
-    {
-        return true;
-    }
-
-    let entry_stem = strip_elf_suffix(entry_base);
-    let requested_stem = strip_elf_suffix(requested_base);
-    entry_stem == strip_elf_suffix(requested_name)
-        || strip_elf_suffix(entry_name) == requested_stem
-        || entry_stem == requested_stem
-}
-
-pub(super) fn initramfs_path_matches(entry_name: &str, requested_name: &str) -> bool {
-    entry_name == requested_name
-        || entry_name.strip_prefix("./") == Some(requested_name)
-        || requested_name.strip_prefix("./") == Some(entry_name)
-}
-
-pub(super) fn initramfs_image_is_explicit_only(name: &str) -> bool {
-    path_basename(name).starts_with('_')
-}
-
-pub(super) fn initramfs_image_is_auto_spawn_candidate(name: &str) -> bool {
-    name.starts_with("./bin/") || name.starts_with("bin/")
-}
-
-pub(super) fn strip_elf_suffix(name: &str) -> &str {
-    name.strip_suffix(".elf").unwrap_or(name)
-}
-
-pub(super) fn path_basename(path: &str) -> &str {
-    let bytes = path.as_bytes();
-    let mut start = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'/' {
-            start = i + 1;
-        }
-        i += 1;
-    }
-    &path[start..]
 }

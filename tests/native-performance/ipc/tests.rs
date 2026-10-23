@@ -9,6 +9,21 @@ fn assert_notification(event: ServiceEvent, expected: Word) {
 }
 
 #[test]
+fn bound_notification_slot_is_exact_and_does_not_consume_pending_badges() {
+    let _guard = setup();
+    let bound = crate::tls::process_slot_descriptor(18);
+    bind_current_thread_notification(bound).unwrap();
+    preserve_interrupted_notification(4);
+    assert_eq!(bound_notification_slot(), Ok(18));
+    assert_eq!(notification_wait(bound), Ok(4));
+    bind_current_thread_notification(BOUND).unwrap();
+    assert_eq!(
+        bound_notification_slot(),
+        Err(RequestError::InvalidArgument)
+    );
+}
+
+#[test]
 fn interrupted_call_irq_reaches_service_receive_without_waiting_for_another_irq() {
     let _guard = setup();
     // call_port has received this notification instead of a reply, saved it,

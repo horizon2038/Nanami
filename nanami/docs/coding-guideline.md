@@ -2,6 +2,8 @@
 
 These guidelines apply to Rust code under `nanami`, including Alpha, core
 services, applications, SDK crates, and reusable libraries.
+The control-flow and readability rules also apply to C++ SDK code, tests and
+documentation examples.
 
 ## Goals
 
@@ -28,15 +30,25 @@ services, applications, SDK crates, and reusable libraries.
 
 ## Crate Boundaries
 
+- `nanami-uapi` owns dependency-free public request constants, wire layouts,
+  resource-input contracts and identifier types. It contains no executable
+  service policy.
 - `nanami_runtime` contains low-level Nanami core calls, process startup, IPC
-  primitives, heap support, and architecture entry code.
-- `nanami-client` contains typed service names, request constants, message
-  layouts, and client wrappers.
+  primitives, heap support, architecture entry code and generic managed-Service
+  lifecycle helpers.
+- `nanami-client` contains typed subsystem operations and client wrappers over
+  shared protocol definitions, not duplicate copies of UAPI constants.
 - A service implementation owns its policy and server state.
 - Alpha must not depend on application, filesystem, network, desktop, POSIX, or
   foreign-ABI semantics.
 - Cross-process functionality is exposed as a named service, not through a
   hard-coded provider capability.
+
+`alpha_booter` alone adapts A9N's init ABI. First and Child Alpha consume the
+same validated `AlphaEnvironment` and use the same launcher/initialization
+path. Keep labels, initial placement, publication grants and child imports in
+external boot policy; do not add image-name or Service-name branches to Alpha.
+Metadata describing authority must not substitute for a real capability.
 
 ## Application Entry
 
@@ -57,6 +69,14 @@ services, applications, SDK crates, and reusable libraries.
 - Keep fast paths short. Move diagnostics, table scans, formatting, and fallback
   policy out of hot loops.
 - Use early returns for invalid input and terminal states.
+- Prefer explicit lifecycle steps over compressing several ownership changes
+  into a boolean expression. Reducing line count is not a readability goal.
+
+## Control Flow
+
+- Always use braces for `if` and `else` bodies, even for one statement.
+- Do not nest ternary operators; use `if`/`else`, `switch` or `match`.
+- Apply these rules to tests and examples as well as production code.
 
 ## Naming and Types
 
@@ -68,6 +88,11 @@ services, applications, SDK crates, and reusable libraries.
 - Use newtypes or enums when raw integers from different domains could be
   confused.
 - Do not duplicate numeric protocol constants at call sites.
+- Name bit masks, field encodings and lifecycle states instead of embedding
+  unexplained shifts or numeric tags in operational code.
+- Keep local process PIDs, domain IDs, `ServiceId`, `ProviderId` and `SessionId`
+  distinct. An IPC identifier/badge is not automatically a PID or authority to
+  edit that identity.
 - Match service and manifest names exactly, including current legacy names such
   as `display_service`.
 
@@ -91,6 +116,8 @@ services, applications, SDK crates, and reusable libraries.
 - Use notifications to signal available work; drain the associated queue or
   state after wakeup.
 - Assume notifications can coalesce.
+- Use the runtime's current notification binding for timer grants and waits;
+  preserve deferred unrelated badges and verify the actual deadline.
 - Avoid synchronous service dependency cycles.
 - Prefer receive/reply-receive server loops.
 - Never busy-poll without a documented bound and a reason that an event-driven
@@ -106,7 +133,12 @@ services, applications, SDK crates, and reusable libraries.
 - Register references for both endpoints of shared memory.
 - Keep MMIO and device reservations distinct from reclaimable RAM.
 - Use overflow-safe range checks for `base + size` and `offset + length`.
-- Release temporary mappings on every success and error path.
+- Release temporary mappings on success and handled errors. If rollback or
+  revocation fails, retain/quarantine the reservation and report the failure;
+  do not claim memory was freed while live references may remain.
+- Separate stopping a process, withdrawing aliases, quiescing DMA, revoking
+  backing and releasing quotas. Kernel revoke support does not perform Nanami's
+  accounting or a driver's shutdown protocol.
 
 ## Unsafe Code
 
@@ -127,6 +159,10 @@ services, applications, SDK crates, and reusable libraries.
 - Avoid formatting and per-packet logging in release paths.
 - Bound caches and queues, and define eviction or replacement behavior.
 - Measure before introducing complex caching or a new abstraction.
+- For IPC hot-path changes, compare optimized generated code and call/branch
+  paths against a recorded baseline; a shorter source file is not evidence of
+  equivalent performance. Do not rely on compiler-specific forced-inline
+  attributes to conceal additional work.
 
 ## Logging
 

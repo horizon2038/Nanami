@@ -179,10 +179,102 @@ pub fn validate_elf(data: &[u8], arch: Arch, label: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Catch linker layout regressions before embedding an unbootable Alpha.
+/// Unlike ordinary payload entries this input must be an executable ELF.
+pub fn validate_alpha_elf(data: &[u8], arch: Arch, label: &Path) -> Result<()> {
+    validate_elf(data, arch, label)?;
+    ensure!(
+        data.len() >= 64 && data.starts_with(b"\x7fELF"),
+        "invalid Alpha ELF"
+    );
+    let word = |offset| u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+    let short = |offset| u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap());
+    ensure!(short(16) == 2, "Alpha must be a fixed-address executable");
+    let offset = usize::try_from(word(32))?;
+    let stride = usize::from(short(54));
+    let count = usize::from(short(56));
+    let end = count
+        .checked_mul(stride)
+        .and_then(|bytes| offset.checked_add(bytes));
+    ensure!(
+        stride >= 56 && count > 0 && end.is_some_and(|end| end <= data.len()),
+        "invalid Alpha program headers"
+    );
+    let mut executable_entry = false;
+    for index in 0..count {
+        let header = offset + index * stride;
+        let kind = u32::from_le_bytes(data[header..header + 4].try_into().unwrap());
+        if kind != 1 {
+            continue;
+        }
+        let flags = u32::from_le_bytes(data[header + 4..header + 8].try_into().unwrap());
+        let file = word(header + 8);
+        let address = word(header + 16);
+        let file_bytes = word(header + 32);
+        let memory_bytes = word(header + 40);
+        ensure!(
+            file_bytes <= memory_bytes
+                && file
+                    .checked_add(file_bytes)
+                    .is_some_and(|end| end <= data.len() as u64),
+            "invalid Alpha segment contents"
+        );
+        if memory_bytes == 0 {
+            continue;
+        }
+        ensure!(
+            address >= 4096
+                && address
+                    .checked_add(memory_bytes)
+                    .is_some_and(|end| end <= 64 * 1024 * 1024),
+            "Alpha segment is outside the launcher image range"
+        );
+        if flags & 1 != 0 && word(24) >= address && word(24) < address + memory_bytes {
+            executable_entry = true;
+        }
+    }
+    ensure!(
+        executable_entry,
+        "Alpha entry is not in an executable segment"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    #[test]
+    fn alpha_layout_rejects_zero_header_mapping_on_both_architectures() {
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            let mut elf = vec![0u8; 4096];
+            elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+            elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+            let machine = if arch == Arch::X86_64 {
+                0x3eu16
+            } else {
+                0xb7u16
+            };
+            elf[18..20].copy_from_slice(&machine.to_le_bytes());
+            elf[24..32].copy_from_slice(&4096u64.to_le_bytes());
+            elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+            elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+            elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+            elf[64..68].copy_from_slice(&1u32.to_le_bytes());
+            elf[68..72].copy_from_slice(&5u32.to_le_bytes());
+            elf[80..88].copy_from_slice(&4096u64.to_le_bytes());
+            elf[96..104].copy_from_slice(&128u64.to_le_bytes());
+            elf[104..112].copy_from_slice(&4096u64.to_le_bytes());
+            let label = Path::new("alpha");
+            validate_alpha_elf(&elf, arch, label).unwrap();
+            elf[80..88].copy_from_slice(&0u64.to_le_bytes());
+            assert!(validate_alpha_elf(&elf, arch, label).is_err());
+            elf[80..88].copy_from_slice(&4096u64.to_le_bytes());
+            elf[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+            assert!(validate_alpha_elf(&elf, arch, label).is_err());
+            assert!(validate_alpha_elf(b"not an executable", arch, label).is_err());
+        }
+    }
     #[test]
     fn shared_source_binary_keeps_its_installed_component_name() {
         let root = tempfile::tempdir().unwrap();

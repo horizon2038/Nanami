@@ -1,14 +1,12 @@
 use alloc::{format, string::String};
-use nun::{CapabilityError, InitInfo, Word};
+use nanami_uapi::alpha::{name, KernelVersion};
+use nun::{CapabilityError, Word};
 
-pub(super) fn kernel_version(info: &InitInfo) -> String {
-    let mut version = format!(
-        "{}.{}.{}",
-        info.kernel_major_version, info.kernel_minor_version, info.kernel_patch_version
-    );
+pub(super) fn kernel_version(info: &KernelVersion) -> String {
+    let mut version = format!("{}.{}.{}", info.major, info.minor, info.patch);
     for (separator, suffix) in [
-        ('-', info.get_pre_release_string()),
-        ('+', info.get_build_metadata_string()),
+        ('-', name(&info.pre_release)),
+        ('+', name(&info.build_metadata)),
     ] {
         if !suffix.is_empty() {
             version.push(separator);

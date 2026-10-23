@@ -11,6 +11,7 @@ pub fn timer_service_sleep_milliseconds(
     if milliseconds == 0 {
         return Ok(());
     }
+    let notification_slot = crate::ipc::bound_notification_slot()?;
     let (start, hz) = timer_service_monotonic_ticks(timer_service_port)?;
     if hz == 0 {
         return Err(RequestError::Protocol);
@@ -22,9 +23,9 @@ pub fn timer_service_sleep_milliseconds(
     timer_service_sleep_async_on_notification_milliseconds(
         timer_service_port,
         milliseconds,
-        crate::PROCESS_SLOT_NOTIFICATION,
+        notification_slot,
     )?;
-    let notification = crate::ipc::process_slot_descriptor(crate::PROCESS_SLOT_NOTIFICATION);
+    let notification = crate::ipc::process_slot_descriptor(notification_slot);
     let mut deferred = 0;
     let result = (|| loop {
         let identifier = crate::ipc::notification_wait(notification)?;
@@ -49,7 +50,9 @@ pub fn timer_service_sleep_on_notification_milliseconds(
     milliseconds: Word,
     notification_slot: Word,
 ) -> Result<(), RequestError> {
-    if notification_slot == crate::PROCESS_SLOT_NOTIFICATION {
+    if notification_slot == crate::PROCESS_SLOT_NOTIFICATION
+        || notification_slot == crate::ipc::bound_notification_slot()?
+    {
         return timer_service_sleep_milliseconds(timer_service_port, milliseconds);
     }
     timer_service_sleep_async_on_notification_milliseconds(
@@ -92,7 +95,7 @@ pub fn timer_service_sleep_async_milliseconds(
     timer_service_sleep_async_on_notification_milliseconds(
         timer_service_port,
         milliseconds,
-        crate::PROCESS_SLOT_NOTIFICATION,
+        crate::ipc::bound_notification_slot()?,
     )
 }
 

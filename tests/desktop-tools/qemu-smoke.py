@@ -15,6 +15,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
+parser.add_argument("--expect-two-phase", action="store_true", help="Require Booter handoff and launcher suspension before services run")
 parser.add_argument("--debugfs", default=shutil.which("debugfs") or "/opt/homebrew/opt/e2fsprogs/sbin/debugfs")
 args = parser.parse_args()
 if not args.image.is_file():
@@ -118,6 +119,13 @@ with (logs / "qemu.log").open("w") as diagnostics:
             return b"".join(pixels[((y+row)*stride+x)*3:((y+row)*stride+x+width)*3] for row in range(height))
 
         wait_for(lambda value: re.search(r"\[\s*shell\] font init end", value) and "[              honoka] online" in value)
+        if args.expect_two_phase:
+            serial_text = text()
+            markers = ["[boot] Alpha Booter preparing independent Alpha", "[boot] handoff ready", "[boot] launcher suspended; Alpha owns independent address space"]
+            positions = [serial_text.find(marker) for marker in markers]
+            assert all(position >= 0 for position in positions) and positions == sorted(positions), "Two-phase boot order missing"
+            assert "retired Booter resumed unexpectedly" not in serial_text
+            print("PASS Booter -> independent Alpha -> stopped launcher -> normal services", flush=True)
         time.sleep(2)
         type_text("performance-monitor\n")
         wait_for(lambda value: "[performance-monitor] online" in value)

@@ -7,6 +7,42 @@ pub struct CpioEntry<'a> {
     pub data: &'a [u8],
 }
 
+/// Explicit paths never select a same-basename module in another directory.
+/// Preserve bare-name/.elf aliases only when the archive match is unambiguous.
+pub fn find_image<'a>(
+    archive: &'a [u8],
+    requested: &str,
+) -> Result<CpioEntry<'a>, CapabilityError> {
+    let requested = normalize_name(requested);
+    let mut found = None;
+    for_each_newc_entry(archive, |entry| {
+        let name = normalize_name(entry.name);
+        let matches = if requested.contains('/') {
+            image_stem(name) == image_stem(requested)
+        } else {
+            image_stem(name.rsplit('/').next().unwrap_or(name)) == image_stem(requested)
+        };
+        if matches {
+            if found.is_some() {
+                return Err(CapabilityError::InvalidArgument);
+            }
+            found = Some(entry);
+        }
+        Ok(())
+    })?;
+    found.ok_or(CapabilityError::InvalidArgument)
+}
+
+fn normalize_name(name: &str) -> &str {
+    name.strip_prefix("./")
+        .or_else(|| name.strip_prefix('/'))
+        .unwrap_or(name)
+}
+
+fn image_stem(name: &str) -> &str {
+    name.strip_suffix(".elf").unwrap_or(name)
+}
+
 pub fn for_each_newc_entry<'a, F>(archive: &'a [u8], mut f: F) -> Result<(), CapabilityError>
 where
     F: FnMut(CpioEntry<'a>) -> Result<(), CapabilityError>,

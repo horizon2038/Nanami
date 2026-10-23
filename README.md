@@ -27,10 +27,11 @@ combines Nanami with A9N and
 UEFI
   -> A9NLoader-rs
   -> A9N Microkernel
-  -> Nanami Alpha
-       -> boot-critical services from initramfs
-       -> system services from ext2 rootfs
-       -> Honoka desktop and user session
+  -> Alpha Booter (init; stopped after handoff)
+       -> First Alpha (independent process and address space)
+            -> boot-critical services from supplied initramfs
+            -> system services from ext2 rootfs
+            -> Honoka desktop and user session
 ```
 
 The system is divided into the following layers:
@@ -39,7 +40,10 @@ The system is divided into the following layers:
   IPC, interrupt delivery, and the minimum hardware-dependent mechanisms.
 - **Nun** provides the Rust runtime and entry ABI used by Nanami and its
   user-space programs.
-- **Alpha** is Nanami's initial and privileged user process. It manages
+- **Alpha Booter** interprets A9N's init-only ABI, constructs First Alpha and
+  transfers its Generic/device authority. It provides no runtime allocation or
+  service-routing API and is suspended after handoff.
+- **Alpha** is Nanami's privileged resource-multiplexing process. It manages
   physical memory, processes, virtual memory metadata, service discovery, and
   privileged resource requests without moving those policies into the kernel.
 - **Servers and drivers** implement storage, filesystems, networking, input,
@@ -75,7 +79,23 @@ Drivers and subsystem servers are not linked into Alpha or the microkernel.
 
 ## Boot Model
 
-Nanami separates boot policy into three stages:
+Booting has two process phases: A9N starts Booter; Booter starts the separate
+`alpha` ELF with `AlphaEnvironment` and receiver-local capabilities/data mappings.
+Alpha initializes its own managers after the launcher is stopped. Booter memory
+is retained/reserved, not unsafely reclaimed on Suspend. External `@alpha` startup
+entries can launch a child with a bounded RAM/Generic partition and its own
+namespace through the same initializer. Managed stateless-control Services now
+support cooperative Provider exchange through stable client handles. An opt-in
+opaque-buffer profile retains session data/client VAs and withdraws old Provider
+mappings before exchange; queue layouts remain outside Alpha. The pending-work
+event profile also retains direct notification handles and queue cursors through
+cooperative exchange, including work queued while no Provider is active.
+Explicit boot-configured imports delegate bounded stateless-control Sessions
+without exposing the parent registry. Live-domain reclamation and stateful Data/Event
+handover remain under implementation; see the
+[architecture migration gates](nanami/docs/architecture.md#architecture-migration-gates).
+
+The current configuration separates service startup policy into three levels:
 
 1. `nanami/servers/boot-list` is embedded in the initramfs and contains only
    boot-critical services. The Device Driver Manager selects the timer and
@@ -86,7 +106,9 @@ Nanami separates boot policy into three stages:
    available. The default session launches the graphical shell.
 
 This keeps Alpha independent of desktop, application, and root filesystem
-policy.
+policy. Image priority/initial affinity and platform-data grants are explicit
+`@process` boot-list inputs; component labels and Service names carry no
+built-in privilege semantics.
 
 ## Supported Targets
 
@@ -131,7 +153,8 @@ cargo xtask build
 ```
 
 This builds native Rust/C++ services, generates the initramfs in Rust, creates
-the rootfs if missing, and calls SPENCER's Rust build library for A9N, Nanami,
+the rootfs if missing, builds the common Alpha ELF before the Booter that embeds
+it, and calls SPENCER's Rust build library for A9N, Nanami,
 the loader and disk assembly. A9N uses CMake + Ninja. The default target is
 x86_64/pc99, release, with SMP enabled.
 

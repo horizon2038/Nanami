@@ -56,6 +56,31 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfImage, CapabilityError> {
     parse_elf64_impl(image, false)
 }
 
+/// Resolve a linker-defined boot symbol using the same load bias as PT_LOAD.
+pub fn symbol_value(image: &[u8], name: &[u8]) -> Result<Option<usize>, CapabilityError> {
+    if image.len() < ELF64_HEADER_SIZE {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    let bias = if read_u16(image, 16)? == ET_DYN {
+        DYNAMIC_IMAGE_LOAD_BIAS
+    } else {
+        0
+    };
+    let offset = read_u64(image, 40)? as usize;
+    let stride = read_u16(image, 58)? as usize;
+    let count = read_u16(image, 60)? as usize;
+    if stride < ELF64_SHDR_SIZE || count == 0 {
+        return Ok(None);
+    }
+    find_symbol_value(image, offset, stride, count, name)?
+        .map(|value| {
+            value
+                .checked_add(bias)
+                .ok_or(CapabilityError::InvalidArgument)
+        })
+        .transpose()
+}
+
 fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, CapabilityError> {
     if image.len() < ELF64_HEADER_SIZE {
         return Err(CapabilityError::InvalidArgument);
@@ -92,6 +117,7 @@ fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, 
     if phoff >= image.len() {
         return Err(CapabilityError::InvalidArgument);
     }
+    checked_table(phoff, phnum, phentsize, image.len())?;
 
     let mut out = ElfImage::empty();
     out.entry_point = entry;
@@ -118,6 +144,9 @@ fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, 
             if memsz < filesz {
                 return Err(CapabilityError::InvalidArgument);
             }
+            vaddr
+                .checked_add(memsz)
+                .ok_or(CapabilityError::InvalidArgument)?;
             let segment_file_end = offset
                 .checked_add(filesz)
                 .ok_or(CapabilityError::InvalidArgument)?;
@@ -143,7 +172,12 @@ fn parse_elf64_impl(image: &[u8], require_full_image: bool) -> Result<ElfImage, 
     if require_full_image && shoff < image.len() && shentsize >= ELF64_SHDR_SIZE && shnum > 0 {
         out.ipc_buffer_start =
             find_symbol_value(image, shoff, shentsize, shnum, IPC_BUFFER_SYMBOL)?
-                .map(|value| value + load_bias);
+                .map(|value| {
+                    value
+                        .checked_add(load_bias)
+                        .ok_or(CapabilityError::InvalidArgument)
+                })
+                .transpose()?;
     }
 
     Ok(out)
@@ -156,6 +190,7 @@ fn find_symbol_value(
     shnum: usize,
     target_name: &[u8],
 ) -> Result<Option<usize>, CapabilityError> {
+    checked_table(shoff, shnum, shentsize, image.len())?;
     let mut section = 0usize;
     while section < shnum {
         let sh_base = shoff + section * shentsize;
@@ -174,7 +209,9 @@ fn find_symbol_value(
         let sym_entsize = read_u64(image, sh_base + 56)? as usize;
         let linked_strtab_index = read_u32(image, sh_base + 40)? as usize;
         if sym_offset >= image.len()
-            || sym_offset + sym_size > image.len()
+            || sym_offset
+                .checked_add(sym_size)
+                .is_none_or(|end| end > image.len())
             || sym_entsize < ELF64_SYM_SIZE
             || linked_strtab_index >= shnum
         {
@@ -188,7 +225,11 @@ fn find_symbol_value(
 
         let str_offset = read_u64(image, str_sh_base + 24)? as usize;
         let str_size = read_u64(image, str_sh_base + 32)? as usize;
-        if str_offset >= image.len() || str_offset + str_size > image.len() {
+        if str_offset >= image.len()
+            || str_offset
+                .checked_add(str_size)
+                .is_none_or(|end| end > image.len())
+        {
             return Err(CapabilityError::InvalidArgument);
         }
 
@@ -232,15 +273,31 @@ fn read_cstr(data: &[u8]) -> &[u8] {
     data
 }
 
+fn checked_table(
+    offset: usize,
+    count: usize,
+    stride: usize,
+    length: usize,
+) -> Result<(), CapabilityError> {
+    let end = count
+        .checked_mul(stride)
+        .and_then(|bytes| offset.checked_add(bytes))
+        .ok_or(CapabilityError::InvalidArgument)?;
+    if end > length {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    Ok(())
+}
+
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, CapabilityError> {
-    if offset + 2 > data.len() {
+    if offset.checked_add(2).is_none_or(|end| end > data.len()) {
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(u16::from_le_bytes([data[offset], data[offset + 1]]))
 }
 
 fn read_u32(data: &[u8], offset: usize) -> Result<u32, CapabilityError> {
-    if offset + 4 > data.len() {
+    if offset.checked_add(4).is_none_or(|end| end > data.len()) {
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(u32::from_le_bytes([
@@ -252,7 +309,7 @@ fn read_u32(data: &[u8], offset: usize) -> Result<u32, CapabilityError> {
 }
 
 fn read_u64(data: &[u8], offset: usize) -> Result<u64, CapabilityError> {
-    if offset + 8 > data.len() {
+    if offset.checked_add(8).is_none_or(|end| end > data.len()) {
         return Err(CapabilityError::InvalidArgument);
     }
     Ok(u64::from_le_bytes([

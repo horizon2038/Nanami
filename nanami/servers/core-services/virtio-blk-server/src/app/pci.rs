@@ -1,9 +1,9 @@
 use super::arch::*;
 use super::*;
 
-const PCI_COMMAND_IO_SPACE: u16 = 1 << 0;
-const PCI_COMMAND_BUS_MASTER: u16 = 1 << 2;
-const PCI_COMMAND_INTX_DISABLE: u16 = 1 << 10;
+#[path = "pci_command.rs"]
+mod pci_command;
+
 const PCI_STATUS_CAP_LIST: u16 = 1 << 4;
 const PCI_CAP_ID_MSI: u8 = 0x05;
 const PCI_CAP_ID_MSIX: u8 = 0x11;
@@ -85,9 +85,10 @@ fn pci_cfg_write16(
     pci_cfg_write32(io_desc, bus, dev, func, aligned, next)
 }
 
-pub(crate) fn configure_pci_command_for_intx(
+pub(crate) fn configure_pci_command(
     io_desc: Word,
     found: VirtioPciDevice,
+    interrupt_enabled: bool,
 ) -> Result<(), RequestError> {
     let cmd_before = pci_cfg_read16(
         io_desc,
@@ -110,8 +111,7 @@ pub(crate) fn configure_pci_command_for_intx(
     nanami_runtime::print!("{}", int_pin as usize);
     nanami_runtime::print!("\n");
 
-    let mut cmd_after = cmd_before | PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER;
-    cmd_after &= !PCI_COMMAND_INTX_DISABLE;
+    let cmd_after = pci_command::command_flags(cmd_before, interrupt_enabled);
 
     if cmd_after != cmd_before {
         pci_cfg_write16(

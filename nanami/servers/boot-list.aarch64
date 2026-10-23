@@ -1,6 +1,8 @@
 # Alpha embedded boot list for AArch64.
 # QEMU virt has no boot framebuffer. The manager selects the current platform's
 # virtio-mmio storage driver and intentionally selects no timer driver yet.
+@process ./bin/driver-manager priority=30 platform=1
+@process ./bin/virtio-blk-server priority=23
 device-manager 31 ./bin/driver-manager
 vfs-service 22 ./bin/ext2-server
 system-manager 20 ./bin/system-manager

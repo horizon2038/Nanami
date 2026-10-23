@@ -72,6 +72,13 @@ initialize the owned caches directly on the heap. Rendering geometry is unchange
 
 ## Host tests
 
+The suite also includes the production Alpha launch/environment/partition
+code (`alpha-launch`, `alpha-environment`, `physical-memory`, `alpha-domains`),
+external image-policy parsing (`boot-policy`), and arbitrary-name registry/wire
+enumeration (`services`). These are mechanism tests, not proof of live kernel
+revocation. Real child-domain, namespace, and caller-identity checks are described
+in [Architecture migration gates](../../nanami/docs/architecture.md#architecture-migration-gates).
+
 Run from the repository root, using its pinned Rust toolchain:
 
 ```sh
@@ -257,3 +264,119 @@ SMP4 / USB2 BOT / high-MMIO / HPET terminal regression, including BusyBox vi
 file-content checks and shrink/grow liveness. The shared initramfs was restored
 to x86_64 after the ARM build. Existing user VMs, disks and physical USB devices
 were not modified.
+
+## Alpha imports and managed receiver fairness (2026-10-16)
+
+`alpha-environment`, `alpha-domains` and `alpha-launch` cover the common boot
+contract's owned import records, alias/limit validation, ambiguous child labels
+and receiver-local capability installation. `service-bindings` distinguishes
+process-owned and domain-owned Sessions and retains per-import charges after
+close. `physical-memory` rejects allocation/mapping of partially occupied boot
+pages and checks that following free pages remain usable.
+
+`service-receiver` exercises the production sequential receiver, including
+uncertain replies, quiesce acknowledgement and a continuously queued 32-request
+batch. A bounded Notification poll prevents management starvation without an
+Alpha request on each data-path call. Cross-domain QEMU fixtures exercise the
+same path against the unchanged kernel; see the [architecture test commands](../../nanami/docs/architecture.md#architecture-migration-gates).
+
+```sh
+cargo test --manifest-path tests/native-performance/Cargo.toml \
+  --test alpha-environment --test alpha-domains --test alpha-launch \
+  --test physical-memory --test service-bindings --test service-receiver \
+  -- --test-threads=1
+```
+
+The full native suite passes 662 tests (7 timing tests ignored). These six
+targets pass 50 host AddressSanitizer tests; xtask passes 24 tests. The C++
+registry/managed-connection wire test passes AddressSanitizer/UBSan. Explicit
+import, alias isolation, shared upstream Session identity, two-connection quota
+and existing-handle Provider exchange pass QEMU on x86_64 and AArch64, each with
+1 and 4 cores. Attenuated alias/container reclamation remains quarantined, not
+claimed as completed by these tests.
+
+## Opaque session-buffer handover (2026-10-16)
+
+`service-buffers` executes the production mapping transaction with substituted
+page effects. It checks retained contents/client VA, exact abort restoration,
+all-candidate rollback after partial MAP/receiver failure, no removal of an
+unrelated pre-existing mapping, uncertain UNMAP retention, bounded allocation
+and quiesced close. `service-bindings` also checks matching data profiles and
+that a partially failed withdrawal cannot be committed or automatically resumed.
+
+The full native suite passes 676 tests (7 timing tests ignored). The buffer,
+binding and receiver targets pass 25 AddressSanitizer tests. The optional QEMU
+fixture receives the actual stale-access fault through a separate guest resolver,
+checks the old sender/address, withholds its reply, stops that blocked task and
+verifies that its uncleaned Cspace cannot be reaped. It is not just a check of
+Alpha's mapping table. Reproduce with `build-domain.py --session-buffers` and
+`boot-smoke.py --expect-buffers`; see the architecture's profile/command details.
+The later event profile extends this coverage; safe backing/quota reuse remains
+a separate gate.
+
+## Recursive Alpha delegation and imports (2026-10-16)
+
+The real three-level fixture exposed an authority-fragmentation bug: both
+512-MiB Generic sources of a 1-GiB child were partially occupied by bootstrap,
+so it could not delegate 512 MiB onward despite enough aggregate free RAM.
+Delegation now supplies two 256-MiB bootstrap extents, followed by successively
+larger untyped extents. They cover exactly the requested budget. The minimum
+512-MiB layout and common boot ABI are unchanged.
+
+`physical-memory` now bootstraps a child against actual checked Generic
+conversions and delegates a grandchild, verifying that neither ancestor can
+allocate/free its live extent. `alpha-domains` validates the shipped recursive
+configuration and its explicit service-readiness dependency. These targets and
+the buffer/binding/receiver targets pass 48 host AddressSanitizer tests.
+
+The `--recursive-imports` / `--expect-recursive-imports` guest fixtures add a
+1-GiB child and 512-MiB grandchild, two local alias names, an intermediate
+domain-owned Session charged against the single upstream allowance, and actual
+leaf CALLs through root Provider exchange. Normal calls use the root endpoint
+directly, without either Alpha relaying them. The intermediate memory report
+excludes the grandchild grant. This is a three-level integration check, not
+arbitrary-depth isolation or a live-domain reclamation claim. Commands are in
+[Architecture migration gates](../../nanami/docs/architecture.md#architecture-migration-gates).
+
+## Event handover, capability provenance and boot regressions (2026-10-16)
+
+The latest full native suite passes 699 tests (7 timing tests ignored).
+The following production-source targets pass 135 AddressSanitizer tests
+(1 timing test ignored):
+
+```sh
+RUSTFLAGS=-Zsanitizer=address cargo test \
+  --manifest-path tests/native-performance/Cargo.toml --target aarch64-apple-darwin \
+  --test physical-memory --test alpha-domains --test core-process \
+  --test service-bindings --test service-buffers --test service-events \
+  --test service-receiver --test ipc-notifications --test timer-wait \
+  --test virtio-lifecycle -- --test-threads=1
+```
+
+`service-events` tests bounded event ownership, visible/PCB-held alias
+withdrawal, exact abort installation, failed-transfer freeze, idempotent grants
+and charged close. Receiver tests cover management/work coalescing and direct
+event delivery without a per-work Alpha RPC. The guest profile additionally
+retains queue cursors through pending work and an accepted non-idempotent CALL;
+ACK cannot precede its old-Provider reply. These event/permission checks pass
+x86_64 and AArch64 QEMU, each with 1 and 4 cores, using
+`build-domain.py --service-events` and `boot-smoke.py --expect-events`.
+
+The guest rejects copying Alpha's administrative endpoint, copying an IPC/PCB as
+a Notification, overwriting managed handles, and acquiring undelegated I/O/IRQ
+authority. It verifies that denied transfers preserve a usable destination.
+`core-process` also tests empty slots left by foreign revocation: COPY can fill
+them without a failing REMOVE, while an occupied IPC/unknown object is never
+deleted by the notification-transfer path. This distinction preserves window
+notification replacement after another application exits.
+
+`timer-wait` delivers a completion during the scheduling RPC while bound through
+an IRQ alias, verifying the exact cached descriptor and preserved unrelated
+flags. `virtio-lifecycle` checks PCI INTx masking in polling mode and device-only
+completion cleanup without an unowned IRQ ACK. Real virtio boots now pass on
+1 and 4 cores; USB 4-core boot and the full AHCI desktop workflow on 1/4 cores
+also pass. Desktop tests include monitor pause/refresh/tabs and Saran
+draw/undo/save/resize/close/reopen, followed by independent persisted-BMP decoding.
+xtask passes 24 tests; the C++ registry/managed-client wire test passes
+AddressSanitizer/UBSan. These checks do not establish safe Cspace/backing or
+quota reuse; the pinned-Kernel requests remain separate acceptance gates.

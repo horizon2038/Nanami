@@ -31,6 +31,9 @@ pub fn map_capability_error(error: CapabilityError) -> RequestError {
     }
 }
 mod tls {
+    pub const fn process_slot_descriptor(slot: crate::Word) -> crate::Word {
+        0x0800_0000_0000_0000usize | ((slot & 0xff) << 48)
+    }
     pub fn init_ipc_tls() -> Result<(), crate::RequestError> {
         Ok(())
     }

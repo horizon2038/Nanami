@@ -61,7 +61,7 @@ impl MemoryManager {
                     .ok_or(CapabilityError::InvalidArgument)?,
             )
             .ok_or(CapabilityError::InvalidArgument)?;
-        if generic.is_device
+        if generic.is_device()
             || address & (PAGE_SIZE - 1) != 0
             || address != base + self.initial_generic_delegated_bytes[index]
             || end > source_end
@@ -111,10 +111,13 @@ impl MemoryManager {
         let address = page
             .checked_mul(PAGE_SIZE)
             .ok_or(CapabilityError::InvalidArgument)?;
+        if self.delegated_range(address, PAGE_SIZE) {
+            return Err(CapabilityError::PermissionDenied);
+        }
         // Ordinary allocations must not select an overlapping device generic.
         let index = (0..self.initial_generic_count)
             .filter(|&index| {
-                !self.initial_generics[index].is_device
+                !self.initial_generics[index].is_device()
                     && self.source_range(index, address).is_some()
             })
             .min_by_key(|&index| self.initial_generics[index].size_radix)

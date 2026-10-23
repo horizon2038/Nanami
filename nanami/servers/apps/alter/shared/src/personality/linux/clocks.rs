@@ -232,6 +232,15 @@ fn sleep_deadline(
 }
 
 pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
+    if runtime.timer_port == 0 {
+        // Initial absence is not a permanent failure: policy can start/import
+        // the provider later. Never substitute a clock or call descriptor zero.
+        nanami_client::registry::connect_timer_service(crate::abi::SLOT_TIMER_SERVICE)
+            .map_err(map_request_error)?;
+        runtime.timer_port = nanami_runtime::ipc::process_slot_descriptor(
+            crate::abi::SLOT_TIMER_SERVICE,
+        );
+    }
     let (ticks, tick_hz) =
         nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
             .map_err(map_request_error)?;

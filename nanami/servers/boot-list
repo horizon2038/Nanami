@@ -1,9 +1,19 @@
 # Alpha embedded boot list.
-# Format: <name> <priority> <initramfs-path> [argv...]
+# Component format: <label> <priority> <initramfs-path>
+# Defaults for trusted initramfs images: @process <path> [priority=N] [affinity=N] [platform=0|1]
+# Labels do not grant authority. Platform metadata access is explicitly assigned.
 #
 # Keep this list minimal. It must not depend on vfs/rootfs because Alpha reads
 # it from embedded initramfs before any filesystem service exists.
 # Architecture/platform drivers are selected by the privileged manager.
+@process ./bin/driver-manager priority=30 platform=1
+@process ./bin/hpet-server priority=30
+@process ./bin/timer-server priority=30
+# Firmware SMI_CMD access belongs on the boot processor.
+@process ./bin/acpi-server priority=28 affinity=0
+@process ./bin/usb-server priority=28
+@process ./bin/ahci-server priority=23
+@process ./bin/virtio-blk-server priority=23
 device-manager 31 ./bin/driver-manager
 rtc-service 22 ./bin/rtc-server
 vfs-service 22 ./bin/ext2-server

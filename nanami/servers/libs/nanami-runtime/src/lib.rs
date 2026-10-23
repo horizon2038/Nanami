@@ -8,15 +8,16 @@ pub mod io;
 pub mod ipc;
 mod mmio;
 mod platform;
+pub mod service;
 mod version;
 
 pub use platform::{request_nanami_info_platform, NanamiPlatformInfo};
 pub use version::{request_kernel_version, request_nanami_version};
 
+pub use a9n_abi::capability_call::address_space::Attribute;
 use a9n_abi::capability_call::ipc_port::MessageInfo;
 pub use a9n_abi::Word;
 use a9n_abi::{CapabilityDescriptor, CapabilityError};
-pub use a9n_abi::capability_call::address_space::Attribute;
 
 pub use nanami_uapi::os::*;
 pub use nanami_uapi::{NanamiError, NanamiResult, RequestError};
@@ -418,13 +419,44 @@ pub fn connect_service_by_name_with_pid(
     Ok(pid)
 }
 
-pub fn service_info_by_ordinal(ordinal: Word) -> Result<(Word, Word), RequestError> {
-    let (status, owner_pid, service_kind) =
-        call_os_port(OS_REQUEST_SERVICE_LIST, ordinal, 0, 0, 0, 2)?;
+pub fn service_info_by_ordinal(
+    ordinal: Word,
+) -> Result<nanami_uapi::registry::ServiceInfo, RequestError> {
+    use nanami_uapi::registry::{ServiceInfo, SERVICE_NAME_BYTES};
+    let (status, owner_pid, name_len) = call_os_port(OS_REQUEST_SERVICE_LIST, ordinal, 0, 0, 0, 3)?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
-    Ok((owner_pid, service_kind))
+    if name_len == 0 || name_len > SERVICE_NAME_BYTES {
+        return Err(RequestError::InvalidArgument);
+    }
+    let mut info = ServiceInfo {
+        owner_pid,
+        name_len,
+        name: [0; SERVICE_NAME_BYTES],
+    };
+    for chunk in 0..name_len.div_ceil(2 * core::mem::size_of::<Word>()) {
+        let (status, first, second) =
+            call_os_port(OS_REQUEST_SERVICE_LIST, ordinal, chunk + 1, 0, 0, 3)?;
+        if status != OS_RESPONSE_OK {
+            return Err(RequestError::Status(status));
+        }
+        for (offset, byte) in first
+            .to_le_bytes()
+            .into_iter()
+            .chain(second.to_le_bytes())
+            .enumerate()
+        {
+            let index = chunk * 2 * core::mem::size_of::<Word>() + offset;
+            if index < SERVICE_NAME_BYTES {
+                info.name[index] = byte;
+            }
+        }
+    }
+    if core::str::from_utf8(&info.name[..name_len]).is_err() || info.name[..name_len].contains(&0) {
+        return Err(RequestError::InvalidArgument);
+    }
+    Ok(info)
 }
 
 pub fn request_process_spawn(image_name: &str) -> Result<Word, RequestError> {
@@ -840,8 +872,8 @@ pub fn request_nanami_info_smp() -> Result<NanamiSmpInfo, RequestError> {
     })
 }
 
-/// Query raw architecture boot data reserved for the boot-selected Device
-/// Driver Manager. For x86_64 this exposes the RSDP physical address, not a
+/// Query raw architecture boot data from a component explicitly granted
+/// `platform=1` by boot policy. On x86_64 this exposes the RSDP address, not a
 /// kernel-discovered device address. Alpha rejects every other process.
 pub fn request_driver_platform_info(kind: Word) -> Result<(Word, Word), RequestError> {
     let (status, detail0, detail1) =

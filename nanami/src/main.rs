@@ -3,17 +3,15 @@
 
 extern crate alloc;
 
+mod alpha_booter;
+#[allow(dead_code)] // Booter links only the shared launch/ELF/capability mechanisms.
 mod nanami_core;
-mod nanami_drivers;
+#[allow(dead_code)]
 mod nanami_utils;
 
-use core::mem::MaybeUninit;
-use nanami_core::alpha::Alpha;
 use nun::InitInfo;
 
 nun::entry!(main);
-
-static mut ALPHA: MaybeUninit<Alpha> = MaybeUninit::uninit();
 
 fn main(init_info: &InitInfo) {
     crate::force_info!(r#" _   _                             _ "#);
@@ -39,12 +37,5 @@ fn main(init_info: &InitInfo) {
         init_info.core_count
     );
 
-    crate::info!("[entry] main entered");
-    unsafe {
-        ALPHA.write(Alpha::bootstrap(init_info).expect("alpha bootstrap failed"));
-        let alpha = ALPHA.assume_init_mut();
-        crate::info!("[entry] alpha bootstrap returned");
-        alpha.start();
-        alpha.switch_to_runtime_stack_and_run();
-    }
+    alpha_booter::boot(init_info);
 }

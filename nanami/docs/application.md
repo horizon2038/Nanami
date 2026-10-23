@@ -4,6 +4,10 @@ This guide describes how to add native Nanami applications, services, and
 drivers. The Rust application ABI supports x86_64 and AArch64; the freestanding
 C++ SDK remains x86_64-only.
 
+This guide follows Nanami v0.5.2 and `AlphaEnvironment` ABI 2. Public wire types
+are defined in `nanami-uapi`; generic Alpha requests and managed-Service helpers
+are exposed through `nanami-runtime`.
+
 ## Component Placement
 
 ```text
@@ -39,6 +43,21 @@ Manifest entries use:
 ```text
 <name> <priority> <path> [arguments...]
 ```
+
+The Alpha boot-list accepts only the first three fields (no arguments), treats
+the name as a label, and reports malformed entries. It also accepts trusted
+`@process <initramfs-path> [priority=N] [affinity=N] [platform=0|1] [services=0|1]` defaults.
+These apply by explicit image path, not by a built-in Service name; rootfs ELF
+buffer spawns do not inherit a grant by claiming a matching image label.
+See [Boot Policy](architecture.md#boot-policy). Rootfs system/session entries
+continue to support arguments. Priority is 0..31 on both paths.
+
+Child-domain launch configuration also accepts explicit managed Service imports:
+`@import <child-label> <local-alias> <source-name> <connection-limit>`.
+Only the named stateless-control Service becomes visible under the alias; there
+is no parent-name fallback or implicit forwarding of PID-based memory APIs.
+See [Explicit Service Imports](architecture.md#explicit-service-imports) for
+the shared upstream Session, local close handles, limits and supported lifecycle.
 
 The rootfs image contains extensionless executable names. For example, the
 `alter/linux` source directory is installed as `/bin/alter-linux`.
@@ -171,13 +190,50 @@ Public protocol constants/types belong in `nanami-uapi`. Runtime code belongs
 in `nanami-runtime`; service IPC wrappers belong in `nanami-client`.
 Do not put an executable service implementation in UAPI.
 
+### External Boot Configuration
+
+`build` produces the standalone Alpha ELF before packaging initramfs and
+building the init Booter. `servers` alone does not rebuild that complete handoff.
+After changing the Alpha launch contract, linker scripts or boot configuration,
+use `build`, not just `servers` followed by `run`.
+
+To supply a boot list and extra initramfs modules:
+
+```sh
+cargo xtask build --boot-list path/to/boot-list \
+  --boot-module path/to/child.conf --boot-module path/to/worker.elf \
+  --rootfs out/custom-rootfs.img --output-image out/custom.img
+```
+
+Each module is a regular file packaged at `./modules/<basename>`; duplicate
+basenames are rejected. Non-ELF files can supply child configuration, while ELF
+modules must match the selected architecture. Keep the platform's required core
+service entries in a custom boot list; supplying a file replaces the packaged
+list rather than appending to it.
+
+An optional child declaration uses the same Alpha ELF and launch contract:
+
+```text
+@alpha laboratory 29 ./nanami/alpha - ./modules/child.conf
+@import laboratory local-door upstream-door 2
+```
+
+The radix selects a real Generic RAM partition (`29` means 512 MiB). `-` supplies
+no child archive; use a packaged archive path when that child launches modules.
+An optional `after=<service-name>` on `@alpha` waits for local registration, not
+for a health check or an authorization grant. Imports expose only the named
+managed stateless-control Service. They do not grant parent memory/device APIs
+or make local PIDs meaningful in another domain. See the
+[child-domain contract](architecture.md#explicit-service-imports) and
+[test configurations](../../tests/alpha/guest/child.conf).
+
 ## Connecting to a Service
 
 Services are resolved through Alpha's registry into a capability slot chosen by
 the client.
 
 ```rust
-const SLOT_TIMER_SERVICE: nanami_runtime::Word = 22;
+const SLOT_TIMER_SERVICE: nanami_runtime::Word = 23;
 
 nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE)?;
 let timer = nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE);
@@ -192,6 +248,11 @@ Rules:
 - Reattach shared memory only when the service protocol requires it, and
   invalidate stale pointers after reattachment.
 - Retry only startup-dependent failures, with a timer-based bound.
+
+Do not spin or repeatedly issue synchronous discovery requests while the timer
+service itself is absent. Report/defer the dependency or retry from an existing
+event source. Slot 20 is the conventional legacy server endpoint, 21 the default
+notification and 22 the fault resolver; choose an unused application slot.
 
 ## Publishing a Service
 
@@ -209,6 +270,85 @@ A service loop should receive a request, perform bounded work, reply, and return
 to receive. Use `reply_receive` where possible. Do not hold the service loop in
 an unbounded poll or wait on another synchronous service without accounting for
 dependency cycles.
+
+## Managed Services
+
+The legacy registry API above returns a Provider-local PID and a direct RW
+endpoint alias. Managed Services are a separate, opt-in API; they return a
+stable `ServiceId`, a local `SessionId` close handle and a WRITE-only endpoint.
+Neither ID is a PID. Use `nanami_runtime::service::connect`, not a legacy
+registry wrapper, for a managed name.
+
+```rust
+let connection = nanami_runtime::service::connect("sample-service", 23)?;
+// Issue protocol CALLs directly through connection.endpoint.
+// After the protocol's outstanding work has completed:
+nanami_runtime::service::close(connection.session)?;
+```
+
+Closing withdraws the client's handle. In the current Nanami implementation the
+alias, Session slot and quota remain quarantined/charged; do not use repeated
+connect/close as an unbounded allocation strategy. A9N v0.3.9-smp supports weak
+alias deletion, but Nanami's managed cleanup path has not switched to reuse.
+
+### Provider and Manager Responsibilities
+
+A Provider registers its interface and private slots with `service::Receiver`.
+Any process may register itself; publishing a public name and changing its
+binding require a manager launched with `@process <image> services=1`.
+
+| Profile | Registration helper | Persistent Service resources |
+| --- | --- | --- |
+| `STATELESS_CONTROL_PROFILE` (1) | `Receiver::register` | Stateless request/reply endpoint |
+| `MANAGED_BUFFER_PROFILE` (2) | `Receiver::register_buffered` | Endpoint plus opaque per-Session buffer |
+| `MANAGED_EVENT_PROFILE` (3) | `Receiver::register_buffered_events` | Buffer plus stable pending-work Notification |
+
+Choose distinct unused root slots in 23..223 for the receive capability,
+management notification and, for profile 3, work notification. The helpers bind
+notifications and return `ProviderEvent::Request`, `Event` or `Retired` from
+`receive()`. Reply to each accepted request with `Receiver::reply` before the
+next receive. On `Retired`, unregister with `retire_provider(receiver.id)` and
+exit. See the [Provider fixture](../../tests/alpha/guest/provider.rs) for the
+sequential lifecycle; its test-only rendezvous is not a general discovery API.
+
+An authorized manager uses `publish(name, provider)`, obtains `binding_state`,
+and coordinates `prepare`, `quiesce`, then `commit` or `abort`. Refresh state
+after transitions and use its generation, rather than inventing an ID or
+assuming the first Provider owns the public name. Matching interface and
+profile are required. Quiescence must finish accepted CALLs before receive
+authority is withdrawn; unknown reply failures are not automatically replayed.
+Clients keep their existing endpoint through a successful exchange. Alpha is
+not a proxy for ordinary requests.
+
+For profiles 2/3, clients allocate at most one buffer per Session using
+`create_buffer(session, bytes)` (maximum 64 KiB, page-rounded). Providers obtain
+their local view using `session_buffer(session)` and the request's Session
+badge, never a client PID. Compatible Providers own the buffer layout and
+validation. Profile 3 clients use `connect_event(session, slot)` for a stable
+pending-work handle. Queue contents/cursors are authoritative; notification
+counts are not. On resource-rescan hints a Provider enumerates
+`buffer_session(provider, ordinal)` rather than querying Alpha on every event.
+
+The x86_64 C++ SDK exposes `connect_managed_service`, `close_managed_session`,
+`create_session_buffer`, `session_buffer` and `connect_session_event` in
+[`nanami.hpp`](../servers/uapi/include/nanami/nanami.hpp). Cross-domain imports
+currently accept profile 1 only. Private heaps, legacy subscriptions and device
+DMA do not become migratable by selecting a managed profile.
+
+## Timer Waits and Notification Bindings
+
+Timer sleeps must grant and wait on the thread's currently bound Notification.
+The `nanami_client::timer` helpers use the runtime's tracked binding rather than
+assuming slot 21, preserve unrelated notification bits, and check the monotonic
+deadline after wakeup. A coalesced interval/timer badge is not proof that a
+particular sleep has completed.
+
+Use the runtime binding helper when rebinding a thread. Do not substitute another
+descriptor alias just because it names the same Notification: deferred badge
+state is tracked per descriptor. Dedicated sleep-notification helpers are for
+exclusive sequential delays, not a Notification shared with IRQ or interval
+users. These helpers still require a working timer provider; the default
+headless AArch64 configuration does not supply one.
 
 ## Shared Memory and Notifications
 
@@ -318,6 +458,8 @@ must not be required by a core service before `system-manager` runs.
 
 ### Rootfs executable is missing
 
-Confirm that the component has an active `Cargo.toml` or `Makefile`, that its
-release output exists, and that `ROOTFS_APPS` is not filtering it out. Rebuild
-`out/ext2.img` after changing application binaries or manifests.
+Confirm that the component has an active `Cargo.toml` or `nanami-app.toml`, that
+its release output exists, and that `--rootfs-app` selection is not filtering it
+out. Rebuild the selected rootfs after changing application binaries or
+manifests; an existing rootfs is otherwise preserved. Use a disposable path or
+back up guest data before passing `--rebuild-rootfs`.

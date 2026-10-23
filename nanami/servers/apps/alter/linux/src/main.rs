@@ -285,17 +285,13 @@ fn connect_posix_service() -> Word {
 }
 
 fn connect_timer_service() -> Word {
-    let mut tries = 0usize;
-    loop {
-        match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
-            Err(e) => {
-                if tries == 0 {
-                    log_request_error("[alter] waiting timer-service: ", e);
-                }
-                tries += 1;
-                nanami_runtime::yield_now();
-            }
+    // A domain may deliberately omit a timer provider. A high-priority retry
+    // loop here can starve the lower-priority process that is still booting.
+    match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
+        Ok(()) => nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE),
+        Err(error) => {
+            log_request_error("[alter] timer unavailable; clock calls will retry: ", error);
+            0
         }
     }
 }

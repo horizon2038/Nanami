@@ -25,20 +25,8 @@ pub enum CapabilityType {
     Frame,
     PageTable,
 }
-#[derive(Clone, Copy, Default)]
-pub struct GenericDescriptor {
-    address: usize,
-    size_radix: u8,
-    is_device: bool,
-}
-pub struct InitInfo {
-    generic_list_count: usize,
-    generic_list: [GenericDescriptor; 128],
-}
-pub enum InitSlotOffset {
-    GenericNode = 6,
-}
 pub use a9n_abi::capability_call;
+use nanami_uapi::alpha::{AlphaEnvironment, MemoryResource, RESOURCE_DEVICE};
 #[macro_export]
 macro_rules! info { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }} }
 #[path = "../../nanami/src/nanami_utils/descriptor.rs"]
@@ -85,6 +73,8 @@ struct Fake {
     nodes: usize,
     batches: usize,
     map_attributes: Vec<usize>,
+    parents: BTreeMap<usize, usize>,
+    fail_revoke: bool,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod arch {
@@ -127,7 +117,13 @@ pub mod arch {
                 let end = start + bytes * count;
                 assert!(end <= original.end, "generic exhausted");
                 if kind != CapabilityType::Node {
-                    assert_eq!(start, original.cursor, "untyped alignment prefix lost");
+                    // A partially occupied boot page is reserved, not a usable
+                    // untyped prefix. No whole free page may be skipped.
+                    assert_eq!(
+                        start,
+                        (original.cursor + 4095) & !4095,
+                        "untyped alignment prefix lost"
+                    );
                 }
                 if kind == CapabilityType::Frame {
                     assert_eq!(slot, 0);
@@ -151,6 +147,7 @@ pub mod arch {
                             device: original.device,
                         },
                     );
+                    fake.parents.insert(descriptor, source);
                     if kind == CapabilityType::Node {
                         fake.nodes += 1;
                     }
@@ -166,8 +163,37 @@ pub mod arch {
         pub fn copy(_: usize, _: usize, _: usize) -> CapabilityResult {
             Ok(())
         }
-        pub fn revoke(_: usize, _: usize) -> CapabilityResult {
-            panic!("live source revoked")
+        pub fn revoke(node: usize, index: usize) -> CapabilityResult {
+            FAKE.with_borrow_mut(|fake| {
+                if fake.fail_revoke {
+                    return Err(CapabilityError::IllegalOperation);
+                }
+                let target = make_child_slot_descriptor(node, fake.caps[&node].radix, index);
+                assert_eq!(fake.caps[&target].kind, CapabilityType::Generic);
+                loop {
+                    let children: Vec<_> = fake
+                        .parents
+                        .iter()
+                        .filter_map(|(&child, &parent)| {
+                            if parent == target || !fake.caps.contains_key(&parent) {
+                                Some(child)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if children.is_empty() {
+                        break;
+                    }
+                    for child in children {
+                        fake.parents.remove(&child);
+                        fake.caps.remove(&child);
+                    }
+                }
+                let cap = fake.caps.get_mut(&target).unwrap();
+                cap.cursor = cap.end - (1usize << cap.radix);
+                Ok(())
+            })
         }
     }
     pub mod address_space {
@@ -187,11 +213,23 @@ pub mod arch {
     }
 }
 
-fn boot(ram_radix: u8, online: bool) -> (MemoryManager, InitInfo) {
-    let mut info = InitInfo {
-        generic_list_count: 5,
-        generic_list: [GenericDescriptor::default(); 128],
+fn boot(ram_radix: u8, online: bool) -> (MemoryManager, AlphaEnvironment) {
+    boot_with_reserved_prefix(ram_radix, online, 0)
+}
+
+fn boot_with_reserved_prefix(
+    ram_radix: u8,
+    online: bool,
+    ram_consumed: usize,
+) -> (MemoryManager, AlphaEnvironment) {
+    let mut info = AlphaEnvironment {
+        resource_count: 5,
+        bootstrap_resource: 1,
+        ..AlphaEnvironment::default()
     };
+    info.capabilities.root_radix = 12;
+    // Deliberately unrelated to A9N's init slots, with reversed leaf indices.
+    let node = make_root_slot_descriptor(12, 117);
     for (index, (address, radix, device)) in [
         (0x100000, 20, false),    // root, with 512 KiB already reserved
         (0x100000000, 30, false), // kernel objects and initial metadata pool
@@ -202,12 +240,15 @@ fn boot(ram_radix: u8, online: bool) -> (MemoryManager, InitInfo) {
     .into_iter()
     .enumerate()
     {
-        info.generic_list[index] = GenericDescriptor {
+        info.resources[index] = MemoryResource {
+            capability: make_child_slot_descriptor(node, 7, 127 - index),
             address,
-            size_radix: radix,
-            is_device: device,
+            size_radix: radix as usize,
+            flags: if device { RESOURCE_DEVICE } else { 0 },
+            consumed_bytes: if index == 0 { 0x80000 } else { 0 },
         };
     }
+    info.resources[3].consumed_bytes = ram_consumed;
     FAKE.with(|fake| {
         let mut fake = fake.borrow_mut();
         *fake = Fake::default();
@@ -221,7 +262,6 @@ fn boot(ram_radix: u8, online: bool) -> (MemoryManager, InitInfo) {
                 device: false,
             },
         );
-        let node = make_root_slot_descriptor(12, InitSlotOffset::GenericNode as usize);
         fake.caps.insert(
             node,
             Cap {
@@ -232,25 +272,25 @@ fn boot(ram_radix: u8, online: bool) -> (MemoryManager, InitInfo) {
                 device: false,
             },
         );
-        for (index, generic) in info.generic_list[..5].iter().enumerate() {
+        for generic in &info.resources[..5] {
             fake.caps.insert(
-                make_child_slot_descriptor(node, 7, index),
+                generic.capability,
                 Cap {
                     kind: CapabilityType::Generic,
-                    cursor: generic.address + if index == 0 { 0x80000 } else { 0 },
+                    cursor: generic.address + generic.consumed_bytes,
                     end: generic.address + (1 << generic.size_radix),
                     radix: generic.size_radix as usize,
-                    device: generic.is_device,
+                    device: generic.is_device(),
                 },
             );
         }
     });
-    let mut memory = MemoryManager::bootstrap(&info, 0, 12, 1, 0, 0x80000).unwrap();
+    let mut memory = MemoryManager::bootstrap(&info).unwrap();
     memory
         .prepare_bootstrap_frames(2, 0x80000000, 8192)
         .unwrap();
     if online {
-        memory.initialize_physical_allocator(&info).unwrap();
+        memory.initialize_physical_allocator().unwrap();
         memory
             .allocate_physical_at(0x80000000, 0x2000000, false)
             .unwrap();
@@ -310,6 +350,24 @@ fn bootstrap_cost_is_independent_of_installed_ram() {
 }
 
 #[test]
+fn subpage_boot_reservations_exclude_the_whole_page_from_allocation_and_frame_sources() {
+    for consumed in [1, 128, 2048, 4095, 4097, 0x200080] {
+        let (mut memory, _) = boot_with_reserved_prefix(33, true, consumed);
+        let rounded = (consumed + 4095) & !4095;
+        assert!(memory
+            .allocate_physical_at(0x200000000, 4096, false)
+            .is_err());
+        assert!(memory
+            .allocate_physical_at(0x200000000 + rounded - 4096, 4096, false)
+            .is_err());
+        assert!(memory
+            .ensure_alpha_frame_at_physical_index((0x200000000 + rounded - 4096) >> 12)
+            .is_err());
+        map(&mut memory, 0x200000000 + rounded, false);
+    }
+}
+
+#[test]
 fn sparse_ram_and_high_mmio_leave_holes_unmaterialized() {
     let (mut memory, _) = boot(40, true);
     let before = FAKE.with(|fake| fake.borrow().batches);
@@ -356,6 +414,19 @@ fn fragmented_unaligned_sources_preserve_every_page() {
     for address in [0x82000000, 0x83fff000] {
         map(&mut memory, address, false);
     }
+}
+
+#[test]
+fn every_delegated_resource_prefix_is_excluded_from_ram_and_capability_allocation() {
+    let (mut memory, _) = boot_with_reserved_prefix(33, true, 0x200000);
+    for address in [0x200000000, 0x2001ff000] {
+        assert!(memory.allocate_physical_at(address, 4096, false).is_err());
+        assert!(memory
+            .ensure_alpha_frames_for_range_from_initial_generic(address, 4096, false)
+            .is_err());
+    }
+    map(&mut memory, 0x200200000, false);
+    map(&mut memory, 0x200201000, false);
 }
 
 #[test]
@@ -432,4 +503,222 @@ fn mapping_flags_use_the_existing_attribute_word_and_keep_default_normal() {
     }
     memory.map_frame_strict(1, 2, 0x3000, &mut vm).unwrap();
     FAKE.with(|fake| assert_eq!(fake.borrow().map_attributes, [7, 7, 0x17, 0x27, 7]));
+}
+
+#[test]
+fn real_generic_partition_excludes_parent_allocation_and_can_be_revoked_and_reused() {
+    let (mut memory, _) = boot(33, true);
+    let before = memory.physical_memory_info().unwrap().free_pages;
+    let id = memory.reserve_alpha_memory(29).unwrap();
+    let info = memory.delegation_info(id).unwrap();
+    assert_eq!(info.bytes, 1 << 29);
+    assert_eq!(info.address % info.bytes, 0);
+    assert_eq!(
+        before - memory.physical_memory_info().unwrap().free_pages,
+        info.bytes / 4096
+    );
+    assert!(memory
+        .allocate_physical_at(info.address, 4096, false)
+        .is_err());
+    assert!(memory.free_physical(info.address, info.bytes).is_err());
+    assert!(memory
+        .ensure_alpha_frame_at_physical_index(info.address / 4096)
+        .is_err());
+    let resources = memory.take_delegated_resources(id).unwrap();
+    assert!(memory.take_delegated_resources(id).is_err());
+    for (half, resource) in resources.iter().enumerate() {
+        assert_eq!(resource.address, info.address + half * (info.bytes / 2));
+        assert_eq!(resource.size_bytes(), Some(info.bytes / 2));
+        assert!(!resource.is_device());
+        FAKE.with_borrow(|fake| {
+            let cap = fake.caps[&resource.capability];
+            assert_eq!(cap.cursor, resource.address);
+            assert_eq!(cap.end, resource.address + info.bytes / 2);
+        });
+    }
+    // No process or external mapping was created from this test partition.
+    unsafe {
+        memory.reclaim_delegation(id).unwrap();
+    }
+    assert_eq!(
+        memory.delegation_info(id).unwrap().state,
+        memory::DelegationState::Reclaimed
+    );
+    assert_eq!(memory.physical_memory_info().unwrap().free_pages, before);
+    assert!(unsafe { memory.reclaim_delegation(id) }.is_err());
+    FAKE.with_borrow(|fake| {
+        assert!(resources
+            .iter()
+            .all(|resource| !fake.caps.contains_key(&resource.capability)));
+    });
+    map(&mut memory, info.address, false);
+}
+
+#[test]
+fn failed_revoke_never_releases_the_partition() {
+    let (mut memory, _) = boot(33, true);
+    let id = memory.reserve_alpha_memory(29).unwrap();
+    let info = memory.delegation_info(id).unwrap();
+    let free = memory.physical_memory_info().unwrap().free_pages;
+    FAKE.with_borrow_mut(|fake| fake.fail_revoke = true);
+    assert!(unsafe { memory.reclaim_delegation(id) }.is_err());
+    assert_eq!(memory.physical_memory_info().unwrap().free_pages, free);
+    assert_eq!(
+        memory.delegation_info(id).unwrap().state,
+        memory::DelegationState::Prepared
+    );
+    assert!(memory
+        .allocate_physical_at(info.address, 4096, false)
+        .is_err());
+}
+
+#[test]
+fn child_bootstrap_preserves_a_whole_generic_for_recursive_delegation() {
+    let (mut parent, _) = boot(33, true);
+    let child_id = parent.reserve_alpha_memory(30).unwrap();
+    let child_info = parent.delegation_info(child_id).unwrap();
+    let mut resources = parent.take_delegated_resources(child_id).unwrap();
+    assert_eq!(resources.len(), 3);
+    let mut address = child_info.address;
+    for (resource, radix) in resources.iter().zip([28, 28, 29]) {
+        assert_eq!(resource.address, address);
+        assert_eq!(resource.size_radix, radix);
+        address += 1 << radix;
+    }
+    assert_eq!(address, child_info.address + child_info.bytes);
+
+    // Descriptors are receiver-local. Switch the syscall mock to the child's
+    // namespace rather than treating a parent root descriptor as a global ID.
+    FAKE.with_borrow_mut(|fake| {
+        let caps: Vec<_> = resources
+            .iter()
+            .map(|resource| fake.caps[&resource.capability])
+            .collect();
+        *fake = Fake::default();
+        fake.caps.insert(
+            0,
+            Cap {
+                kind: CapabilityType::Node,
+                cursor: 0,
+                end: 0,
+                radix: 12,
+                device: false,
+            },
+        );
+        let node = make_root_slot_descriptor(12, 117);
+        fake.caps.insert(
+            node,
+            Cap {
+                kind: CapabilityType::Node,
+                cursor: 0,
+                end: 0,
+                radix: 7,
+                device: false,
+            },
+        );
+        for (index, (resource, cap)) in resources.iter_mut().zip(caps).enumerate() {
+            resource.capability = make_child_slot_descriptor(node, 7, 127 - index);
+            fake.caps.insert(resource.capability, cap);
+        }
+    });
+    let mut environment = AlphaEnvironment {
+        resource_count: resources.len(),
+        bootstrap_resource: 0,
+        ..AlphaEnvironment::default()
+    };
+    environment.capabilities.root_radix = 12;
+    environment.resources[..resources.len()].copy_from_slice(&resources);
+    let mut child = MemoryManager::bootstrap(&environment).unwrap();
+    // Exercise the same two bootstrap consumers as a live Alpha: object pools
+    // in resource 0 and the 32-MiB heap in the smallest non-bootstrap extent.
+    child
+        .prepare_bootstrap_frames(1, resources[1].address, 8192)
+        .unwrap();
+    child.initialize_physical_allocator().unwrap();
+    child
+        .allocate_physical_at(resources[1].address, 1 << 25, false)
+        .unwrap();
+    let free = child.physical_memory_info().unwrap().free_pages;
+    let grandchild_id = child.reserve_alpha_memory(29).unwrap();
+    let grandchild = child.delegation_info(grandchild_id).unwrap();
+    assert_eq!(grandchild.address, resources[2].address);
+    assert_eq!(grandchild.bytes, 1 << 29);
+    assert_eq!(
+        free - child.physical_memory_info().unwrap().free_pages,
+        (1 << 29) / 4096
+    );
+    assert!(child
+        .allocate_physical_at(grandchild.address, 4096, false)
+        .is_err());
+    assert!(parent
+        .allocate_physical_at(grandchild.address, 4096, false)
+        .is_err());
+    assert!(child
+        .free_physical(grandchild.address, grandchild.bytes)
+        .is_err());
+    let free = child.physical_memory_info().unwrap().free_pages;
+    assert!(child.reserve_alpha_memory(29).is_err());
+    assert_eq!(child.physical_memory_info().unwrap().free_pages, free);
+}
+
+#[test]
+fn failed_partition_preparation_is_accounted_and_quarantined() {
+    let (mut memory, _) = boot(33, true);
+    let before = memory.physical_memory_info().unwrap().free_pages;
+    FAKE.with_borrow_mut(|fake| fake.fail_kind = Some((CapabilityType::Generic, 0)));
+    assert!(memory.reserve_alpha_memory(29).is_err());
+    let records: Vec<_> = memory.delegation_records().collect();
+    assert_eq!(records.len(), 1);
+    let (id, info) = records[0];
+    assert_eq!(info.state, memory::DelegationState::Reserved);
+    assert_eq!(
+        before - memory.physical_memory_info().unwrap().free_pages,
+        info.bytes / 4096
+    );
+    assert!(memory.free_physical(info.address, info.bytes).is_err());
+    assert!(memory.take_delegated_resources(id).is_err());
+}
+
+#[test]
+fn aligned_partition_search_uses_free_ram_not_device_or_materialized_frames() {
+    let (mut memory, _) = boot(33, true);
+    let before = memory.physical_memory_info().unwrap().free_pages;
+    for radix in [0, 12, 28, usize::BITS as usize, usize::MAX] {
+        assert!(memory.reserve_alpha_memory(radix).is_err());
+    }
+    assert_eq!(memory.physical_memory_info().unwrap().free_pages, before);
+    let first = memory.reserve_alpha_memory(29).unwrap();
+    let first = memory.delegation_info(first).unwrap();
+    let second = memory.reserve_alpha_memory(29).unwrap();
+    let second = memory.delegation_info(second).unwrap();
+    assert!(
+        first.address + first.bytes <= second.address
+            || second.address + second.bytes <= first.address
+    );
+    for range in [first, second] {
+        assert!(
+            (0x200000000..0x400000000).contains(&range.address)
+                || (0x100000000..0x140000000).contains(&range.address)
+        );
+    }
+}
+
+#[test]
+fn partition_exhaustion_is_bounded_and_does_not_fall_back_to_device_authority() {
+    let (mut memory, _) = boot(33, true);
+    let mut partitions = 0;
+    for _ in 0..32 {
+        if memory.reserve_alpha_memory(29).is_err() {
+            break;
+        }
+        partitions += 1;
+    }
+    assert!(partitions > 1 && partitions < 32);
+    let free = memory.physical_memory_info().unwrap().free_pages;
+    let records = memory.delegation_records().count();
+    for _ in 0..4 {
+        assert!(memory.reserve_alpha_memory(29).is_err());
+        assert_eq!(memory.physical_memory_info().unwrap().free_pages, free);
+        assert_eq!(memory.delegation_records().count(), records);
+    }
 }

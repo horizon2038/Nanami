@@ -100,6 +100,12 @@ pub struct Common {
     /// Select rootfs apps by their installed name; repeatable.
     #[arg(long)]
     pub rootfs_app: Vec<String>,
+    /// External startup configuration for First Alpha (packaged as boot-list).
+    #[arg(long)]
+    pub boot_list: Option<PathBuf>,
+    /// Additional boot module, installed as ./modules/<basename>.
+    #[arg(long)]
+    pub boot_module: Vec<PathBuf>,
     #[arg(long)]
     pub skip_cpp: bool,
     #[arg(long)]

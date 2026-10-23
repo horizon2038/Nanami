@@ -6,6 +6,7 @@
 pub type Word = usize;
 mod error;
 pub use error::{NanamiError, NanamiResult, RequestError};
+pub mod alpha;
 pub mod block;
 pub mod device;
 pub mod exec;
@@ -18,6 +19,7 @@ pub mod posix;
 pub mod power;
 pub mod registry;
 pub mod rtc;
+pub mod service;
 pub mod terminal;
 pub mod timer;
 pub mod usb;

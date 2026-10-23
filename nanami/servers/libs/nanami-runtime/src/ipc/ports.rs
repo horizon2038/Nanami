@@ -6,7 +6,11 @@ use crate::{map_capability_error, RequestError, Word};
 use super::tls::init_ipc_tls;
 
 const SELF_PCB_DESCRIPTOR: CapabilityDescriptor = 0x0801_0000_0000_0000;
-static BOUND_NOTIFICATION: AtomicUsize = AtomicUsize::new(0);
+// Alpha initially binds the common Native notification before first entry.
+// Record that binding even before a component explicitly selects an alias.
+static BOUND_NOTIFICATION: AtomicUsize = AtomicUsize::new(super::tls::process_slot_descriptor(
+    crate::PROCESS_SLOT_NOTIFICATION,
+));
 static PENDING_NOTIFICATION: AtomicUsize = AtomicUsize::new(0);
 
 pub fn bind_current_thread_notification(
@@ -45,6 +49,21 @@ pub fn bind_current_thread_notification(
     PENDING_NOTIFICATION.store(0, Ordering::Release);
     BOUND_NOTIFICATION.store(notification_descriptor, Ordering::Release);
     Ok(())
+}
+
+/// Flat Native root slot currently used by the thread's bound Notification.
+/// Use this for both notification grants and waits: two slot aliases of the
+/// same object are not interchangeable in the runtime's deferred-badge cache.
+pub fn bound_notification_slot() -> Result<Word, RequestError> {
+    let descriptor = BOUND_NOTIFICATION.load(Ordering::Acquire);
+    if descriptor == 0 {
+        return Ok(crate::PROCESS_SLOT_NOTIFICATION);
+    }
+    let slot = (descriptor >> 48) & 0xff;
+    if super::tls::process_slot_descriptor(slot) != descriptor {
+        return Err(RequestError::InvalidArgument);
+    }
+    Ok(slot)
 }
 
 pub fn notification_wait(

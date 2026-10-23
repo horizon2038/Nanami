@@ -9,6 +9,7 @@ pub enum CapabilityError {
     IllegalOperation,
     InvalidArgument,
     PermissionDenied,
+    Fatal,
 }
 #[macro_export]
 macro_rules! info {
@@ -44,13 +45,185 @@ use vm_space::VmTracker;
 #[path = "shared-memory-reservations.rs"]
 mod shared_memory_reservations;
 
-#[path = "shared-memory-lifecycle.rs"]
-mod shared_memory_lifecycle;
 #[path = "allocation-index.rs"]
 mod allocation_index;
+#[path = "shared-memory-lifecycle.rs"]
+mod shared_memory_lifecycle;
 
 fn manager() -> ProcessManager {
-    ProcessManager::new_alpha(1, 2, 3, 4096, &[], 4).unwrap()
+    ProcessManager::new_alpha(1, 2, 99, 3, 4096, &[], 4).unwrap()
+}
+
+#[test]
+fn alpha_uses_its_actual_pcb_capability() {
+    assert_eq!(manager().alpha_entry().pcb, 99);
+}
+
+#[test]
+fn native_root_provenance_never_treats_kernel_or_other_slots_as_notifications() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    let types = manager.find_entry_by_pid(1).unwrap().root_types;
+    assert!(types.is_notification(21));
+    assert!(types.is_ipc(20));
+    for slot in [0, 1, 2, 3, 7, 22, 40, 64, 255, 256, usize::MAX] {
+        assert!(!types.is_notification(slot));
+    }
+    assert!(manager.root_types_mut(0).is_err());
+    assert!(manager.root_types_mut(999).is_err());
+}
+
+#[test]
+fn root_slot_overwrite_clears_notification_type_without_touching_adjacent_slots() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    let types = manager.root_types_mut(1).unwrap();
+    for slot in [31, 32, 63, 64, 127, 128, 255] {
+        types.notification(slot);
+        assert!(types.is_notification(slot));
+        types.other(slot);
+        assert!(types.occupied(slot));
+        assert!(!types.is_notification(slot));
+        types.ipc(slot);
+        assert!(types.is_ipc(slot));
+        types.clear(slot);
+        assert!(!types.occupied(slot));
+    }
+    assert!(types.is_notification(21));
+    assert!(types.is_ipc(20));
+    types.notification(256);
+    assert!(!types.occupied(256));
+    assert_eq!(core::mem::size_of_val(types), 64);
+}
+
+#[test]
+fn exited_process_cannot_acquire_new_root_provenance() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    manager.mark_exited(1, 1, 0).unwrap();
+    assert!(manager.root_types_mut(1).is_err());
+}
+
+#[test]
+fn foreign_revocation_can_empty_a_known_slot_without_requiring_a_remove() {
+    use std::cell::RefCell;
+    let operations = RefCell::new(Vec::new());
+    for known in [false, true] {
+        operations.borrow_mut().clear();
+        nanami_core::process::install_notification_alias(
+            known,
+            || {
+                operations.borrow_mut().push("copy");
+                Ok(())
+            },
+            || {
+                operations.borrow_mut().push("remove");
+                Err(CapabilityError::PermissionDenied)
+            },
+        )
+        .unwrap();
+        assert_eq!(*operations.borrow(), ["copy"]);
+    }
+}
+
+#[test]
+fn only_a_known_live_notification_is_removed_before_replacement() {
+    use std::cell::RefCell;
+    let occupied = RefCell::new(true);
+    let operations = RefCell::new(Vec::new());
+    nanami_core::process::install_notification_alias(
+        true,
+        || {
+            operations.borrow_mut().push("copy");
+            if *occupied.borrow() {
+                return Err(CapabilityError::Fatal); // A9N INIT_FIRST conversion.
+            }
+            *occupied.borrow_mut() = true;
+            Ok(())
+        },
+        || {
+            operations.borrow_mut().push("remove");
+            *occupied.borrow_mut() = false;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(*operations.borrow(), ["copy", "remove", "copy"]);
+}
+
+#[test]
+fn occupied_unverified_or_ipc_slot_is_never_deleted_by_notification_transfer() {
+    nanami_core::process::install_notification_alias(
+        false,
+        || Err(CapabilityError::Fatal),
+        || {
+            panic!("notification API deleted another capability type");
+        },
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn failed_notification_withdrawal_is_not_followed_by_another_copy() {
+    let mut copies = 0;
+    let result = nanami_core::process::install_notification_alias(
+        true,
+        || {
+            copies += 1;
+            Err(CapabilityError::Fatal)
+        },
+        || Err(CapabilityError::PermissionDenied),
+    );
+    assert_eq!(result, Err(CapabilityError::PermissionDenied));
+    assert_eq!(copies, 1);
+}
+
+#[test]
+fn uncertain_authority_keeps_process_backing_and_metadata_quarantined() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    manager.quarantine_resources(1).unwrap();
+    manager.mark_exited(1, 0, 5).unwrap();
+    assert!(manager.reap_process(1, true).is_err());
+    assert!(manager.find_entry_by_pid(1).unwrap().resource_quarantined);
+}
+
+#[test]
+fn platform_access_is_per_process_and_defaults_to_denied() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    install(&mut manager, 2, 202);
+    assert_eq!(
+        manager.entries().map(|entry| entry.pid).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(
+        !manager
+            .find_entry_by_pid(1)
+            .unwrap()
+            .platform_information_access
+    );
+    manager.set_platform_information_access(1, true).unwrap();
+    assert!(
+        manager
+            .find_entry_by_pid(1)
+            .unwrap()
+            .platform_information_access
+    );
+    assert!(
+        !manager
+            .find_entry_by_pid(2)
+            .unwrap()
+            .platform_information_access
+    );
+    assert!(manager.set_platform_information_access(999, true).is_err());
+    manager.set_platform_information_access(1, false).unwrap();
+    assert!(
+        !manager
+            .find_entry_by_pid(1)
+            .unwrap()
+            .platform_information_access
+    );
 }
 
 #[test]
@@ -64,7 +237,7 @@ fn affinity_diagnostic_requires_explicit_one() {
 #[test]
 fn affinity_allocation_preserves_topology_and_normal_round_robin() {
     for core_count in [1, 2, 4, 64] {
-        let mut manager = ProcessManager::new_alpha(1, 2, 3, 4096, &[], core_count).unwrap();
+        let mut manager = ProcessManager::new_alpha(1, 2, 99, 3, 4096, &[], core_count).unwrap();
         for index in 0..core_count * 3 {
             let expected = if nanami_core::process::SAME_CORE_DIAGNOSTIC || core_count == 1 {
                 0

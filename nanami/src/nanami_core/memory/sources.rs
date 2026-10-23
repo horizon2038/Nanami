@@ -4,15 +4,15 @@ use super::*;
 
 #[derive(Clone, Copy)]
 pub(super) struct PhysicalSource {
-    end: usize,
-    descriptor: CapabilityDescriptor,
+    pub(super) end: usize,
+    pub(super) descriptor: CapabilityDescriptor,
 }
 
 impl MemoryManager {
     pub(super) fn initialize_physical_sources(&mut self) -> Result<(), CapabilityError> {
         for index in 0..self.initial_generic_count {
             let generic = self.initial_generics[index];
-            if generic.size_radix < PAGE_BITS as u8 {
+            if generic.size_radix < PAGE_BITS {
                 continue;
             }
             let base = generic.address as usize;
@@ -60,6 +60,17 @@ impl MemoryManager {
         address: usize,
         radix: usize,
     ) -> Result<CapabilityDescriptor, CapabilityError> {
+        Ok(self
+            .take_physical_source_slot(index, address, radix)?
+            .descriptor())
+    }
+
+    pub(super) fn take_physical_source_slot(
+        &mut self,
+        index: usize,
+        address: usize,
+        radix: usize,
+    ) -> Result<directory::Slot, CapabilityError> {
         let bytes = checked_pow2(radix).ok_or(CapabilityError::InvalidArgument)?;
         let (mut cursor, end) = self
             .source_range(index, address)
@@ -106,7 +117,7 @@ impl MemoryManager {
         )?;
         self.physical_sources.remove(&(index, cursor));
         self.retain_source(index, cursor + bytes, source);
-        Ok(slot.descriptor())
+        Ok(slot)
     }
 
     pub(super) fn ensure_metadata_capacity(&mut self) -> Result<(), CapabilityError> {
@@ -117,7 +128,7 @@ impl MemoryManager {
         // range. Reserve with the buddy allocator before converting it.
         let mut selected = None;
         'ranges: for (&(index, start), source) in self.physical_sources.iter().rev() {
-            if self.initial_generics[index].is_device {
+            if self.initial_generics[index].is_device() {
                 continue;
             }
             let Some(mut base) = source

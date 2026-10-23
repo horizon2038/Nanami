@@ -2,27 +2,26 @@ use super::*;
 
 impl Alpha {
     pub(super) fn prepare_alpha_heap(
-        init_info: &InitInfo,
+        environment: &AlphaEnvironment,
         memory: &mut MemoryManager,
-        root_radix: usize,
         bootstrap_generic: CapabilityDescriptor,
         alpha_address_space: CapabilityDescriptor,
         alpha_vm_space: &mut crate::nanami_core::vm_space::BootstrapVmSpace,
     ) -> Result<usize, CapabilityError> {
         let mut selected: Option<(usize, usize, usize, usize)> = None;
         let needed_bytes = ALPHA_HEAP_PAGES * PAGE_SIZE;
-        let count = init_info.generic_list_count as usize;
+        let count = environment.resource_count;
 
         for i in 0..count {
-            let g = init_info.generic_list[i];
-            if g.is_device || g.size_radix < 12 {
+            let g = environment.resources[i];
+            if g.is_device() || g.size_radix < 12 {
                 continue;
             }
             let size_bytes = 1usize << g.size_radix;
             if size_bytes < needed_bytes {
                 continue;
             }
-            let desc = make_generic_descriptor(root_radix, i);
+            let desc = g.capability;
             if desc == bootstrap_generic {
                 continue;
             }

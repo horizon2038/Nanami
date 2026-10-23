@@ -1,11 +1,16 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
+mod delegation;
 mod directory;
+pub use delegation::DelegationId;
+#[cfg(test)]
+pub use delegation::{DelegationInfo, DelegationState};
 mod frames;
 mod sources;
 
 use directory::{CapabilityDirectory, NodePool};
 use frames::FrameRange;
+use nanami_uapi::alpha::{AlphaEnvironment, MemoryResource, ALPHA_RESOURCE_CAPACITY};
 use sources::PhysicalSource;
 
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
@@ -16,7 +21,7 @@ use crate::nanami_core::vm_space::VmTracker;
 use crate::nanami_utils::descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use nun::{
     arch, capability_call::address_space::Attribute, CapabilityDescriptor, CapabilityError,
-    CapabilityResult, CapabilityType, InitInfo, Word,
+    CapabilityResult, CapabilityType, Word,
 };
 
 const PAGE_BITS: usize = 12;
@@ -28,8 +33,7 @@ const PHYSICAL_LEAF_RADIX: usize = 11;
 const PHYSICAL_CHUNK_RADIX: usize = PAGE_BITS + PHYSICAL_LEAF_RADIX;
 const PHYSICAL_CHUNK_SIZE: usize = 1 << PHYSICAL_CHUNK_RADIX;
 pub(super) const FRAME_LEAF_POOL_RADIX: usize = PHYSICAL_CHUNK_RADIX;
-pub(super) const PHYSICAL_DIRECTORY_RADIX: usize = directory::DIRECTORY_RADIX;
-const GENERIC_NODE_RADIX: usize = 7;
+pub(crate) const PHYSICAL_DIRECTORY_RADIX: usize = directory::DIRECTORY_RADIX;
 const PAGE_TABLE_POOL_RADIX: usize = 10;
 const PAGE_TABLE_POOL_SLOTS: usize = 1 << PAGE_TABLE_POOL_RADIX;
 const KERNEL_OBJECT_POOL_RADIX: usize = 27;
@@ -43,7 +47,7 @@ const INITIAL_FRAME_LEAF_POOL_SLOT_CANDIDATES: [usize; 4] = [1040, 1041, 1042, 1
 const PHYSICAL_FRAME_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1100, 1101, 1102, 1103];
 const PAGE_TABLE_POOL_SLOT_CANDIDATES: [usize; 4] = [1200, 1201, 1202, 1203];
 const PROCESS_ARENA_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1210, 1211, 1212, 1213];
-const INITIAL_GENERIC_CAPACITY: usize = 128;
+const INITIAL_GENERIC_CAPACITY: usize = ALPHA_RESOURCE_CAPACITY;
 
 pub struct MemoryManager {
     pub root_descriptor: CapabilityDescriptor,
@@ -59,35 +63,49 @@ pub struct MemoryManager {
     process_arena_directory: CapabilityDescriptor,
     process_arenas_ready: [bool; PROCESS_ARENA_DIRECTORY_SLOTS],
     physical_allocator: Option<PhysicalAllocator>,
-    initial_generics: [nun::GenericDescriptor; INITIAL_GENERIC_CAPACITY],
+    initial_generics: [MemoryResource; INITIAL_GENERIC_CAPACITY],
     initial_generic_count: usize,
     initial_generic_consumed_bytes: [usize; INITIAL_GENERIC_CAPACITY],
     // Delegating a generic does not allocate its RAM. Keep the capability
     // watermark separate from the boot reservations used by the buddy allocator.
     initial_generic_delegated_bytes: [usize; INITIAL_GENERIC_CAPACITY],
+    delegations: Vec<delegation::Delegation>,
 }
 
 impl MemoryManager {
-    pub fn bootstrap(
-        init_info: &InitInfo,
-        root_descriptor: CapabilityDescriptor,
-        root_radix: usize,
-        bootstrap_generic_index: usize,
-        root_generic_index: usize,
-        root_generic_consumed_bytes: usize,
-    ) -> Result<Self, CapabilityError> {
+    pub fn bootstrap(environment: &AlphaEnvironment) -> Result<Self, CapabilityError> {
+        let root_descriptor = environment.capabilities.capability_space;
+        let root_radix = environment.capabilities.root_radix;
+        let bootstrap_generic_index = environment.bootstrap_resource;
+        let resources = environment
+            .memory_resources()
+            .map_err(|_| CapabilityError::InvalidArgument)?;
         let mut initial_generic_consumed_bytes = [0usize; INITIAL_GENERIC_CAPACITY];
-        if init_info.generic_list_count as usize > INITIAL_GENERIC_CAPACITY
-            || root_generic_index >= init_info.generic_list_count as usize
-            || root_generic_index >= INITIAL_GENERIC_CAPACITY
-        {
+        if bootstrap_generic_index >= resources.len() {
             return Err(CapabilityError::InvalidArgument);
         }
-        initial_generic_consumed_bytes[root_generic_index] = root_generic_consumed_bytes;
+        for (index, &resource) in resources.iter().enumerate() {
+            resource
+                .validate()
+                .map_err(|_| CapabilityError::InvalidArgument)?;
+            // A launcher may finish with a sub-page Node/Generic conversion.
+            // Its partially occupied page cannot enter the page allocator or
+            // the still-untyped frame source, even if the exact ABI watermark
+            // is not page aligned. Future page-sized conversions skip this pad.
+            initial_generic_consumed_bytes[index] = if resource.size_radix >= PAGE_BITS {
+                resource
+                    .consumed_bytes
+                    .checked_add(PAGE_SIZE - 1)
+                    .map(|value| value & !(PAGE_SIZE - 1))
+                    .ok_or(CapabilityError::InvalidArgument)?
+            } else {
+                resource.consumed_bytes
+            };
+        }
 
         crate::info!("memory: create kernel object generic pool");
         let kernel_object_generic = create_generic_from_initial_generic(
-            init_info,
+            resources,
             root_descriptor,
             root_radix,
             bootstrap_generic_index,
@@ -98,7 +116,7 @@ impl MemoryManager {
         crate::info!("kernel object generic={:#018x}", kernel_object_generic);
         crate::info!("memory: create initial frame leaf pool");
         let initial_frame_leaf_pool = create_generic_from_initial_generic(
-            init_info,
+            resources,
             root_descriptor,
             root_radix,
             bootstrap_generic_index,
@@ -109,7 +127,7 @@ impl MemoryManager {
         crate::info!("initial frame leaf pool={:#018x}", initial_frame_leaf_pool);
         crate::info!("memory: create physical generic directory");
         let physical_generic_directory = create_root_node_from_initial_generic(
-            init_info,
+            resources,
             root_descriptor,
             root_radix,
             bootstrap_generic_index,
@@ -154,10 +172,11 @@ impl MemoryManager {
             process_arena_directory,
             process_arenas_ready: [false; PROCESS_ARENA_DIRECTORY_SLOTS],
             physical_allocator: None,
-            initial_generics: init_info.generic_list,
-            initial_generic_count: init_info.generic_list_count as usize,
+            initial_generics: environment.resources,
+            initial_generic_count: resources.len(),
             initial_generic_consumed_bytes,
             initial_generic_delegated_bytes: initial_generic_consumed_bytes,
+            delegations: Vec::new(),
         })
     }
 
@@ -314,19 +333,16 @@ impl MemoryManager {
         arch::node::revoke(self.process_arena_directory, process_root_slot as Word)
     }
 
-    pub fn initialize_physical_allocator(
-        &mut self,
-        init_info: &InitInfo,
-    ) -> Result<(), CapabilityError> {
+    pub fn initialize_physical_allocator(&mut self) -> Result<(), CapabilityError> {
         let mut allocator = PhysicalAllocator::new();
-        let count = init_info.generic_list_count as usize;
+        let count = self.initial_generic_count;
 
         for i in 0..count {
-            let g = init_info.generic_list[i];
-            if g.size_radix < PAGE_BITS as u8 {
+            let g = self.initial_generics[i];
+            if g.size_radix < PAGE_BITS {
                 continue;
             }
-            if g.is_device {
+            if g.is_device() {
                 continue;
             }
             let size_bytes = 1usize << g.size_radix;
@@ -339,7 +355,7 @@ impl MemoryManager {
                 .min(size_bytes);
             if consumed != 0 {
                 allocator
-                    .add_region(g.address as usize, consumed, g.is_device, true)
+                    .add_region(g.address as usize, consumed, g.is_device(), true)
                     .map_err(map_physical_alloc_error)?;
             }
             if consumed < size_bytes {
@@ -348,7 +364,7 @@ impl MemoryManager {
                 if free_start == 0 {
                     let reserved = PAGE_SIZE.min(free_size);
                     allocator
-                        .add_region(0, reserved, g.is_device, true)
+                        .add_region(0, reserved, g.is_device(), true)
                         .map_err(map_physical_alloc_error)?;
                     free_start = free_start.saturating_add(reserved);
                     free_size -= reserved;
@@ -357,7 +373,7 @@ impl MemoryManager {
                     continue;
                 }
                 allocator
-                    .add_region(free_start, free_size, g.is_device, false)
+                    .add_region(free_start, free_size, g.is_device(), false)
                     .map_err(map_physical_alloc_error)?;
             }
         }
@@ -410,6 +426,13 @@ impl MemoryManager {
         physical_address: usize,
         size_bytes: usize,
     ) -> Result<(), CapabilityError> {
+        if self
+            .delegations
+            .iter()
+            .any(|delegation| delegation.overlaps(physical_address, size_bytes))
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
         let allocator = self
             .physical_allocator
             .as_mut()
@@ -513,13 +536,16 @@ impl MemoryManager {
         let requested_end = page_base
             .checked_add(page_count * PAGE_SIZE)
             .ok_or(CapabilityError::InvalidArgument)?;
+        if self.delegated_range(page_base, requested_end - page_base) {
+            return Err(CapabilityError::PermissionDenied);
+        }
 
         let mut selected: Option<(usize, usize)> = None;
         for pass_device_only in [prefer_device, false] {
             let mut i = 0usize;
             while i < self.initial_generic_count {
                 let g = self.initial_generics[i];
-                if pass_device_only && !g.is_device {
+                if pass_device_only && !g.is_device() {
                     i += 1;
                     continue;
                 }
@@ -554,7 +580,7 @@ impl MemoryManager {
         Ok((requested_base_page, 0, page_count))
     }
 
-    fn ensure_page_tables(
+    pub(crate) fn ensure_page_tables(
         &mut self,
         address_space: CapabilityDescriptor,
         virtual_address: usize,
@@ -663,7 +689,7 @@ struct RootNodeAllocation {
 }
 
 fn create_root_node_from_initial_generic(
-    init_info: &InitInfo,
+    resources: &[MemoryResource],
     root_descriptor: CapabilityDescriptor,
     root_radix: usize,
     generic_index: usize,
@@ -673,20 +699,17 @@ fn create_root_node_from_initial_generic(
 ) -> Result<RootNodeAllocation, CapabilityError> {
     let required_size_bits = kernel_object::memory_size_bits(KernelObjectKind::Node, node_radix)
         .ok_or(CapabilityError::InvalidArgument)?;
-    if generic_index >= init_info.generic_list_count as usize
-        || generic_index >= INITIAL_GENERIC_CAPACITY
-    {
-        return Err(CapabilityError::InvalidArgument);
-    }
-    let g = init_info.generic_list[generic_index];
-    if g.is_device || (g.size_radix as usize) < required_size_bits {
+    let g = *resources
+        .get(generic_index)
+        .ok_or(CapabilityError::InvalidArgument)?;
+    if g.is_device() || g.size_radix < required_size_bits {
         return Err(CapabilityError::InvalidArgument);
     }
     let consumed_bytes = initial_generic_consumed_bytes[generic_index];
     let (_, new_consumed_bytes) =
         next_initial_generic_allocation(g, consumed_bytes, required_size_bits)
             .ok_or(CapabilityError::InvalidArgument)?;
-    let generic = generic_descriptor_from_index(root_radix, generic_index);
+    let generic = g.capability;
     crate::info!(
         "root-node source generic idx={:>3} addr={:#018x} size_radix={:>2} node_radix={:>2} required_radix={:>2}",
         generic_index,
@@ -707,7 +730,7 @@ fn create_root_node_from_initial_generic(
 }
 
 fn create_generic_from_initial_generic(
-    init_info: &InitInfo,
+    resources: &[MemoryResource],
     root_descriptor: CapabilityDescriptor,
     root_radix: usize,
     generic_index: usize,
@@ -715,19 +738,16 @@ fn create_generic_from_initial_generic(
     slot_candidates: &[usize],
     initial_generic_consumed_bytes: &mut [usize; INITIAL_GENERIC_CAPACITY],
 ) -> Result<CapabilityDescriptor, CapabilityError> {
-    if generic_index >= init_info.generic_list_count as usize
-        || generic_index >= INITIAL_GENERIC_CAPACITY
-    {
-        return Err(CapabilityError::InvalidArgument);
-    }
-    let g = init_info.generic_list[generic_index];
-    if g.is_device || (g.size_radix as usize) < generic_radix {
+    let g = *resources
+        .get(generic_index)
+        .ok_or(CapabilityError::InvalidArgument)?;
+    if g.is_device() || g.size_radix < generic_radix {
         return Err(CapabilityError::InvalidArgument);
     }
     let consumed_bytes = initial_generic_consumed_bytes[generic_index];
     let (_, new_consumed_bytes) = next_initial_generic_allocation(g, consumed_bytes, generic_radix)
         .ok_or(CapabilityError::InvalidArgument)?;
-    let source = generic_descriptor_from_index(root_radix, generic_index);
+    let source = g.capability;
     for slot in slot_candidates {
         match arch::generic::convert(
             source,
@@ -748,16 +768,10 @@ fn create_generic_from_initial_generic(
     Err(CapabilityError::InvalidArgument)
 }
 
-fn generic_descriptor_from_index(root_radix: usize, index: usize) -> CapabilityDescriptor {
-    let generic_node =
-        make_root_slot_descriptor(root_radix, nun::InitSlotOffset::GenericNode as usize);
-    make_child_slot_descriptor(generic_node, GENERIC_NODE_RADIX, index)
-}
-
 impl MemoryManager {
     #[inline(always)]
     fn generic_descriptor_from_index(&self, index: usize) -> CapabilityDescriptor {
-        generic_descriptor_from_index(self.root_radix, index)
+        self.initial_generics[index].capability
     }
 
     fn initial_generic_consumed_bytes_for_index(&self, index: usize) -> usize {
@@ -782,7 +796,7 @@ impl MemoryManager {
             let start = g.address as usize;
             let end = start.saturating_add(1usize << g.size_radix);
             if physical_address >= start && requested_end <= end {
-                return g.is_device;
+                return g.is_device();
             }
             i += 1;
         }
@@ -837,7 +851,7 @@ fn checked_pow2(bits: usize) -> Option<usize> {
 }
 
 fn next_initial_generic_allocation(
-    generic: nun::GenericDescriptor,
+    generic: MemoryResource,
     consumed_bytes: usize,
     required_size_bits: usize,
 ) -> Option<(usize, usize)> {

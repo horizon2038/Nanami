@@ -1,0 +1,15 @@
+[package]
+name = "nanami-capability-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+a9n_abi = "=0.8.0"
+nanami-uapi = { path = "../../../nanami/servers/uapi" }
+nanami-runtime = { path = "../../../nanami/servers/libs/nanami-runtime" }
+
+[profile.release]
+panic = "abort"
+
+[workspace]

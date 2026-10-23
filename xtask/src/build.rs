@@ -2,7 +2,7 @@ use crate::{
     cli::{Arch, Common, Profile},
     cpio, payload, rootfs, util,
 };
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -53,22 +53,66 @@ pub fn servers(root: &Path, args: &Common) -> Result<()> {
         }
         util::command(cmd, args.dry_run)?;
     }
+    package_boot_archive(root, args, &apps, false)?;
+    Ok(())
+}
+
+fn package_boot_archive(
+    root: &Path,
+    args: &Common,
+    apps: &[payload::App],
+    include_alpha: bool,
+) -> Result<()> {
     if !args.dry_run {
+        let configuration = if let Some(path) = &args.boot_list {
+            let path = root.join(path);
+            ensure!(
+                fs::symlink_metadata(&path)?.is_file(),
+                "boot list must be a regular file"
+            );
+            fs::read(path)?
+        } else {
+            payload::manifest(root, "boot-list", args.arch)?
+        };
         let mut records = vec![
             (".".into(), 0o40755, vec![]),
             ("./bin".into(), 0o40755, vec![]),
             ("./nanami".into(), 0o40755, vec![]),
-            (
-                "./nanami/boot-list".into(),
-                0o100644,
-                payload::manifest(root, "boot-list", args.arch)?,
-            ),
+            ("./nanami/boot-list".into(), 0o100644, configuration),
         ];
         for app in apps.iter().filter(|a| a.core) {
             let source = payload::artifact(root, args, app);
             let data = fs::read(&source).with_context(|| format!("read {}", source.display()))?;
             payload::validate_elf(&data, args.arch, &source)?;
             records.push((format!("./bin/{}", app.name), 0o100755, data));
+        }
+        if include_alpha {
+            let path = root.join("nanami/alpha.elf");
+            let data = fs::read(&path)?;
+            payload::validate_alpha_elf(&data, args.arch, &path)?;
+            records.push(("./nanami/alpha".into(), 0o100755, data));
+        }
+        if !args.boot_module.is_empty() {
+            records.push(("./modules".into(), 0o40755, vec![]));
+        }
+        for path in &args.boot_module {
+            let path = root.join(path);
+            ensure!(
+                fs::symlink_metadata(&path)?.is_file(),
+                "boot module must be a regular file"
+            );
+            let basename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("invalid boot module name")?;
+            let name = format!("./modules/{basename}");
+            ensure!(
+                !records.iter().any(|(existing, _, _)| *existing == name),
+                "duplicate boot module: {basename}"
+            );
+            let data = fs::read(&path)?;
+            payload::validate_elf(&data, args.arch, &path)?;
+            records.push((name, 0o100755, data));
         }
         records.sort_by(|a, b| a.0.cmp(&b.0));
         util::write(
@@ -112,6 +156,8 @@ pub fn image(root: &Path, args: &Common) -> Result<PathBuf> {
             true,
         )?;
     }
+    alpha(root, args)?;
+    package_boot_archive(root, args, &payload::discover(root, args)?, true)?;
     let common = spencer_build::cli::CommonArgs {
         arch: match args.arch {
             Arch::X86_64 => spencer_build::cli::Arch::X86_64,
@@ -161,6 +207,54 @@ pub fn image(root: &Path, args: &Common) -> Result<PathBuf> {
     spencer_build::run_build_pipeline_to_image(spencer, &common, true, Some(out_utf8))?;
     eprintln!("[xtask] image ready: {}", out.display());
     Ok(out)
+}
+
+/// Build the common Alpha executable before compiling the init Booter that
+/// embeds it. Neither the kernel nor Spencer's dependency revision is changed.
+fn alpha(root: &Path, args: &Common) -> Result<()> {
+    let name = format!("alpha-{}-unknown-a9n", args.arch.name());
+    let target = root.join(format!("out/targets/{name}.json"));
+    let directory = root.join("out/alpha-target");
+    if !args.dry_run {
+        let mut value: serde_json::Value = serde_json::from_slice(&fs::read(
+            root.join(format!("targets/{}-unknown-a9n.json", args.arch.name())),
+        )?)?;
+        value["pre-link-args"]["ld.lld"][1] =
+            util::path_text(&root.join(format!("targets/{}/alpha.ld", args.arch.name())))?.into();
+        util::write(
+            &target,
+            serde_json::to_string_pretty(&value)?.as_bytes(),
+            true,
+        )?;
+    }
+    let mut command = util::cargo();
+    command
+        .current_dir(root)
+        .args(["build", "--locked", "--manifest-path"])
+        .arg(root.join("nanami/Cargo.toml"))
+        .args(["--bin", "alpha", "--features", "alpha-entry", "--target"])
+        .arg(&target)
+        .args([
+            "-Z",
+            "json-target-spec",
+            "-Z",
+            "build-std=core,alloc,compiler_builtins",
+            "-Z",
+            "build-std-features=compiler-builtins-mem",
+        ])
+        .env("CARGO_TARGET_DIR", &directory);
+    if args.profile == Profile::Release {
+        command.arg("--release");
+    }
+    util::command(command, args.dry_run)?;
+    if !args.dry_run {
+        let executable = directory.join(name).join(args.profile.name()).join("alpha");
+        let bytes =
+            fs::read(&executable).with_context(|| format!("read {}", executable.display()))?;
+        payload::validate_alpha_elf(&bytes, args.arch, &executable)?;
+        util::write(&root.join("nanami/alpha.elf"), &bytes, true)?;
+    }
+    Ok(())
 }
 
 fn build_cpp(root: &Path, app: &payload::App, args: &Common) -> Result<()> {

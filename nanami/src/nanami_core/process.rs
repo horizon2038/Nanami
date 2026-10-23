@@ -4,6 +4,9 @@ use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 mod shared_memory;
 pub use shared_memory::SharedMemoryReservation;
 use shared_memory::SharedMemorySpace;
+#[path = "process/root_slots.rs"]
+mod root_slots;
+pub use root_slots::{install_notification_alias, RootSlotTypes};
 #[path = "process/physical_allocations.rs"]
 mod physical_allocations;
 use physical_allocations::PhysicalAllocations;
@@ -42,6 +45,7 @@ impl IoPortRange {
 
 #[derive(Clone, Copy)]
 pub struct ProcessEntry {
+    pub root_types: RootSlotTypes,
     pub used: bool,
     pub pid: usize,
     pub reaper_pid: usize,
@@ -52,6 +56,9 @@ pub struct ProcessEntry {
     pub os_port: CapabilityDescriptor,
     pub os_port_identifier: Word,
     pub affinity: Word,
+    pub platform_information_access: bool,
+    pub service_admin: bool,
+    pub resource_quarantined: bool,
     pub irq_count: usize,
     pub irq_numbers: [Word; MAX_IRQS_PER_PROCESS],
     pub io_range_count: usize,
@@ -147,6 +154,7 @@ impl ProcessManager {
     pub fn new_alpha(
         alpha_root_node: CapabilityDescriptor,
         alpha_address_space: CapabilityDescriptor,
+        alpha_pcb: CapabilityDescriptor,
         alpha_os_port: CapabilityDescriptor,
         root_slot_limit: usize,
         reserved_root_slots: &'static [usize],
@@ -154,23 +162,27 @@ impl ProcessManager {
     ) -> Result<Self, CapabilityError> {
         if !(1..=A9N_CPU_COUNT_MAX).contains(&online_core_count) {
             crate::error!(
-                "[smp.err] invalid init_info.core_count={}",
+                "[smp.err] invalid Alpha environment core_count={}",
                 online_core_count
             );
             return Err(CapabilityError::InvalidArgument);
         }
         crate::info!("process: ProcessManager::new_alpha");
         let alpha_entry = ProcessEntry {
+            root_types: RootSlotTypes::empty(),
             used: true,
             pid: 0,
             reaper_pid: 0,
             root_slot: 0,
             root_node: alpha_root_node,
-            pcb: 0,
+            pcb: alpha_pcb,
             address_space: alpha_address_space,
             os_port: alpha_os_port,
             os_port_identifier: 0,
             affinity: 0,
+            platform_information_access: false,
+            service_admin: false,
+            resource_quarantined: false,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,
@@ -490,6 +502,7 @@ impl ProcessManager {
         user_heap_limit_va: usize,
     ) -> Result<(), CapabilityError> {
         let entry = ProcessEntry {
+            root_types: RootSlotTypes::native(),
             used: true,
             pid,
             reaper_pid,
@@ -500,6 +513,9 @@ impl ProcessManager {
             os_port,
             os_port_identifier,
             affinity,
+            platform_information_access: false,
+            service_admin: false,
+            resource_quarantined: false,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,
@@ -541,6 +557,18 @@ impl ProcessManager {
         Err(CapabilityError::InvalidArgument)
     }
 
+    pub fn set_platform_information_access(
+        &mut self,
+        pid: usize,
+        allowed: bool,
+    ) -> Result<(), CapabilityError> {
+        let entry = self
+            .entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        entry.platform_information_access = allowed;
+        Ok(())
+    }
+
     pub fn release_process_slot_reservation(&mut self, root_slot: usize) {
         if let Some(slot_index) = self
             .used_root_slots
@@ -549,6 +577,21 @@ impl ProcessManager {
         {
             self.used_root_slots.swap_remove(slot_index);
         }
+    }
+
+    pub fn set_service_admin(&mut self, pid: usize, allowed: bool) -> Result<(), CapabilityError> {
+        let entry = self
+            .entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        entry.service_admin = allowed;
+        Ok(())
+    }
+
+    pub fn quarantine_resources(&mut self, pid: usize) -> Result<(), CapabilityError> {
+        self.entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?
+            .resource_quarantined = true;
+        Ok(())
     }
 
     pub fn discard_process_artifacts(&mut self, pid: usize, root_slot: usize) {
@@ -576,6 +619,19 @@ impl ProcessManager {
             .binary_search_by_key(&pid, |entry| entry.pid)
             .ok()?;
         self.entries.get(index).filter(|entry| entry.used).copied()
+    }
+
+    pub fn root_types_mut(&mut self, pid: usize) -> Result<&mut RootSlotTypes, CapabilityError> {
+        self.entry_mut_by_pid(pid)
+            .filter(|entry| pid != 0 && !entry.exited)
+            .map(|entry| &mut entry.root_types)
+            .ok_or(CapabilityError::PermissionDenied)
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = ProcessEntry> + '_ {
+        core::iter::once(self.alpha_entry)
+            .chain(self.entries.iter().copied())
+            .filter(|entry| entry.used)
     }
 
     pub fn statistics(&self) -> ProcessStatistics {
@@ -625,6 +681,9 @@ impl ProcessManager {
         }
         if !self.entries[index].exited {
             return Err(CapabilityError::IllegalOperation);
+        }
+        if self.entries[index].resource_quarantined {
+            return Err(CapabilityError::Fatal);
         }
         let root_slot = self.entries[index].root_slot;
         self.entries.remove(index);

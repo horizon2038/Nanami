@@ -11,16 +11,17 @@ constexpr a9n::Word OS_REQUEST_IRQ_CONTROL = 0x1001;
 constexpr a9n::Word OS_REQUEST_IO_PORT_CONTROL = 0x1002;
 constexpr a9n::Word OS_REQUEST_SERVICE_REGISTER = 0x1003;
 constexpr a9n::Word OS_REQUEST_PAGE_ALLOC = 0x1004;
+constexpr a9n::Word OS_REQUEST_SERVICE_CONNECT = 0x1005;
 constexpr a9n::Word OS_REQUEST_DMA_REQUEST = 0x1006;
 constexpr a9n::Word OS_REQUEST_MMIO_REQUEST = 0x1007;
 constexpr a9n::Word OS_REQUEST_SHARED_MEMORY_CREATE = 0x1008;
 constexpr a9n::Word OS_REQUEST_EXIT = 0x100a;
 constexpr a9n::Word OS_REQUEST_DEBUG_PING = 0x10ff;
+constexpr a9n::Word OS_REQUEST_SESSION_CONNECT = 0x1027;
+constexpr a9n::Word OS_REQUEST_BINDING_CONTROL = 0x1028;
 
 constexpr a9n::Word OS_RESPONSE_OK = 0;
 constexpr a9n::Word OS_RESPONSE_INVALID_ARGUMENT = 1;
-constexpr a9n::Word OS_SERVICE_NET_DEVICE = 1;
-constexpr a9n::Word OS_SERVICE_PORT_SLOT_NET_DEVICE = 20;
 constexpr a9n::Word OS_RESPONSE_PONG_MAGIC = 0x504f4e47;
 
 inline a9n::NanamiStatus map_status(a9n::Word status) {
@@ -31,6 +32,20 @@ inline a9n::NanamiStatus map_status(a9n::Word status) {
         return a9n::NanamiStatus::InvalidArgument;
     }
     return a9n::NanamiStatus::Unsupported;
+}
+
+bool pack_service_name(const char* name, a9n::Word words[3]) {
+    if (!name || name[0] == 0) {
+        return false;
+    }
+    for (unsigned index = 0; name[index] != 0; ++index) {
+        if (index >= 24) {
+            return false;
+        }
+        words[index / 8] |= static_cast<a9n::Word>(static_cast<unsigned char>(name[index]))
+            << ((index % 8) * 8);
+    }
+    return true;
 }
 
 inline a9n::NanamiStatus call_port(
@@ -142,15 +157,19 @@ a9n::NanamiStatus ping(a9n::Word token, a9n::Word* echoed_token) {
     return a9n::NanamiStatus::Ok;
 }
 
-a9n::NanamiStatus register_service_net_device() {
+a9n::NanamiStatus register_service(const char* name, a9n::Word service_slot) {
+    a9n::Word words[3] = {};
+    if (!pack_service_name(name, words)) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
     a9n::Word status = 0;
     a9n::NanamiStatus rc = os_call(
         OS_REQUEST_SERVICE_REGISTER,
-        OS_SERVICE_NET_DEVICE,
-        OS_SERVICE_PORT_SLOT_NET_DEVICE,
-        0,
-        0,
-        4,
+        words[0],
+        words[1],
+        words[2],
+        service_slot,
+        5,
         &status,
         nullptr,
         nullptr
@@ -159,6 +178,83 @@ a9n::NanamiStatus register_service_net_device() {
         return rc;
     }
     return map_status(status);
+}
+
+a9n::NanamiStatus connect_service(const char* name, a9n::Word destination_slot, a9n::Word* owner_pid) {
+    a9n::Word words[3] = {};
+    if (!pack_service_name(name, words)) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
+    a9n::Word owner = 0;
+    const a9n::NanamiStatus result = os_call(
+        OS_REQUEST_SERVICE_CONNECT, destination_slot, words[0], words[1], words[2],
+        5, nullptr, &owner, nullptr
+    );
+    if (result == a9n::NanamiStatus::Ok && owner_pid) {
+        *owner_pid = owner;
+    }
+    return result;
+}
+
+a9n::NanamiStatus register_service_net_device() {
+    return register_service("net-device", 20);
+}
+
+a9n::NanamiStatus connect_managed_service(
+    const char* name, a9n::Word destination_slot, ServiceConnection* connection
+) {
+    a9n::Word words[3] = {};
+    if (!connection || !pack_service_name(name, words)) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
+    a9n::Word session = 0;
+    a9n::Word service = 0;
+    const a9n::NanamiStatus result = os_call(
+        OS_REQUEST_SESSION_CONNECT, destination_slot, words[0], words[1], words[2],
+        5, nullptr, &session, &service
+    );
+    if (result == a9n::NanamiStatus::Ok) {
+        *connection = {0x0800000000000000ull | ((destination_slot & 0xff) << 48), session, service};
+    }
+    return result;
+}
+
+a9n::NanamiStatus close_managed_session(a9n::Word session) {
+    constexpr a9n::Word close_operation = 9;
+    return os_call(OS_REQUEST_BINDING_CONTROL, close_operation, session, 0, 0, 5, nullptr, nullptr, nullptr);
+}
+
+a9n::NanamiStatus create_session_buffer(a9n::Word session, a9n::Word bytes, SessionBuffer* buffer) {
+    if (!buffer || bytes == 0 || bytes > 65536) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
+    a9n::Word address = 0;
+    a9n::Word mapped_bytes = 0;
+    const a9n::NanamiStatus result = os_call(OS_REQUEST_BINDING_CONTROL, 11, session, bytes, 0, 5, nullptr, &address, &mapped_bytes);
+    if (result == a9n::NanamiStatus::Ok) {
+        *buffer = {address, mapped_bytes};
+    }
+    return result;
+}
+
+a9n::NanamiStatus session_buffer(a9n::Word session, SessionBuffer* buffer) {
+    if (!buffer) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
+    a9n::Word address = 0;
+    a9n::Word bytes = 0;
+    const a9n::NanamiStatus result = os_call(OS_REQUEST_BINDING_CONTROL, 12, session, 0, 0, 5, nullptr, &address, &bytes);
+    if (result == a9n::NanamiStatus::Ok) {
+        *buffer = {address, bytes};
+    }
+    return result;
+}
+
+a9n::NanamiStatus connect_session_event(a9n::Word session, a9n::Word destination_slot) {
+    if (destination_slot < 23 || destination_slot >= 224) {
+        return a9n::NanamiStatus::InvalidArgument;
+    }
+    return os_call(OS_REQUEST_BINDING_CONTROL, 13, session, destination_slot, 0, 5, nullptr, nullptr, nullptr);
 }
 
 a9n::NanamiStatus request_irq(a9n::Word irq_number, a9n::Word notification_slot, a9n::Word interrupt_slot) {

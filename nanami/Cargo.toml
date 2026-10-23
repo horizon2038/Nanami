@@ -1,7 +1,15 @@
 [package]
 name = "nanami"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
+
+[features]
+alpha-entry = []
+
+[[bin]]
+name = "alpha"
+path = "src/alpha_main.rs"
+required-features = ["alpha-entry"]
 
 [dependencies]
 nanami-uapi = { path = "servers/uapi" }

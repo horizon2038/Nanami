@@ -26,26 +26,21 @@ pub const TERMINAL_SERVICE: &str = "terminal-service";
 
 pub const EXEC_SERVICE: &str = "exec-service";
 
-pub const SERVICE_KIND_NET_DEVICE: Word = 1;
+pub const SERVICE_NAME_BYTES: usize = 24;
 
-pub const SERVICE_KIND_NETWORK_SERVICE: Word = 2;
+/// Local diagnostic information; the owner PID is not a cross-domain identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServiceInfo {
+    pub owner_pid: Word,
+    pub name_len: Word,
+    pub name: [u8; SERVICE_NAME_BYTES],
+}
 
-pub const SERVICE_KIND_TIMER_SERVICE: Word = 3;
-
-pub const SERVICE_KIND_DISPLAY_SERVICE: Word = 4;
-
-pub const SERVICE_KIND_INPUT_SERVICE: Word = 5;
-
-pub const SERVICE_KIND_HONOKA_SERVICE: Word = 6;
-
-pub const SERVICE_KIND_RTC_SERVICE: Word = 7;
-
-pub const SERVICE_KIND_BLOCK_DEVICE: Word = 8;
-
-pub const SERVICE_KIND_VFS_SERVICE: Word = 9;
-
-pub const SERVICE_KIND_POSIX_SERVICE: Word = 10;
-
-pub const SERVICE_KIND_TERMINAL_SERVICE: Word = 11;
-
-pub const SERVICE_KIND_EXEC_SERVICE: Word = 12;
+impl ServiceInfo {
+    pub fn name(&self) -> &str {
+        self.name
+            .get(..self.name_len)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or("")
+    }
+}

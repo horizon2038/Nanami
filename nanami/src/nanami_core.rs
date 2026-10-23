@@ -1,4 +1,5 @@
 pub mod alpha;
+pub mod alpha_launch;
 pub mod capability_space;
 pub mod communication;
 pub mod cpio;

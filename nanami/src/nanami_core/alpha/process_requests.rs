@@ -4,18 +4,18 @@ impl Alpha {
     fn configure_process_affinity(
         &mut self,
         pcb: CapabilityDescriptor,
-        image_name: &str,
+        requested: Option<Word>,
     ) -> Result<Word, CapabilityError> {
-        // ACPI's SMI_CMD must be accessed on the boot processor. The server
-        // comes from the trusted initramfs; keep its suspended PCB on the BSP.
-        #[cfg(target_arch = "x86_64")]
-        if image_name == "./bin/acpi-server" {
-            return Ok(0);
-        }
-        let _ = image_name;
-        // The available cores come from init_info. A newly created, suspended
+        // The available cores come from the environment. A newly created, suspended
         // PCB starts on core 0; no affinity probing is needed.
-        let affinity = self.processes.allocate_affinity();
+        let affinity = if crate::nanami_core::process::SAME_CORE_DIAGNOSTIC {
+            0
+        } else {
+            requested.unwrap_or_else(|| self.processes.allocate_affinity())
+        };
+        if affinity >= self.processes.online_core_count() {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if affinity == 0 {
             return Ok(affinity);
         }
@@ -23,6 +23,9 @@ impl Alpha {
         match configure_pcb_affinity(pcb, affinity) {
             Ok(()) => Ok(affinity),
             Err(error) => {
+                if requested.is_some() {
+                    return Err(error);
+                }
                 error!(
                     "[smp.warn] affinity assignment failed requested={} err={:?}; keeping core=0",
                     affinity, error
@@ -131,7 +134,9 @@ impl Alpha {
         resolver_port: Option<CapabilityDescriptor>,
         auto_resume: bool,
         priority_override: Option<Word>,
+        policy: ProcessPolicy,
     ) -> Result<usize, CapabilityError> {
+        let priority = policy.priority(priority_override)?;
         info!("[proc] parse elf: {}", image_name);
         let elf = parse_elf64(image_bytes)?;
         info!(
@@ -260,7 +265,15 @@ impl Alpha {
             PROCESS_SLOT_NOTIFICATION_PORT as Word,
         ));
         let _ = arch::notification_port::identify(child_notification, 0);
-        let _ = arch::ipc_port::identify(child_os_port, pid as Word);
+        spawn_try!(arch::ipc_port::identify(child_os_port, pid as Word));
+        // The caller must not rewrite the identity used for OS authorization.
+        // Retain READ|WRITE for A9N's current remove/revoke preconditions, but
+        // never COPY or MODIFY. This does not claim receive-side isolation.
+        spawn_try!(arch::node::demote(
+            child_root,
+            PROCESS_SLOT_OS_PORT as Word,
+            IDENTIFIED_IPC_RIGHTS
+        ));
 
         let mut image_base = usize::MAX;
         let mut image_end = 0usize;
@@ -380,7 +393,6 @@ impl Alpha {
             child_pcb, child_root, child_address_space, elf.entry_point, initial_stack_pointer
         );
         spawn_stage = "pcb-configuration";
-        let priority = priority_override.unwrap_or_else(|| process_priority_for_image(image_name));
         let resolver_port = if let Some(external_resolver) = resolver_port {
             spawn_try!(arch::node::copy(
                 child_root,
@@ -393,6 +405,11 @@ impl Alpha {
                 PROCESS_SLOT_FAULT_RESOLVER,
             );
             spawn_try!(arch::ipc_port::identify(child_resolver, pid as Word));
+            spawn_try!(arch::node::demote(
+                child_root,
+                PROCESS_SLOT_FAULT_RESOLVER as Word,
+                IDENTIFIED_IPC_RIGHTS
+            ));
             child_resolver
         } else {
             child_os_port
@@ -412,7 +429,7 @@ impl Alpha {
             0,
         ));
         spawn_stage = "affinity";
-        let affinity = spawn_try!(self.configure_process_affinity(child_pcb, image_name));
+        let affinity = spawn_try!(self.configure_process_affinity(child_pcb, policy.affinity));
 
         spawn_stage = "process-install";
         spawn_try!(self.processes.install_process(
@@ -429,6 +446,13 @@ impl Alpha {
             heap_base,
             USER_HEAP_LIMIT,
         ));
+        if resolver_port != child_os_port {
+            spawn_try!(self.processes.root_types_mut(pid)).ipc(PROCESS_SLOT_FAULT_RESOLVER);
+        }
+        spawn_try!(self
+            .processes
+            .set_platform_information_access(pid, policy.platform_information));
+        spawn_try!(self.processes.set_service_admin(pid, policy.service_admin));
         if auto_resume {
             spawn_stage = "process-resume";
             spawn_try!(arch::process_control_block::resume(child_pcb));
@@ -461,24 +485,16 @@ impl Alpha {
         auto_resume: bool,
         priority_override: Option<Word>,
     ) -> Result<usize, CapabilityError> {
-        let mut spawned_pid = None;
-        cpio::for_each_newc_entry(INITRAMFS_IMAGE, |entry| {
-            if spawned_pid.is_some() || !initramfs_image_is_auto_spawn_candidate(entry.name) {
-                return Ok(());
-            }
-            if initramfs_image_name_matches(entry.name, image_name) {
-                spawned_pid = Some(self.spawn_process_from_elf(
-                    entry.name,
-                    entry.data,
-                    reaper_pid,
-                    resolver_port,
-                    auto_resume,
-                    priority_override,
-                )?);
-            }
-            Ok(())
-        })?;
-        spawned_pid.ok_or(CapabilityError::InvalidArgument)
+        let entry = cpio::find_image(self.initramfs_image, image_name)?;
+        self.spawn_process_from_elf(
+            entry.name,
+            entry.data,
+            reaper_pid,
+            resolver_port,
+            auto_resume,
+            priority_override,
+            self.process_policies.for_image(entry.name),
+        )
     }
 
     pub(super) fn cleanup_failed_spawn(&mut self, pid: usize, root_slot: usize) {
@@ -640,6 +656,10 @@ impl Alpha {
         let is_ok = request.arg0;
         let error_value = request.arg1;
         self.processes.mark_exited(pid, is_ok, error_value)?;
+        if self.communication.bindings.has_live_sessions(pid) {
+            self.processes.quarantine_resources(pid)?;
+        }
+        self.notify_retired_provider_exit(pid);
         info!(
             "[proc] exited pid={:>3} pcb={:#018x} is_ok={} error={:#018x}",
             pid, process_entry.pcb, is_ok, error_value
@@ -700,6 +720,7 @@ impl Alpha {
             None,
             true,
             Some(priority),
+            ProcessPolicy::default(),
         )?;
         info!(
             "[proc] spawned from memory caller={:>3} pid={:>3} bytes={:#x} priority={:>2}",
@@ -726,6 +747,10 @@ impl Alpha {
         let size_bytes = request.arg1;
         let priority = request.arg2;
         let destination_slot = request.arg3;
+        self.validate_legacy_destination(request.identifier, destination_slot)?;
+        if (20..=22).contains(&destination_slot) {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if image_vaddr == 0
             || size_bytes == 0
             || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
@@ -747,17 +772,24 @@ impl Alpha {
             None,
             false,
             Some(priority),
+            ProcessPolicy::default(),
         )?;
         let child = self
             .processes
             .find_entry_by_pid(pid)
             .ok_or(CapabilityError::Fatal)?;
+        self.processes
+            .root_types_mut(request.identifier)?
+            .clear(destination_slot);
         let _ = arch::node::remove(caller.root_node, destination_slot as Word);
         if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
         {
             self.cleanup_failed_spawn(pid, child.root_slot);
             return Err(error);
         }
+        self.processes
+            .root_types_mut(request.identifier)?
+            .other(destination_slot);
         info!(
             "[proc] spawned memory suspended caller={:>3} pid={:>3} pcb_slot={:>3} bytes={:#x} priority={:>2}",
             request.identifier, pid, destination_slot, size_bytes, priority
@@ -783,6 +815,10 @@ impl Alpha {
         let size_bytes = request.arg1;
         let priority = request.arg2;
         let destination_slot = request.arg3;
+        self.validate_legacy_destination(request.identifier, destination_slot)?;
+        if (20..=22).contains(&destination_slot) {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if image_vaddr == 0
             || size_bytes == 0
             || size_bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES
@@ -813,11 +849,15 @@ impl Alpha {
             Some(resolver_port),
             false,
             Some(priority),
+            ProcessPolicy::default(),
         )?;
         let child = self
             .processes
             .find_entry_by_pid(pid)
             .ok_or(CapabilityError::Fatal)?;
+        self.processes
+            .root_types_mut(request.identifier)?
+            .clear(destination_slot);
         let _ = arch::node::remove(caller.root_node, destination_slot as Word);
         if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
         {
@@ -828,6 +868,9 @@ impl Alpha {
             self.cleanup_failed_spawn(pid, child.root_slot);
             return Err(error);
         }
+        self.processes
+            .root_types_mut(request.identifier)?
+            .other(destination_slot);
         info!(
             "[proc] spawned memory with fault-handler caller={:>3} pid={:>3} pcb_slot={:>3} bytes={:#x} priority={:>2}",
             request.identifier, pid, destination_slot, size_bytes, priority
@@ -875,6 +918,11 @@ impl Alpha {
         image_bytes: &'static [u8],
         _priority: Word,
     ) -> Result<usize, CapabilityError> {
+        if self.managed_buffers.has_mapping(pid)
+            || self.communication.bindings.has_provider_authority(pid)
+        {
+            return Err(CapabilityError::IllegalOperation);
+        }
         let elf = parse_elf64(image_bytes)?;
         let mut image_base = usize::MAX;
         let mut image_end = 0usize;
@@ -1092,7 +1140,8 @@ impl Alpha {
             return Err(CapabilityError::InvalidDescriptor);
         }
         let destination_slot = request.arg3;
-        if destination_slot == 0 || destination_slot >= (1 << PROCESS_ROOT_RADIX) {
+        self.validate_legacy_destination(request.identifier, destination_slot)?;
+        if (20..=22).contains(&destination_slot) {
             return Err(CapabilityError::InvalidArgument);
         }
 
@@ -1117,6 +1166,9 @@ impl Alpha {
             .processes
             .find_entry_by_pid(pid)
             .ok_or(CapabilityError::Fatal)?;
+        self.processes
+            .root_types_mut(request.identifier)?
+            .clear(destination_slot);
         let _ = arch::node::remove(caller.root_node, destination_slot as Word);
         if let Err(error) = arch::node::copy(caller.root_node, destination_slot as Word, child.pcb)
         {
@@ -1127,6 +1179,9 @@ impl Alpha {
             self.cleanup_failed_spawn(pid, child.root_slot);
             return Err(error);
         }
+        self.processes
+            .root_types_mut(request.identifier)?
+            .other(destination_slot);
         info!(
             "[proc] spawned with fault-handler caller={:>3} image={} pid={:>3} pcb_slot={:>3} suspended={}",
             request.identifier, image_name, pid, destination_slot, !auto_resume
@@ -1185,6 +1240,13 @@ impl Alpha {
         validate_process_observer(request.identifier, entry.pid, entry.reaper_pid)?;
         if !entry.exited {
             return Err(CapabilityError::IllegalOperation);
+        }
+        if entry.resource_quarantined
+            || self.communication.bindings.has_live_sessions(pid)
+            || self.communication.bindings.has_provider_authority(pid)
+            || self.managed_buffers.has_mapping(pid)
+        {
+            return Err(CapabilityError::Fatal);
         }
         self.invalidate_process_copy_mappings(pid)?;
         arch::node::revoke(self.root.root_descriptor, entry.root_slot as Word)?;

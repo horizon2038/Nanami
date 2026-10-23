@@ -122,21 +122,3 @@ pub fn connect_input_service_with_pid(destination_slot: Word) -> Result<Word, Re
 pub fn connect_honoka_service_with_pid(destination_slot: Word) -> Result<Word, RequestError> {
     connect_service_with_pid(HONOKA_SERVICE, destination_slot)
 }
-
-pub fn service_name_from_kind(kind: Word) -> &'static [u8] {
-    match kind {
-        SERVICE_KIND_NET_DEVICE => b"net-device",
-        SERVICE_KIND_NETWORK_SERVICE => b"network-service",
-        SERVICE_KIND_TIMER_SERVICE => b"timer-service",
-        SERVICE_KIND_DISPLAY_SERVICE => b"display_service",
-        SERVICE_KIND_INPUT_SERVICE => b"input-service",
-        SERVICE_KIND_HONOKA_SERVICE => b"honoka-service",
-        SERVICE_KIND_RTC_SERVICE => b"rtc-service",
-        SERVICE_KIND_BLOCK_DEVICE => b"block-device",
-        SERVICE_KIND_VFS_SERVICE => b"vfs-service",
-        SERVICE_KIND_POSIX_SERVICE => b"posix-service",
-        SERVICE_KIND_TERMINAL_SERVICE => b"terminal-service",
-        SERVICE_KIND_EXEC_SERVICE => b"exec-service",
-        _ => b"unknown",
-    }
-}

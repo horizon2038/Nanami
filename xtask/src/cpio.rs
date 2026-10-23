@@ -78,4 +78,27 @@ mod tests {
         assert_eq!(bytes.len() % 512, 0);
         assert_eq!(bytes, archive(&records).unwrap());
     }
+
+    #[test]
+    fn explicit_module_paths_and_ambiguous_legacy_names() {
+        let records = vec![
+            ("./bin/tool".into(), 0o100755, vec![1]),
+            ("./modules/tool".into(), 0o100755, vec![2]),
+        ];
+        let bytes = archive(&records).unwrap();
+        assert_eq!(
+            guest_parser::find_image(&bytes, "./modules/tool")
+                .unwrap()
+                .data,
+            [2]
+        );
+        assert_eq!(
+            guest_parser::find_image(&bytes, "/bin/tool.elf")
+                .unwrap()
+                .data,
+            [1]
+        );
+        assert!(guest_parser::find_image(&bytes, "tool").is_err());
+        assert!(guest_parser::find_image(&bytes, "other/tool").is_err());
+    }
 }

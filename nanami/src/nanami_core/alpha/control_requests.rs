@@ -5,7 +5,12 @@ impl Alpha {
         &self,
         request: OsRequestEvent,
     ) -> Result<(usize, usize), CapabilityError> {
-        if request.identifier == 0 || request.identifier != self.driver_manager_pid {
+        if request.identifier == 0
+            || !self
+                .processes
+                .find_entry_by_pid(request.identifier)
+                .is_some_and(|entry| !entry.exited && entry.platform_information_access)
+        {
             return Err(CapabilityError::PermissionDenied);
         }
         match request.arg0 {
@@ -71,9 +76,7 @@ impl Alpha {
             NANAMI_INFO_ARCHITECTURE_NAME => {
                 encode_info_name_chunk(&self.architecture_name, request.arg1)
             }
-            NANAMI_INFO_PLATFORM_NAME => {
-                encode_info_name_chunk(&self.platform_name, request.arg1)
-            }
+            NANAMI_INFO_PLATFORM_NAME => encode_info_name_chunk(&self.platform_name, request.arg1),
             NANAMI_INFO_KERNEL_VERSION => {
                 version_info::encode_chunk(&self.kernel_version, request.arg1)
             }
@@ -89,7 +92,9 @@ impl Alpha {
         request: OsRequestEvent,
     ) -> Result<(), CapabilityError> {
         let pid = request.identifier;
-        if pid == 0 {
+        // Zero is the absence marker in AlphaEnvironment, not a usable IRQ
+        // region. Invoking it would dispatch an IRQ opcode against root Node 0.
+        if pid == 0 || self.interrupt_region == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
 
@@ -97,8 +102,8 @@ impl Alpha {
         let notification_slot = request.arg1;
         let interrupt_slot = request.arg2;
 
-        validate_process_device_slot(notification_slot)?;
-        validate_process_device_slot(interrupt_slot)?;
+        self.validate_legacy_destination(pid, notification_slot)?;
+        self.validate_legacy_destination(pid, interrupt_slot)?;
 
         let process_entry = self
             .processes
@@ -123,11 +128,19 @@ impl Alpha {
                 notification_slot,
                 default_notification_descriptor,
             ) {
-                Ok(()) => {}
-                Err(_) => {
+                Ok(()) => {
+                    self.processes
+                        .root_types_mut(pid)?
+                        .notification(notification_slot);
+                }
+                Err(error) => {
                     // Reusing the same notification slot for multiple IRQ registrations
                     // is valid. The user-visible slot must keep a stable notification object;
                     // IRQ-specific identifiers are assigned only to the per-IRQ alias below.
+                    if !process_entry.root_types.is_notification(notification_slot) {
+                        let _ = self.processes.unassign_irq_from_pid(pid, irq_number);
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -144,6 +157,7 @@ impl Alpha {
                 return Err(e);
             }
         }
+        self.processes.root_types_mut(pid)?.other(interrupt_slot);
 
         let interrupt_descriptor =
             make_child_slot_descriptor(process_entry.root_node, PROCESS_ROOT_RADIX, interrupt_slot);
@@ -168,7 +182,8 @@ impl Alpha {
             alias_slot,
             requested_notification_descriptor,
         )?;
-        let _ = arch::notification_port::identify(alias_descriptor, irq_identifier);
+        self.processes.root_types_mut(pid)?.notification(alias_slot);
+        arch::notification_port::identify(alias_descriptor, irq_identifier)?;
         if let Err(e) = arch::interrupt_port::bind(interrupt_descriptor, alias_descriptor) {
             let _ = self.processes.unassign_irq_from_pid(pid, irq_number);
             return Err(e);
@@ -192,7 +207,7 @@ impl Alpha {
         }
         let notification_slot = request.arg0;
         let identifier = request.arg1;
-        validate_process_device_slot(notification_slot)?;
+        self.validate_legacy_destination(pid, notification_slot)?;
 
         let process_entry = self
             .processes
@@ -207,13 +222,16 @@ impl Alpha {
             process_entry.root_node,
             notification_slot,
         )?;
+        self.processes
+            .root_types_mut(pid)?
+            .notification(notification_slot);
 
         let notification_descriptor = make_child_slot_descriptor(
             process_entry.root_node,
             PROCESS_ROOT_RADIX,
             notification_slot,
         );
-        let _ = arch::notification_port::identify(notification_descriptor, identifier);
+        arch::notification_port::identify(notification_descriptor, identifier)?;
 
         Ok(())
     }
@@ -223,7 +241,7 @@ impl Alpha {
         request: OsRequestEvent,
     ) -> Result<(), CapabilityError> {
         let caller_pid = request.identifier;
-        if caller_pid == 0 {
+        if caller_pid == 0 || request.arg0 == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
 
@@ -232,16 +250,25 @@ impl Alpha {
         let destination_slot = request.arg2;
         let identifier = request.arg3;
         validate_process_device_slot(source_notification_slot)?;
-        validate_process_device_slot(destination_slot)?;
+        self.validate_legacy_destination(caller_pid, destination_slot)?;
 
         let caller_entry = self
             .processes
             .find_entry_by_pid(caller_pid)
+            .filter(|entry| !entry.exited)
             .ok_or(CapabilityError::InvalidArgument)?;
         let source_entry = self
             .processes
             .find_entry_by_pid(source_pid)
+            .filter(|entry| !entry.exited)
             .ok_or(CapabilityError::InvalidArgument)?;
+
+        if !source_entry
+            .root_types
+            .is_notification(source_notification_slot)
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
 
         let source_notification_descriptor = make_child_slot_descriptor(
             source_entry.root_node,
@@ -249,21 +276,50 @@ impl Alpha {
             source_notification_slot,
         );
 
-        let _ = arch::node::remove(caller_entry.root_node, destination_slot as Word);
+        if source_pid == caller_pid && source_notification_slot == destination_slot {
+            return arch::notification_port::identify(source_notification_descriptor, identifier);
+        }
+
+        // Check COPY authority and configure a verified Notification before
+        // touching an existing destination. A denied source never destroys it.
+        let temporary =
+            make_root_slot_descriptor(self.root.root_radix, NOTIFICATION_COPY_TEMP_SLOT);
         arch::node::copy(
-            caller_entry.root_node,
-            destination_slot,
+            self.root.root_descriptor,
+            NOTIFICATION_COPY_TEMP_SLOT,
             source_notification_descriptor,
         )?;
+        let result = (|| {
+            arch::notification_port::identify(temporary, identifier)?;
+            // A foreign Generic revoke can already have emptied this slot.
+            // COPY is safe on any destination; only remove a known Notification
+            // if it is still occupied. Never probe its type with an opcode.
+            let mut removed = false;
+            let installed = crate::nanami_core::process::install_notification_alias(
+                caller_entry.root_types.is_notification(destination_slot),
+                || arch::node::copy(caller_entry.root_node, destination_slot, temporary),
+                || {
+                    arch::node::remove(caller_entry.root_node, destination_slot)?;
+                    removed = true;
+                    Ok(())
+                },
+            );
+            if removed {
+                self.processes
+                    .root_types_mut(caller_pid)?
+                    .clear(destination_slot);
+            }
+            installed?;
+            self.processes
+                .root_types_mut(caller_pid)?
+                .notification(destination_slot);
+            Ok(())
+        })();
+        if arch::node::remove(self.root.root_descriptor, NOTIFICATION_COPY_TEMP_SLOT).is_err() {
+            return Err(CapabilityError::Fatal);
+        }
 
-        let destination_descriptor = make_child_slot_descriptor(
-            caller_entry.root_node,
-            PROCESS_ROOT_RADIX,
-            destination_slot,
-        );
-        let _ = arch::notification_port::identify(destination_descriptor, identifier);
-
-        Ok(())
+        result
     }
 
     pub(super) fn handle_service_connect_request(
@@ -287,18 +343,43 @@ impl Alpha {
         let service_name = core::str::from_utf8(&raw_name[..raw_len])
             .map_err(|_| CapabilityError::InvalidArgument)?;
 
+        if self
+            .communication
+            .services
+            .managed_id(service_name)
+            .is_some()
+        {
+            return Err(CapabilityError::IllegalOperation);
+        }
+
         let (service_port, service_pid) = self
             .communication
             .resolve_service_with_owner(service_name)
             .ok_or(CapabilityError::InvalidArgument)?;
+        // A released root slot can be reused by an unrelated process. A stale
+        // registry descriptor must never silently connect to that new occupant.
+        if !self
+            .processes
+            .find_entry_by_pid(service_pid)
+            .is_some_and(|owner| !owner.exited)
+        {
+            return Err(CapabilityError::InvalidDescriptor);
+        }
 
         arch::node::copy(process_entry.root_node, destination_slot, service_port)?;
+        self.processes.root_types_mut(pid)?.ipc(destination_slot);
         let destination_descriptor = make_child_slot_descriptor(
             process_entry.root_node,
             PROCESS_ROOT_RADIX,
             destination_slot,
         );
         arch::ipc_port::identify(destination_descriptor, pid as Word)?;
+        // Authentication belongs to the granted alias, not a caller-editable badge.
+        arch::node::demote(
+            process_entry.root_node,
+            destination_slot,
+            IDENTIFIED_IPC_RIGHTS,
+        )?;
 
         info!(
             "[svc] connect name={} pid={:>3} dst_slot={:>3} src_port={:#018x}",
@@ -469,7 +550,7 @@ impl Alpha {
         request: OsRequestEvent,
     ) -> Result<(), CapabilityError> {
         let pid = request.identifier;
-        if pid == 0 {
+        if pid == 0 || self.root_io_port == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
 
@@ -495,6 +576,7 @@ impl Alpha {
             process_entry.root_node,
             io_port_slot,
         )?;
+        self.processes.root_types_mut(pid)?.other(io_port_slot);
 
         self.processes
             .add_io_range_to_pid(pid, range_min, range_max)?;
@@ -537,6 +619,9 @@ impl Alpha {
             CapabilityError::InvalidArgument
         })?;
         let service_slot = request.arg3;
+        if !process_entry.root_types.is_ipc(service_slot) {
+            return Err(CapabilityError::PermissionDenied);
+        }
         validate_process_device_slot(service_slot).map_err(|e| {
             error!(
                 "[svc.err] register invalid slot pid={:>3} name={} slot={:#x}",
@@ -562,6 +647,7 @@ impl Alpha {
         &self,
         request: OsRequestEvent,
     ) -> Option<(usize, usize)> {
-        self.communication.service_info_by_ordinal(request.arg0)
+        self.communication
+            .service_info_by_ordinal(request.arg0, request.arg1)
     }
 }

@@ -90,11 +90,27 @@ struct Fake {
     memory_writes: Vec<(Word, Word, Word)>,
     completed: Vec<(Word, Word)>,
     read_error: bool,
+    timer_available: bool,
+    timer_connects: usize,
 }
-pub mod abi { pub const SLOT_RTC_SERVICE: usize = 32; }
+pub mod abi {
+    pub const SLOT_RTC_SERVICE: usize = 32;
+    pub const SLOT_TIMER_SERVICE: usize = 31;
+}
 pub mod ipc { pub fn process_slot_descriptor(slot: usize) -> usize { slot } }
 pub mod registry {
     pub fn connect_rtc_service(_: usize) -> Result<(), i32> { Ok(()) }
+    pub fn connect_timer_service(slot: usize) -> Result<(), i32> {
+        assert_eq!(slot, super::abi::SLOT_TIMER_SERVICE);
+        super::FAKE.with_borrow_mut(|fake| {
+            fake.timer_connects += 1;
+            if fake.timer_available {
+                Ok(())
+            } else {
+                Err(super::EOPNOTSUPP)
+            }
+        })
+    }
 }
 pub mod rtc {
     use super::*;
@@ -118,7 +134,8 @@ thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod timer {
     use super::*;
     pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: Word = 1 << 63;
-    pub fn timer_service_monotonic_ticks(_: Word) -> Result<(Word, Word), i32> {
+    pub fn timer_service_monotonic_ticks(port: Word) -> Result<(Word, Word), i32> {
+        assert_ne!(port, 0, "clock query used a missing capability");
         FAKE.with(|fake| {
             let mut fake = fake.borrow_mut();
             fake.clock_reads += 1;
@@ -206,15 +223,47 @@ fn runtime(hz: Word) -> Runtime {
     FAKE.with(|fake| {
         *fake.borrow_mut() = Fake {
             hz,
+            timer_available: true,
             ..Fake::default()
         }
     });
     let mut runtime = Runtime::default();
+    runtime.timer_port = abi::SLOT_TIMER_SERVICE;
     for index in 0..4 {
         runtime.managed[index].pid = index + 1;
         runtime.managed[index].pcb = index + 1;
     }
     runtime
+}
+
+#[test]
+fn absent_timer_does_not_query_zero_or_fabricate_time_and_can_connect_later() {
+    let mut runtime = runtime(1_000_000_000);
+    runtime.timer_port = 0;
+    runtime.monotonic_ticks = 123;
+    runtime.monotonic_tick_hz = 456;
+    FAKE.with_borrow_mut(|fake| fake.timer_available = false);
+    assert_eq!(refresh_clock(&mut runtime), Err(EOPNOTSUPP));
+    assert_eq!(runtime.timer_port, 0);
+    assert_eq!(runtime.monotonic_ticks, 123);
+    assert_eq!(runtime.monotonic_tick_hz, 456);
+    FAKE.with_borrow(|fake| {
+        assert_eq!(fake.timer_connects, 1);
+        assert_eq!(fake.clock_reads, 0);
+    });
+    FAKE.with_borrow_mut(|fake| {
+        fake.timer_available = true;
+        fake.ticks = 789;
+    });
+    refresh_clock(&mut runtime).unwrap();
+    refresh_clock(&mut runtime).unwrap();
+    assert_eq!(runtime.timer_port, abi::SLOT_TIMER_SERVICE);
+    assert_eq!(runtime.monotonic_ticks, 789);
+    assert_eq!(runtime.monotonic_tick_hz, 1_000_000_000);
+    FAKE.with_borrow(|fake| {
+        assert_eq!(fake.timer_connects, 2);
+        assert_eq!(fake.clock_reads, 2);
+    });
 }
 fn sleep(runtime: &mut Runtime, pid: Word, ns: Word) -> EmulationAction {
     let mut request = [ns / 1_000_000_000, ns % 1_000_000_000];

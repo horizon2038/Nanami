@@ -12,6 +12,11 @@ UEFI variables, virtual USB input, AHCI storage and no network. It never mounts
 or writes the supplied disk. `debugfs` from e2fsprogs is needed for the independent
 post-exit BMP check (`--debugfs /absolute/path/to/debugfs` if needed).
 
+For the two-phase boot image, pass `--expect-two-phase` to additionally require
+Booter preparation, handoff and launcher suspension in order before the normal
+service/application workflow. This is not a child-domain or Provider handover
+test; those have separate acceptance requirements.
+
 It checks monitor tabs, paused pixel stability and manual refresh, then draws
 with Saran, changes colors, checks crop/rotate/flip and undo/redo, saves,
 shrinks/grows the viewport, cancels a dirty close, reopens the image and compares

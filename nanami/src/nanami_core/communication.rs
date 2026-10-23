@@ -2,8 +2,11 @@ use crate::*;
 pub use nanami_uapi::os::*;
 use nun::{arch, CapabilityDescriptor, CapabilityError, MessageInfo, MessageSource};
 
-const MAX_SERVICES: usize = 64;
-const MAX_SERVICE_NAME_LEN: usize = 32;
+pub mod bindings;
+pub mod buffers;
+pub mod events;
+mod services;
+use services::Services;
 const FAULT_REASON_MR: usize = 4;
 const FAULT_PC_MR: usize = 5;
 const FAULT_ADDRESS_MR: usize = 6;
@@ -19,28 +22,10 @@ const RESPONSE_STATUS_MR: usize = 4;
 const RESPONSE_DETAIL0_MR: usize = 5;
 const RESPONSE_DETAIL1_MR: usize = 6;
 const RESPONSE_MESSAGE_LENGTH: u8 = 3;
-#[derive(Clone, Copy)]
-pub struct ServiceEntry {
-    used: bool,
-    owner_pid: usize,
-    name_len: usize,
-    name: [u8; MAX_SERVICE_NAME_LEN],
-    port_descriptor: CapabilityDescriptor,
-}
-
-impl ServiceEntry {
-    const EMPTY: Self = Self {
-        used: false,
-        owner_pid: usize::MAX,
-        name_len: 0,
-        name: [0; MAX_SERVICE_NAME_LEN],
-        port_descriptor: 0,
-    };
-}
-
 pub struct CommunicationManager {
     pub os_port: CapabilityDescriptor,
-    services: [ServiceEntry; MAX_SERVICES],
+    pub(crate) services: Services,
+    pub bindings: bindings::Bindings,
 }
 
 #[derive(Clone, Copy)]
@@ -79,7 +64,8 @@ impl CommunicationManager {
     pub fn new(os_port: CapabilityDescriptor) -> Self {
         Self {
             os_port,
-            services: [ServiceEntry::EMPTY; MAX_SERVICES],
+            services: Services::new(),
+            bindings: bindings::Bindings::new(),
         }
     }
 
@@ -89,71 +75,19 @@ impl CommunicationManager {
         name: &str,
         port_descriptor: CapabilityDescriptor,
     ) -> Result<(), CapabilityError> {
-        let bytes = name.as_bytes();
-        if bytes.is_empty() || bytes.len() > MAX_SERVICE_NAME_LEN {
-            error!(
-                "[svc.err] invalid service name owner={} len={} max={}",
-                owner_pid,
-                bytes.len(),
-                MAX_SERVICE_NAME_LEN
-            );
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        if let Some(idx) = self.find_service_index(bytes) {
-            self.services[idx].owner_pid = owner_pid;
-            self.services[idx].port_descriptor = port_descriptor;
-            return Ok(());
-        }
-
-        let mut i = 0;
-        while i < MAX_SERVICES {
-            if !self.services[i].used {
-                self.services[i].used = true;
-                self.services[i].owner_pid = owner_pid;
-                self.services[i].name_len = bytes.len();
-                self.services[i].name[..bytes.len()].copy_from_slice(bytes);
-                self.services[i].port_descriptor = port_descriptor;
-                return Ok(());
-            }
-            i += 1;
-        }
-
-        error!(
-            "[svc.err] service table full owner={} name={}",
-            owner_pid, name
-        );
-        Err(CapabilityError::InvalidArgument)
+        self.services.register(owner_pid, name, port_descriptor)
     }
 
     pub fn resolve_service(&self, name: &str) -> Option<CapabilityDescriptor> {
-        self.find_service_index(name.as_bytes())
-            .map(|idx| self.services[idx].port_descriptor)
+        self.services.resolve(name).map(|(port, _)| port)
     }
 
     pub fn resolve_service_with_owner(&self, name: &str) -> Option<(CapabilityDescriptor, usize)> {
-        self.find_service_index(name.as_bytes()).map(|idx| {
-            (
-                self.services[idx].port_descriptor,
-                self.services[idx].owner_pid,
-            )
-        })
+        self.services.resolve(name)
     }
 
-    pub fn service_info_by_ordinal(&self, ordinal: usize) -> Option<(usize, usize)> {
-        let mut seen = 0usize;
-        let mut i = 0usize;
-        while i < MAX_SERVICES {
-            let e = self.services[i];
-            if e.used {
-                if seen == ordinal {
-                    return Some((e.owner_pid, service_kind_from_name(&e.name[..e.name_len])));
-                }
-                seen += 1;
-            }
-            i += 1;
-        }
-        None
+    pub fn service_info_by_ordinal(&self, ordinal: usize, chunk: usize) -> Option<(usize, usize)> {
+        self.services.info_chunk(ordinal, chunk)
     }
 
     pub fn receive_event(&mut self) -> Result<CommunicationEvent, CapabilityError> {
@@ -203,19 +137,6 @@ impl CommunicationManager {
         let mut identifier = 0usize;
         arch::ipc_port::reply_receive(self.os_port, &mut info, &mut identifier)?;
         Ok(Self::decode_event(info, identifier))
-    }
-
-    fn find_service_index(&self, target: &[u8]) -> Option<usize> {
-        let mut i = 0;
-        while i < MAX_SERVICES {
-            let e = self.services[i];
-            if e.used && e.name_len == target.len() && e.name[..e.name_len] == target[..e.name_len]
-            {
-                return Some(i);
-            }
-            i += 1;
-        }
-        None
     }
 
     fn decode_event(info: MessageInfo, identifier: usize) -> CommunicationEvent {
@@ -278,35 +199,5 @@ impl CommunicationManager {
             arg2,
             arg3,
         })
-    }
-}
-
-fn service_kind_from_name(name: &[u8]) -> usize {
-    if name == b"net-device" {
-        OS_SERVICE_NET_DEVICE
-    } else if name == b"network-service" {
-        OS_SERVICE_NETWORK_SERVICE
-    } else if name == b"timer-service" {
-        OS_SERVICE_TIMER_SERVICE
-    } else if name == b"display_service" {
-        OS_SERVICE_DISPLAY_SERVICE
-    } else if name == b"input-service" {
-        OS_SERVICE_INPUT_SERVICE
-    } else if name == b"honoka-service" {
-        OS_SERVICE_HONOKA_SERVICE
-    } else if name == b"rtc-service" {
-        OS_SERVICE_RTC_SERVICE
-    } else if name == b"block-device" {
-        OS_SERVICE_BLOCK_DEVICE
-    } else if name == b"vfs-service" {
-        OS_SERVICE_VFS_SERVICE
-    } else if name == b"posix-service" {
-        OS_SERVICE_POSIX_SERVICE
-    } else if name == b"terminal-service" {
-        OS_SERVICE_TERMINAL_SERVICE
-    } else if name == b"exec-service" {
-        OS_SERVICE_EXEC_SERVICE
-    } else {
-        0
     }
 }

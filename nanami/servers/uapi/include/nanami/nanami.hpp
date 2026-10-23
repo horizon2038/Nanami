@@ -23,7 +23,33 @@ a9n::NanamiStatus request_shared_memory(
     a9n::Word* out_peer_vaddr
 );
 a9n::NanamiStatus ping(a9n::Word token, a9n::Word* echoed_token);
+// Names are 1..24 UTF-8 bytes. Returned owner PIDs are local to this Alpha.
+a9n::NanamiStatus register_service(const char* name, a9n::Word service_slot);
+a9n::NanamiStatus connect_service(
+    const char* name,
+    a9n::Word destination_slot,
+    a9n::Word* owner_pid = nullptr
+);
 a9n::NanamiStatus register_service_net_device();
+struct ServiceConnection {
+    a9n::Word endpoint;
+    // Local Alpha close handle; an imported upstream Session badge may differ.
+    a9n::Word session;
+    a9n::Word service;
+};
+struct SessionBuffer {
+    a9n::Word address;
+    a9n::Word bytes;
+};
+a9n::NanamiStatus create_session_buffer(a9n::Word session, a9n::Word bytes, SessionBuffer* buffer);
+a9n::NanamiStatus session_buffer(a9n::Word session, SessionBuffer* buffer);
+a9n::NanamiStatus connect_session_event(a9n::Word session, a9n::Word destination_slot);
+// Managed stateless-control Services use opaque local Session/Service identities.
+a9n::NanamiStatus connect_managed_service(
+    const char* name, a9n::Word destination_slot, ServiceConnection* connection
+);
+// Withdraws access; the current kernel requires retaining its alias/quota.
+a9n::NanamiStatus close_managed_session(a9n::Word session);
 a9n::NanamiStatus request_irq(a9n::Word irq_number, a9n::Word notification_slot, a9n::Word interrupt_slot);
 a9n::NanamiStatus request_io_port(a9n::Word range_min, a9n::Word range_max, a9n::Word io_slot);
 

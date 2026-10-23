@@ -9,6 +9,10 @@ use nanami_runtime::{self, RequestError, Word};
 
 #[path = "app/arch.rs"]
 mod arch;
+#[path = "app/dma.rs"]
+mod dma;
+#[path = "app/interrupt.rs"]
+mod interrupt;
 #[cfg(target_arch = "x86_64")]
 #[path = "app/pci.rs"]
 mod pci;
@@ -16,10 +20,10 @@ mod pci;
 mod util;
 
 use arch::*;
+use dma::*;
 #[cfg(target_arch = "x86_64")]
 use pci::{
-    configure_pci_command_for_intx, disable_pci_msi_capabilities, resolve_irq_number,
-    scan_virtio_blk,
+    configure_pci_command, disable_pci_msi_capabilities, resolve_irq_number, scan_virtio_blk,
 };
 use util::{fail_device, log_request_error};
 
@@ -48,7 +52,6 @@ const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
 const VIRTIO_STATUS_FAILED: u8 = 128;
 
 const QUEUE_INDEX: u16 = 0;
-const QUEUE_MEM_BYTES: usize = 16384;
 const VIRTIO_QUEUE_ALIGN: usize = 4096;
 const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
@@ -60,13 +63,6 @@ const VIRTIO_BLK_F_FLUSH: Word = 1 << 9;
 const VIRTIO_BLK_STATUS_OK: u8 = 0;
 const VIRTIO_SECTOR_BYTES: usize = 512;
 const BLOCK_SIZE: usize = nanami_client::block::BLOCK_DEVICE_BLOCK_SIZE as usize;
-const MAX_TRANSFER_BYTES: usize = nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES as usize;
-
-const DMA_QUEUE_OFFSET: usize = 0;
-const DMA_HEADER_OFFSET: usize = DMA_QUEUE_OFFSET + QUEUE_MEM_BYTES;
-const DMA_DATA_OFFSET: usize = DMA_HEADER_OFFSET + core::mem::size_of::<VirtioBlkReqHeader>();
-const DMA_STATUS_OFFSET: usize = DMA_DATA_OFFSET + MAX_TRANSFER_BYTES;
-const DMA_TOTAL_BYTES: usize = 0x9000;
 
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
@@ -95,14 +91,6 @@ struct VirtqDesc {
 struct VirtqUsedElem {
     id: u32,
     len: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtioBlkReqHeader {
-    request_type: u32,
-    reserved: u32,
-    sector: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -265,7 +253,11 @@ fn submit_blk_request_dma(
         (*desc.add(0)).addr = header_paddr as u64;
         (*desc.add(0)).len = core::mem::size_of::<VirtioBlkReqHeader>() as u32;
         (*desc.add(0)).flags = DESC_F_NEXT;
-        (*desc.add(0)).next = if request_type == VIRTIO_BLK_T_FLUSH { 2 } else { 1 };
+        (*desc.add(0)).next = if request_type == VIRTIO_BLK_T_FLUSH {
+            2
+        } else {
+            1
+        };
 
         (*desc.add(1)).addr = data_paddr as u64;
         (*desc.add(1)).len = bytes as u32;
@@ -312,6 +304,18 @@ fn submit_blk_request_dma(
                     nanami_runtime::print!("\n");
                     return Err(RequestError::Unsupported);
                 }
+                // Completion can be visible before we ever enter the IRQ
+                // wait below. Retire its level interrupt before bootstrap
+                // performs another RPC or waits for storage arbitration.
+                let acknowledged = interrupt::complete(
+                    runtime.io_desc,
+                    runtime.io_base,
+                    runtime.irq_registered.then_some(runtime.interrupt_desc),
+                );
+                if let Err(error) = acknowledged {
+                    log_request_error("[virtio-blk] completion irq ack failed: ", error);
+                    runtime.irq_wait_enabled = false;
+                }
                 let status = ptr::read_volatile(runtime.status_vaddr as *const u8);
                 return if status == VIRTIO_BLK_STATUS_OK {
                     Ok(())
@@ -335,8 +339,7 @@ fn submit_blk_request_dma(
         if runtime.irq_wait_enabled {
             let wait_result = nanami_runtime::ipc::notification_wait(runtime.notification_desc)
                 .and_then(|_| {
-                    arch::acknowledge_interrupt(runtime.io_desc, runtime.io_base)?;
-                    nanami_runtime::ipc::interrupt_ack(runtime.interrupt_desc)
+                    interrupt::acknowledge(runtime.io_desc, runtime.io_base, runtime.interrupt_desc)
                 });
             if let Err(error) = wait_result {
                 log_request_error("[virtio-blk] irq wait failed, fallback polling: ", error);
@@ -664,7 +667,10 @@ fn prepare_transport() -> Result<PreparedTransport, nanami_runtime::NanamiError>
         found.irq_line
     );
 
-    configure_pci_command_for_intx(pci_io_desc, found).map_err(|error| {
+    // The firmware route may be shared with another device. Do not assert it
+    // until this driver actually owns a usable IRQ port. Polling must not
+    // trigger a higher-priority driver's interrupt loop on that shared line.
+    configure_pci_command(pci_io_desc, found, false).map_err(|error| {
         log_device_error(
             "[virtio-blk] pci command configure failed: ",
             error,
@@ -702,14 +708,16 @@ fn prepare_transport() -> Result<PreparedTransport, nanami_runtime::NanamiError>
     if let Ok(Some(irq_number)) = resolve_irq_number(pci_io_desc, found) {
         if nanami_runtime::request_irq(irq_number, SLOT_NOTIFICATION, SLOT_INTERRUPT).is_ok() {
             irq_registered = true;
-            nanami_runtime::ipc::bind_current_thread_notification(notification).map_err(|error| {
-                log_device_error(
-                    "[virtio-blk] notification bind failed: ",
-                    error,
-                    dev_io_desc,
-                    io_base,
-                )
-            })?;
+            nanami_runtime::ipc::bind_current_thread_notification(notification).map_err(
+                |error| {
+                    log_device_error(
+                        "[virtio-blk] notification bind failed: ",
+                        error,
+                        dev_io_desc,
+                        io_base,
+                    )
+                },
+            )?;
             match nanami_runtime::ipc::interrupt_ack(interrupt) {
                 Ok(()) => {
                     irq_wait_enabled = true;
@@ -720,6 +728,10 @@ fn prepare_transport() -> Result<PreparedTransport, nanami_runtime::NanamiError>
                 }
             }
         }
+    }
+
+    if irq_wait_enabled {
+        configure_pci_command(pci_io_desc, found, true)?;
     }
 
     Ok(PreparedTransport {
@@ -734,8 +746,8 @@ fn prepare_transport() -> Result<PreparedTransport, nanami_runtime::NanamiError>
 
 #[cfg(target_arch = "aarch64")]
 fn prepare_transport() -> Result<PreparedTransport, nanami_runtime::NanamiError> {
-    let (_, mapped_base) =
-        nanami_runtime::request_mmio(MMIO_PHYSICAL_BASE, MMIO_REGION_BYTES).map_err(|error| {
+    let (_, mapped_base) = nanami_runtime::request_mmio(MMIO_PHYSICAL_BASE, MMIO_REGION_BYTES)
+        .map_err(|error| {
             log_request_error("[virtio-blk] virtio-mmio mapping failed: ", error);
             nanami_runtime::NanamiError::UNKNOWN
         })?;
@@ -875,8 +887,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             }
             ServiceEvent::Notification { .. } => {
                 if runtime.irq_registered {
-                    let _ = arch::acknowledge_interrupt(runtime.io_desc, runtime.io_base);
-                    if nanami_runtime::ipc::interrupt_ack(runtime.interrupt_desc).is_err() {
+                    if interrupt::acknowledge(
+                        runtime.io_desc,
+                        runtime.io_base,
+                        runtime.interrupt_desc,
+                    )
+                    .is_err()
+                    {
                         runtime.irq_wait_enabled = false;
                     }
                 }
@@ -927,7 +944,13 @@ fn init_virtio_blk_with_dma_base(
     #[cfg(target_arch = "x86_64")]
     let flush_supported = {
         let features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
-        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, features & VIRTIO_BLK_F_FLUSH)?;
+        vio_write(
+            io_desc,
+            io_base,
+            REG_DRIVER_FEATURES,
+            4,
+            features & VIRTIO_BLK_F_FLUSH,
+        )?;
         features & VIRTIO_BLK_F_FLUSH != 0
     };
     #[cfg(target_arch = "aarch64")]
@@ -936,7 +959,13 @@ fn init_virtio_blk_with_dma_base(
         vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 0)?;
         let low_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;
         vio_write(io_desc, io_base, REG_DRIVER_FEATURES_SELECT, 4, 0)?;
-        vio_write(io_desc, io_base, REG_DRIVER_FEATURES, 4, low_features & VIRTIO_BLK_F_FLUSH)?;
+        vio_write(
+            io_desc,
+            io_base,
+            REG_DRIVER_FEATURES,
+            4,
+            low_features & VIRTIO_BLK_F_FLUSH,
+        )?;
 
         vio_write(io_desc, io_base, REG_DEVICE_FEATURES_SELECT, 4, 1)?;
         let high_features = vio_read(io_desc, io_base, REG_DEVICE_FEATURES, 4)?;

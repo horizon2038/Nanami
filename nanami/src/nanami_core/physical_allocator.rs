@@ -335,6 +335,48 @@ impl PhysicalAllocator {
         self.allocate_at(base_page << PAGE_BITS, req_count << PAGE_BITS, false)
     }
 
+    /// Reserve an aligned power-of-two RAM block within an untyped extent.
+    /// Search buddy blocks, not every physical page in a potentially huge map.
+    pub fn allocate_aligned_in_range(
+        &mut self,
+        start: usize,
+        end: usize,
+        bytes: usize,
+    ) -> Result<PhysicalAllocation, PhysicalAllocError> {
+        if bytes < PAGE_SIZE || !bytes.is_power_of_two() || start >= end {
+            return Err(PhysicalAllocError::InvalidArgument);
+        }
+        let wanted_order = (bytes >> PAGE_BITS).ilog2() as usize;
+        let mut selected = None;
+        for order in wanted_order..self.normal.free_lists.len() {
+            let block_bytes = block_pages(order)?
+                .checked_mul(PAGE_SIZE)
+                .ok_or(PhysicalAllocError::InvalidArgument)?;
+            for &page in &self.normal.free_lists[order] {
+                let base = page << PAGE_BITS;
+                let Some(block_end) = base.checked_add(block_bytes) else {
+                    continue;
+                };
+                let Some(address) = base
+                    .max(start)
+                    .checked_add(bytes - 1)
+                    .map(|value| value & !(bytes - 1))
+                else {
+                    continue;
+                };
+                if address
+                    .checked_add(bytes)
+                    .is_some_and(|limit| limit <= end.min(block_end))
+                    && selected.is_none_or(|best| address < best)
+                {
+                    selected = Some(address);
+                }
+            }
+        }
+        let address = selected.ok_or(PhysicalAllocError::OutOfMemory)?;
+        self.allocate_at(address, bytes, false)
+    }
+
     pub fn free(
         &mut self,
         base_address: usize,

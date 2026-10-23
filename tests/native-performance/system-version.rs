@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 extern crate alloc;
 extern crate self as nun;
-pub use a9n_types::InitInfo;
+use nanami_uapi::alpha::KernelVersion;
 use std::cell::RefCell;
 pub type Word = usize;
 #[derive(Debug, PartialEq)]
@@ -61,20 +61,22 @@ fn serve(text: &str) {
 
 #[test]
 fn kernel_version_preserves_runtime_numbers_and_optional_suffixes() {
-    let mut info: InitInfo = unsafe { core::mem::zeroed() };
-    info.kernel_major_version = 3;
-    info.kernel_minor_version = 12;
-    info.kernel_patch_version = 123;
+    let mut info = KernelVersion {
+        major: 3,
+        minor: 12,
+        patch: 123,
+        ..KernelVersion::default()
+    };
     assert_eq!(encoder::kernel_version(&info), "3.12.123");
-    info.kernel_pre_release[..3].copy_from_slice(b"smp");
+    info.pre_release[..3].copy_from_slice(b"smp");
     assert_eq!(encoder::kernel_version(&info), "3.12.123-smp");
     let metadata = b"x86-64-Release-123456";
-    info.kernel_build_metadata[..metadata.len()].copy_from_slice(metadata);
+    info.build_metadata[..metadata.len()].copy_from_slice(metadata);
     assert_eq!(
         encoder::kernel_version(&info),
         "3.12.123-smp+x86-64-Release-123456"
     );
-    info.kernel_pre_release.fill(0);
+    info.pre_release.fill(0);
     assert_eq!(
         encoder::kernel_version(&info),
         "3.12.123+x86-64-Release-123456"

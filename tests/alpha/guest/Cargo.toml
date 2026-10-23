@@ -1,0 +1,63 @@
+[package]
+name = "nanami-domain-fixtures"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "domain-probe"
+path = "probe.rs"
+
+[[bin]]
+name = "domain-leaf"
+path = "leaf.rs"
+
+[[bin]]
+name = "handover-node"
+path = "provider.rs"
+
+[[bin]]
+name = "handover-bad"
+path = "provider.rs"
+
+[[bin]]
+name = "import-manager"
+path = "import-manager.rs"
+
+[[bin]]
+name = "import-client"
+path = "import-client.rs"
+
+[[bin]]
+name = "import-relay"
+path = "import-relay.rs"
+
+[[bin]]
+name = "buffer-provider"
+path = "buffer-provider.rs"
+
+[[bin]]
+name = "buffer-manager"
+path = "buffer-manager.rs"
+
+[[bin]]
+name = "event-provider"
+path = "event-provider.rs"
+
+[[bin]]
+name = "event-caller"
+path = "event-caller.rs"
+
+[[bin]]
+name = "event-manager"
+path = "event-manager.rs"
+
+[dependencies]
+a9n_abi = "=0.8.0"
+nanami-runtime = { path = "../../../nanami/servers/libs/nanami-runtime" }
+nanami-client = { path = "../../../nanami/servers/libs/nanami-client" }
+
+[profile.release]
+panic = "abort"
+
+[workspace]

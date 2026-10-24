@@ -101,8 +101,7 @@ with (output / "qemu.log").open("w") as errors, (output / "monitor.log").open("w
                     time.sleep(0.15)
                     continue
                 if args.expect_kernel_capabilities and (
-                    "CAPABILITY-PROBE-DONE" not in text or "CAPABILITY-PROBE-PASS" not in text
-                    or "SUSPEND-PROBE-PASS" not in text
+                    "CAPABILITY-PROBE-DONE" not in text or "KCONT-PASS" not in text
                 ):
                     time.sleep(0.15)
                     continue
@@ -145,7 +144,7 @@ with (output / "qemu.log").open("w") as errors, (output / "monitor.log").open("w
                     # SMP can interleave the parent's diagnostic serial line.
                     print("PASS bounded Child Alpha, local process/service creation, no unimported parent namespace, and same-name parent/child providers", flush=True)
                 if args.expect_kernel_capabilities:
-                    print("PASS kernel peer aliases, weak deletion, Node drainage, Generic reuse, synchronous suspend/register access/resume, self suspend and process revoke", flush=True)
+                    print("PASS kernel peer aliases, weak deletion, Node drainage, Generic reuse, synchronous suspend, fault replay/arguments, native cancellation, explicit context resume, self suspend and process revoke", flush=True)
                 if args.expect_handover:
                     print("PASS one managed connect, S1 replies, incompatible prepare rejected, quiesce/commit, S1 stopped, same handle reaches S2, and WO handle closure; no old-process or closed-alias reclamation claim", flush=True)
                 if args.expect_imports:

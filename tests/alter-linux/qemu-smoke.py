@@ -14,6 +14,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
 parser.add_argument("--program", action="append", help="guest basename and optional arguments (repeatable)")
+parser.add_argument("--ctrl-c-after", type=float,
+                    help="send real Ctrl-C this many seconds after each checked guest starts")
 parser.add_argument("--capture-running-after", type=float,
                     help="capture each guest's running screen this many seconds after launch (0-30)")
 parser.add_argument("--visual-program",
@@ -22,6 +24,8 @@ parser.add_argument("--network", action="store_true", help="attach an isolated u
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
 args = parser.parse_args()
+if args.ctrl_c_after is not None and not 0 < args.ctrl_c_after <= 30:
+    parser.error("--ctrl-c-after must be greater than 0 and at most 30 seconds")
 if args.capture_running_after is not None and not 0 <= args.capture_running_after <= 30:
     parser.error("--capture-running-after must be between 0 and 30 seconds")
 if args.visual_program and args.ui_stress:
@@ -62,7 +66,8 @@ with (logs / "qemu.log").open("w") as diagnostics:
             raise RuntimeError("Guest timed out; see serial.log and screen.png")
 
         wait_for(lambda text: re.search(r"\[\s*shell\] font init end", text)
-                 and "[              honoka] online" in text)
+                 and ("[              honoka] online" in text
+                      or "[              honoka] initial render done" in text))
         # Font initialization precedes creating/focusing the shell window.
         time.sleep(2)
         monitor = process.stdin
@@ -91,6 +96,15 @@ with (logs / "qemu.log").open("w") as diagnostics:
             # Byte offsets drift with CRLF or UTF-8 serial output.
             start = len(serial.read_text(errors="replace"))
             type_command(f"alter -t /alter/linux/bin/{program}")
+            if args.ctrl_c_after is not None:
+                wait_for(lambda text: re.search(
+                    r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)",
+                    text[start:]))
+                time.sleep(args.ctrl_c_after)
+                before_interrupt = serial.read_text(errors="replace")[start:]
+                if re.search(r"exit pid=\d+ syscall=\d+ status=", before_interrupt):
+                    raise RuntimeError("Guest exited before Ctrl-C; interruption was not exercised")
+                send("sendkey ctrl-c 80")
             if args.capture_running_after is not None:
                 wait_for(lambda text: re.search(
                     r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)",

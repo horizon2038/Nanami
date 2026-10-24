@@ -1,5 +1,5 @@
-//! Cooperative delivery: only inspect registers of a task blocked in an Alter fault.
-//! In particular, never SUSPEND a running SMP task to sample its register context.
+//! Signal delivery to parked tasks and synchronously suspended running tasks.
+//! Suspend must complete before reading a running target's register context.
 use super::*;
 use crate::common::signals::{
     self, Action, AltStack, Info, SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_RESTART, SA_RESTORER,
@@ -351,8 +351,9 @@ pub fn restore(
     Ok(())
 }
 
-/// Running tasks retain pending signals until their next syscall. Parked tasks
-/// are safe to read/write: the kernel already blocked them in the fault IPC.
+/// The event loop serializes delivery with syscall emulation. Its current fault
+/// is excluded until the pending reply is sent; other unaccepted fault IPCs can
+/// be cancelled by Suspend, which prepares their syscall for replay.
 pub fn pump(runtime: &mut Runtime, excluded: Word) {
     if !runtime.signals_pending {
         return;
@@ -391,8 +392,18 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
             terminate(runtime, process.pid, 9);
             continue;
         }
+        // A created OCI process must not start merely because it has a signal.
+        if process.rootfs.prepared {
+            continue;
+        }
         let eligible = pending_mask & (!state.blocked | state.wait_mask.unwrap_or(0));
-        if saved.is_none() && (waiting.is_none() || state.stopped || eligible == 0) {
+        if saved.is_none() && (state.stopped || eligible == 0) {
+            continue;
+        }
+        let suspended = saved.is_none() && waiting.is_none();
+        if suspended && a9n_abi::arch::process_control_block::suspend(process.pcb).is_err() {
+            // Do not inspect a context without the remote CPU's stop ACK.
+            // Leave its pending signals intact so a later pump can retry.
             continue;
         }
         let mut registers = match saved
@@ -411,10 +422,11 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
             Delivery::Terminate(signal) => terminate(runtime, process.pid, signal),
             Delivery::Stopped => {}
             Delivery::Handler | Delivery::Unchanged
-                if saved.is_some() || matches!(delivery, Delivery::Handler) =>
+                if suspended || saved.is_some() || matches!(delivery, Delivery::Handler) =>
             {
                 runtime.managed[index].signals_mut().stopped_context = None;
-                if write_hardware_context(process.pcb, &registers).is_err()
+                let changed = saved.is_some() || matches!(delivery, Delivery::Handler);
+                if (changed && write_hardware_context(process.pcb, &registers).is_err())
                     || a9n_abi::arch::process_control_block::resume(process.pcb).is_err()
                 {
                     terminate(runtime, process.pid, 11);

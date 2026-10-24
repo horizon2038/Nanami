@@ -92,4 +92,26 @@ impl ByteRing {
         self.write = 0;
         self.len = 0;
     }
+
+    /// Remove selected control bytes in one pass. When flushing, discard only
+    /// bytes before the last control, retaining input typed after it.
+    pub fn take_controls(&mut self, controls: [u8; 3], flush: bool) -> usize {
+        let mut kept = 0;
+        let mut events = 0;
+        for offset in 0..self.len {
+            let byte = self.buffer[(self.read + offset) % RING_BYTES];
+            if let Some(index) = controls.iter().position(|value| *value != 0 && *value == byte) {
+                events |= 1 << index;
+                if flush {
+                    kept = 0;
+                }
+            } else {
+                self.buffer[(self.read + kept) % RING_BYTES] = byte;
+                kept += 1;
+            }
+        }
+        self.len = kept;
+        self.write = (self.read + kept) % RING_BYTES;
+        events
+    }
 }

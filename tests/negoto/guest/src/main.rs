@@ -270,6 +270,7 @@ fn main() -> nanami_runtime::NanamiResult {
     );
     client.command("delete", "signal-abi").unwrap();
     nanami_runtime::println!("NEGOTO-SIGNAL-ABI-PASS masks=true nested=true altstack=true realtime=true faults=true stop=true wait=true timers=true restart=true");
+    nanami_runtime::println!("NEGOTO-ASYNC-SIGNALS-PASS busy-timer=true busy-stop-continue=true gprs=true");
 
     for _ in 0..20 {
         client.create("box", "true").unwrap();
@@ -306,6 +307,12 @@ fn main() -> nanami_runtime::NanamiResult {
     console.expect(b"pipe-ok\r\n", timer);
     console.send(b"/bin/busybox sleep 0.05 & fg || exit 73; printf 'nego''to-fg-ok\\n'\n");
     console.expect(b"negoto-fg-ok", timer);
+    console.send(b"/bin/busybox sleep 100\n");
+    timer::timer_service_sleep_milliseconds(timer, 300).unwrap();
+    console.send(b"\x03");
+    console.send(b"printf 'nego''to-ctrl-c-ok\\n'\n");
+    console.expect(b"negoto-ctrl-c-ok", timer);
+    nanami_runtime::println!("NEGOTO-CTRL-C-PASS foreground=true shell-survives=true");
     console.send(b"exit\n");
     native.wait(pid, timer);
     assert!(client.command("state", "tty").is_err());

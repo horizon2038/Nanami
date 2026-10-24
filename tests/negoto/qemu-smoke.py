@@ -60,8 +60,11 @@ with (logs / "qemu.log").open("w") as diagnostics:
         # SMP serial output can interleave inside Negoto's one-off startup
         # line. The guest verifies its service connection directly; use GUI
         # readiness here only to avoid typing before the shell accepts input.
+        # Honoka's final online line can interleave too; completed initial
+        # rendering is the preceding, equally useful readiness observation.
         wait_for(lambda text: re.search(r"\[\s*shell\] font init end", text)
-                 and "[              honoka] online" in text)
+                 and ("[              honoka] online" in text
+                      or "[              honoka] initial render done" in text))
         time.sleep(2)
         keys = {"/": "slash", "-": "minus", "\n": "ret"}
         for character in "/alter/linux/bin/negoto-smoke\n":
@@ -69,10 +72,10 @@ with (logs / "qemu.log").open("w") as diagnostics:
             time.sleep(0.25)
         wait_for(lambda text: "NEGOTO-SMOKE-PASS reuse=20 cleanup=true" in text)
         text = serial.read_text(errors="replace")
-        for marker in ["NEGOTO-LIFECYCLE-PASS", "NEGOTO-READONLY-PASS", "NEGOTO-KILL-PASS", "NEGOTO-SIGNALS-PASS", "NEGOTO-SIGNAL-ABI-PASS", "NEGOTO-CLI-PASS", "NEGOTO-INTERACTIVE-PASS"]:
+        for marker in ["NEGOTO-LIFECYCLE-PASS", "NEGOTO-READONLY-PASS", "NEGOTO-KILL-PASS", "NEGOTO-SIGNALS-PASS", "NEGOTO-SIGNAL-ABI-PASS", "NEGOTO-ASYNC-SIGNALS-PASS", "NEGOTO-CTRL-C-PASS", "NEGOTO-CLI-PASS", "NEGOTO-INTERACTIVE-PASS"]:
             if marker not in text:
                 raise RuntimeError(f"Missing {marker}")
-        print(f"PASS OCI lifecycle, rootfs/cwd/env, fork/exec, readonly, signals/ABI, 20 reuse cycles, native CLI and interactive shell (smp={args.smp})", flush=True)
+        print(f"PASS OCI lifecycle, rootfs/cwd/env, fork/exec, readonly, asynchronous signals/GPRs/ABI, 20 reuse cycles, native CLI and interactive shell (smp={args.smp})", flush=True)
     finally:
         process.terminate()
         try:

@@ -49,6 +49,7 @@ struct TerminalSession {
     echo_enabled: bool,
     output_crlf: bool,
     input_edit_len: usize,
+    input_filter: Word,
     input: ByteRing,
     output: ByteRing,
 }
@@ -64,6 +65,7 @@ impl TerminalSession {
         echo_enabled: true,
         output_crlf: true,
         input_edit_len: 0,
+        input_filter: 0,
         input: ByteRing::EMPTY,
         output: ByteRing::EMPTY,
     };
@@ -200,6 +202,7 @@ fn handle_create(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word,
         echo_enabled: true,
         output_crlf: true,
         input_edit_len: 0,
+        input_filter: 0,
         input: ByteRing::EMPTY,
         output: ByteRing::EMPTY,
     };
@@ -226,6 +229,9 @@ fn handle_write(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> 
     // Output has no per-byte editing. With echo disabled, input does not either.
     // Keep the editing/echo path below unchanged.
     let terminal = &mut runtime.terminals[index];
+    if input {
+        terminal.input_filter = 0;
+    }
     if !input && terminal.output_crlf {
         let done = unsafe {
             terminal
@@ -348,18 +354,51 @@ fn handle_read(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> (
     let Some(index) = find_terminal(runtime, request.arg0) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
+    let terminal = &mut runtime.terminals[index];
+    let mut events = 0;
+    // A canonical reader consumes one byte per call. Do not rescan the same
+    // batch until another input write or a different control configuration.
+    if input && request.arg3 & TERMINAL_INPUT_CONTROLS != 0
+        && terminal.input_filter != request.arg3
+    {
+        let controls = [request.arg3 as u8, (request.arg3 >> 8) as u8, (request.arg3 >> 16) as u8];
+        let flush = request.arg3 & TERMINAL_INPUT_FLUSH != 0;
+        events = terminal.input.take_controls(controls, flush);
+        terminal.input_filter = request.arg3;
+        if events != 0 {
+            if flush {
+                terminal.output.clear();
+                terminal.input_edit_len = 0;
+            }
+            if terminal.echo_enabled && request.arg3 & TERMINAL_INPUT_ECHO != 0 {
+                for (index, byte) in controls.iter().copied().enumerate() {
+                    if events & (1 << index) != 0 {
+                        if byte < 0x20 {
+                            terminal.output.push(b'^');
+                            terminal.output.push(byte + b'@');
+                        } else {
+                            terminal.output.push(byte);
+                        }
+                        terminal.output.push(b'\r');
+                        terminal.output.push(b'\n');
+                    }
+                }
+                notify_terminal(terminal.output_notification);
+            }
+        }
+    }
     if request.arg2 == 0 {
         let len = if input {
-            runtime.terminals[index].input.len
+            terminal.input.len
         } else {
-            runtime.terminals[index].output.len
+            terminal.output.len
         };
-        return (nanami_runtime::OS_RESPONSE_OK, len as Word, 0);
+        return (nanami_runtime::OS_RESPONSE_OK, len as Word, events);
     }
     let ring = if input {
-        &mut runtime.terminals[index].input
+        &mut terminal.input
     } else {
-        &mut runtime.terminals[index].output
+        &mut terminal.output
     };
     let done = unsafe {
         ring.read_into(
@@ -367,7 +406,7 @@ fn handle_read(runtime: &mut Runtime, request: ServiceRequest, input: bool) -> (
             request.arg2 as usize,
         )
     };
-    (nanami_runtime::OS_RESPONSE_OK, done as Word, 0)
+    (nanami_runtime::OS_RESPONSE_OK, done as Word, events)
 }
 
 fn handle_get_size(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {

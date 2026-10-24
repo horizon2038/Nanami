@@ -79,6 +79,7 @@ subprocess.run([cargo, "build", "--manifest-path", str(repo / "tests/negoto/gues
                 "build-std-features=compiler-builtins-mem", "--release", "--offline"], cwd=repo, env=environment, check=True)
 fixture = repo / "out/negoto-fixtures-target/x86_64-unknown-a9n/release/negoto-smoke"
 subprocess.run([cargo, "xtask", "build", "--no-linux-bins", "--linux-bin", str(fixture),
+                "--linux-bin", str(busybox),
                 "--linux-rootfs-dir", str(payload), "--rootfs", str(args.rootfs.resolve()),
                 "--output-image", str(args.image.resolve()), "--offline"], cwd=repo, check=True)
 print(f"Fixture payload retained at {payload}", flush=True)

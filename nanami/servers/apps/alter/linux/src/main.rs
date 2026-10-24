@@ -135,7 +135,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     linux::handle_timer_notification(&mut runtime, identifier);
                 }
                 if identifier & nanami_client::terminal::TERMINAL_NOTIFICATION_INPUT != 0 {
-                    linux::wake_terminal_readers(&mut runtime);
+                    linux::handle_terminal_input(&mut runtime);
                 }
                 if identifier & nanami_client::net::NET_NOTIFICATION_RX != 0 {
                     linux::wake_network_waiters(&mut runtime);
@@ -156,6 +156,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 ..
             } => {
                 fault_pid = identifier;
+                if fault_pid == 0 {
+                    // Legacy unbadged faults may resolve to the sole managed
+                    // process. Exclude its PID, not the zero wire identifier.
+                    fault_pid = runtime
+                        .process_for_fault_identifier(identifier)
+                        .map_or(0, |process| process.pid);
+                }
                 runtime.trapped_faults = runtime.trapped_faults.saturating_add(1);
                 match fault::handle_fault(
                     &mut runtime,

@@ -102,6 +102,23 @@ pub fn terminal_read_input(
     )
 }
 
+/// Read/peek ordinary input while collecting selected control bytes. A zero
+/// max_len leaves ordinary bytes queued, but still consumes the control bytes.
+pub fn terminal_read_input_filtered(
+    service_port: CapabilityDescriptor,
+    terminal_id: Word,
+    max_len: Word,
+    controls: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, bytes, events) = call_port(
+        service_port, TERMINAL_REQUEST_READ_INPUT, terminal_id, 0, max_len, controls, 5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((bytes, events))
+}
+
 pub fn terminal_write_output(
     service_port: CapabilityDescriptor,
     terminal_id: Word,

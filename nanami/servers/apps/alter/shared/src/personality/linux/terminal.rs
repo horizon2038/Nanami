@@ -35,7 +35,7 @@ pub(super) fn sys_terminal_read_now(
     let bytes = if canonical {
         drain_terminal_canonical_line(runtime, pid, chunk)?
     } else {
-        drain_terminal_raw_input(runtime, terminal_id, chunk)?
+        drain_terminal_raw_input(runtime, pid, chunk)?
     };
     if let Some(bytes) = bytes {
         if bytes != 0 {
@@ -54,16 +54,10 @@ pub(super) fn sys_terminal_read_now(
 
 pub(super) fn drain_terminal_raw_input(
     runtime: &mut Runtime,
-    terminal_id: Word,
+    pid: Word,
     max_len: Word,
 ) -> Result<Option<Word>, i32> {
-    let bytes = nanami_client::terminal::terminal_read_input(
-        runtime.terminal_port,
-        terminal_id,
-        0,
-        max_len,
-    )
-    .map_err(map_request_error)?;
+    let bytes = super::terminal_signals::read_terminal_input(runtime, pid, max_len)?;
     if bytes == 0 {
         Ok(None)
     } else {
@@ -88,11 +82,8 @@ fn fill_terminal_canonical_line(runtime: &mut Runtime, pid: Word) -> Result<(), 
     {
         return Ok(());
     }
-    let terminal_id = terminal_id_for_pid(runtime, pid)?;
     loop {
-        let bytes =
-            nanami_client::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 1)
-                .map_err(map_request_error)?;
+        let bytes = super::terminal_signals::read_terminal_input(runtime, pid, 1)?;
         if bytes == 0 {
             return Ok(());
         }
@@ -119,9 +110,8 @@ pub(super) fn terminal_readable(runtime: &mut Runtime, pid: Word) -> Result<bool
             .terminal_line_ready)
     } else {
         // A zero-length service read reports queued bytes without consuming.
-        nanami_client::terminal::terminal_read_input(runtime.terminal_port, terminal_id, 0, 0)
+        super::terminal_signals::read_terminal_input(runtime, pid, 0)
             .map(|bytes| bytes != 0)
-            .map_err(map_request_error)
     }
 }
 
@@ -398,7 +388,7 @@ pub(super) fn write_linux_termios(base: Word, canonical: bool, echo: bool) {
         write_u32(base, LINUX_ICRNL | LINUX_IXON);
         write_u32(base + 4, LINUX_OPOST | LINUX_ONLCR);
         write_u32(base + 8, LINUX_CREAD | LINUX_CS8);
-        let mut lflag = LINUX_ISIG | LINUX_ECHOE | LINUX_ECHOK | LINUX_IEXTEN;
+        let mut lflag = LINUX_ISIG | super::LINUX_ECHOCTL | LINUX_ECHOE | LINUX_ECHOK | LINUX_IEXTEN;
         if canonical {
             lflag |= LINUX_ICANON;
         }

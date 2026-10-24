@@ -27,7 +27,7 @@ mod arch_impl;
 
 pub use arch_impl::*;
 
-// Used only for signal delivery/restoration to a task blocked in Alter.
+// Signal delivery/restoration requires a parked or synchronously suspended task.
 pub fn read_hardware_context(pcb: Word) -> Result<HardwareContext, ()> {
     let mut registers = [0; nanami_runtime::ipc::HARDWARE_CONTEXT_WORDS];
     a9n_abi::arch::process_control_block::read_register(pcb, registers.len() as Word)

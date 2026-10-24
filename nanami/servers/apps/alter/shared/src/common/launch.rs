@@ -428,22 +428,26 @@ fn discard_spawned_process(pid: Word) {
     let _ = nanami_runtime::request_process_reap(pid);
 }
 
-fn ensure_terminal_client(runtime: &mut Runtime, _terminal_id: Word) -> Result<(), Word> {
-    if runtime.terminal_port != 0 && runtime.terminal_shm != 0 && runtime.terminal_shm_size != 0 {
-        return Ok(());
-    }
-
-    nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
+fn ensure_terminal_client(runtime: &mut Runtime, terminal_id: Word) -> Result<(), Word> {
+    if runtime.terminal_port == 0 || runtime.terminal_shm == 0 || runtime.terminal_shm_size == 0 {
+        nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
+            .map_err(map_request_error_to_status)?;
+        let terminal_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
+        let (terminal_shm, terminal_shm_size) = nanami_client::terminal::terminal_attach_shared_memory(
+            terminal_port,
+            ALTER_DEFAULT_SHM_BYTES,
+        )
         .map_err(map_request_error_to_status)?;
-    let terminal_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
-    let (terminal_shm, terminal_shm_size) = nanami_client::terminal::terminal_attach_shared_memory(
-        terminal_port,
-        ALTER_DEFAULT_SHM_BYTES,
-    )
-    .map_err(map_request_error_to_status)?;
-    runtime.terminal_port = terminal_port;
-    runtime.terminal_shm = terminal_shm;
-    runtime.terminal_shm_size = terminal_shm_size;
+        runtime.terminal_port = terminal_port;
+        runtime.terminal_shm = terminal_shm;
+        runtime.terminal_shm_size = terminal_shm_size;
+    }
+    if runtime.terminal_input_notification_id != terminal_id {
+        nanami_client::terminal::terminal_attach_input_notification(
+            runtime.terminal_port, terminal_id, nanami_runtime::PROCESS_SLOT_NOTIFICATION,
+        ).map_err(map_request_error_to_status)?;
+        runtime.terminal_input_notification_id = terminal_id;
+    }
     Ok(())
 }
 

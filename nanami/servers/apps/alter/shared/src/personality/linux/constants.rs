@@ -452,6 +452,10 @@ pub(super) const LINUX_ECHOE: u32 = 0x0000_0010;
 
 pub(super) const LINUX_ECHOK: u32 = 0x0000_0020;
 
+pub(super) const LINUX_NOFLSH: u32 = 0x0000_0080;
+
+pub(super) const LINUX_ECHOCTL: u32 = 0x0000_0200;
+
 pub(super) const LINUX_IEXTEN: u32 = 0x0000_8000;
 
 pub(super) const LINUX_VINTR: Word = 0;

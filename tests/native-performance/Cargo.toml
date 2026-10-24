@@ -20,6 +20,10 @@ name = "linux-signals"
 path = "linux-signals.rs"
 
 [[test]]
+name = "linux-signal-delivery"
+path = "linux-signal-delivery.rs"
+
+[[test]]
 name = "linux-pipe"
 path = "linux-pipe.rs"
 

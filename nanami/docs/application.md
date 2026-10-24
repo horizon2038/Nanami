@@ -386,6 +386,13 @@ instead of duplicating offsets.
 `exec-service`, provided by `system-manager`, launches native executables from
 the root filesystem with arguments and environment data.
 
+Alter subscribes to terminal input before starting a terminal-bound program,
+including programs such as `ping` that never read terminal stdin. With `ISIG`
+enabled, the configured `VINTR`, `VQUIT` and `VSUSP` bytes generate SIGINT,
+SIGQUIT and SIGTSTP for the terminal's foreground process group in its controlling
+session. `ISIG` off and disabled control characters leave the input unchanged;
+`NOFLSH` preserves queued input and partial canonical lines.
+
 Use these services instead of embedding application-specific launch logic in a
 GUI client or Alpha.
 
@@ -422,17 +429,22 @@ Handlers receive Linux ABI signal frames on x86_64 and AArch64. Alternate stacks
 selectors, execution modes or flags from the user frame. A return trampoline is
 mapped read/execute when the application does not supply its own restorer.
 
-Delivery is cooperative: running processes receive pending signals at their
-next syscall boundary; tasks already waiting in Alter can be interrupted there.
-CPU-bound tasks without syscalls are not asynchronously interrupted. SIGKILL
-uses native process termination, including for a running target. No Kernel or
-IPC fastpath changes are required. Stop/continue signals are distinct from
+Running processes can receive signals without another syscall: Alter waits for
+synchronous PCB Suspend to complete before reading their context, installs the
+handler frame, and resumes them. This uses the A9N 0.3.11 suspend-continuation
+contract. Unaccepted syscall faults are cancelled and replayed after the handler;
+syscalls already parked in Alter retain their existing EINTR/SA_RESTART policy.
+The currently emulated syscall is excluded from the asynchronous pump until its
+reply is sent, so completed work is not replayed. Created OCI processes remain
+suspended until start. SIGKILL uses native process termination, including for a
+running target. Normal syscall replies and the IPC fastpath are unchanged.
+Stop/continue signals are distinct from
 termination; `wait4` reports stopped/continued children and signal exit status,
 and SIGCHLD notifies the parent. `ITIMER_REAL`, `alarm` and `getitimer` deliver
 SIGALRM through the timer service; CPU-time interval timers return `EOPNOTSUPP`.
 Synchronous instruction, arithmetic and memory faults can enter a handler, and
-broken-pipe writes generate SIGPIPE. Terminal-generated control-character
-signals and complete POSIX terminal job-control policy are separate concerns.
+broken-pipe writes generate SIGPIPE. Terminal control-character signals use the
+same pending-signal and asynchronous delivery mechanism.
 
 From the host repository root, copy the existing static Linux BusyBox into
 the bundle. Binary payloads are ignored by Git and must be copied again in a

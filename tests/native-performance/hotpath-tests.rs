@@ -58,6 +58,39 @@ fn next(seed: &mut u64) -> u64 {
 }
 
 #[test]
+fn terminal_controls_filter_wraparound_without_losing_ordinary_input() {
+    let mut ring = ring::ByteRing::EMPTY;
+    let padding = [b'x'; RING_BYTES - 2];
+    let mut scratch = [0; RING_BYTES];
+    unsafe {
+        assert_eq!(ring.write_from(padding.as_ptr(), padding.len()), padding.len());
+        assert_eq!(ring.read_into(scratch.as_mut_ptr(), padding.len()), padding.len());
+        let input = b"ab\x03c\x1cd\x1ae\0";
+        assert_eq!(ring.write_from(input.as_ptr(), input.len()), input.len());
+        assert_eq!(ring.take_controls([3, 28, 26], false), 7);
+        let bytes = ring.read_into(scratch.as_mut_ptr(), scratch.len());
+        assert_eq!(&scratch[..bytes], b"abcde\0");
+    }
+}
+
+#[test]
+fn terminal_control_flush_retains_bytes_after_the_last_control_and_supports_disabled_chars() {
+    let mut ring = ring::ByteRing::EMPTY;
+    let input = b"old\x03first\x03next\n";
+    let mut output = [0; 64];
+    unsafe {
+        ring.write_from(input.as_ptr(), input.len());
+        assert_eq!(ring.take_controls([3, 0, 0], true), 1);
+        let bytes = ring.read_into(output.as_mut_ptr(), output.len());
+        assert_eq!(&output[..bytes], b"next\n");
+        ring.write_from(b"\0\x03z".as_ptr(), 3);
+        assert_eq!(ring.take_controls([0, 0, 0], true), 0);
+        let bytes = ring.read_into(output.as_mut_ptr(), output.len());
+        assert_eq!(&output[..bytes], b"\0\x03z");
+    }
+}
+
+#[test]
 fn scrollback_matches_deque_through_wrap_pop_clear_and_replace() {
     let mut rows = scrollback::Scrollback::new();
     let mut expected = VecDeque::new();

@@ -26,3 +26,24 @@ pub const TERMINAL_DEFAULT_ROWS: Word = 24;
 
 pub const TERMINAL_NOTIFICATION_OUTPUT: Word = 1 << 51;
 pub const TERMINAL_NOTIFICATION_INPUT: Word = 1 << 52;
+
+// Optional READ_INPUT arg3: three selected bytes, then control flags. Matching
+// bytes are consumed and reported as bits 0..2 in reply detail1. Zero disables
+// a selected byte; arg3=0 retains the original unfiltered read/peek operation.
+pub const TERMINAL_INPUT_CONTROLS: Word = 1 << 24;
+pub const TERMINAL_INPUT_FLUSH: Word = 1 << 25;
+pub const TERMINAL_INPUT_ECHO: Word = 1 << 26;
+
+pub const fn terminal_input_controls(bytes: [u8; 3], flush: bool, echo: bool) -> Word {
+    let mut value = TERMINAL_INPUT_CONTROLS
+        | bytes[0] as Word
+        | ((bytes[1] as Word) << 8)
+        | ((bytes[2] as Word) << 16);
+    if flush {
+        value |= TERMINAL_INPUT_FLUSH;
+    }
+    if echo {
+        value |= TERMINAL_INPUT_ECHO;
+    }
+    value
+}

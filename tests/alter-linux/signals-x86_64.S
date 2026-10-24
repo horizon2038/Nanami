@@ -26,4 +26,37 @@ signal_restorer:
 invalid_instruction:
     ud2
     ret
+.global spin_until_signal
+spin_until_signal:
+    push %rbx
+    push %r12
+    mov $0x11223344, %ecx
+    mov $0x55667788, %r11d
+    mov $0x99aabbcc, %ebx
+    mov $0xddeeff00, %r12d
+    mov $1000000000, %edx
+1:
+    cmp %esi, (%rdi)
+    jne 2f
+    dec %edx
+    jne 1b
+    mov $1, %eax
+    jmp 4f
+2:
+    cmp $0x11223344, %ecx
+    jne 3f
+    cmp $0x55667788, %r11d
+    jne 3f
+    cmp $0x99aabbcc, %ebx
+    jne 3f
+    cmp $0xddeeff00, %r12d
+    jne 3f
+    xor %eax, %eax
+    jmp 4f
+3:
+    mov $2, %eax
+4:
+    pop %r12
+    pop %rbx
+    ret
 .section .note.GNU-stack,"",@progbits

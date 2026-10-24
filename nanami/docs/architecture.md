@@ -321,16 +321,31 @@ these are not added to Alpha or A9N. `TIOCGPGRP`/`TIOCSPGRP`/`TIOCGSID` read and
 update actual foreground-group/session state. Fork inherits group membership,
 exec preserves it, and foreign-session/group changes are rejected. Wait targets
 and group-directed signals use the same PGIDs. Linux signal state is a lazy
-per-process allocation, independent of terminal-group metadata. Alter queues
-signals and delivers them at syscall boundaries or while a target is parked in
-an Alter fault; it never samples a running remote CPU's registers. Default
-stop/continue actions preserve wait state, and wait4/SIGCHLD distinguish stops,
+per-process allocation, independent of terminal-group metadata. Terminal input
+notifications are installed at launch rather than only on read, so commands
+that read sockets instead of stdin still receive Ctrl-C. Alter interprets
+ISIG/VINTR/VQUIT/VSUSP and targets only the controlling session's foreground
+group. The terminal service filters caller-selected bytes from its input ring
+and reports a control-event bitmask; Linux signal numbers and group policy stay
+in Alter. READ_INPUT's optional fifth payload word selects this filtering; a
+zero word preserves the existing API, and a zero-length filtered read leaves
+ordinary input queued. Each unchanged input batch is scanned only once for a
+given filter, avoiding repeated scans during canonical byte reads. Alter queues
+signals and delivers them at syscall boundaries, while a target is parked in
+an Alter fault, or after synchronous PCB Suspend has stopped a running target.
+Remote register reads occur only after the stop ACK. A cancelled, unaccepted
+syscall replays from the Kernel-prepared context; a syscall already parked in
+Alter follows EINTR/SA_RESTART. The event loop excludes its current fault until
+the pending reply is sent, and never starts a prepared OCI process while
+delivering an ordinary signal. Default stop/continue actions preserve wait state
+or a suspended user context, and wait4/SIGCHLD distinguish stops,
 continuations and signal termination. Real-time interval alarms share the
 existing one-shot deadline scheduler. Handler frames and sigreturn use the
 Linux architecture ABI, excluding FPU/SIMD state, with privileged register
 fields kept under server control. Normal syscall replies retain their existing
 short register payload; only signal delivery/restoration requires a full
-context. A9N and its IPC fastpath are unchanged.
+context. This uses A9N 0.3.11's suspend-continuation contract without additional
+Kernel or IPC fastpath changes.
 
 Empty blocking pipe reads park on existing readiness waiters while a writer
 remains; EOF requires the last writer to close. Full writes use the same

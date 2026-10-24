@@ -1,5 +1,55 @@
 # Alter/Linux dynamic-loader regression
 
+## Terminal Ctrl-C regression (2026-10-25)
+
+The Negoto smoke includes a real terminal control byte interrupting a foreground
+BusyBox `sleep 100`; the interactive BusyBox shell must survive and execute the
+next command. The fixture also installs the unchanged BusyBox at
+`/alter/linux/bin/busybox` for standalone Alter networking tests.
+
+```sh
+python3 tests/negoto/build-fixture.py \
+  --rootfs out/ctrl-c-rootfs.img --image out/ctrl-c.img
+python3 tests/negoto/qemu-smoke.py --image out/ctrl-c.img --smp 1
+python3 tests/negoto/qemu-smoke.py --image out/ctrl-c.img --smp 4
+python3 tests/alter-linux/qemu-smoke.py --image out/ctrl-c.img --network \
+  --program 'busybox ping 10.0.2.2' --ctrl-c-after 3 --smp 1
+python3 tests/alter-linux/qemu-smoke.py --image out/ctrl-c.img --network \
+  --program 'busybox ping 10.0.2.2' --ctrl-c-after 3 --smp 4
+```
+
+Use fresh build paths. The ping runner sends an actual Ctrl-C keyboard event,
+rejects an early guest exit, and requires status zero from ping's own exit
+syscall rather than a forced native kill. Networking is restricted to the
+isolated QEMU user-mode network.
+
+## Asynchronous signal delivery (2026-10-25)
+
+Alter uses A9N 0.3.11's synchronous Suspend and continuation contract to deliver
+signals to running processes without another syscall. Parked syscall waits keep
+their EINTR/SA_RESTART behavior; unaccepted syscall faults replay after the
+handler. FPU/SIMD signal-frame state is excluded.
+
+The raw `signals.c` / `signals-x86_64.S` fixture is included in the Negoto smoke
+image. It checks SIGALRM during a syscall-free assembly loop, preservation of
+RCX/R11 and callee-saved registers, and STOP/CONT plus a pending handler during
+a child's busy loop. Existing signal-frame, blocking pipe, timer and interactive
+BusyBox tests run alongside these checks.
+
+```sh
+cargo test --manifest-path tests/native-performance/Cargo.toml \
+  --test linux-signals --test linux-signal-delivery
+python3 tests/negoto/build-fixture.py \
+  --rootfs out/async-signals-rootfs.img --image out/async-signals.img
+python3 tests/negoto/qemu-smoke.py --image out/async-signals.img --smp 1
+python3 tests/negoto/qemu-smoke.py --image out/async-signals.img --smp 4
+```
+
+The fixture builder requires new output paths and refuses to replace existing
+guest data. QEMU uses snapshot disks. For the complete host suite, use
+`cargo test --manifest-path tests/native-performance/Cargo.toml -- --test-threads=1`;
+the heap fixtures share mock allocation state between tests.
+
 ## time(2), clock_nanosleep and ncurses regression (2026-10-15)
 
 The x86_64 `time` syscall (201) returns Unix seconds and optionally stores the

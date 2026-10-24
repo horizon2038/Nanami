@@ -3,6 +3,7 @@ typedef unsigned long word;
 extern long linux_call(long, word, word, word, word, word, word);
 extern void signal_restorer(void);
 extern void invalid_instruction(void);
+extern int spin_until_signal(volatile int *, int);
 struct action { word handler, flags, restorer, mask; };
 struct stack { word sp, flags, size; };
 struct info { unsigned int signal, error; int code; unsigned int pad; unsigned char data[112]; };
@@ -151,6 +152,37 @@ int test_main(void) {
     call(14, 1, (word)&mask, 0, 8);
     word short_time[2] = { 0, 1000000 };
     if (call(128, (word)&mask, 0, (word)short_time, 8) != -11) { return 44; }
+
+    /* A real timer must interrupt a userspace loop without a syscall boundary.
+       The assembly also checks RCX/R11 and callee-saved registers on return. */
+    word busy_timer[4] = { 0, 0, 0, 100000 };
+    if (call(38, 0, (word)busy_timer, 0, 0) != 0) { return 55; }
+    if (spin_until_signal(&alarm_count, 2) != 0 || alarm_count != 3) { return 56; }
+
+    /* Cross-process delivery and stop/continue must also interrupt a busy CPU. */
+    int ready_pipe[2] = { -1, -1 };
+    if (call(22, (word)ready_pipe, 0, 0, 0) != 0 || !install(10, 0)) { return 57; }
+    child = call(57, 0, 0, 0, 0);
+    if ((long)child < 0) { return 58; }
+    if (child == 0) {
+        int initial = received;
+        call(3, ready_pipe[0], 0, 0, 0);
+        if (call(1, ready_pipe[1], (word)"r", 1, 0) != 1) { finish(91); }
+        if (spin_until_signal(&received, initial) != 0) { finish(92); }
+        finish(0);
+    }
+    call(3, ready_pipe[1], 0, 0, 0);
+    char ready = 0;
+    if (call(0, ready_pipe[0], (word)&ready, 1, 0) != 1 || ready != 'r') { return 59; }
+    word busy_delay[2] = { 0, 20000000 };
+    call(35, (word)busy_delay, 0, 0, 0);
+    if (call(62, child, 19, 0, 0) != 0 || !wait_child(child, (19u << 8) | 0x7f, 2)) { return 60; }
+    if (call(62, child, 10, 0, 0) != 0) { return 61; }
+    call(35, (word)busy_delay, 0, 0, 0);
+    unsigned int busy_status = 0;
+    if (call(61, child, (word)&busy_status, 1, 0) != 0) { return 62; }
+    if (call(62, child, 18, 0, 0) != 0 || !wait_child(child, 0, 0)) { return 63; }
+    call(3, ready_pipe[0], 0, 0, 0);
 
     int paused_pipe[2] = { -1, -1 };
     if (call(22, (word)paused_pipe, 0, 0, 0) != 0) { return 45; }

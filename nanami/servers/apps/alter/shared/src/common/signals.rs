@@ -104,7 +104,7 @@ pub struct Signals {
     pub suspend_mask: Option<u64>,
     pub wait_mask: Option<u64>,
     pub stopped: bool,
-    // A completed syscall held by a default stop action. No kernel suspend is needed.
+    // A completed syscall or suspended user context held by a default stop action.
     pub stopped_context: Option<crate::process::HardwareContext>,
     pub child_event: Option<u32>,
     pub child_notify: bool,

@@ -46,6 +46,8 @@ use network_packet::*;
 #[path = "linux/terminal.rs"]
 mod terminal;
 use terminal::*;
+#[path = "linux/terminal_signals.rs"]
+mod terminal_signals;
 #[path = "linux/job_control.rs"]
 mod job_control;
 
@@ -818,4 +820,5 @@ pub use poll_wait::{
     handle_readiness_changes, handle_readiness_notification, wake_readiness_waiters,
 };
 pub use terminal::wake_terminal_readers;
+pub use terminal_signals::handle_terminal_input;
 pub use wait_signals::wake_waiter_for_child;

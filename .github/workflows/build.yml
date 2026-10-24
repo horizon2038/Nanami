@@ -64,11 +64,13 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes clang-19 lld-19 llvm-19-dev nasm ninja-build python3-venv
+          sudo apt-get install --yes clang-19 clang-tools-19 lld-19 llvm-19-dev nasm ninja-build python3-venv
           echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
           python3 -m venv "$RUNNER_TEMP/cmake"
           "$RUNNER_TEMP/cmake/bin/pip" install --disable-pip-version-check cmake==3.31.6
           echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
+      - name: Verify Clang dependency scanner
+        run: /usr/lib/llvm-19/bin/clang-scan-deps --version
       - name: Install pinned Rust toolchain
         run: |
           set -euo pipefail

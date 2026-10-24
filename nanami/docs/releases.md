@@ -46,8 +46,10 @@ cd /path/to/empty-directory
 sha256sum --check SHA256SUMS
 ```
 
-CI uses the pinned Rust nightly, LLVM 19, and CMake 3.31.6. The AArch64 build
-uses SPENCER's Docker-based U-Boot build (upstream `v2025.10`, source at
+CI uses the pinned Rust nightly, LLVM 19, and CMake 3.31.6. It installs
+`clang-tools-19` alongside Clang to provide `clang-scan-deps` for CMake's C++20
+dependency scanning, and verifies the scanner before building images. The
+AArch64 build uses SPENCER's Docker-based U-Boot build (upstream `v2025.10`, source at
 <https://source.denx.de/u-boot/u-boot/>). Dependency licenses remain applicable;
 the included Nanami license does not relicense A9N, the loader, or U-Boot.
 

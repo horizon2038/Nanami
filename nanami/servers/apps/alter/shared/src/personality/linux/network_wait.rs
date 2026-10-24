@@ -112,7 +112,7 @@ pub fn wake_network_waiters(runtime: &mut Runtime) {
     let mut index = 0usize;
     while index < runtime.managed.len() {
         let process = runtime.managed[index];
-        if process.pid == 0 || !process.network_waiting {
+        if process.pid == 0 || !process.network_waiting || runtime.is_signal_stopped(process.pid) {
             index += 1;
             continue;
         }

@@ -28,11 +28,21 @@ for directory in ["bin", "work", "etc"]:
     (bundle / "rootfs" / directory).mkdir(parents=True, exist_ok=True)
 shutil.copyfile(busybox, bundle / "rootfs/bin/busybox")
 (bundle / "rootfs/bin/busybox").chmod(0o755)
+subprocess.run([os.environ.get("CLANG", "/opt/homebrew/opt/llvm/bin/clang"),
+                "--target=x86_64-unknown-linux-gnu", "-fuse-ld=lld", "-nostdlib", "-static",
+                "-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-mno-sse", "-mno-sse2",
+                "-mno-red-zone", "-O2", "-Wl,-e,_start,--image-base=0x400000",
+                str(repo / "tests/alter-linux/signals.c"), str(repo / "tests/alter-linux/signals-x86_64.S"),
+                "-o", str(bundle / "rootfs/bin/signal-test")], check=True)
 script = ('test "$NEGOTO_VALUE" = "oci untouched" || exit 41; '
           'test "$(pwd)" = /work || exit 42; '
           '/bin/busybox test ! -e /nanami/system-list || exit 43; '
           '/bin/busybox test ! -e /alter/linux/bundles/busybox/rootfs/etc/token || exit 44; '
           '/bin/busybox true || exit 45; printf "NEGOTO-BUSYBOX-OK\\n" > result')
+signal_script = ('trap "printf signal-ok > /work/signal-result" USR1; '
+                 'kill -USR1 $$ || exit 81; '
+                 'test "$(/bin/busybox cat /work/signal-result)" = signal-ok || exit 82; '
+                 'trap "exit 83" USR2; trap "" USR2; kill -USR2 $$; exit 0')
 (bundle / "rootfs/etc/token").write_text("container-only\n")
 base = {"ociVersion": "1.3.0", "root": {"path": "rootfs", "readonly": False},
         "process": {"terminal": False, "user": {"uid": 0, "gid": 0}, "cwd": "/work",
@@ -44,6 +54,8 @@ for name, argv, readonly in [
     ("readonly", ["/bin/busybox", "sh", "-c", "if printf forbidden > /work/forbidden; then exit 50; fi; exit 0"], True),
     ("hold", ["/bin/busybox", "sleep", "300"], False),
     ("true", ["/bin/busybox", "true"], False),
+    ("signals", ["/bin/busybox", "sh", "-c", signal_script], False),
+    ("signal-abi", ["/bin/signal-test"], False),
     ("interactive", ["/bin/busybox", "sh", "-i"], True),
     ("unsupported", ["/bin/busybox", "true"], False),
 ]:

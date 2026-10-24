@@ -15,6 +15,8 @@ mod mappings;
 mod processes;
 #[path = "state/readiness.rs"]
 pub mod readiness;
+#[path = "state/signals.rs"]
+mod signals;
 #[path = "state/waiters.rs"]
 mod waiters;
 
@@ -297,6 +299,8 @@ pub struct ManagedProcess {
     pub graphics_session: Word,
     pub exited: bool,
     pub exit_status: Word,
+    // Owned by Runtime. ManagedProcess copies only borrow this lazy signal state.
+    pub signal_state: Word,
     pub signal_waiting: bool,
     pub signal_wait_target: Word,
     pub signal_context: LinuxSyscallContext,
@@ -359,6 +363,7 @@ impl ManagedProcess {
         graphics_session: 0,
         exited: false,
         exit_status: 0,
+        signal_state: 0,
         signal_waiting: false,
         signal_wait_target: 0,
         signal_context: LinuxSyscallContext::EMPTY,
@@ -506,6 +511,7 @@ pub struct Runtime {
     // False for the normal non-strace case. Once enabled it remains true so
     // hot syscall paths can skip all trace-related process-table scans.
     pub trace_ever_enabled: bool,
+    pub signals_pending: bool,
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
 }
@@ -573,6 +579,7 @@ impl Runtime {
             fork_image_cache: [None; FORK_IMAGE_CACHE_ENTRIES],
             trapped_faults: 0,
             trace_ever_enabled: false,
+            signals_pending: false,
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
         }

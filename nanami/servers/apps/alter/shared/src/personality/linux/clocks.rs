@@ -1,8 +1,7 @@
 use super::{
     arm_clock_timer, map_request_error, read_target_memory, write_target_memory, write_u64,
     EmulationAction, LinuxSyscallContext, Runtime, Word, EFAULT, EINVAL, EIO, EOPNOTSUPP, ESRCH,
-    LINUX_CPU_MASK_BYTES, LINUX_ITIMERVAL_BYTES, LINUX_ITIMER_PROF, LINUX_PAGE_SIZE,
-    LINUX_TIMESPEC_BYTES,
+    LINUX_CPU_MASK_BYTES, LINUX_PAGE_SIZE, LINUX_TIMESPEC_BYTES,
 };
 
 pub(super) fn sys_time(runtime: &mut Runtime, pid: Word, tloc: Word) -> Result<Word, i32> {
@@ -28,32 +27,6 @@ pub(super) fn sys_gettimeofday(
             write_u64(runtime.posix_shm + 8, nanos / 1000);
         }
         write_target_memory(runtime, pid, timeval, 16)?;
-    }
-    Ok(0)
-}
-
-pub(super) fn sys_setitimer(
-    runtime: &mut Runtime,
-    pid: Word,
-    which: Word,
-    new_value: Word,
-    old_value: Word,
-) -> Result<Word, i32> {
-    if which > LINUX_ITIMER_PROF {
-        return Err(EINVAL);
-    }
-    if new_value != 0 {
-        read_target_memory(runtime, pid, new_value, LINUX_ITIMERVAL_BYTES)?;
-    }
-    if old_value != 0 {
-        unsafe {
-            ::core::ptr::write_bytes(
-                runtime.posix_shm as *mut u8,
-                0,
-                LINUX_ITIMERVAL_BYTES as usize,
-            );
-        }
-        write_target_memory(runtime, pid, old_value, LINUX_ITIMERVAL_BYTES)?;
     }
     Ok(0)
 }
@@ -111,10 +84,7 @@ pub(super) fn split_ticks(ticks: Word, tick_hz: Word) -> (Word, Word) {
     if tick_hz == 1_000_000_000 {
         // HPET already reports nanoseconds. Constant division avoids the
         // generic 128-bit scale/divide on every clock_gettime call.
-        (
-            ticks / 1_000_000_000,
-            ticks % 1_000_000_000,
-        )
+        (ticks / 1_000_000_000, ticks % 1_000_000_000)
     } else {
         (
             ticks / tick_hz,
@@ -184,7 +154,7 @@ fn sleep_action(
     EmulationAction::Park
 }
 
-fn sleep_deadline(
+pub(super) fn sleep_deadline(
     runtime: &mut Runtime,
     pid: Word,
     request: Word,
@@ -219,7 +189,11 @@ fn sleep_deadline(
         anchor
     } else {
         refresh_clock(runtime)?;
-        if absolute { 0 } else { runtime.monotonic_ticks }
+        if absolute {
+            0
+        } else {
+            runtime.monotonic_ticks
+        }
     };
     let hz = runtime.monotonic_tick_hz as u128;
     let ticks = (seconds as u128 * hz + (nanoseconds as u128 * hz).div_ceil(1_000_000_000))
@@ -237,13 +211,11 @@ pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
         // the provider later. Never substitute a clock or call descriptor zero.
         nanami_client::registry::connect_timer_service(crate::abi::SLOT_TIMER_SERVICE)
             .map_err(map_request_error)?;
-        runtime.timer_port = nanami_runtime::ipc::process_slot_descriptor(
-            crate::abi::SLOT_TIMER_SERVICE,
-        );
+        runtime.timer_port =
+            nanami_runtime::ipc::process_slot_descriptor(crate::abi::SLOT_TIMER_SERVICE);
     }
-    let (ticks, tick_hz) =
-        nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
-            .map_err(map_request_error)?;
+    let (ticks, tick_hz) = nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
+        .map_err(map_request_error)?;
     if tick_hz == 0 {
         return Err(EIO);
     }

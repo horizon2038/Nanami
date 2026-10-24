@@ -18,6 +18,8 @@ pub mod launch;
 pub mod loader;
 #[path = "common/process.rs"]
 pub mod process;
+#[path = "common/signals.rs"]
+pub mod signals;
 #[path = "common/state.rs"]
 pub mod state;
 #[path = "common/virtual_fs.rs"]

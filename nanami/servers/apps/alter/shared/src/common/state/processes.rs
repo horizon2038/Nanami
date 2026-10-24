@@ -98,6 +98,7 @@ impl Runtime {
                     graphics_session: 0,
                     exited: false,
                     exit_status: 0,
+                    signal_state: 0,
                     signal_waiting: false,
                     signal_wait_target: 0,
                     signal_context: LinuxSyscallContext::EMPTY,
@@ -159,35 +160,50 @@ impl Runtime {
         false
     }
 
-    pub fn exited_child(&self, parent_pid: Word, target_pid: Word) -> Option<(Word, Word)> {
-        let group = self
-            .managed_process(parent_pid)
-            .map_or(0, |process| process.job.group);
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let child = self.managed[i];
-            if child.pid != 0
-                && child.parent_pid == parent_pid
-                && child.exited
-                && wait_target_matches(child.pid, target_pid, child.job.group, group)
-            {
-                return Some((child.pid, child.exit_status));
-            }
-            i += 1;
-        }
-        None
-    }
-
     pub fn remove_process(&mut self, pid: Word) -> bool {
         let mut i = 0usize;
         while i < self.managed.len() {
             if self.managed[i].pid == pid {
+                self.release_signals(i);
                 self.managed[i] = ManagedProcess::EMPTY;
                 return true;
             }
             i += 1;
         }
         false
+    }
+
+    pub fn child_wait_event(
+        &self,
+        parent: Word,
+        target: Word,
+        report_stops: bool,
+        report_continues: bool,
+    ) -> Option<(Word, u32, bool)> {
+        let group = self.managed_process(parent)?.job.group;
+        for child in &self.managed {
+            if child.pid == 0
+                || child.parent_pid != parent
+                || !wait_target_matches(child.pid, target, child.job.group, group)
+            {
+                continue;
+            }
+            if child.exited {
+                let signal = child.signals().map_or(0, |state| state.exit_signal);
+                let status = if signal == 0 {
+                    ((child.exit_status & 0xff) << 8) as u32
+                } else {
+                    signal as u32 & 0x7f
+                };
+                return Some((child.pid, status, true));
+            }
+            if let Some(status) = child.signals().and_then(|state| state.child_event) {
+                if (status == 0xffff && report_continues) || (status != 0xffff && report_stops) {
+                    return Some((child.pid, status, false));
+                }
+            }
+        }
+        None
     }
 
     pub fn set_process_image_name(&mut self, pid: Word, image_name: &[u8]) -> bool {
@@ -209,6 +225,9 @@ impl Runtime {
         };
         process.program_break = 0;
         process.job.executed = true;
+        if process.signal_state != 0 {
+            process.signals_mut().exec();
+        }
         process.mapped_break = 0;
         process.fs_base = 0;
         process.exited = false;

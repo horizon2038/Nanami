@@ -69,10 +69,10 @@ with (logs / "qemu.log").open("w") as diagnostics:
             time.sleep(0.25)
         wait_for(lambda text: "NEGOTO-SMOKE-PASS reuse=20 cleanup=true" in text)
         text = serial.read_text(errors="replace")
-        for marker in ["NEGOTO-LIFECYCLE-PASS", "NEGOTO-READONLY-PASS", "NEGOTO-KILL-PASS", "NEGOTO-CLI-PASS", "NEGOTO-INTERACTIVE-PASS"]:
+        for marker in ["NEGOTO-LIFECYCLE-PASS", "NEGOTO-READONLY-PASS", "NEGOTO-KILL-PASS", "NEGOTO-SIGNALS-PASS", "NEGOTO-SIGNAL-ABI-PASS", "NEGOTO-CLI-PASS", "NEGOTO-INTERACTIVE-PASS"]:
             if marker not in text:
                 raise RuntimeError(f"Missing {marker}")
-        print(f"PASS OCI lifecycle, rootfs/cwd/env, fork/exec, readonly, kill, 20 reuse cycles, native CLI and interactive shell (smp={args.smp})", flush=True)
+        print(f"PASS OCI lifecycle, rootfs/cwd/env, fork/exec, readonly, signals/ABI, 20 reuse cycles, native CLI and interactive shell (smp={args.smp})", flush=True)
     finally:
         process.terminate()
         try:

@@ -117,6 +117,15 @@ use vm::*;
 #[path = "linux/wait_signals.rs"]
 mod wait_signals;
 use wait_signals::*;
+#[path = "linux/signal_syscalls.rs"]
+mod signal_syscalls;
+use signal_syscalls::*;
+#[path = "linux/signal_frame.rs"]
+mod signal_frame;
+#[path = "linux/signal_timers.rs"]
+mod signal_timers;
+#[path = "linux/signals_runtime.rs"]
+pub mod signals_runtime;
 
 #[path = "linux/readiness.rs"]
 mod readiness;
@@ -207,6 +216,7 @@ pub use arch_syscalls::*;
 pub enum EmulationAction {
     Return(isize),
     Resume,
+    RestoreSignalFrame,
     Park,
     Exit(Word),
     Unsupported(Word),
@@ -525,6 +535,36 @@ pub fn dispatch_syscall(
             context.args[2],
             context.args[3],
         ),
+        SYS_RT_SIGRETURN => return EmulationAction::RestoreSignalFrame,
+        SYS_RT_SIGPENDING => {
+            sys_rt_sigpending(runtime, native_pid, context.args[0], context.args[1])
+        }
+        SYS_RT_SIGTIMEDWAIT => return sys_rt_sigtimedwait(runtime, native_pid, context),
+        SYS_PAUSE => {
+            runtime.park_signal_waiter(native_pid, Word::MAX, context);
+            return EmulationAction::Park;
+        }
+        SYS_TKILL => sys_tgkill(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[0],
+            context.args[1],
+        ),
+        SYS_TGKILL => sys_tgkill(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
+        SYS_RT_SIGQUEUEINFO => sys_sigqueue(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
         SYS_SIGALTSTACK => sys_sigaltstack(runtime, native_pid, context.args[0], context.args[1]),
         SYS_RT_SIGSUSPEND => {
             let action = sys_rt_sigsuspend(runtime, native_pid, context);
@@ -565,10 +605,15 @@ pub fn dispatch_syscall(
             trace_syscall_action(runtime, native_pid, context, action);
             return action;
         }
-        SYS_GETPPID => Ok(1),
+        SYS_GETPPID => runtime
+            .managed_process(native_pid)
+            .map(|process| process.parent_pid.max(1))
+            .ok_or(ESRCH),
         SYS_TIME => sys_time(runtime, native_pid, context.args[0]),
         SYS_GETTIMEOFDAY => sys_gettimeofday(runtime, native_pid, context.args[0]),
-        SYS_SETITIMER => sys_setitimer(
+        SYS_GETITIMER => signal_timers::get(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_ALARM => signal_timers::alarm(runtime, native_pid, context.args[0]),
+        SYS_SETITIMER => signal_timers::set(
             runtime,
             native_pid,
             context.args[0],
@@ -749,6 +794,13 @@ pub fn dispatch_syscall(
         let action = EmulationAction::Park;
         trace_syscall_action(runtime, native_pid, context, action);
         return action;
+    }
+    if result == Err(EPIPE) {
+        let _ = signals_runtime::queue(
+            runtime,
+            native_pid,
+            crate::common::signals::Info::new(13, 0, native_pid),
+        );
     }
     let value = result_to_linux_return(result);
     record_syscall_result(runtime, native_pid, context.number, value);

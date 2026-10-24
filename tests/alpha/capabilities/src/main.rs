@@ -9,6 +9,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 static READY: AtomicUsize = AtomicUsize::new(0);
+static RESUME_SELF: AtomicUsize = AtomicUsize::new(0);
 #[repr(align(16))]
 struct WorkerStack([u8; 8192]);
 static mut WORKER_STACK: WorkerStack = WorkerStack([0; 8192]);
@@ -17,6 +18,10 @@ extern "C" fn worker() -> ! {
     COUNTER.store(1, Ordering::Release);
     arch::notification_port::notify(READY.load(Ordering::Acquire)).unwrap();
     loop {
+        let resume = RESUME_SELF.swap(0, Ordering::AcqRel);
+        if resume != 0 && arch::process_control_block::resume(resume).is_err() {
+            RESUME_SELF.store(resume, Ordering::Release);
+        }
         COUNTER.fetch_add(1, Ordering::Relaxed);
         core::hint::spin_loop();
     }
@@ -133,7 +138,7 @@ extern "C" fn entry(environment: *const AlphaEnvironment) -> ! {
     arch::notification_port::identify(slot(radix, 101), 1).unwrap();
     READY.store(slot(radix, 101), Ordering::Release);
     let affinity = environment.platform.core_count - 1;
-    for _ in 0..16 {
+    for iteration in 0..16 {
         COUNTER.store(0, Ordering::Release);
         arch::generic::convert(unit, CapabilityType::ProcessControlBlock, 0, 1, root, 100).unwrap();
         let stack = core::ptr::addr_of!(WORKER_STACK) as usize + 8192;
@@ -156,6 +161,35 @@ extern "C" fn entry(environment: *const AlphaEnvironment) -> ! {
             }
             assert!(COUNTER.load(Ordering::Acquire) >= 1024, "remote worker did not enter user loop");
         }
+        arch::process_control_block::suspend(slot(radix, 100)).unwrap();
+        let suspended = COUNTER.load(Ordering::Acquire);
+        for _ in 0..100_000 {
+            core::hint::spin_loop();
+        }
+        assert_eq!(COUNTER.load(Ordering::Acquire), suspended, "worker survived successful suspend");
+        // A successful suspend permits immediate register access and resume,
+        // without waiting for a timer or retrying INVALID_ARGUMENT.
+        #[cfg(target_arch = "x86_64")]
+        let register_count = 23;
+        #[cfg(target_arch = "aarch64")]
+        let register_count = 35;
+        arch::process_control_block::read_register(slot(radix, 100), register_count).unwrap();
+        arch::process_control_block::write_register(slot(radix, 100), register_count).unwrap();
+        arch::process_control_block::resume(slot(radix, 100)).unwrap();
+        if environment.platform.core_count > 1 {
+            for _ in 0..10_000_000 {
+                if COUNTER.load(Ordering::Acquire) > suspended {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            assert!(COUNTER.load(Ordering::Acquire) > suspended, "worker did not resume");
+        }
+        if iteration == 15 {
+            RESUME_SELF.store(environment.capabilities.process_control_block, Ordering::Release);
+            arch::process_control_block::suspend(environment.capabilities.process_control_block).unwrap();
+            assert_eq!(RESUME_SELF.load(Ordering::Acquire), 0, "self suspend returned before resumer ran");
+        }
         arch::node::revoke(root, 97).unwrap();
         let stopped = COUNTER.load(Ordering::Acquire);
         for _ in 0..100_000 {
@@ -165,6 +199,7 @@ extern "C" fn entry(environment: *const AlphaEnvironment) -> ! {
         assert!(arch::process_control_block::resume(slot(radix, 100)).is_err());
     }
     nanami_runtime::println!("CAPABILITY-PROBE-PASS siblings=true weak-delete=true node-drain=true generic-reuse=32 process-reuse=16 cores={}", environment.platform.core_count);
+    nanami_runtime::println!("SUSPEND-PROBE-PASS stopped=true register-roundtrip=true immediate-resume=true self-resume=true");
     nanami_runtime::println!("CAPABILITY-PROBE-DONE");
     // Keep all test backing reserved; no test claims failed revoke freed it.
     arch::process_control_block::suspend(environment.capabilities.process_control_block).unwrap();

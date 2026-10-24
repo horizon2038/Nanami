@@ -124,6 +124,9 @@ struct Runtime {
     alarm_error: bool,
 }
 impl Runtime {
+    fn is_signal_stopped(&self, _: Word) -> bool {
+        false
+    }
     fn linux_file(&self, _: Word, fd: Word) -> Option<LinuxFile> {
         self.files.get(fd).copied()
     }

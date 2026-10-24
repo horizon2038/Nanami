@@ -2,19 +2,19 @@ use super::{
     read_shm_u64, read_target_memory, EmulationAction, LinuxSyscallContext, Runtime, Word, ENOSYS,
     SYS_ACCESS, SYS_ARCH_PRCTL, SYS_BRK, SYS_CHDIR, SYS_CHOWN, SYS_CLOCK_GETTIME, SYS_CLONE,
     SYS_CLOSE, SYS_CREAT, SYS_DUP, SYS_DUP2, SYS_DUP3, SYS_EXECVE, SYS_EXIT, SYS_EXIT_GROUP,
-    SYS_FACCESSAT, SYS_FACCESSAT2, SYS_FCHOWN, SYS_FCHOWNAT, SYS_FCNTL, SYS_FORK, SYS_FSTAT,
-    SYS_FUTEX, SYS_FUTIMESAT, SYS_GETCWD, SYS_GETDENTS64, SYS_GETEGID, SYS_GETEUID, SYS_GETGID,
-    SYS_GETPGID, SYS_GETPID, SYS_GETPPID, SYS_GETRANDOM, SYS_GETRESGID, SYS_GETRESUID,
-    SYS_GETRLIMIT, SYS_GETTID, SYS_GETTIMEOFDAY, SYS_GETUID, SYS_IOCTL, SYS_KILL, SYS_LCHOWN,
-    SYS_LINK, SYS_LINKAT, SYS_LSEEK, SYS_LSTAT, SYS_MADVISE, SYS_MKDIR, SYS_MKDIRAT, SYS_MKNOD,
-    SYS_MKNODAT, SYS_MMAP, SYS_MPROTECT, SYS_MREMAP, SYS_MSYNC, SYS_MUNMAP, SYS_NANOSLEEP,
-    SYS_NEWFSTATAT, SYS_OPEN, SYS_OPENAT, SYS_PIPE, SYS_PIPE2, SYS_POLL, SYS_PPOLL, SYS_PREAD64,
-    SYS_PRLIMIT64, SYS_PSELECT6, SYS_PWRITE64, SYS_READ, SYS_READLINK, SYS_READLINKAT, SYS_READV,
-    SYS_RECVMSG, SYS_RENAME, SYS_RENAMEAT, SYS_RMDIR, SYS_RSEQ, SYS_RT_SIGACTION,
-    SYS_RT_SIGPROCMASK, SYS_RT_SIGSUSPEND, SYS_SCHED_GETAFFINITY, SYS_SELECT, SYS_SENDMSG,
-    SYS_SETITIMER, SYS_SETPGID, SYS_SET_ROBUST_LIST, SYS_SET_TID_ADDRESS, SYS_SIGALTSTACK,
-    SYS_STAT, SYS_STATX, SYS_UNAME, SYS_UNLINK, SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK,
-    SYS_WAIT4, SYS_WRITE, SYS_WRITEV, SYS_FSYNC, SYS_FDATASYNC, SYS_SYNC, SYS_SYNCFS, SYS_FTRUNCATE,
+    SYS_FACCESSAT, SYS_FACCESSAT2, SYS_FCHOWN, SYS_FCHOWNAT, SYS_FCNTL, SYS_FDATASYNC, SYS_FORK,
+    SYS_FSTAT, SYS_FSYNC, SYS_FTRUNCATE, SYS_FUTEX, SYS_FUTIMESAT, SYS_GETCWD, SYS_GETDENTS64,
+    SYS_GETEGID, SYS_GETEUID, SYS_GETGID, SYS_GETPGID, SYS_GETPID, SYS_GETPPID, SYS_GETRANDOM,
+    SYS_GETRESGID, SYS_GETRESUID, SYS_GETRLIMIT, SYS_GETTID, SYS_GETTIMEOFDAY, SYS_GETUID,
+    SYS_IOCTL, SYS_KILL, SYS_LCHOWN, SYS_LINK, SYS_LINKAT, SYS_LSEEK, SYS_LSTAT, SYS_MADVISE,
+    SYS_MKDIR, SYS_MKDIRAT, SYS_MKNOD, SYS_MKNODAT, SYS_MMAP, SYS_MPROTECT, SYS_MREMAP, SYS_MSYNC,
+    SYS_MUNMAP, SYS_NANOSLEEP, SYS_NEWFSTATAT, SYS_OPEN, SYS_OPENAT, SYS_PIPE, SYS_PIPE2, SYS_POLL,
+    SYS_PPOLL, SYS_PREAD64, SYS_PRLIMIT64, SYS_PSELECT6, SYS_PWRITE64, SYS_READ, SYS_READLINK,
+    SYS_READLINKAT, SYS_READV, SYS_RECVMSG, SYS_RENAME, SYS_RENAMEAT, SYS_RMDIR, SYS_RSEQ,
+    SYS_RT_SIGACTION, SYS_RT_SIGPROCMASK, SYS_RT_SIGSUSPEND, SYS_SCHED_GETAFFINITY, SYS_SELECT,
+    SYS_SENDMSG, SYS_SETITIMER, SYS_SETPGID, SYS_SET_ROBUST_LIST, SYS_SET_TID_ADDRESS,
+    SYS_SIGALTSTACK, SYS_STAT, SYS_STATX, SYS_SYNC, SYS_SYNCFS, SYS_UNAME, SYS_UNLINK,
+    SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK, SYS_WAIT4, SYS_WRITE, SYS_WRITEV,
 };
 
 pub(super) fn trace_syscall_action(
@@ -58,7 +58,7 @@ pub(super) fn trace_syscall_action(
         EmulationAction::Return(value) => {
             pos = trace_append_isize(&mut line, pos, value);
         }
-        EmulationAction::Resume => {
+        EmulationAction::Resume | EmulationAction::RestoreSignalFrame => {
             pos = trace_append_bytes(&mut line, pos, b"0 <resume>");
         }
         EmulationAction::Park => {
@@ -106,7 +106,7 @@ pub(super) fn record_action_result(
 ) {
     let value = match action {
         EmulationAction::Return(value) => value,
-        EmulationAction::Resume => 0,
+        EmulationAction::Resume | EmulationAction::RestoreSignalFrame => 0,
         EmulationAction::Park => isize::MIN,
         EmulationAction::Exit(status) => status as isize,
         EmulationAction::Unsupported(_) => -(ENOSYS as isize),
@@ -165,7 +165,7 @@ pub(super) fn trace_critical_action(
 ) {
     let value = match action {
         EmulationAction::Return(value) => value,
-        EmulationAction::Resume => 0,
+        EmulationAction::Resume | EmulationAction::RestoreSignalFrame => 0,
         EmulationAction::Park => isize::MIN,
         EmulationAction::Exit(status) => status as isize,
         EmulationAction::Unsupported(_) => -(ENOSYS as isize),
@@ -177,8 +177,15 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
     match number {
         SYS_GETPID | SYS_GETPPID | SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID
         | SYS_FORK | SYS_VFORK | SYS_GETTID | SYS_SYNC => 0,
-        SYS_CLOSE | SYS_EXIT | SYS_EXIT_GROUP | SYS_PIPE | SYS_GETPGID
-        | SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS | super::SYS_TIME => 1,
+        SYS_CLOSE
+        | SYS_EXIT
+        | SYS_EXIT_GROUP
+        | SYS_PIPE
+        | SYS_GETPGID
+        | SYS_FSYNC
+        | SYS_FDATASYNC
+        | SYS_SYNCFS
+        | super::SYS_TIME => 1,
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
@@ -217,9 +224,19 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_LCHOWN
         | SYS_SETITIMER
         | SYS_SCHED_GETAFFINITY => 3,
-        SYS_MMAP | SYS_SELECT | SYS_PSELECT6 | SYS_PRLIMIT64 | SYS_UTIMENSAT | SYS_RENAMEAT
-        | SYS_READLINKAT | SYS_MKNODAT | SYS_FACCESSAT2 | SYS_PREAD64 | SYS_PWRITE64
-        | SYS_NEWFSTATAT | super::SYS_CLOCK_NANOSLEEP => 4,
+        SYS_MMAP
+        | SYS_SELECT
+        | SYS_PSELECT6
+        | SYS_PRLIMIT64
+        | SYS_UTIMENSAT
+        | SYS_RENAMEAT
+        | SYS_READLINKAT
+        | SYS_MKNODAT
+        | SYS_FACCESSAT2
+        | SYS_PREAD64
+        | SYS_PWRITE64
+        | SYS_NEWFSTATAT
+        | super::SYS_CLOCK_NANOSLEEP => 4,
         SYS_CLONE | SYS_STATX | SYS_FCHOWNAT | SYS_LINKAT => 5,
         _ => 6,
     }

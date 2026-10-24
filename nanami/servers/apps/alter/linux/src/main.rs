@@ -120,6 +120,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             Err(e) => return Err(log_error("[alter] ipc receive failed: ", e)),
         };
 
+        let mut fault_pid = 0;
         pending = match event {
             ServiceEvent::Request(request) => {
                 let reply = handle_request(&mut runtime, request);
@@ -154,6 +155,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 hardware_context_count,
                 ..
             } => {
+                fault_pid = identifier;
                 runtime.trapped_faults = runtime.trapped_faults.saturating_add(1);
                 match fault::handle_fault(
                     &mut runtime,
@@ -187,7 +189,16 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                             let _ = nanami_runtime::request_process_kill(pid, status);
                         } else {
                             let _ = nanami_runtime::request_process_kill(pid, status);
-                            linux::wake_waiter_for_child(&mut runtime, pid);
+                            let signal = runtime
+                                .managed_process(pid)
+                                .and_then(|process| process.signals())
+                                .map_or(0, |state| state.exit_signal);
+                            let (code, detail) = if signal == 0 {
+                                (1, status)
+                            } else {
+                                (2, signal)
+                            };
+                            linux::signals_runtime::notify_child(&mut runtime, pid, code, detail);
                         }
                         ReplyAction::DropReply
                     }
@@ -195,6 +206,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             }
         };
         linux::handle_readiness_changes(&mut runtime);
+        linux::signals_runtime::pump(&mut runtime, fault_pid);
     }
 }
 

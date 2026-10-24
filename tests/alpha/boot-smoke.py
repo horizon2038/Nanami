@@ -15,6 +15,7 @@ parser.add_argument("--rootfs", type=pathlib.Path)
 parser.add_argument("--storage", choices=["ahci", "virtio", "usb"], help="x86_64 storage transport")
 parser.add_argument("--expect-domain", action="store_true", help="Require the optional isolated-child guest fixtures")
 parser.add_argument("--expect-kernel-capabilities", action="store_true", help="Require the optional real-kernel capability observations")
+parser.add_argument("--expect-suspend", action="store_true", help="Run the kernel capability/suspend probes without unrelated Alter service-log readiness checks")
 parser.add_argument("--expect-handover", action="store_true", help="Require managed stable-handle Provider exchange after the child fixture")
 parser.add_argument("--expect-imports", action="store_true", help="Require scoped, quota-bounded imports and upstream stable-handle Provider exchange")
 parser.add_argument("--expect-recursive-imports", action="store_true", help="Also require actual child/grandchild reimport and intermediate memory/session accounting")
@@ -23,6 +24,8 @@ parser.add_argument("--expect-events", action="store_true", help="Require direct
 parser.add_argument("--smp", type=int, default=4)
 parser.add_argument("--timeout", type=float, default=120)
 args = parser.parse_args()
+if args.expect_suspend:
+    args.expect_kernel_capabilities = True
 if args.expect_recursive_imports:
     args.expect_imports = True
 if not args.image.is_file() or (args.rootfs and not args.rootfs.is_file()):
@@ -74,7 +77,7 @@ with (output / "qemu.log").open("w") as errors, (output / "monitor.log").open("w
                 if "service registered: vfs-service" not in text:
                     time.sleep(0.15)
                     continue
-                if args.arch == "aarch64":
+                if args.arch == "aarch64" and not args.expect_suspend:
                     # Alter registers only after connecting to POSIX and
                     # attaching its shared buffers through real POSIX IPC.
                     # That also proves POSIX readiness if its log interleaves.
@@ -99,6 +102,7 @@ with (output / "qemu.log").open("w") as errors, (output / "monitor.log").open("w
                     continue
                 if args.expect_kernel_capabilities and (
                     "CAPABILITY-PROBE-DONE" not in text or "CAPABILITY-PROBE-PASS" not in text
+                    or "SUSPEND-PROBE-PASS" not in text
                 ):
                     time.sleep(0.15)
                     continue
@@ -141,7 +145,7 @@ with (output / "qemu.log").open("w") as errors, (output / "monitor.log").open("w
                     # SMP can interleave the parent's diagnostic serial line.
                     print("PASS bounded Child Alpha, local process/service creation, no unimported parent namespace, and same-name parent/child providers", flush=True)
                 if args.expect_kernel_capabilities:
-                    print("PASS kernel peer aliases, weak deletion, Node drainage, Generic reuse and synchronous process revoke", flush=True)
+                    print("PASS kernel peer aliases, weak deletion, Node drainage, Generic reuse, synchronous suspend/register access/resume, self suspend and process revoke", flush=True)
                 if args.expect_handover:
                     print("PASS one managed connect, S1 replies, incompatible prepare rejected, quiesce/commit, S1 stopped, same handle reaches S2, and WO handle closure; no old-process or closed-alias reclamation claim", flush=True)
                 if args.expect_imports:

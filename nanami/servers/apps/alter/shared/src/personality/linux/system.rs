@@ -1,8 +1,8 @@
 use super::{
-    bounded_len, map_request_error, map_unit, map_word, posix, read_register_value,
-    write_guest_u32, write_guest_u64, write_register_value, write_target_memory, write_u64,
-    LinuxSyscallContext, Runtime, Word, ARCH_GET_FS, ARCH_SET_FS, EFAULT, EINVAL, EIO, ESRCH,
-    REG_FS_BASE, SYS_PRLIMIT64, UNAME_MACHINE,
+    bounded_len, map_unit, map_word, posix, read_register_value, write_guest_u32, write_guest_u64,
+    write_register_value, write_target_memory, write_u64, LinuxSyscallContext, Runtime, Word,
+    ARCH_GET_FS, ARCH_SET_FS, EFAULT, EINVAL, EIO, ESRCH, REG_FS_BASE, SYS_PRLIMIT64,
+    UNAME_MACHINE,
 };
 
 pub(super) fn sys_uname(runtime: &mut Runtime, pid: Word, user_buffer: Word) -> Result<Word, i32> {
@@ -208,24 +208,11 @@ pub(super) fn sys_kill(
         };
     }
     if runtime.managed_process(target_pid).is_some() {
-        // A running task is unchanged by SIGCONT. Stop-signal delivery needs
-        // guest signal/stop state, and must not be confused with termination.
-        if signal == super::LINUX_SIGCONT {
-            return Ok(0);
-        }
-        if matches!(
-            signal,
-            super::LINUX_SIGSTOP
-                | super::LINUX_SIGTSTP
-                | super::LINUX_SIGTTIN
-                | super::LINUX_SIGTTOU
-        ) {
-            return Err(super::EOPNOTSUPP);
-        }
-        nanami_runtime::request_process_kill(target_pid, signal).map_err(map_request_error)?;
-        runtime.mark_process_exited(target_pid, 128 + signal);
-        super::close_process_files(runtime, target_pid);
-        super::wake_waiter_for_child(runtime, target_pid);
+        super::signals_runtime::queue(
+            runtime,
+            target_pid,
+            crate::common::signals::Info::new(signal, 0, current_pid),
+        )?;
         return Ok(0);
     }
     map_unit(posix::posix_kill(runtime.posix_port, target_pid, signal), 0)

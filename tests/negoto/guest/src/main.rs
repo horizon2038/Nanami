@@ -246,6 +246,31 @@ fn main() -> nanami_runtime::NanamiResult {
     client.command("delete", "box").unwrap();
     nanami_runtime::println!("NEGOTO-KILL-PASS");
 
+    client.create("signals", "signals").unwrap();
+    client.command("start", "signals").unwrap();
+    let state = client.stopped("signals", timer);
+    assert_eq!(state["exitStatus"], 0, "signal handlers: {state}");
+    assert_eq!(
+        files
+            .read("/alter/linux/bundles/busybox/rootfs/work/signal-result")
+            .unwrap(),
+        b"signal-ok"
+    );
+    client.command("delete", "signals").unwrap();
+    nanami_runtime::println!("NEGOTO-SIGNALS-PASS handlers=true ignore=true sigreturn=true");
+    client.create("signal-abi", "signal-abi").unwrap();
+    client.command("start", "signal-abi").unwrap();
+    let state = client.stopped("signal-abi", timer);
+    assert_eq!(state["exitStatus"], 0, "signal ABI: {state}");
+    assert_eq!(
+        files
+            .read("/alter/linux/bundles/busybox/rootfs/work/signal-abi")
+            .unwrap(),
+        b"SIGNAL-ABI-PASS\n"
+    );
+    client.command("delete", "signal-abi").unwrap();
+    nanami_runtime::println!("NEGOTO-SIGNAL-ABI-PASS masks=true nested=true altstack=true realtime=true faults=true stop=true wait=true timers=true restart=true");
+
     for _ in 0..20 {
         client.create("box", "true").unwrap();
         client.command("start", "box").unwrap();

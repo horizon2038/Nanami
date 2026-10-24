@@ -320,8 +320,17 @@ Alter owns session/process-group identity and controlling-terminal association;
 these are not added to Alpha or A9N. `TIOCGPGRP`/`TIOCSPGRP`/`TIOCGSID` read and
 update actual foreground-group/session state. Fork inherits group membership,
 exec preserves it, and foreign-session/group changes are rejected. Wait targets
-and group-directed signals use the same PGIDs. Stop-signal and general signal
-handler delivery remain separate from this terminal-group implementation.
+and group-directed signals use the same PGIDs. Linux signal state is a lazy
+per-process allocation, independent of terminal-group metadata. Alter queues
+signals and delivers them at syscall boundaries or while a target is parked in
+an Alter fault; it never samples a running remote CPU's registers. Default
+stop/continue actions preserve wait state, and wait4/SIGCHLD distinguish stops,
+continuations and signal termination. Real-time interval alarms share the
+existing one-shot deadline scheduler. Handler frames and sigreturn use the
+Linux architecture ABI, excluding FPU/SIMD state, with privileged register
+fields kept under server control. Normal syscall replies retain their existing
+short register payload; only signal delivery/restoration requires a full
+context. A9N and its IPC fastpath are unchanged.
 
 Empty blocking pipe reads park on existing readiness waiters while a writer
 remains; EOF requires the last writer to close. Full writes use the same

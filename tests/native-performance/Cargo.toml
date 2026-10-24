@@ -16,6 +16,10 @@ name = "linux-job-control"
 path = "linux-job-control.rs"
 
 [[test]]
+name = "linux-signals"
+path = "linux-signals.rs"
+
+[[test]]
 name = "linux-pipe"
 path = "linux-pipe.rs"
 

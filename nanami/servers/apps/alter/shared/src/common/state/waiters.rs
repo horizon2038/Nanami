@@ -60,46 +60,4 @@ impl Runtime {
         process.device_read_context = context;
         true
     }
-
-    pub fn take_signal_waiter_for_child(
-        &mut self,
-        child_pid: Word,
-    ) -> Option<(Word, Word, LinuxSyscallContext)> {
-        let mut parent_pid = 0;
-        let mut child_group = 0;
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let process = self.managed[i];
-            if process.pid == child_pid && process.pcb != 0 {
-                parent_pid = process.parent_pid;
-                child_group = process.job.group;
-                break;
-            }
-            i += 1;
-        }
-        if parent_pid == 0 {
-            return None;
-        }
-        i = 0;
-        while i < self.managed.len() {
-            let process = self.managed[i];
-            if process.pid == parent_pid
-                && process.pcb != 0
-                && process.signal_waiting
-                && wait_target_matches(
-                    child_pid,
-                    process.signal_wait_target,
-                    child_group,
-                    process.job.group,
-                )
-            {
-                self.managed[i].signal_waiting = false;
-                self.managed[i].signal_wait_target = 0;
-                self.managed[i].signal_context = LinuxSyscallContext::EMPTY;
-                return Some((process.pid, process.pcb, process.signal_context));
-            }
-            i += 1;
-        }
-        None
-    }
 }

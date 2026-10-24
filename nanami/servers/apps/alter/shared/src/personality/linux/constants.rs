@@ -85,10 +85,6 @@ pub(super) const LINUX_SECOND_PATH_OFFSET: Word = LINUX_PAGE_SIZE;
 
 pub(super) const LINUX_CPU_MASK_BYTES: Word = 8;
 
-pub(super) const LINUX_ITIMERVAL_BYTES: Word = 32;
-
-pub(super) const LINUX_ITIMER_PROF: Word = 2;
-
 pub(super) const LINUX_VIRTUAL_RESERVATION_BASE: Word = 0x0000_0001_0000_0000;
 
 pub(super) const LINUX_VIRTUAL_RESERVATION_LIMIT: Word = 0x0000_4000_0000_0000;
@@ -257,11 +253,6 @@ pub(super) const TCP_FLAG_PSH: Word = 0x08;
 pub(super) const TCP_FLAG_ACK: Word = 0x10;
 
 pub(super) const LINUX_SIGCHLD: Word = 17;
-pub(super) const LINUX_SIGCONT: Word = 18;
-pub(super) const LINUX_SIGSTOP: Word = 19;
-pub(super) const LINUX_SIGTSTP: Word = 20;
-pub(super) const LINUX_SIGTTIN: Word = 21;
-pub(super) const LINUX_SIGTTOU: Word = 22;
 
 pub(super) const LINUX_CLONE_VM: Word = 0x0000_0100;
 
@@ -486,21 +477,10 @@ pub(super) const LINUX_VSUSP: Word = 10;
 pub(super) const LINUX_VEOL: Word = 11;
 
 pub(super) const LINUX_WNOHANG: Word = 1;
+pub(super) const LINUX_WCONTINUED: Word = 8;
 pub(super) const LINUX_WUNTRACED: Word = 2;
 
-pub(super) const LINUX_STACK_T_BYTES: Word = 24;
-
-pub(super) const LINUX_SS_DISABLE: Word = 2;
-
-pub(super) const LINUX_SS_AUTODISARM: Word = 0x8000_0000;
-
-pub(super) const LINUX_MINSIGSTKSZ: Word = 2048;
-
 pub(super) const LINUX_NSIG: Word = 64;
-
-pub(super) const LINUX_SIGSET_BYTES: Word = 8;
-
-pub(super) const LINUX_KERNEL_SIGACTION_BYTES: usize = 32;
 
 pub(super) const LINUX_TIMESPEC_BYTES: Word = 16;
 

@@ -48,6 +48,14 @@ struct Process {
 struct ReadinessWait { deadline: Option<Word> }
 mod state { pub mod readiness { pub const READY_TIMER: usize = 16; } }
 fn wake_readiness_waiters(_: &mut Runtime, _: Word) {}
+mod signal_timers {
+    pub fn next_deadline(_: &super::Runtime) -> Option<usize> { None }
+    pub fn expire(_: &mut super::Runtime) {}
+}
+mod signals_runtime {
+    pub fn pump(_: &mut super::Runtime, _: usize) {}
+    pub fn timed_wait_expired(_: &mut super::Runtime, _: usize, _: usize) -> isize { 0 }
+}
 #[derive(Default, Clone, Copy)]
 struct Graphics {
     active: bool,
@@ -67,6 +75,7 @@ struct Runtime {
     graphics: [Graphics; 4],
 }
 impl Runtime {
+    fn is_signal_stopped(&self, _: Word) -> bool { false }
     fn managed_process(&self, pid: Word) -> Option<&Process> {
         self.managed.iter().find(|p| p.pid == pid)
     }

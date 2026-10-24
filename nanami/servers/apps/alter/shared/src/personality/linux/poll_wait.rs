@@ -70,7 +70,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
         let Some(wait) = process.readiness_wait.as_ref() else {
             continue;
         };
-        if process.pid == 0 || process.exited {
+        if process.pid == 0 || process.exited || runtime.is_signal_stopped(process.pid) {
             continue;
         }
         let expired = timer

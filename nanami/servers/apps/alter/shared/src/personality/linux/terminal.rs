@@ -437,7 +437,10 @@ pub fn wake_terminal_readers(runtime: &mut Runtime) {
     let mut index = 0usize;
     while index < runtime.managed.len() {
         let process = runtime.managed[index];
-        if process.pid == 0 || !process.terminal_read_waiting {
+        if process.pid == 0
+            || !process.terminal_read_waiting
+            || runtime.is_signal_stopped(process.pid)
+        {
             index += 1;
             continue;
         }

@@ -27,9 +27,16 @@ pub(super) fn drain_input_queue(runtime: &mut Runtime, source: Word, session_id:
         match kind {
             input::INPUT_EVENT_KIND_WINDOW_RESIZE if session_id != 0 => {
                 if let Some(session) = runtime.graphics.get(session_id as usize - 1) {
-                    if let Err(error) = honoka::honoka_resize_viewport(session.honoka_port, session.window_id,
-                        value0 as u16 as Word, value1 as u16 as Word) {
-                        nanami_runtime::println!("[alter/linux] framebuffer viewport resize failed: {}", error);
+                    if let Err(error) = honoka::honoka_resize_viewport(
+                        session.honoka_port,
+                        session.window_id,
+                        value0 as u16 as Word,
+                        value1 as u16 as Word,
+                    ) {
+                        nanami_runtime::println!(
+                            "[alter/linux] framebuffer viewport resize failed: {}",
+                            error
+                        );
                     }
                 }
             }
@@ -419,7 +426,10 @@ pub fn wake_device_readers(runtime: &mut Runtime) {
     let mut index = 0usize;
     while index < runtime.managed.len() {
         let process = runtime.managed[index];
-        if process.pid == 0 || !process.device_read_waiting {
+        if process.pid == 0
+            || !process.device_read_waiting
+            || runtime.is_signal_stopped(process.pid)
+        {
             index += 1;
             continue;
         }

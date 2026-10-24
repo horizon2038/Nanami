@@ -408,9 +408,31 @@ Alter implements `TIOCGPGRP`, `TIOCSPGRP` and `TIOCGSID` using tracked session
 and process-group state. `TIOCSCTTY` and `TIOCNOTTY` manage controlling-terminal
 association; another session's terminal cannot be stolen. Fork inherits the
 session/group and exec preserves them. Unknown ioctls still return `ENOTTY`.
-Stop-signal delivery and general guest signal handlers are outside these
-terminal-group operations; stop signals return `EOPNOTSUPP`, not a fake success
-or process termination. This is not a complete POSIX job-control subsystem.
+Alter/Linux implements signal actions, masks, pending signals, `rt_sigreturn`,
+`sigaltstack`, `rt_sigsuspend`, `rt_sigtimedwait`, `kill`/`tkill`/`tgkill`, and
+`rt_sigqueueinfo`. Standard signals coalesce; realtime signals retain ordered
+siginfo records in a bounded queue (`EAGAIN` on overflow). Signal state is
+allocated lazily, inherited appropriately by fork, and reset for exec while
+preserving ignored dispositions, pending signals, masks and real timers.
+
+Handlers receive Linux ABI signal frames on x86_64 and AArch64. Alternate stacks,
+`SA_SIGINFO`, `SA_NODEFER`, `SA_RESETHAND`, `SA_RESTART`, `SA_NOCLDSTOP` and
+`SA_NOCLDWAIT` are supported. FPU/SIMD state is deliberately not saved or restored.
+`rt_sigreturn` restores general registers and masks without accepting privileged
+selectors, execution modes or flags from the user frame. A return trampoline is
+mapped read/execute when the application does not supply its own restorer.
+
+Delivery is cooperative: running processes receive pending signals at their
+next syscall boundary; tasks already waiting in Alter can be interrupted there.
+CPU-bound tasks without syscalls are not asynchronously interrupted. SIGKILL
+uses native process termination, including for a running target. No Kernel or
+IPC fastpath changes are required. Stop/continue signals are distinct from
+termination; `wait4` reports stopped/continued children and signal exit status,
+and SIGCHLD notifies the parent. `ITIMER_REAL`, `alarm` and `getitimer` deliver
+SIGALRM through the timer service; CPU-time interval timers return `EOPNOTSUPP`.
+Synchronous instruction, arithmetic and memory faults can enter a handler, and
+broken-pipe writes generate SIGPIPE. Terminal-generated control-character
+signals and complete POSIX terminal job-control policy are separate concerns.
 
 From the host repository root, copy the existing static Linux BusyBox into
 the bundle. Binary payloads are ignored by Git and must be copied again in a

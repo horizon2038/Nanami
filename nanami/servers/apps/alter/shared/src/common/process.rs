@@ -26,3 +26,24 @@ mod arch_impl;
 mod arch_impl;
 
 pub use arch_impl::*;
+
+// Used only for signal delivery/restoration to a task blocked in Alter.
+pub fn read_hardware_context(pcb: Word) -> Result<HardwareContext, ()> {
+    let mut registers = [0; nanami_runtime::ipc::HARDWARE_CONTEXT_WORDS];
+    a9n_abi::arch::process_control_block::read_register(pcb, registers.len() as Word)
+        .map_err(|_| ())?;
+    let ipc = a9n_abi::arch::ipc_buffer::get_ipc_buffer();
+    for (index, value) in registers.iter_mut().enumerate() {
+        *value = ipc.get_message(3 + index);
+    }
+    Ok(registers)
+}
+
+pub fn write_hardware_context(pcb: Word, registers: &HardwareContext) -> Result<(), ()> {
+    let ipc = a9n_abi::arch::ipc_buffer::get_ipc_buffer();
+    for (index, value) in registers.iter().enumerate() {
+        ipc.configure_message(3 + index, *value);
+    }
+    a9n_abi::arch::process_control_block::write_register(pcb, registers.len() as Word)
+        .map_err(|_| ())
+}

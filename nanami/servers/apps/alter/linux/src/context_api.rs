@@ -30,19 +30,19 @@ pub fn handle(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction {
             reply(nanami_runtime::OS_RESPONSE_OK, process.pid)
         }
         ALTER_REQUEST_SIGNAL_CONTEXT => {
-            if process.exited || !matches!(request.arg1, 0 | 9 | 15) {
+            if process.exited || request.arg1 > 64 {
                 return reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0);
             }
             if request.arg1 == 0 {
                 return reply(nanami_runtime::OS_RESPONSE_OK, 0);
             }
-            match nanami_runtime::request_process_kill(process.pid, request.arg1) {
-                Ok(()) => {
-                    runtime.mark_process_exited(process.pid, 128 + request.arg1);
-                    crate::linux::close_process_files(runtime, process.pid);
-                    reply(nanami_runtime::OS_RESPONSE_OK, 0)
-                }
-                Err(error) => reply(crate::loader::map_request_error_to_status(error), 0),
+            match crate::linux::signals_runtime::queue(
+                runtime,
+                process.pid,
+                crate::common::signals::Info::new(request.arg1, 0, request.identifier),
+            ) {
+                Ok(()) => reply(nanami_runtime::OS_RESPONSE_OK, 0),
+                Err(_) => reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0),
             }
         }
         ALTER_REQUEST_DELETE_CONTEXT => {

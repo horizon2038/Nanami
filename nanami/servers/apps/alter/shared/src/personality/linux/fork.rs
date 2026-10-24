@@ -1,8 +1,8 @@
 use super::{
-    align_down_word, align_up_word, arch, clone_registers_for_fork, close_process_files,
-    copy_present_process_range, inherit_linux_files, map_request_error, read_register_value,
-    read_shm_u16, read_shm_u32, read_shm_u64, read_shm_u8, spawn_fork_child, write_guest_u32,
-    EmulationAction, LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM, ENOSYS, ESRCH,
+    align_down_word, align_up_word, arch, clone_registers_for_fork, copy_present_process_range,
+    inherit_linux_files, map_request_error, read_register_value, read_shm_u16, read_shm_u32,
+    read_shm_u64, read_shm_u8, spawn_fork_child, write_guest_u32, EmulationAction,
+    LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM, ENOSYS, ESRCH,
     LINUX_CLONE_CHILD_SETTID, LINUX_CLONE_PARENT_SETTID, LINUX_CLONE_SETTLS, LINUX_CLONE_VM,
     LINUX_ELF_HEADER_BYTES, LINUX_IMAGE_BASE, LINUX_MAX_LOAD_SEGMENTS, LINUX_PAGE_SIZE, LINUX_PF_W,
     LINUX_PROT_NONE, LINUX_PT_LOAD, LINUX_SIGCHLD, LINUX_STACK_BYTES, LINUX_STACK_GUARD_BYTES,
@@ -17,7 +17,6 @@ pub(super) fn sys_fork(
     if context.number == SYS_CLONE && (context.args[0] & LINUX_CLONE_VM) != 0 {
         return Err(ENOSYS);
     }
-    reap_exited_children(runtime, parent_pid);
     let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let image_name =
         ::core::str::from_utf8(&parent.image_name[..parent.image_name_len]).map_err(|_| EINVAL)?;
@@ -187,6 +186,7 @@ pub(super) fn sys_fork(
         child.terminal_echo = parent.terminal_echo;
         child.terminal_termios = parent.terminal_termios;
     }
+    runtime.inherit_signals(parent_pid, child_pid);
     if cfg!(debug_assertions) {
         if let Ok(read_back_fs_base) = read_register_value(child_pcb, REG_FS_BASE) {
             if read_back_fs_base != child_fs_base {
@@ -231,32 +231,6 @@ pub(super) fn sys_vfork(
 pub(super) fn discard_spawned_child(pid: Word) {
     let _ = nanami_runtime::request_process_kill(pid, 1);
     let _ = nanami_runtime::request_process_reap(pid);
-}
-
-pub(super) fn reap_exited_children(runtime: &mut Runtime, parent_pid: Word) {
-    loop {
-        let Some((child_pid, _status)) = runtime.exited_child(parent_pid, 0) else {
-            return;
-        };
-        match nanami_runtime::request_process_reap(child_pid) {
-            Ok(()) => {
-                close_process_files(runtime, child_pid);
-                runtime.remove_process(child_pid);
-            }
-            Err(error) => {
-                let errno = map_request_error(error);
-                nanami_runtime::println!(
-                    "[alter/linux] fork pre-clean reap failed parent={} child={} errno={}",
-                    parent_pid,
-                    child_pid,
-                    errno
-                );
-                close_process_files(runtime, child_pid);
-                runtime.remove_process(child_pid);
-                return;
-            }
-        }
-    }
 }
 
 pub(super) fn fork_step<T>(stage: &str, result: Result<T, i32>) -> Result<T, i32> {

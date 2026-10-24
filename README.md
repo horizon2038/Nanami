@@ -358,6 +358,7 @@ on the syscalls and flags used by each program.
 - [Application Guide](./nanami/docs/application.md)
 - [Coding Guidelines](./nanami/docs/coding-guideline.md)
 - [Refactoring Guidelines](./nanami/docs/refactor-guideline.md)
+- [Release CI and prebuilt images](./nanami/docs/releases.md)
 - [User-space API and libraries](./nanami/servers/README.md)
 - [Alter/Linux supported syscalls](./nanami/servers/apps/alter/linux/linux-supported-syscalls.md)
 - [Alter/FreeBSD supported syscalls](./nanami/servers/apps/alter/freebsd/freebsd-supported-syscalls.md)

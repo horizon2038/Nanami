@@ -1,0 +1,118 @@
+name: Build images
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  test:
+    name: Host regression tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Test host tools and protocols
+        run: cargo test --locked -p ext2-image -p negoto-oci -p nanami-uapi -p nanami-xtask
+      - name: Test native service logic
+        run: cargo test --locked --manifest-path tests/native-performance/Cargo.toml -- --test-threads=1
+
+  build:
+    name: ${{ matrix.target.id }} / Release
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - id: x86_64-pc99
+            arch: x86_64
+            platform: pc99
+          - id: aarch64-qemu
+            arch: aarch64
+            platform: qemu
+    env:
+      TARGET_ID: ${{ matrix.target.id }}
+      TARGET_ARCH: ${{ matrix.target.arch }}
+      TARGET_PLATFORM: ${{ matrix.target.platform }}
+      # Also pin Cargo commands launched inside submodules with their own toolchain files.
+      RUSTUP_TOOLCHAIN: nightly-2026-03-25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install LLVM and build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes clang-19 lld-19 llvm-19-dev nasm ninja-build python3-venv
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/cmake"
+          "$RUNNER_TEMP/cmake/bin/pip" install --disable-pip-version-check cmake==3.31.6
+          echo "$RUNNER_TEMP/cmake/bin" >> "$GITHUB_PATH"
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rust-src
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" "${TARGET_ARCH}-unknown-uefi"
+      - name: Build Nanami boot image
+        run: |
+          set -euo pipefail
+          cargo xtask build \
+            --arch "$TARGET_ARCH" --platform "$TARGET_PLATFORM" --profile release \
+            --no-linux-bins --rootfs out/ci/rootfs.img --output-image out/ci/nanami.img
+      - name: Collect release artifacts
+        run: |
+          set -euo pipefail
+          artifact_dir="out/artifacts/${TARGET_ID}-release-artifacts"
+          mkdir -p "$artifact_dir"
+          cp out/ci/nanami.img "$artifact_dir/nanami.img"
+          if [[ "$TARGET_ARCH" == aarch64 ]]; then
+            cp out/ci/rootfs.img "$artifact_dir/rootfs.img"
+            cp "spencer/out/${TARGET_ID}-release/u-boot/u-boot.bin" "$artifact_dir/u-boot.bin"
+            git -C spencer/build/u-boot/v2025.10/source archive --format=tar.gz --prefix=u-boot/ HEAD \
+              > "$artifact_dir/u-boot-source.tar.gz"
+            cp spencer/xtask/docker/u-boot.Dockerfile "$artifact_dir/u-boot.Dockerfile"
+          fi
+          cp LICENSE "$artifact_dir/LICENSE"
+          cp spencer/A9N/LICENSE "$artifact_dir/LICENSE-A9N"
+          cp spencer/Nun/LICENSE "$artifact_dir/LICENSE-Nun"
+          cp spencer/a9nloader-rs/LICENSE "$artifact_dir/LICENSE-A9NLoader"
+          cp nanami/docs/releases.md "$artifact_dir/README.md"
+          {
+            git rev-parse HEAD
+            git submodule status --recursive
+            rustc --version
+            clang --version
+            cmake --version
+            if [[ "$TARGET_ARCH" == aarch64 ]]; then
+              git -C spencer/build/u-boot/v2025.10/source rev-parse HEAD
+            fi
+          } > "$artifact_dir/BUILD-INFO.txt"
+          (cd "$artifact_dir" && sha256sum ./* > SHA256SUMS)
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target.id }}-release-artifacts
+          path: out/artifacts/${{ matrix.target.id }}-release-artifacts/
+          if-no-files-found: error
+          retention-days: 14

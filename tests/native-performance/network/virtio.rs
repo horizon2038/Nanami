@@ -3,11 +3,11 @@ use net::{NET_DEVICE_RX_BATCH_MAX, NET_DEVICE_RX_SLOT_STRIDE};
 use std::sync::atomic::{fence, Ordering};
 use std::{cmp::min, ptr, sync::Mutex};
 
-#[path = "../../../nanami/servers/apps/virtio-net/src/app/rx_backlog.rs"]
+#[path = "../../../nanami/servers/core-services/virtio-net/src/app/rx_backlog.rs"]
 mod rx_backlog;
-#[path = "../../../nanami/servers/apps/virtio-net/src/app/rx_batch.rs"]
+#[path = "../../../nanami/servers/core-services/virtio-net/src/app/rx_batch.rs"]
 mod rx_batch;
-#[path = "../../../nanami/servers/apps/virtio-net/src/app/rx_softq.rs"]
+#[path = "../../../nanami/servers/core-services/virtio-net/src/app/rx_softq.rs"]
 mod rx_softq;
 use rx_softq::{softq_is_empty, softq_pop_to_shared};
 

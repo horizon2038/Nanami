@@ -2,6 +2,14 @@ use nanami_runtime::RequestError;
 
 use super::super::TimerSelection;
 
+pub fn initialize() -> Result<(), RequestError> {
+    Ok(())
+}
+
+pub fn start_peripherals() -> Result<Option<&'static str>, RequestError> {
+    Ok(None)
+}
+
 pub fn usb_controller(_index: usize) -> Result<Option<nanami_runtime::Word>, RequestError> {
     Ok(None) // PCI host resource discovery for this platform is deferred.
 }

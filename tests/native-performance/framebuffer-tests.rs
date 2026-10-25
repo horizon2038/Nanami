@@ -10,9 +10,9 @@ enum RequestError {
     InvalidArgument,
     Status(Word),
 }
-#[path = "../../nanami/servers/apps/fb-server/src/damage.rs"]
+#[path = "../../nanami/servers/core-services/fb-server/src/damage.rs"]
 mod damage;
-#[path = "../../nanami/servers/apps/fb-server/src/presentation.rs"]
+#[path = "../../nanami/servers/core-services/fb-server/src/presentation.rs"]
 mod presentation;
 use presentation::present_shared_framebuffer as present;
 

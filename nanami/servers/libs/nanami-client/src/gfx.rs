@@ -4,7 +4,26 @@ use a9n_abi::CapabilityDescriptor;
 
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
+pub mod display;
 pub mod honoka;
+
+pub fn display_service_get_capabilities(
+    display_service_port: CapabilityDescriptor,
+) -> Result<Word, RequestError> {
+    let (status, capabilities, _) = call_port(
+        display_service_port,
+        DISPLAY_SERVICE_REQUEST_GET_CAPABILITIES,
+        0,
+        0,
+        0,
+        0,
+        1,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(capabilities)
+}
 
 pub fn display_service_get_screen_info(
     display_service_port: CapabilityDescriptor,

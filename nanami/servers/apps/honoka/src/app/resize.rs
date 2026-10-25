@@ -1,8 +1,8 @@
 //! Configure events propose content dimensions. The owner's synchronous
 //! acknowledgement commits geometry and a matching surface together.
 use super::*;
-use nanami_runtime::RequestError;
 use nanami_client::gfx::honoka::{publish_resize, HONOKA_DAMAGE_QUEUE_BYTES};
+use nanami_runtime::RequestError;
 
 impl Compositor {
     pub(super) fn resize_edges(&self, index: usize) -> u8 {

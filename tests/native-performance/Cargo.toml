@@ -8,6 +8,22 @@ publish = false
 path = "heap-tests.rs"
 
 [[test]]
+name = "intel-graphics"
+path = "intel-graphics.rs"
+
+[[test]]
+name = "display-selection"
+path = "display-selection.rs"
+
+[[test]]
+name = "pci-server"
+path = "pci-server.rs"
+
+[[test]]
+name = "pci-info"
+path = "pci-info.rs"
+
+[[test]]
 name = "negoto"
 path = "negoto.rs"
 
@@ -269,6 +285,7 @@ a9n_abi = "0.8.0"
 rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 
 [dev-dependencies]
+pci-ids-rs = "=1.2026.10"
 fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
 uefi = { version = "=0.35.0", default-features = false }
 

@@ -8,8 +8,8 @@ user-space libraries. There is no umbrella `sdk/` directory.
 ```text
 servers/
   boot-list, system-list, session-list   # Startup manifests
-  core-services/                        # Boot-critical binaries
-  apps/                                 # Upper services, drivers and apps
+  core-services/                        # Boot services and manager-selected drivers
+  apps/                                 # Upper services and apps
   uapi/                                 # nanami-uapi: dependency-free no_std ABI
     include/                            # Public C++ headers
   targets/{x86_64,aarch64}/              # Target JSON and linker scripts
@@ -47,10 +47,25 @@ The wire numbers and Linux/FreeBSD guest ABIs are unchanged by this split.
 
 ## Components and Packaging
 
-Only services needed before mounting the rootfs belong in `core-services/`.
+Boot services and manager-selected hardware drivers live in `core-services/`.
 Their binaries and the architecture-specific `boot-list` are packaged in
-Rust-generated `initramfs.cpio`. Driver Manager selects platform timer/storage
-drivers; ext2-server and system-manager consume the mounted filesystem.
+Rust-generated `initramfs.cpio`. Driver Manager selects platform PCI, timer,
+storage, input, display and network-device drivers; ext2-server and
+system-manager consume the mounted filesystem. In particular, `fb-server`,
+`ps2-server` and `virtio-net` are no longer unconditional rootfs services.
+`system-list` starts logical services, including input distribution, the network
+stack and Honoka, which connect to those selected hardware providers.
+
+On x86_64/pc99, `pci-server` owns configuration I/O and caches enumeration.
+Clients use `nanami-client::pci`; DMA, MMIO and packet/block data paths remain
+direct. `intel-graphics-server` selects its backend by PCI ID; the first backend
+implements inherited-mode Gen9 scanout with GGTT-backed double buffering,
+VBT-aware active-output discovery and monitor EDID over GMBUS/I2C-over-AUX.
+Honoka submits one vblank flip per composed frame on this backend. Monitor
+detailed-timing queries are read-only, not an implemented modesetting API.
+Other display configurations use `fb-server`. See
+[device drivers](../docs/device-drivers.md) for the protocol, ownership rules,
+supported modes and validation limits.
 
 Normal services/apps under `apps/` are installed into ext2 `/bin`.
 Nested paths join with `-`: `apps/alter/linux` becomes `/bin/alter-linux`.
@@ -63,8 +78,8 @@ sources = ["src/main.cpp"]
 ```
 
 xtask invokes Clang/LLD directly, linking the shared runtime and matching target
-script. AArch64 currently omits the x86-only ACPI/AHCI/HPET/PIT services and C++
-sample.
+script. AArch64 currently omits the x86-only PCI, Intel graphics, PS/2, virtio-net,
+ACPI/AHCI/HPET/PIT services and C++ sample.
 
 The headless AArch64 configuration has no timer provider yet. Alter/Linux can
 register and handle non-clock work without one; clock-dependent operations

@@ -1,7 +1,6 @@
 use crate::{host::Host, power::Power};
 use acpi::{
     aml::Interpreter,
-    platform::PciConfigRegions,
     registers::FixedRegisters,
     rsdp::Rsdp,
     sdt::{facs::Facs, fadt::Fadt, SdtHeader, Signature},
@@ -110,7 +109,6 @@ pub fn load(host: Host, rsdp_address: usize) -> Result<Firmware, AcpiError> {
     }
     if let Some(mcfg) = tables.find_table::<acpi::sdt::mcfg::Mcfg>() {
         mcfg.validate()?;
-        host.set_pci(PciConfigRegions::new(&tables)?);
     }
     let registers = Arc::new(FixedRegisters::new(&fadt, host.clone())?);
     let facs = match fadt.facs_address() {

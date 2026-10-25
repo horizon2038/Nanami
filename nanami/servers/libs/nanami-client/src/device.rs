@@ -4,6 +4,25 @@ use a9n_abi::CapabilityDescriptor;
 
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
+pub fn report_display_probe(
+    service: CapabilityDescriptor,
+    ready: bool,
+) -> Result<(), RequestError> {
+    let (status, _, _) = call_port(
+        service,
+        DEVICE_MANAGER_REQUEST_DISPLAY_PROBE,
+        ready as Word,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
 /// None means ACPI resolution is still in progress; Some(None) means no route.
 pub fn usb_irq(
     service: CapabilityDescriptor,

@@ -5,7 +5,7 @@ const SLOT_TIMER: Word = 26;
 const SLOT_DELAY: Word = 27;
 
 pub fn initialize() -> Result<(), RequestError> {
-    nanami_client::registry::connect_timer_service(SLOT_TIMER)?;
+    nanami_client::registry::connect_boot_service("timer-service", SLOT_TIMER)?;
     // Keep timer completion separate from keyboard/mouse IRQ notifications.
     nanami_runtime::request_notification_port_create(
         SLOT_DELAY,

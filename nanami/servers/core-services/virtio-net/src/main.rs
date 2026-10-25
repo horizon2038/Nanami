@@ -682,7 +682,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 
     let service_port_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let pci_io_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_IO_PCI_CFG);
-    let mut dev_io_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_IO_VIRTIO);
+    let dev_io_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_IO_VIRTIO);
     let notif_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_NOTIFICATION);
     let irq_desc = nanami_runtime::ipc::process_slot_descriptor(SLOT_INTERRUPT);
 
@@ -699,25 +699,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         }
     }
 
-    let mut full_io_granted = false;
-    match nanami_runtime::request_io_port(0x0000, 0xffff, SLOT_IO_PCI_CFG) {
-        Ok(()) => {
-            nanami_runtime::print!("[virtio-net] full io range granted\n");
-            full_io_granted = true;
-            dev_io_desc = pci_io_desc;
-        }
-        Err(_) => match nanami_runtime::request_io_port(0x0cf8, 0x0cff, SLOT_IO_PCI_CFG) {
-            Ok(()) => nanami_runtime::print!("[virtio-net] pci cfg io ports granted\n"),
-            Err(e) => {
-                return Err(log_device_error(
-                    "[virtio-net] failed to request PCI cfg io ports: ",
-                    e,
-                    dev_io_desc,
-                    0,
-                ));
-            }
-        },
-    }
+    nanami_client::pci::connect(SLOT_IO_PCI_CFG)?;
 
     nanami_runtime::print!("[virtio-net] step: scan pci\n");
     nanami_runtime::diagnostics::clock_info("virtio-net");
@@ -772,21 +754,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::print!("[virtio-net] step: request virtio io range\n");
     let io_min = found.io_base as Word;
     let io_max = io_min + 0xff;
-    match nanami_runtime::request_io_port(io_min, io_max, SLOT_IO_VIRTIO) {
-        Ok(()) => nanami_runtime::print!("[virtio-net] virtio io range granted\n"),
-        Err(e) => {
-            if full_io_granted {
-                nanami_runtime::print!("[virtio-net] virtio io range already covered by full range\n",);
-            } else {
-                return Err(log_device_error(
-                    "[virtio-net] failed to request virtio io range: ",
-                    e,
-                    dev_io_desc,
-                    io_min,
-                ));
-            }
-        }
-    }
+    nanami_runtime::request_io_port(io_min, io_max, SLOT_IO_VIRTIO)
+        .map_err(|error| log_device_error("[virtio-net] failed to request virtio io range: ", error, dev_io_desc, io_min))?;
 
     nanami_runtime::print!("[virtio-net] step: request irq\n");
     let mut irq_enabled = false;

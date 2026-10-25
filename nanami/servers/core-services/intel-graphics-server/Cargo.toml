@@ -1,0 +1,16 @@
+[package]
+name = "intel_graphics_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

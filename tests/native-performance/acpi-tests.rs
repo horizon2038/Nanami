@@ -23,7 +23,7 @@ macro_rules! println {
 }
 thread_local! { static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) }; }
 
-#[path = "../../nanami/servers/core-services/driver-manager/src/arch/x86_64/acpi.rs"]
+#[path = "../../nanami/servers/libs/nanami-client/src/firmware.rs"]
 mod acpi;
 #[path = "../../spencer/a9nloader-rs/src/loader/memory/map.rs"]
 mod map;
@@ -187,6 +187,61 @@ fn bad_checksum_still_fails_closed() {
     install(MemoryType::ACPI_NON_VOLATILE, HPET);
     FIRMWARE.with(|firmware| firmware.borrow_mut().pages.get_mut(&RSDP).unwrap()[8] ^= 1);
     assert_eq!(acpi::find_hpet_mmio_base(RSDP), Err(RequestError::Protocol));
+}
+
+fn install_mcfg(regions: &[(u64, u16, u8, u8)]) {
+    let kind = MemoryType::ACPI_NON_VOLATILE;
+    install(kind, HPET);
+    let mut table = sdt(b"MCFG", 44 + regions.len() * 16);
+    for (index, &(physical, segment, first, last)) in regions.iter().enumerate() {
+        let offset = 44 + index * 16;
+        table[offset..offset + 8].copy_from_slice(&physical.to_le_bytes());
+        table[offset + 8..offset + 10].copy_from_slice(&segment.to_le_bytes());
+        table[offset + 10] = first;
+        table[offset + 11] = last;
+    }
+    checksum(&mut table, 9);
+    write(HPET, &table, kind);
+}
+
+#[test]
+fn mcfg_nonzero_bus_ranges_still_use_bus_zero_relative_bases() {
+    install_mcfg(&[(0xe0000000, 3, 0x40, 0x4f)]);
+    let regions = acpi::find_pci_ecam(RSDP).unwrap();
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].address(3, 0x42, 5, 2), Some(0xe422a000));
+    assert_eq!(regions[0].address(0, 0x42, 5, 2), None);
+    assert_eq!(regions[0].address(3, 0x3f, 5, 2), None);
+    assert_eq!(regions[0].address(3, 0x42, 32, 0), None);
+}
+
+#[test]
+fn mcfg_rejects_overlapping_bus_ranges_unaligned_bases_and_bad_checksum() {
+    for regions in [
+        vec![(0xe0000000, 0, 0, 15), (0xf0000000, 0, 15, 31)],
+        vec![(0xe0000001, 0, 0, 15)],
+        vec![(0xe0000000, 0, 16, 15)],
+    ] {
+        install_mcfg(&regions);
+        assert_eq!(acpi::find_pci_ecam(RSDP), Err(RequestError::Protocol));
+    }
+    install_mcfg(&[(0xe0000000, 0, 0, 15)]);
+    let corrupt = HPET + 9;
+    FIRMWARE.with(|firmware| {
+        firmware
+            .borrow_mut()
+            .pages
+            .get_mut(&(corrupt & !(PAGE - 1)))
+            .unwrap()[corrupt % PAGE] ^= 1
+    });
+    assert_eq!(acpi::find_pci_ecam(RSDP), Err(RequestError::Protocol));
+}
+
+#[test]
+fn absent_mcfg_is_a_valid_legacy_pci_platform() {
+    install(MemoryType::ACPI_NON_VOLATILE, HPET);
+    assert_eq!(acpi::find_pci_ecam(RSDP), Ok(Vec::new()));
+    assert_eq!(acpi::find_pci_ecam(0), Ok(Vec::new()));
 }
 
 #[test]

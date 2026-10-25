@@ -62,6 +62,7 @@ pub struct Framebuffer {
     vaddr: Word,
     bytes: Word,
     screen: ScreenInfo,
+    vblank_flip: bool,
 }
 
 impl Framebuffer {
@@ -84,7 +85,17 @@ impl Framebuffer {
             vaddr,
             bytes,
             screen,
+            vblank_flip: false,
         })
+    }
+
+    pub fn with_vblank_flip(mut self, enabled: bool) -> Self {
+        self.vblank_flip = enabled;
+        self
+    }
+
+    pub fn vblank_flip(&self) -> bool {
+        self.vblank_flip
     }
 
     pub fn screen(&self) -> ScreenInfo {

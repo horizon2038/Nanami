@@ -4,85 +4,45 @@ use super::*;
 #[path = "pci_command.rs"]
 mod pci_command;
 
-const PCI_STATUS_CAP_LIST: u16 = 1 << 4;
-const PCI_CAP_ID_MSI: u8 = 0x05;
-const PCI_CAP_ID_MSIX: u8 = 0x11;
-const PCI_MSI_CONTROL_ENABLE: u16 = 1 << 0;
-const PCI_MSIX_CONTROL_MASKALL: u16 = 1 << 14;
-const PCI_MSIX_CONTROL_ENABLE: u16 = 1 << 15;
-
-fn pci_cfg_addr(bus: u8, dev: u8, func: u8, offset: u8) -> u32 {
-    0x8000_0000u32
-        | ((bus as u32) << 16)
-        | ((dev as u32) << 11)
-        | ((func as u32) << 8)
-        | ((offset as u32) & 0xfc)
+fn pci_cfg_read32(port: Word, bus: u8, dev: u8, func: u8, offset: u8) -> Result<u32, RequestError> {
+    nanami_client::pci::read(
+        port,
+        nanami_client::pci::Address::new(bus, dev, func),
+        offset as Word,
+        4,
+    )
 }
-
-fn pci_cfg_read32(
-    io_desc: Word,
-    bus: u8,
-    dev: u8,
-    func: u8,
-    offset: u8,
-) -> Result<u32, RequestError> {
-    let addr = pci_cfg_addr(bus, dev, func, offset);
-    nanami_runtime::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
-    let data = nanami_runtime::io::io_read(io_desc, PCI_CFG_DATA_PORT, 4)? as u32;
-    Ok(data)
+fn pci_cfg_read16(port: Word, bus: u8, dev: u8, func: u8, offset: u8) -> Result<u16, RequestError> {
+    Ok(nanami_client::pci::read(
+        port,
+        nanami_client::pci::Address::new(bus, dev, func),
+        offset as Word,
+        2,
+    )? as u16)
 }
-
-fn pci_cfg_read16(
-    io_desc: Word,
-    bus: u8,
-    dev: u8,
-    func: u8,
-    offset: u8,
-) -> Result<u16, RequestError> {
-    let value = pci_cfg_read32(io_desc, bus, dev, func, offset)?;
-    let shift = ((offset & 0x2) * 8) as u32;
-    Ok(((value >> shift) & 0xffff) as u16)
+fn pci_cfg_read8(port: Word, bus: u8, dev: u8, func: u8, offset: u8) -> Result<u8, RequestError> {
+    Ok(nanami_client::pci::read(
+        port,
+        nanami_client::pci::Address::new(bus, dev, func),
+        offset as Word,
+        1,
+    )? as u8)
 }
-
-fn pci_cfg_read8(
-    io_desc: Word,
-    bus: u8,
-    dev: u8,
-    func: u8,
-    offset: u8,
-) -> Result<u8, RequestError> {
-    let value = pci_cfg_read32(io_desc, bus, dev, func, offset)?;
-    let shift = ((offset & 0x3) * 8) as u32;
-    Ok(((value >> shift) & 0xff) as u8)
-}
-
-fn pci_cfg_write32(
-    io_desc: Word,
-    bus: u8,
-    dev: u8,
-    func: u8,
-    offset: u8,
-    value: u32,
-) -> Result<(), RequestError> {
-    let addr = pci_cfg_addr(bus, dev, func, offset);
-    nanami_runtime::io::io_write(io_desc, PCI_CFG_ADDR_PORT, 4, addr as Word)?;
-    nanami_runtime::io::io_write(io_desc, PCI_CFG_DATA_PORT, 4, value as Word)
-}
-
 fn pci_cfg_write16(
-    io_desc: Word,
+    port: Word,
     bus: u8,
     dev: u8,
     func: u8,
     offset: u8,
     value: u16,
 ) -> Result<(), RequestError> {
-    let aligned = offset & 0xfc;
-    let old = pci_cfg_read32(io_desc, bus, dev, func, aligned)?;
-    let shift = ((offset & 0x2) * 8) as u32;
-    let mask = !(0xffffu32 << shift);
-    let next = (old & mask) | ((value as u32) << shift);
-    pci_cfg_write32(io_desc, bus, dev, func, aligned, next)
+    nanami_client::pci::write(
+        port,
+        nanami_client::pci::Address::new(bus, dev, func),
+        offset as Word,
+        2,
+        value as u32,
+    )
 }
 
 pub(crate) fn configure_pci_command(
@@ -138,66 +98,13 @@ pub(crate) fn configure_pci_command(
 }
 
 pub(crate) fn disable_pci_msi_capabilities(
-    io_desc: Word,
+    port: Word,
     found: VirtioPciDevice,
 ) -> Result<(), RequestError> {
-    let status = pci_cfg_read16(
-        io_desc,
-        found.bus,
-        found.dev,
-        found.func,
-        PCI_CFG_STATUS_OFFSET,
-    )?;
-    if (status & PCI_STATUS_CAP_LIST) == 0 {
-        nanami_runtime::print!("[virtio-blk] pci caps: none\n");
-        return Ok(());
-    }
-
-    let mut cap = pci_cfg_read8(
-        io_desc,
-        found.bus,
-        found.dev,
-        found.func,
-        PCI_CFG_CAP_PTR_OFFSET,
-    )? & 0xfc;
-    let mut guard = 0usize;
-
-    while cap >= 0x40 && guard < 48 {
-        guard += 1;
-        let cap_id = pci_cfg_read8(io_desc, found.bus, found.dev, found.func, cap)?;
-        let cap_next = pci_cfg_read8(io_desc, found.bus, found.dev, found.func, cap + 1)? & 0xfc;
-
-        if cap_id == PCI_CAP_ID_MSI {
-            let ctrl = pci_cfg_read16(io_desc, found.bus, found.dev, found.func, cap + 2)?;
-            let next = ctrl & !PCI_MSI_CONTROL_ENABLE;
-            if next != ctrl {
-                pci_cfg_write16(io_desc, found.bus, found.dev, found.func, cap + 2, next)?;
-            }
-            nanami_runtime::print!("[virtio-blk] pci msi ctrl=");
-            nanami_runtime::print!("{:#x}", ctrl);
-            nanami_runtime::print!(" -> ");
-            nanami_runtime::print!("{:#x}", next);
-            nanami_runtime::print!("\n");
-        } else if cap_id == PCI_CAP_ID_MSIX {
-            let ctrl = pci_cfg_read16(io_desc, found.bus, found.dev, found.func, cap + 2)?;
-            let next = (ctrl & !PCI_MSIX_CONTROL_ENABLE) & !PCI_MSIX_CONTROL_MASKALL;
-            if next != ctrl {
-                pci_cfg_write16(io_desc, found.bus, found.dev, found.func, cap + 2, next)?;
-            }
-            nanami_runtime::print!("[virtio-blk] pci msix ctrl=");
-            nanami_runtime::print!("{:#x}", ctrl);
-            nanami_runtime::print!(" -> ");
-            nanami_runtime::print!("{:#x}", next);
-            nanami_runtime::print!("\n");
-        }
-
-        if cap_next == 0 || cap_next == cap {
-            break;
-        }
-        cap = cap_next;
-    }
-
-    Ok(())
+    nanami_client::pci::disable_message_interrupts(
+        port,
+        nanami_client::pci::Address::new(found.bus, found.dev, found.func),
+    )
 }
 
 fn probe_virtio_at(
@@ -288,46 +195,20 @@ pub(crate) fn resolve_irq_number(
     Ok(line_irq)
 }
 
-pub(crate) fn scan_virtio_blk(io_desc: Word) -> Result<VirtioPciDevice, RequestError> {
-    let known = [
-        (0u8, 4u8, 0u8),
-        (0u8, 5u8, 0u8),
-        (0u8, 3u8, 0u8),
-        (0u8, 2u8, 0u8),
-    ];
-    let mut i = 0usize;
-    while i < known.len() {
-        let (b, d, f) = known[i];
-        if let Some(v) = probe_virtio_at(io_desc, b, d, f)? {
-            return Ok(v);
-        }
-        i += 1;
-    }
-
-    let bus = 0u8;
-    let mut dev = 0u8;
-    while dev < 32 {
-        let mut func = 0u8;
-        while func < 8 {
-            if let Some(v) = probe_virtio_at(io_desc, bus, dev, func)? {
-                return Ok(v);
+pub(crate) fn scan_virtio_blk(port: Word) -> Result<VirtioPciDevice, RequestError> {
+    let mut index = 0;
+    while let Some(device) = nanami_client::pci::enumerate(port, index)? {
+        if device.address.segment == 0 && device.vendor_id == VIRTIO_VENDOR_ID {
+            if let Some(found) = probe_virtio_at(
+                port,
+                device.address.bus,
+                device.address.device,
+                device.address.function,
+            )? {
+                return Ok(found);
             }
-
-            if func == 0 {
-                let vendor_id = pci_cfg_read16(io_desc, bus, dev, func, 0x00)?;
-                if vendor_id == 0xffff {
-                    break;
-                }
-                let header_type = pci_cfg_read8(io_desc, bus, dev, func, 0x0e)?;
-                if (header_type & 0x80) == 0 {
-                    break;
-                }
-            }
-
-            func += 1;
         }
-        dev += 1;
+        index += 1;
     }
-
     Err(RequestError::Unsupported)
 }

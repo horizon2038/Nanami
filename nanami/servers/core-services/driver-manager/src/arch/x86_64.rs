@@ -1,168 +1,105 @@
-use nanami_runtime::{RequestError, Word};
-
 use super::super::TimerSelection;
-
-#[path = "x86_64/acpi.rs"]
-mod acpi;
+use nanami_client::{firmware as acpi, pci};
+use nanami_runtime::{RequestError, Word};
 #[path = "x86_64/usb.rs"]
 mod usb;
 pub use usb::prepare as prepare_usb_controller;
+const SLOT_PCI_SERVICE: Word = 16;
 
-const SLOT_PCI_CONFIG: Word = 16;
-const PCI_CONFIG_ADDRESS: Word = 0x0cf8;
-const PCI_CONFIG_DATA: Word = 0x0cfc;
-
-const PCI_CLASS_AHCI: u32 = 0x010601;
-const PCI_CLASS_XHCI: u32 = 0x0c0330;
-
-fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
-    0x8000_0000
-        | ((bus as u32) << 16)
-        | ((device as u32) << 11)
-        | ((function as u32) << 8)
-        | (u32::from(offset) & 0xfc)
+pub fn initialize() -> Result<(), RequestError> {
+    let pid = nanami_runtime::request_process_spawn("./bin/pci-server")?;
+    nanami_runtime::println!("[driver-manager] spawned ./bin/pci-server pid={}", pid);
+    pci::connect(SLOT_PCI_SERVICE)?;
+    Ok(())
 }
 
-fn read_config32(
-    descriptor: Word,
-    bus: u8,
-    device: u8,
-    function: u8,
-    offset: u8,
-) -> Result<u32, RequestError> {
-    nanami_runtime::io::io_write(
-        descriptor,
-        PCI_CONFIG_ADDRESS,
-        4,
-        config_address(bus, device, function, offset) as Word,
-    )?;
-    Ok(nanami_runtime::io::io_read(descriptor, PCI_CONFIG_DATA, 4)? as u32)
-}
-
-fn find_pci_class(
-    descriptor: Word,
-    wanted: u32,
-    mut index: usize,
-) -> Result<Option<Word>, RequestError> {
-    let mut pending_buses = [0u8; 256];
-    let mut seen_buses = [false; 256];
-    let mut head = 0usize;
-    let mut tail = 1usize;
-    seen_buses[0] = true;
-    while head < tail {
-        let bus = pending_buses[head];
-        head += 1;
-        let mut device = 0u8;
-        while device < 32 {
-            let function0_id = read_config32(descriptor, bus, device, 0, 0x00)?;
-            if function0_id as u16 == 0xffff {
-                device += 1;
-                continue;
+fn find_pci_class(wanted: u32, mut ordinal: usize) -> Result<Option<Word>, RequestError> {
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_SERVICE);
+    let mut index = 0;
+    while let Some(device) = pci::enumerate(port, index)? {
+        if device.class == wanted {
+            if ordinal == 0 {
+                return Ok(Some(device.address.packed()));
             }
-            let header = read_config32(descriptor, bus, device, 0, 0x0c)?;
-            let functions = if ((header >> 16) as u8 & 0x80) != 0 {
-                8
-            } else {
-                1
-            };
-            let mut function = 0u8;
-            while function < functions {
-                let id = if function == 0 {
-                    function0_id
-                } else {
-                    read_config32(descriptor, bus, device, function, 0x00)?
-                };
-                if (id as u16) != 0xffff {
-                    let class = read_config32(descriptor, bus, device, function, 0x08)?;
-                    if class >> 8 == wanted {
-                        if index == 0 {
-                            nanami_runtime::println!(
-                                "[driver-manager] PCI class={:06x} at {:02x}:{:02x}.{}",
-                                wanted,
-                                bus,
-                                device,
-                                function
-                            );
-                            return Ok(Some(
-                                (bus as Word) << 16 | (device as Word) << 8 | function as Word,
-                            ));
-                        }
-                        index -= 1;
-                    }
-                    if (class >> 24) as u8 == 0x06 && (class >> 16) as u8 == 0x04 {
-                        let buses = read_config32(descriptor, bus, device, function, 0x18)?;
-                        let secondary = ((buses >> 8) & 0xff) as usize;
-                        if secondary != 0 && !seen_buses[secondary] {
-                            seen_buses[secondary] = true;
-                            pending_buses[tail] = secondary as u8;
-                            tail += 1;
-                        }
-                    }
-                }
-                function += 1;
-            }
-            device += 1;
+            ordinal -= 1;
         }
+        index += 1;
     }
     Ok(None)
 }
 
 pub fn select_storage_driver() -> Result<Option<&'static str>, RequestError> {
-    nanami_runtime::request_io_port(0x0cf8, 0x0cff, SLOT_PCI_CONFIG)?;
-    let descriptor = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
-    let storage_image = if find_pci_class(descriptor, PCI_CLASS_AHCI, 0)?.is_some() {
-        "./bin/ahci-server"
-    } else if find_pci_class(descriptor, 0x010000, 0)?.is_some() {
-        nanami_runtime::print!(
-            "[driver-manager] no PCI AHCI controller; selecting virtio-blk fallback\n"
-        );
-        "./bin/virtio-blk-server"
-    } else {
-        nanami_runtime::print!("[driver-manager] no PCI storage controller; probing USB storage\n");
-        return Ok(None);
-    };
-    Ok(Some(storage_image))
+    if find_pci_class(0x010601, 0)?.is_some() {
+        return Ok(Some("./bin/ahci-server"));
+    }
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_SERVICE);
+    let mut index = 0;
+    while let Some(device) = pci::enumerate(port, index)? {
+        if device.vendor_id == 0x1af4 && matches!(device.device_id, 0x1001 | 0x1042) {
+            return Ok(Some("./bin/virtio-blk-server"));
+        }
+        index += 1;
+    }
+    nanami_runtime::println!("[driver-manager] no PCI storage controller; probing USB storage");
+    Ok(None)
 }
 
 pub fn usb_controller(index: usize) -> Result<Option<Word>, RequestError> {
-    let descriptor = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
-    find_pci_class(descriptor, PCI_CLASS_XHCI, index)
+    find_pci_class(0x0c0330, index)
+}
+
+/// Start optional input/network drivers and return the native display candidate.
+/// The manager owns display startup and the common framebuffer fallback.
+pub fn start_peripherals() -> Result<Option<&'static str>, RequestError> {
+    super::super::start_optional("./bin/ps2-server");
+    let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_SERVICE);
+    let mut index = 0;
+    let mut intel_graphics = false;
+    let mut network_started = false;
+    while let Some(device) = pci::enumerate(port, index)? {
+        intel_graphics |= nanami_client::uapi::intel_graphics::generation(
+            device.vendor_id,
+            device.device_id,
+            device.class,
+        )
+        .is_some();
+        if !network_started
+            && device.vendor_id == 0x1af4
+            && matches!(device.device_id, 0x1000 | 0x1041)
+        {
+            super::super::start_optional("./bin/virtio-net");
+            network_started = true;
+        }
+        index += 1;
+    }
+    if intel_graphics {
+        return Ok(Some("./bin/intel-graphics-server"));
+    }
+    Ok(None)
 }
 
 pub fn select_timer_driver() -> Result<TimerSelection, RequestError> {
-    let (rsdp, _) =
-        nanami_runtime::request_driver_platform_info(nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS)?;
+    let (rsdp, _) = nanami_runtime::request_driver_platform_info(
+        nanami_runtime::DRIVER_PLATFORM_INFO_RSDP_ADDRESS,
+    )?;
     let hpet_mmio_base = match acpi::find_hpet_mmio_base(rsdp) {
-        Ok(Some(address)) => {
-            nanami_runtime::println!(
-                "[driver-manager] ACPI HPET at {:#x} (RSDP {:#x})",
-                address,
-                rsdp
-            );
-            address
-        }
-        Ok(None) => {
-            nanami_runtime::print!("[driver-manager] ACPI HPET not found; selecting PIT fallback\n");
-            0
-        }
+        Ok(Some(address)) => address,
+        Ok(None) => 0,
         Err(error) => {
             nanami_runtime::println!(
-                "[driver-manager] ACPI scan failed (RSDP {:#x}): {}; selecting PIT fallback",
-                rsdp,
+                "[driver-manager] ACPI scan failed: {}; selecting PIT fallback",
                 error
             );
             0
         }
     };
-
-    let timer_image = if hpet_mmio_base != 0 {
+    let image = if hpet_mmio_base != 0 {
         "./bin/hpet-server"
     } else {
         "./bin/timer-server"
     };
-
     Ok(TimerSelection {
-        image: Some(timer_image),
+        image: Some(image),
         hpet_mmio_base,
     })
 }

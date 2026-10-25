@@ -1,6 +1,6 @@
 //! ACPI resolves firmware routing; the manager owns device assignment and policy.
-use nanami_runtime::{ipc::ServiceRequest, RequestError, Word};
 use nanami_client::device::*;
+use nanami_runtime::{ipc::ServiceRequest, RequestError, Word};
 
 const ACPI_NOTIFICATION_SLOT: Word = 22;
 pub const MAX_CONTROLLERS: usize = 4;
@@ -52,9 +52,9 @@ impl Routes {
                 )?;
                 self.notification_ready = true;
             }
-            nanami_runtime::ipc::notification_notify(nanami_runtime::ipc::process_slot_descriptor(
-                ACPI_NOTIFICATION_SLOT,
-            ))?;
+            nanami_runtime::ipc::notification_notify(
+                nanami_runtime::ipc::process_slot_descriptor(ACPI_NOTIFICATION_SLOT),
+            )?;
             self.started = true;
         }
         Ok(false)

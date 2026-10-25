@@ -3,8 +3,8 @@ use nanami_runtime::Word;
 
 use crate::background::BackgroundCache;
 use crate::constants::{
-    CURSOR_WIDTH, CURSOR_HEIGHT,
-    MAX_WINDOWS, MENU_BAR_HEIGHT, SLOT_WINDOW_INPUT_NOTIFICATION_BASE, TITLE_BAR_HEIGHT,
+    CURSOR_HEIGHT, CURSOR_WIDTH, MAX_WINDOWS, MENU_BAR_HEIGHT, SLOT_WINDOW_INPUT_NOTIFICATION_BASE,
+    TITLE_BAR_HEIGHT,
 };
 use crate::font::TextRenderer;
 use crate::framebuffer::{clamp_i32, Framebuffer, Rect, ScreenInfo};
@@ -236,8 +236,18 @@ impl Compositor {
         }
 
         let composited = self.profile.now();
+        let mut present_count = count;
+        if self.framebuffer.vblank_flip() {
+            // Compose sparse rectangles independently, then flip once. The
+            // untouched gaps are already current in our persistent RAM image.
+            // Presenting each rectangle would wait for N vblanks per frame.
+            for index in 1..count {
+                self.dirty_rects[0] = union_rect(self.dirty_rects[0], self.dirty_rects[index]);
+            }
+            present_count = 1;
+        }
         i = 0;
-        while i < count {
+        while i < present_count {
             if let Err(error) = self.framebuffer.present(self.dirty_rects[i]) {
                 nanami_runtime::println!("[honoka] display present failed: {}", error);
             }

@@ -18,15 +18,15 @@ mod logging {
     pub fn log_request_error(_: &str, _: crate::RequestError) {}
 }
 
-#[path = "../../../nanami/servers/apps/ps2-server/src/app/constants.rs"]
+#[path = "../../../nanami/servers/core-services/ps2-server/src/app/constants.rs"]
 mod constants;
-#[path = "../../../nanami/servers/apps/ps2-server/src/app/controller.rs"]
+#[path = "../../../nanami/servers/core-services/ps2-server/src/app/controller.rs"]
 mod controller;
-#[path = "../../../nanami/servers/apps/ps2-server/src/app/init.rs"]
+#[path = "../../../nanami/servers/core-services/ps2-server/src/app/init.rs"]
 mod init;
-#[path = "../../../nanami/servers/apps/ps2-server/src/app/state.rs"]
+#[path = "../../../nanami/servers/core-services/ps2-server/src/app/state.rs"]
 mod state;
-#[path = "../../../nanami/servers/apps/ps2-server/src/app/wait.rs"]
+#[path = "../../../nanami/servers/core-services/ps2-server/src/app/wait.rs"]
 mod wait;
 
 use mock::{Mode, HW};

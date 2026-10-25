@@ -499,18 +499,19 @@ impl Shell {
             return;
         }
         if bytes_eq(&self.editor.bytes[..self.editor.len], b"help") {
-            self.push_line_bytes(b"commands: help, services, netinfo, fstest, posixtest");
+            self.push_line_bytes(b"commands: help, services, net-info, fstest, posixtest");
             self.push_line_bytes(b"          ls, cat, rm, mkdir, cd");
             self.push_line_bytes(b"          shutdown (x86_64 ACPI S5)");
             self.push_line_bytes(b"          path [PATH], external apps via PATH");
             self.push_line_bytes(b"          nanami-info memory|process, performance-monitor");
+            self.push_line_bytes(b"          pci-info [-n|-nn] [-v]");
             self.push_line_bytes(b"foreground app: F12 terminate");
             self.push_line_bytes(b"          nanami-control os.log enable|disable");
             self.push_line_bytes(b"          clear, echo, about");
         } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"services") {
             self.show_services();
-        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"netinfo") {
-            self.show_netinfo();
+        } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"net-info") {
+            self.show_net_info();
         } else if bytes_eq(&self.editor.bytes[..self.editor.len], b"fstest") {
             self.run_fs_test();
             self.files.invalidate_vfs_session();
@@ -657,20 +658,20 @@ impl Shell {
         }
     }
 
-    fn show_netinfo(&mut self) {
+    fn show_net_info(&mut self) {
         let _ = nanami_client::registry::connect_network_service(SLOT_NETWORK_SERVICE);
         let net_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NETWORK_SERVICE);
         let (ip, gateway, dns) = match nanami_client::net::net_service_ipv4_config(net_port) {
             Ok(v) => v,
             Err(_) => {
-                self.push_line_bytes(b"netinfo: network-service unavailable");
+                self.push_line_bytes(b"net-info: network-service unavailable");
                 return;
             }
         };
         let mac = match nanami_client::net::net_service_mac_address(net_port) {
             Ok(v) => v,
             Err(_) => {
-                self.push_line_bytes(b"netinfo: mac query failed");
+                self.push_line_bytes(b"net-info: mac query failed");
                 return;
             }
         };

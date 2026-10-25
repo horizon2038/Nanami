@@ -1,12 +1,12 @@
 //! Hardware access for the single-threaded userspace AML interpreter.
-use acpi::{
-    aml::AmlError, platform::PciConfigRegions, Handle, Handler, PciAddress, PhysicalMapping,
-};
+use acpi::{aml::AmlError, Handle, Handler, PciAddress, PhysicalMapping};
 use alloc::{rc::Rc, vec::Vec};
 use core::{cell::RefCell, mem, ptr::NonNull};
 use nanami_runtime::{RequestError, Word};
 
 const IO_SLOT: Word = 16;
+const HIGH_IO_SLOT: Word = 17;
+const PCI_SLOT: Word = 23;
 const TIMER_SLOT: Word = 22;
 const PAGE_SIZE: usize = 4096;
 
@@ -18,7 +18,6 @@ struct Mapping {
 
 struct State {
     mappings: Vec<Mapping>,
-    pci: Option<PciConfigRegions>,
     mutexes: Vec<usize>,
 }
 
@@ -27,17 +26,14 @@ pub struct Host(Rc<RefCell<State>>);
 
 impl Host {
     pub fn new() -> Result<Self, RequestError> {
-        nanami_client::registry::connect_timer_service(TIMER_SLOT)?;
-        nanami_runtime::request_io_port(0, 0xffff, IO_SLOT)?;
+        nanami_client::registry::connect_boot_service("timer-service", TIMER_SLOT)?;
+        nanami_runtime::request_io_port(0, 0xcf7, IO_SLOT)?;
+        nanami_runtime::request_io_port(0xd00, 0xffff, HIGH_IO_SLOT)?;
+        nanami_client::pci::connect(PCI_SLOT)?;
         Ok(Self(Rc::new(RefCell::new(State {
             mappings: Vec::new(),
-            pci: None,
             mutexes: Vec::new(),
         }))))
-    }
-
-    pub fn set_pci(&self, regions: PciConfigRegions) {
-        self.0.borrow_mut().pci = Some(regions);
     }
 
     fn map(&self, address: usize, size: usize) -> usize {
@@ -74,7 +70,7 @@ impl Host {
 
     fn io_read(&self, port: u16, width: usize) -> usize {
         nanami_runtime::io::io_read(
-            nanami_runtime::ipc::process_slot_descriptor(IO_SLOT),
+            nanami_runtime::ipc::process_slot_descriptor(self.io_slot(port)),
             port as Word,
             width,
         )
@@ -83,7 +79,7 @@ impl Host {
 
     fn io_write(&self, port: u16, width: usize, value: usize) {
         nanami_runtime::io::io_write(
-            nanami_runtime::ipc::process_slot_descriptor(IO_SLOT),
+            nanami_runtime::ipc::process_slot_descriptor(self.io_slot(port)),
             port as Word,
             width,
             value,
@@ -91,28 +87,15 @@ impl Host {
         .expect("ACPI I/O write failed");
     }
 
-    fn pci_address(&self, address: PciAddress, offset: u16, width: usize) -> usize {
+    fn io_slot(&self, port: u16) -> Word {
+        if port < 0xcf8 {
+            return IO_SLOT;
+        }
         assert!(
-            offset as usize + width <= 4096,
-            "ACPI PCI offset out of range"
+            port >= 0xd00,
+            "PCI configuration ports belong to pci-server"
         );
-        // ECAM avoids the SMP race inherent in shared CF8/CFC address/data ports.
-        let state = self.0.borrow();
-        let physical = state
-            .pci
-            .as_ref()
-            .and_then(|regions| {
-                regions.physical_address(
-                    address.segment(),
-                    address.bus(),
-                    address.device(),
-                    address.function(),
-                )
-            })
-            .expect("AML PCI access requires an MCFG region");
-        (physical as usize)
-            .checked_add(offset as usize)
-            .expect("ACPI PCI address overflow")
+        HIGH_IO_SLOT
     }
 }
 
@@ -139,15 +122,37 @@ macro_rules! io_access {
 }
 
 macro_rules! pci_access {
-    ($read:ident, $write:ident, $ty:ty, $mem_read:ident, $mem_write:ident) => {
+    ($read:ident, $write:ident, $ty:ty) => {
         fn $read(&self, address: PciAddress, offset: u16) -> $ty {
-            self.$mem_read(self.pci_address(address, offset, mem::size_of::<$ty>()))
+            let address = nanami_client::pci::Address {
+                segment: address.segment(),
+                bus: address.bus(),
+                device: address.device(),
+                function: address.function(),
+            };
+            nanami_client::pci::read(
+                nanami_runtime::ipc::process_slot_descriptor(PCI_SLOT),
+                address,
+                offset as Word,
+                mem::size_of::<$ty>(),
+            )
+            .expect("ACPI PCI read failed") as $ty
         }
         fn $write(&self, address: PciAddress, offset: u16, value: $ty) {
-            self.$mem_write(
-                self.pci_address(address, offset, mem::size_of::<$ty>()),
-                value,
-            );
+            let address = nanami_client::pci::Address {
+                segment: address.segment(),
+                bus: address.bus(),
+                device: address.device(),
+                function: address.function(),
+            };
+            nanami_client::pci::write(
+                nanami_runtime::ipc::process_slot_descriptor(PCI_SLOT),
+                address,
+                offset as Word,
+                mem::size_of::<$ty>(),
+                value as u32,
+            )
+            .expect("ACPI PCI write failed");
         }
     };
 }
@@ -184,9 +189,9 @@ impl Handler for Host {
     io_access!(read_io_u8, write_io_u8, u8);
     io_access!(read_io_u16, write_io_u16, u16);
     io_access!(read_io_u32, write_io_u32, u32);
-    pci_access!(read_pci_u8, write_pci_u8, u8, read_u8, write_u8);
-    pci_access!(read_pci_u16, write_pci_u16, u16, read_u16, write_u16);
-    pci_access!(read_pci_u32, write_pci_u32, u32, read_u32, write_u32);
+    pci_access!(read_pci_u8, write_pci_u8, u8);
+    pci_access!(read_pci_u16, write_pci_u16, u16);
+    pci_access!(read_pci_u32, write_pci_u32, u32);
 
     fn nanos_since_boot(&self) -> u64 {
         let (ticks, hz) = nanami_client::timer::timer_service_monotonic_ticks(

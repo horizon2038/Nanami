@@ -1,4 +1,6 @@
 pub use nanami_uapi::registry::*;
+mod startup;
+pub use startup::connect_boot_service;
 
 use nanami_runtime::{self, RequestError, Word};
 

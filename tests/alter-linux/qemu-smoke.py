@@ -13,6 +13,8 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
+parser.add_argument("--storage", choices=("ahci", "virtio", "usb"), default="ahci",
+                    help="root-disk transport for driver/PCI regression tests")
 parser.add_argument("--program", action="append", help="guest basename and optional arguments (repeatable)")
 parser.add_argument("--ctrl-c-after", type=float,
                     help="send real Ctrl-C this many seconds after each checked guest starts")
@@ -23,6 +25,10 @@ parser.add_argument("--visual-program",
 parser.add_argument("--nvim-editor", action="store_true",
                     help="edit/save/quit in untraced Neovim, then verify the file with BusyBox")
 parser.add_argument("--diagnostics", action="store_true", help="send explicit Alter traces to serial (-t -d)")
+parser.add_argument("--native-info", action="store_true",
+                    help="also capture pci-info, its numeric/verbose modes and net-info for visual inspection")
+parser.add_argument("--expect-framebuffer", action="store_true",
+                    help="require exactly one fb-server startup, published after initialization, with no active native display")
 parser.add_argument("--network", action="store_true", help="attach an isolated user-mode virtio NIC (no external network access)")
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
@@ -48,10 +54,17 @@ command = [
       if args.network or args.internet else ["-nic", "none"]),
     "-drive", f"if=pflash,format=raw,readonly=on,file={firmware / 'OVMF_CODE.fd'}",
     "-drive", f"if=pflash,format=raw,file={logs / 'OVMF_VARS.fd'}",
-    "-device", "ich9-ahci,id=ahci,addr=3",
     "-drive", f"if=none,id=disk,format=raw,snapshot=on,file={args.image.resolve()}",
-    "-device", "ide-hd,drive=disk,bus=ahci.0,bootindex=1", "--no-reboot", "--no-shutdown",
 ]
+if args.storage == "ahci":
+    command += ["-device", "ich9-ahci,id=ahci,addr=3",
+                "-device", "ide-hd,drive=disk,bus=ahci.0,bootindex=1"]
+elif args.storage == "virtio":
+    command += ["-device", "virtio-blk-pci,drive=disk,addr=3,disable-legacy=off,disable-modern=on,bootindex=1"]
+else:
+    command += ["-device", "qemu-xhci,id=xhci,addr=3",
+                "-device", "usb-storage,drive=disk,bus=xhci.0,bootindex=1"]
+command += ["--no-reboot", "--no-shutdown"]
 monitor = None
 with (logs / "qemu.log").open("w") as diagnostics:
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=diagnostics)
@@ -74,6 +87,21 @@ with (logs / "qemu.log").open("w") as diagnostics:
         # Font initialization precedes creating/focusing the shell window.
         time.sleep(2)
         monitor = process.stdin
+        if args.expect_framebuffer:
+            text = serial.read_text(errors="replace")
+            startups = re.findall(r"spawned \./bin/fb-server pid=\d+", text)
+            # SMP serial messages can interleave inside the prefix of the
+            # multi-part mapping log. The cache marker is emitted only after
+            # mapping, validation and the initial framebuffer clear complete.
+            initialized = re.search(r"unchanged-pixel cache bytes=", text)
+            published = re.search(r"\[\s*fb-server\] service registered: display_service", text)
+            if len(startups) != 1 or initialized is None or published is None:
+                raise RuntimeError("Framebuffer fallback was not started/published exactly once")
+            if initialized.start() >= published.start():
+                raise RuntimeError("Framebuffer service was published before initialization")
+            if re.search(r"\[\s*driver-manager\] (?:Intel )?native display ready", text):
+                raise RuntimeError("Native and framebuffer display backends are both active")
+            print(f"PASS framebuffer fallback (smp={args.smp})", flush=True)
 
         def send(command):
             monitor.write(command.encode() + b"\n")
@@ -139,6 +167,14 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 raise RuntimeError(f"{program} exited with status {exited[1]}")
             print(f"PASS {program} (smp={args.smp})", flush=True)
             time.sleep(1)
+        if args.native_info:
+            for label, command in [("pci", "pci-info"), ("pci-numeric", "pci-info -n"),
+                                   ("pci-verbose", "pci-info -nn -v"), ("network", "net-info")]:
+                type_command("clear")
+                type_command(command)
+                time.sleep(2)
+                send(f"screendump {logs / f'native-{label}.png'} -f png")
+            print("Captured native info commands; inspect native-*.png", flush=True)
         if args.nvim_editor:
             start = len(serial.read_text(errors="replace"))
             flags = "-t -d " if args.diagnostics else ""
@@ -184,7 +220,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
             print(f"Captured untraced {args.visual_program}; inspect visual-*.png", flush=True)
         if args.ui_stress:
             type_command("clear")
-            # Each help adds eight rows: exceed the shell's 128-row capacity.
+            # Repeated help output exceeds the shell's 128-row capacity.
             for _ in range(18):
                 type_command("help")
             type_command("echo scroll-bottom-marker")

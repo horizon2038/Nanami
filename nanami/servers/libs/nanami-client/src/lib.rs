@@ -3,9 +3,12 @@
 pub mod block;
 pub mod device;
 pub mod exec;
+#[cfg(target_arch = "x86_64")]
+pub mod firmware;
 pub mod gfx;
 pub mod input;
 pub mod net;
+pub mod pci;
 pub mod posix;
 pub mod power;
 pub mod registry;

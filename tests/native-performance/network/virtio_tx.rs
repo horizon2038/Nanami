@@ -5,10 +5,10 @@ use std::{
     sync::atomic::{fence, Ordering},
 };
 
-#[path = "../../../nanami/servers/apps/virtio-net/src/app/virtqueue.rs"]
+#[path = "../../../nanami/servers/core-services/virtio-net/src/app/virtqueue.rs"]
 mod virtqueue;
 use virtqueue::*;
-#[path = "../../../nanami/servers/apps/virtio-net/src/app/tx_queue.rs"]
+#[path = "../../../nanami/servers/core-services/virtio-net/src/app/tx_queue.rs"]
 mod tx_queue;
 use tx_queue::{TxQueue, TX_BUFFER_COUNT};
 

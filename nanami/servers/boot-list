@@ -7,6 +7,11 @@
 # it from embedded initramfs before any filesystem service exists.
 # Architecture/platform drivers are selected by the privileged manager.
 @process ./bin/driver-manager priority=30 platform=1
+@process ./bin/pci-server priority=31 platform=1
+@process ./bin/fb-server priority=24
+@process ./bin/intel-graphics-server priority=24
+@process ./bin/ps2-server priority=28
+@process ./bin/virtio-net priority=23
 @process ./bin/hpet-server priority=30
 @process ./bin/timer-server priority=30
 # Firmware SMI_CMD access belongs on the boot processor.

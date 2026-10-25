@@ -9,8 +9,5 @@ alter-linux 21 /bin/alter-linux
 negoto-service 20 /bin/negoto serve
 alter-freebsd 21 /bin/alter-freebsd
 input-service 28 /bin/input-server
-ps2-service 28 /bin/ps2-server
-display-service 24 /bin/fb-server
 honoka-service 24 /bin/honoka
-net-device 23 /bin/virtio-net
 network-service 22 /bin/net-server

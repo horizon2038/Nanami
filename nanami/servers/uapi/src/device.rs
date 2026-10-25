@@ -19,6 +19,8 @@ pub const DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT: Word = 0xd007;
 /// Counter reads for the boot-selected USB driver; does not delegate timer IRQs
 /// or ownership of HPET configuration/comparators.
 pub const DEVICE_MANAGER_REQUEST_HPET_COUNTER_BASE: Word = 0xd008;
+/// Only the manager-selected graphics driver may report initial success/failure.
+pub const DEVICE_MANAGER_REQUEST_DISPLAY_PROBE: Word = 0xd009;
 
 pub const ACPI_ROUTE_NOTIFICATION: Word = 1;
 

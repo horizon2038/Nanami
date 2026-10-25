@@ -6,6 +6,7 @@ use nanami_runtime::{RequestError, Word};
 
 #[path = "arch.rs"]
 mod arch;
+mod display;
 mod storage;
 mod usb_irq;
 
@@ -26,6 +27,7 @@ struct DriverState {
     usb_controllers: [Option<nanami_client::device::UsbControllerResource>; 4],
     usb_count: usize,
     usb_routes: usb_irq::Routes,
+    display: display::Selection,
 }
 
 #[panic_handler]
@@ -41,8 +43,39 @@ fn spawn(image: &str) -> Result<Word, RequestError> {
     Ok(pid)
 }
 
+fn start_framebuffer() -> Result<(), RequestError> {
+    let (_, bytes) = nanami_runtime::request_initial_framebuffer_information(
+        nanami_runtime::FRAMEBUFFER_INFORMATION_REGION,
+    )?;
+    if bytes == 0 {
+        return Err(RequestError::Unsupported);
+    }
+    spawn("./bin/fb-server")?;
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn start_optional(image: &str) {
+    if let Err(error) = spawn(image) {
+        nanami_runtime::println!(
+            "[driver-manager] optional driver {} unavailable: {}",
+            image,
+            error
+        );
+    }
+}
+
 fn handle_request(request: ServiceRequest, state: &mut DriverState) -> (Word, Word, Word) {
     match request.code {
+        nanami_client::device::DEVICE_MANAGER_REQUEST_DISPLAY_PROBE => {
+            let status = match state.display.report(request.identifier, request.arg0) {
+                Ok(()) => nanami_runtime::OS_RESPONSE_OK,
+                Err(RequestError::InvalidArgument) => nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT,
+                Err(RequestError::Status(status)) => status,
+                Err(_) => nanami_runtime::OS_RESPONSE_FATAL,
+            };
+            (status, 0, 0)
+        }
         nanami_client::device::DEVICE_MANAGER_REQUEST_USB_PCI_ROUTE
         | nanami_client::device::DEVICE_MANAGER_REQUEST_USB_IRQ_REPORT => {
             state
@@ -146,7 +179,9 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         SERVICE_PORT_SLOT,
     )?;
 
-    // Finish PCI discovery before launching any driver that configures PCI.
+    // Configuration transactions are owned by a dedicated server, never by
+    // several drivers sharing the CF8/CFC address latch.
+    arch::initialize()?;
     let storage_image = arch::select_storage_driver()?;
     let selected_timer = arch::select_timer_driver()?;
     let mut state = DriverState {
@@ -159,6 +194,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         usb_controllers: [None; 4],
         usb_count: 0,
         usb_routes: usb_irq::Routes::default(),
+        display: display::Selection::default(),
     };
     for index in 0..state.usb_controllers.len() {
         let Some(address) = arch::usb_controller(index)? else {
@@ -214,6 +250,17 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             }
         }
     }
+    let display_driver = match arch::start_peripherals() {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            nanami_runtime::println!(
+                "[driver-manager] peripheral discovery failed: {}; selecting framebuffer",
+                error
+            );
+            None
+        }
+    };
+    state.display = display::Selection::start(display_driver);
     nanami_runtime::print!("[driver-manager] ready\n");
     let port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_PORT_SLOT);
     let mut reply = (nanami_runtime::OS_RESPONSE_OK, 0, 0);

@@ -42,6 +42,34 @@ USB root discovery and late-attachment regressions are documented in
 Cursor/drag damage and compositor RAM writes are documented in
 [Motion rendering](motion.md).
 
+`display-selection` exercises the manager's common native/fallback policy:
+unknown GPUs, native spawn failure, explicit probe rejection, caller validation,
+duplicate reports, fallback startup failure and absent boot framebuffer.
+Once native activation succeeds it cannot start a competing framebuffer writer.
+`tests/alter-linux/qemu-smoke.py --expect-framebuffer` checks a single fallback
+startup and publication after framebuffer initialization in a real guest.
+
+PCI inventory/BAR transaction checks are in `pci-server`; `usb-pci` exercises
+the shared PCI client and USB setup together. `pci-server` also resolves the
+published `pci-ids-rs` database and checks its name chunks through the production
+client, including unknown IDs and malformed replies. `pci-info` tests CLI
+formatting and buffered terminal output with partial writes/backpressure.
+`acpi` also checks MCFG parsing
+and ECAM address calculation. `intel-graphics` includes the production Gen9
+scanout logic with a host MMIO/DMA model, including damaged back-buffer repair,
+unsupported-mode refusal, GGTT allocation above the CPU aperture and timeout
+ownership. It also exercises real GMBUS/AUX transaction sequencing, bounded
+DEFER/NAK/busy handling, VBT/OpRegion parsing, EDID detailed timings and the
+production display-discovery client wire format. `honoka-motion` checks that
+native scanout receives one present per frame, with pixels matching sparse
+framebuffer-fallback composition. These are not Intel hardware
+tests. See [Device Drivers](../../nanami/docs/device-drivers.md) for the backend
+scope and QEMU limitations. `tests/alter-linux/qemu-smoke.py --storage
+ahci|virtio|usb` can regression-test each root-disk transport in a snapshot.
+Add `--native-info --network` to capture the three PCI listing modes and the
+renamed `net-info` builtin for visual inspection; this does not claim automated
+text recognition of those screenshots.
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

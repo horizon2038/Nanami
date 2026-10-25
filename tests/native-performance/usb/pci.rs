@@ -1,16 +1,22 @@
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
+extern crate alloc;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
+extern crate self as nanami_uapi;
 
 use std::cell::RefCell;
 pub type Word = usize;
-const SLOT_PCI_CONFIG: Word = 16;
+const SLOT_PCI_SERVICE: Word = 16;
+pub const OS_RESPONSE_OK: Word = 0;
+pub const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
+pub const OS_RESPONSE_INVALID_DESCRIPTOR: Word = 3;
 #[derive(Debug, PartialEq)]
 pub enum RequestError {
     InvalidArgument,
     Unsupported,
     Protocol,
     Transport,
+    Status(Word),
 }
 pub mod device {
     #[derive(Debug)]
@@ -25,6 +31,101 @@ macro_rules! println { ($($arg:tt)*) => { { let _ = format_args!($($arg)*); } };
 pub mod ipc {
     pub fn process_slot_descriptor(slot: usize) -> usize {
         slot
+    }
+}
+pub fn connect_service_by_name(_: &str, _: Word) -> Result<(), RequestError> {
+    Ok(())
+}
+pub fn yield_now() {}
+pub mod registry {
+    pub fn connect_boot_service(_: &str, _: usize) -> Result<(), crate::RequestError> {
+        Ok(())
+    }
+}
+#[path = "../../../nanami/servers/libs/nanami-client/src/pci.rs"]
+mod pci_client;
+#[path = "../../../nanami/servers/uapi/src/pci.rs"]
+mod pci_uapi;
+pub mod pci {
+    pub use crate::pci_client::{disable_message_interrupts, probe_bar, read, write};
+    pub use crate::pci_uapi::*;
+}
+#[path = "../../../nanami/servers/core-services/pci-server/src/config.rs"]
+mod config;
+
+struct Backend;
+impl config::Access for Backend {
+    fn read(
+        &mut self,
+        address: pci::Address,
+        offset: Word,
+        width: Word,
+    ) -> Result<u32, RequestError> {
+        io::io_write(
+            16,
+            0xcf8,
+            4,
+            0x80000000 | ((address.device as Word) << 11) | (offset & !3),
+        )?;
+        let value = io::io_read(16, 0xcfc, 4)? as u32;
+        let mask = u32::MAX >> ((4 - width) * 8);
+        Ok((value >> ((offset & 3) * 8)) & mask)
+    }
+    fn write(
+        &mut self,
+        address: pci::Address,
+        offset: Word,
+        width: Word,
+        value: u32,
+    ) -> Result<(), RequestError> {
+        io::io_write(
+            16,
+            0xcf8,
+            4,
+            0x80000000 | ((address.device as Word) << 11) | (offset & !3),
+        )?;
+        io::io_write(16, 0xcfc + (offset & 3), width, value as Word)
+    }
+}
+pub fn call_port(
+    _: Word,
+    code: Word,
+    a: Word,
+    b: Word,
+    c: Word,
+    _: Word,
+    words: u8,
+) -> Result<(Word, Word, Word), RequestError> {
+    use config::Access;
+    let address = pci::Address::from_packed(a).ok_or(RequestError::InvalidArgument)?;
+    let mut backend = Backend;
+    match code {
+        pci::PCI_REQUEST_READ => {
+            assert_eq!(words, 4);
+            Ok((0, backend.read(address, b, c)? as Word, 0))
+        }
+        pci::PCI_REQUEST_WRITE => {
+            assert_eq!(words, 4);
+            backend.write(address, b & 0xffff, b >> 16, c as u32)?;
+            Ok((0, 0, 0))
+        }
+        pci::PCI_REQUEST_PROBE_BAR => {
+            assert_eq!(words, 3);
+            let device = pci::Device {
+                address,
+                vendor_id: 0,
+                device_id: 0,
+                class: 0x0c0330,
+                header: 0,
+            };
+            let bar = config::probe_bar(&mut backend, device, b)?;
+            Ok((
+                0,
+                bar.physical,
+                bar.bytes | if bar.io { pci::PCI_BAR_IO } else { 0 },
+            ))
+        }
+        _ => Err(RequestError::Unsupported),
     }
 }
 

@@ -128,7 +128,7 @@ fn failed_device_ack_does_not_unmask_an_asserted_irq() {
         assert_eq!(state.acknowledgements.len(), 2);
     });
 }
-#[path = "../../nanami/servers/apps/virtio-net/src/app/util.rs"]
+#[path = "../../nanami/servers/core-services/virtio-net/src/app/util.rs"]
 mod util;
 
 #[test]

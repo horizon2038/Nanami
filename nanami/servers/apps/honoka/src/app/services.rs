@@ -50,9 +50,8 @@ pub fn connect_services() -> Result<ServicePorts, nanami_runtime::NanamiError> {
     nanami_runtime::println!("[honoka] connect: vfs-service");
     let vfs = connect_vfs_service(timer)?;
     nanami_runtime::println!("[honoka] connect: vfs shm attach");
-    let (vfs_shm, vfs_shm_size) =
-        nanami_client::vfs::vfs_attach_shared_memory(vfs, VFS_SHM_BYTES)
-            .map_err(|e| log_error("[honoka] vfs shm attach failed: ", e))?;
+    let (vfs_shm, vfs_shm_size) = nanami_client::vfs::vfs_attach_shared_memory(vfs, VFS_SHM_BYTES)
+        .map_err(|e| log_error("[honoka] vfs shm attach failed: ", e))?;
 
     Ok(ServicePorts {
         timer,
@@ -192,7 +191,12 @@ pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, nanami_run
         nanami_client::gfx::display_service_prepare_shared_framebuffer(display_port)
             .map_err(|e| log_error("[honoka] prepare shared framebuffer failed: ", e))?;
 
-    Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen)
+    let capabilities =
+        nanami_client::gfx::display_service_get_capabilities(display_port).unwrap_or(0);
+    Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen).map(|framebuffer| {
+        framebuffer
+            .with_vblank_flip(capabilities & nanami_client::gfx::DISPLAY_CAP_VBLANK_FLIP != 0)
+    })
 }
 
 pub fn subscribe_input(input_port: Word) -> Result<(Word, Word), nanami_runtime::NanamiError> {
@@ -226,7 +230,11 @@ fn connect_display_service(timer_port: Word) -> Result<Word, nanami_runtime::Nan
 fn connect_input_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
         match nanami_client::registry::connect_input_service(SLOT_INPUT_SERVICE) {
-            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_INPUT_SERVICE)),
+            Ok(()) => {
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
+                    SLOT_INPUT_SERVICE,
+                ))
+            }
             Err(e) => {
                 log_request_error("[honoka] waiting input-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -238,7 +246,11 @@ fn connect_input_service(timer_port: Word) -> Result<Word, nanami_runtime::Nanam
 fn connect_rtc_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
         match nanami_client::registry::connect_rtc_service(SLOT_RTC_SERVICE) {
-            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_RTC_SERVICE)),
+            Ok(()) => {
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
+                    SLOT_RTC_SERVICE,
+                ))
+            }
             Err(e) => {
                 log_request_error("[honoka] waiting rtc-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -250,7 +262,11 @@ fn connect_rtc_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiE
 fn connect_exec_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
         match nanami_client::registry::connect_exec_service(SLOT_EXEC_SERVICE) {
-            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_EXEC_SERVICE)),
+            Ok(()) => {
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
+                    SLOT_EXEC_SERVICE,
+                ))
+            }
             Err(e) => {
                 log_request_error("[honoka] waiting exec-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);
@@ -262,7 +278,11 @@ fn connect_exec_service(timer_port: Word) -> Result<Word, nanami_runtime::Nanami
 fn connect_vfs_service(timer_port: Word) -> Result<Word, nanami_runtime::NanamiError> {
     loop {
         match nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
-            Ok(()) => return Ok(nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE)),
+            Ok(()) => {
+                return Ok(nanami_runtime::ipc::process_slot_descriptor(
+                    SLOT_VFS_SERVICE,
+                ))
+            }
             Err(e) => {
                 log_request_error("[honoka] waiting vfs-service: ", e);
                 sleep_ms(timer_port, CONNECT_RETRY_MS);

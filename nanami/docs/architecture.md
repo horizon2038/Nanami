@@ -8,7 +8,7 @@ policy in isolated user processes.
 This document describes the current implementation. It is not an ABI stability
 guarantee.
 
-The current baseline is Nanami v0.6.0, `AlphaEnvironment` ABI 2 and `a9n_abi`
+The current baseline is Nanami v0.6.1, `AlphaEnvironment` ABI 2 and `a9n_abi`
 0.8.0. The checked-out Spencer revision includes A9N v0.3.11-smp. Historical
 QEMU results below retain their original scope; they are not evidence that
 every fixture was rerun after a kernel revision change.
@@ -250,7 +250,7 @@ Nanami processes fall into four practical classes.
 
 ### Core Services
 
-Core services are required before the root filesystem is usable. They live in
+Core services and manager-selected hardware drivers live in
 `nanami/servers/core-services`, are packaged into `initramfs.cpio`, and are
 listed in `nanami/servers/boot-list`.
 
@@ -262,7 +262,11 @@ The default x86_64 configuration currently starts:
 - `system-manager`.
 
 `driver-manager` selects and starts the supported hardware drivers in its own
-server, outside Alpha. These names describe the checked-in configuration, not
+server, outside Alpha. Its architecture backends choose PCI, timer, storage,
+input, display and network-device drivers. `pci-server` starts before PCI
+discovery; `fb-server`, `ps2-server` and `virtio-net` are packaged with these
+drivers rather than launched unconditionally by system-manager.
+These names describe the checked-in configuration, not
 reserved core names. A component label has no privilege semantics. The
 legacy automatic archive scan has been removed: an empty startup configuration
 starts no services.
@@ -271,7 +275,8 @@ starts no services.
 
 System services live in the ext2 root filesystem under `/bin`. The
 `system-manager` reads `/nanami/system-list` and starts terminal, POSIX, Alter, Negoto,
-input, display, desktop, and network services.
+input distribution, desktop, and network-stack services. Hardware providers
+are selected separately by Driver Manager.
 
 ### Session Applications
 
@@ -509,7 +514,9 @@ Current service names include:
 | `alter-freebsd` | Alter/FreeBSD | FreeBSD ABI personality |
 | `negoto-service` | Negoto | OCI bundle/lifecycle management over Alter/Linux |
 | `input-service` | `input-server` | Input event distribution |
-| `display_service` | `fb-server` | Boot framebuffer sharing |
+| `device-manager` | `driver-manager` | Platform driver selection and resource coordination |
+| `pci-service` | `pci-server` | Serialized PCI configuration and cached enumeration |
+| `display_service` | `intel-graphics-server` or `fb-server` | Native Gen9 scanout or boot framebuffer sharing |
 | `honoka-service` | Honoka | Compositor and window service |
 | `net-device` | `virtio-net` | Network-device backend |
 | `network-service` | `net-server` | IPv4, ICMP, UDP, DNS, and TCP |
@@ -858,8 +865,9 @@ tools such as `ip` and `ping` to use the native Nanami network stack.
 ## Graphics and Input
 
 ```text
-boot framebuffer
-  -> fb-server
+Driver Manager
+  -> Intel Gen9 native scanout OR boot framebuffer fallback
+  -> display_service
   -> Honoka compositor
   -> shared window framebuffers
 ```
@@ -867,6 +875,28 @@ boot framebuffer
 Honoka owns desktop composition, window decorations, transparency, themes,
 wallpaper, cursor rendering, focus, and window movement. Clients own only their
 drawable content and submit damage after writing shared pixels.
+
+The manager's common display selector retains `fb-server` as an independent
+backend. No matching native driver, spawn failure or a declined initialization
+probe selects the boot framebuffer. Providers expose the same display service;
+the framebuffer backend publishes only after mapping/initialization succeeds
+and does not require native-GPU capabilities. An active native display is not
+silently replaced by a second framebuffer writer.
+
+The Intel server dispatches explicitly supported Skylake, Kaby Lake and Coffee
+Lake PCI IDs to its Gen9 backend. It adopts a single active linear XRGB8888 mode,
+allocates private DMA scanout buffers, binds only empty GGTT entries, and arms
+vblank-latched page flips. Completion uses the live surface register, with
+bounded timer sleeps, before reusing the previous buffer. Unsupported initial
+states fall back before publishing the display service. After a flip has been
+armed, timeout retains DMA/GGTT ownership rather than freeing possibly active
+memory or starting a second display owner. It also reads the active DDI route,
+board VBT wiring and monitor EDID over GMBUS or I2C-over-AUX. The read-only output
+and detailed-timing queries do not change a link or select a new mode. Honoka
+coalesces presentation to one vblank flip per composed frame for this provider,
+while preserving sparse CPU composition. This is native scanout, not a render
+engine or a full modesetting implementation. Details and hardware-validation
+limits are in [Device Drivers](device-drivers.md).
 
 ```text
 PS/2 hardware

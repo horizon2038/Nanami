@@ -3,6 +3,10 @@ use compositor::Compositor;
 use input::InputEvent;
 
 fn setup() -> (Compositor, Vec<u32>) {
+    setup_with_vblank(false)
+}
+
+fn setup_with_vblank(vblank: bool) -> (Compositor, Vec<u32>) {
     let screen = framebuffer::ScreenInfo {
         width: 800,
         height: 600,
@@ -19,7 +23,8 @@ fn setup() -> (Compositor, Vec<u32>) {
     let fb =
         framebuffer::Framebuffer::new(1, pixels.as_mut_ptr() as usize, pixels.len() * 4, screen)
             .ok()
-            .unwrap();
+            .unwrap()
+            .with_vblank_flip(vblank);
     let theme = include_bytes!("../../../nanami/servers/apps/honoka/assets/themes/default.theme");
     let fields = [
         "Kernel Version: A9N v0.3.4",
@@ -41,6 +46,31 @@ fn move_by(dx: i32, dy: i32) -> InputEvent {
 }
 fn button(pressed: bool) -> InputEvent {
     InputEvent::MouseButton { code: 1, pressed }
+}
+
+#[test]
+fn native_scanout_presents_once_per_composited_frame_without_repainting_sparse_gaps() {
+    let (mut fallback, fallback_pixels) = setup();
+    fallback.process_input(move_by(-550, 180));
+    fallback.render_if_needed();
+    let sparse = PRESENTED.with(|rects| std::mem::take(&mut *rects.borrow_mut()));
+    assert!(sparse.len() > 1);
+    let (mut native, native_pixels) = setup_with_vblank(true);
+    native.process_input(move_by(-550, 180));
+    native.render_if_needed();
+    assert_eq!(native_pixels, fallback_pixels);
+    PRESENTED.with(|rects| {
+        let rects = rects.borrow();
+        assert_eq!(rects.len(), 1);
+        let merged = rects[0];
+        for rect in sparse {
+            assert!(merged.x <= rect.x && merged.y <= rect.y);
+            assert!(merged.x + merged.width >= rect.x + rect.width);
+            assert!(merged.y + merged.height >= rect.y + rect.height);
+        }
+    });
+    native.render_if_needed();
+    PRESENTED.with(|rects| assert_eq!(rects.borrow().len(), 1));
 }
 
 #[test]

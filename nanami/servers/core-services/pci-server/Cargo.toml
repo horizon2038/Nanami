@@ -1,0 +1,17 @@
+[package]
+name = "pci_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
+pci-ids-rs = "=1.2026.10"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

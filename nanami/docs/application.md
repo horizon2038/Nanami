@@ -4,7 +4,7 @@ This guide describes how to add native Nanami applications, services, and
 drivers. The Rust application ABI supports x86_64 and AArch64; the freestanding
 C++ SDK remains x86_64-only.
 
-This guide follows Nanami v0.6.0 and `AlphaEnvironment` ABI 2. Public wire types
+This guide follows Nanami v0.6.1 and `AlphaEnvironment` ABI 2. Public wire types
 are defined in `nanami-uapi`; generic Alpha requests and managed-Service helpers
 are exposed through `nanami-runtime`.
 
@@ -12,7 +12,7 @@ are exposed through `nanami-runtime`.
 
 ```text
 nanami/servers/
-  core-services/        # Boot-critical binaries packaged into initramfs
+  core-services/        # Boot services and manager-selected hardware drivers
   apps/                 # Services and applications installed into rootfs /bin
   uapi/                 # Pure ABI/protocol definitions and C++ headers
   targets/              # Native target JSON and linker scripts
@@ -21,9 +21,12 @@ nanami/servers/
   libs/                 # Other reusable implementation crates
 ```
 
-Use `core-services` only when a component must run before the root filesystem
-is available. Normal drivers, upper services, desktop components, tests, and
-applications belong in `apps`.
+Use `core-services` for boot services and hardware drivers selected by
+Driver Manager. Upper services, desktop components, tests and applications
+belong in `apps`. Hardware drivers must not duplicate PCI configuration I/O:
+use `nanami-client::pci` and add architecture/platform selection in
+`core-services/driver-manager/src/arch/`. See [Device Drivers](device-drivers.md)
+for current display and PCI contracts.
 
 The build discovers Rust components through `Cargo.toml` and C++ components
 through declarative `nanami-app.toml` manifests. A disabled source directory may retain `_Cargo.toml`, but it
@@ -168,6 +171,12 @@ cargo xtask run --arch aarch64 --net none
 `--rebuild-rootfs` is supplied. `run` never builds implicitly. Back up saved
 guest data before rebuilding the boot disk, or use `--output-image` to isolate
 the output.
+
+For read-only hardware diagnostics in Shell, use `pci-info` (names and numeric
+PCI IDs), `pci-info -n` (numeric only), or `pci-info -nn -v` (additional class and
+command/status details). The database lives in PCI Server, not in the CLI.
+`net-info` is the network-information Shell builtin; the former spelling
+`netinfo` has been removed. See [PCI identification](device-drivers.md#identification-and-pci-info).
 
 To package only selected native rootfs applications:
 

@@ -67,11 +67,6 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         return Err(log_error("[fb-server] ipc tls init failed: ", e));
     }
 
-    if let Err(e) = nanami_client::registry::register_display_service() {
-        return Err(log_error("[fb-server] service register failed: ", e));
-    }
-    nanami_runtime::print!("[fb-server] service registered: display_service\n");
-
     let (fb_phys, fb_size) = match nanami_runtime::request_initial_framebuffer_information(
         nanami_runtime::FRAMEBUFFER_INFORMATION_REGION,
     ) {
@@ -122,7 +117,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 
     let color = unpack_color_info(color_info);
 
-    if fb_size == 0 {
+    if fb_size == 0 || fb_width == 0 || fb_height == 0 || fb_bpp != 32 {
         return Err(log_error(
             "[fb-server] framebuffer region request failed: ",
             RequestError::InvalidArgument,
@@ -215,6 +210,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         }
     );
 
+    // Publish only a usable backend. A client connecting to an uninitialized
+    // service would otherwise block forever if mapping/validation failed.
+    if let Err(e) = nanami_client::registry::register_display_service() {
+        return Err(log_error("[fb-server] service register failed: ", e));
+    }
+    nanami_runtime::print!("[fb-server] service registered: display_service\n");
+
     loop {
         let used_reply_receive = has_pending_reply;
         let event = if used_reply_receive {
@@ -275,6 +277,9 @@ fn fill_screen(screen_info: &ScreenInfo, mapped_address: usize) {
 
 fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word, Word, Word) {
     match request.code {
+        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_CAPABILITIES => {
+            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
+        }
         nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {
             let detail0 = pack_screen_info_detail0(&display.screen);
             let detail1 = pack_screen_info_detail1(&display.screen);

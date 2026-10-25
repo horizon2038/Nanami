@@ -1,133 +1,41 @@
-//! Configure PCI before spawning drivers: CF8/CFC is a global address latch,
-//! not an SMP-safe per-process register. USB never accesses it at runtime.
+//! PCI discovery/configuration is serialized by pci-server.
+use nanami_client::{
+    device::UsbControllerResource,
+    pci::{self, Address},
+};
 use nanami_runtime::{RequestError, Word};
-use nanami_client::device::UsbControllerResource;
-
-struct Pci {
-    io: Word,
-    address: u32,
-}
-impl Pci {
-    fn select(&self, offset: u8) -> Result<(), RequestError> {
-        nanami_runtime::io::io_write(
-            self.io,
-            0xcf8,
-            4,
-            (self.address | (offset as u32 & !3)) as Word,
-        )
-    }
-    fn read(&self, offset: u8) -> Result<u32, RequestError> {
-        self.select(offset)?;
-        Ok(nanami_runtime::io::io_read(self.io, 0xcfc, 4)? as u32)
-    }
-    fn write(&self, offset: u8, value: u32) -> Result<(), RequestError> {
-        self.select(offset)?;
-        nanami_runtime::io::io_write(self.io, 0xcfc, 4, value as Word)
-    }
-    fn write16(&self, offset: u8, value: u16) -> Result<(), RequestError> {
-        self.select(offset)?;
-        // Do not write adjacent PCI status RW1C bits back while updating command.
-        nanami_runtime::io::io_write(self.io, 0xcfc + (offset as Word & 2), 2, value as Word)
-    }
-}
 
 pub fn prepare(bdf: Word) -> Result<(UsbControllerResource, u8), RequestError> {
-    if bdf & !0x00ff_1f07 != 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    let pci = Pci {
-        io: nanami_runtime::ipc::process_slot_descriptor(super::SLOT_PCI_CONFIG),
-        address: 0x8000_0000
-            | ((bdf as u32 >> 16) << 16)
-            | (((bdf as u32 >> 8) & 31) << 11)
-            | ((bdf as u32 & 7) << 8),
-    };
-    if pci.read(8)? >> 8 != 0x0c0330 {
+    let address = Address::from_packed(bdf).ok_or(RequestError::InvalidArgument)?;
+    let port = nanami_runtime::ipc::process_slot_descriptor(super::SLOT_PCI_SERVICE);
+    if pci::read(port, address, 8, 4)? >> 8 != 0x0c0330 {
         return Err(RequestError::Unsupported);
     }
-    let low = pci.read(0x10)?;
-    if low & 1 != 0 || !matches!(low & 6, 0 | 4) {
+    let bar = pci::probe_bar(port, address, 0)?;
+    if bar.io || bar.bytes < 0x1000 || bar.bytes > 0x100000 {
         return Err(RequestError::Unsupported);
     }
-    let wide = low & 6 == 4;
-    let high = if wide { pci.read(0x14)? } else { 0 };
-    let physical = (low & !15) as u64 | ((high as u64) << 32);
-    if physical == 0 {
-        return Err(RequestError::Unsupported);
-    }
-    let command = pci.read(4)? as u16;
-    pci.write16(4, command & !6)?;
-    // Probe BAR size with decoding disabled; always restore the BAR on errors.
-    let probe = (|| {
-        pci.write(0x10, u32::MAX)?;
-        if wide {
-            pci.write(0x14, u32::MAX)?;
-        }
-        let lo = pci.read(0x10)? & !15;
-        let hi = if wide { pci.read(0x14)? } else { u32::MAX };
-        Ok::<u64, RequestError>((!((hi as u64) << 32 | lo as u64)).wrapping_add(1))
-    })();
-    pci.write(0x10, low)?;
-    if wide {
-        pci.write(0x14, high)?;
-    }
-    pci.write16(4, command)?;
-    let bytes = probe?;
-    if bytes < 0x1000
-        || bytes > 0x100000
-        || !bytes.is_power_of_two()
-        || physical & (bytes - 1) != 0
-        || physical.checked_add(bytes).is_none()
-    {
-        return Err(RequestError::Unsupported);
-    }
-    // The existing IRQ API supplies INTx, not MSI/MSI-X vectors. Disable both
-    // message mechanisms, preserving the other capability control fields.
-    if pci.read(4)? & (1 << 20) != 0 {
-        let mut cap = (pci.read(0x34)? & 0xfc) as u8;
-        for _ in 0..48 {
-            if cap == 0 {
-                break;
-            }
-            if cap < 0x40 {
-                return Err(RequestError::Protocol);
-            }
-            let value = pci.read(cap)?;
-            let control = (value >> 16) as u16;
-            match value as u8 {
-                5 => pci.write16(cap + 2, control & !1)?,
-                0x11 => pci.write16(cap + 2, (control & !(1 << 15)) | (1 << 14))?,
-                _ => {}
-            }
-            let next = ((value >> 8) & 0xfc) as u8;
-            if next == cap {
-                return Err(RequestError::Protocol);
-            }
-            cap = next;
-        }
-        if cap != 0 {
-            return Err(RequestError::Protocol);
-        }
-    }
-    let interrupt = pci.read(0x3c)?;
-    let line = (interrupt & 0xff) as usize;
+    let command = pci::read(port, address, 4, 2)? as u16;
+    pci::disable_message_interrupts(port, address)?;
+    let interrupt = pci::read(port, address, 0x3c, 4)?;
+    let line = (interrupt & 0xff) as Word;
     let pin = (interrupt >> 8) as u8;
     let irq = ((1..=4).contains(&pin)
         && line != 0
         && line < 24
         && option_env!("NANAMI_USB_ACPI_IRQ") != Some("1"))
     .then_some(line);
-    pci.write16(4, (command | 6) & !(1 << 10))?;
+    pci::write(port, address, 4, 2, ((command | 6) & !(1 << 10)) as u32)?;
     nanami_runtime::println!(
         "[driver-manager] USB PCI BAR={:#x} bytes={:#x} INTx={}",
-        physical,
-        bytes,
+        bar.physical,
+        bar.bytes,
         line
     );
     Ok((
         UsbControllerResource {
-            physical: physical as usize,
-            bytes: bytes as usize,
+            physical: bar.physical,
+            bytes: bar.bytes,
             irq,
         },
         pin,

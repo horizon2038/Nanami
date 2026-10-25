@@ -94,7 +94,8 @@ pub mod ipc {
 }
 pub mod registry {
     use super::*;
-    pub fn connect_timer_service(slot: Word) -> Result<(), RequestError> {
+    pub fn connect_boot_service(name: &str, slot: Word) -> Result<(), RequestError> {
+        assert_eq!(name, "timer-service");
         assert_eq!(slot, 26);
         Ok(())
     }

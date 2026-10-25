@@ -1,4 +1,6 @@
 use core::ptr::read_volatile;
+extern crate alloc;
+use alloc::vec::Vec;
 
 use nanami_runtime::{RequestError, Word};
 
@@ -215,13 +217,16 @@ fn hpet_base(mapper: &mut AcpiMapper, table: Word) -> Result<Word, RequestError>
     Ok(address)
 }
 
-pub fn find_hpet_mmio_base(rsdp: Word) -> Result<Option<Word>, RequestError> {
+fn find_table(
+    mapper: &mut AcpiMapper,
+    rsdp: Word,
+    wanted: &[u8; 4],
+) -> Result<Option<Word>, RequestError> {
     if rsdp == 0 {
         return Ok(None);
     }
 
-    let mut mapper = AcpiMapper::new();
-    let (root, root_address, signature, entry_bytes) = match root_table(&mut mapper, rsdp)? {
+    let (root, root_address, signature, entry_bytes) = match root_table(mapper, rsdp)? {
         RootTable::Xsdt(address) => (RootTable::Xsdt(address), address, b"XSDT", 8usize),
         RootTable::Rsdt(address) => (RootTable::Rsdt(address), address, b"RSDT", 4usize),
     };
@@ -241,10 +246,86 @@ pub fn find_hpet_mmio_base(rsdp: Word) -> Result<Option<Word>, RequestError> {
             RootTable::Xsdt(_) => mapper.read_u64(entry_address)? as Word,
             RootTable::Rsdt(_) => mapper.read_u32(entry_address)? as Word,
         };
-        if table != 0 && mapper.signature(table, b"HPET")? {
-            return hpet_base(&mut mapper, table).map(Some);
+        if table != 0 && mapper.signature(table, wanted)? {
+            return Ok(Some(table));
         }
         index += 1;
     }
     Ok(None)
+}
+
+pub fn find_hpet_mmio_base(rsdp: Word) -> Result<Option<Word>, RequestError> {
+    let mut mapper = AcpiMapper::new();
+    find_table(&mut mapper, rsdp, b"HPET")?
+        .map(|table| hpet_base(&mut mapper, table))
+        .transpose()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EcamRegion {
+    pub physical: Word,
+    pub segment: u16,
+    pub first_bus: u8,
+    pub last_bus: u8,
+}
+
+impl EcamRegion {
+    pub fn address(self, segment: u16, bus: u8, device: u8, function: u8) -> Option<Word> {
+        if self.segment != segment
+            || !(self.first_bus..=self.last_bus).contains(&bus)
+            || device >= 32
+            || function >= 8
+        {
+            return None;
+        }
+        // ACPI MCFG bases are relative to bus zero, even for a nonzero start bus.
+        self.physical
+            .checked_add((bus as Word) << 20)?
+            .checked_add((device as Word) << 15)?
+            .checked_add((function as Word) << 12)
+    }
+}
+
+pub fn find_pci_ecam(rsdp: Word) -> Result<Vec<EcamRegion>, RequestError> {
+    let mut mapper = AcpiMapper::new();
+    let mut regions = Vec::new();
+    let Some(table) = find_table(&mut mapper, rsdp, b"MCFG")? else {
+        return Ok(regions);
+    };
+    let len = mapper.sdt_length(table, b"MCFG")?;
+    if len < 44 || (len - 44) % 16 != 0 || (len - 44) / 16 > 64 {
+        return Err(RequestError::Protocol);
+    }
+    for index in 0..(len - 44) / 16 {
+        let entry = table
+            .checked_add(44 + index * 16)
+            .ok_or(RequestError::Protocol)?;
+        let physical = mapper.read_u64(entry)? as Word;
+        let data = mapper.read_u32(entry + 8)?;
+        let region = EcamRegion {
+            physical,
+            segment: data as u16,
+            first_bus: (data >> 16) as u8,
+            last_bus: (data >> 24) as u8,
+        };
+        if physical == 0
+            || physical & ((1 << 20) - 1) != 0
+            || region.first_bus > region.last_bus
+            || physical
+                .checked_add(((region.last_bus as Word) + 1) << 20)
+                .is_none()
+            || regions.iter().any(|previous: &EcamRegion| {
+                previous.segment == region.segment
+                    && previous.first_bus <= region.last_bus
+                    && region.first_bus <= previous.last_bus
+            })
+        {
+            return Err(RequestError::Protocol);
+        }
+        regions
+            .try_reserve(1)
+            .map_err(|_| RequestError::Unsupported)?;
+        regions.push(region);
+    }
+    Ok(regions)
 }

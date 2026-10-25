@@ -38,7 +38,25 @@ types and output devices return an error rather than fabricated success.
 ## File Descriptors and Polling
 
 `dup`, `dup2`, `dup3`, `pipe`, `pipe2`, `fcntl`, `ioctl`, `poll`, `ppoll`,
-`select`, and `pselect6`.
+`select`, `pselect6`, `eventfd`, `eventfd2`, `epoll_create`, `epoll_create1`,
+`epoll_ctl`, `epoll_wait`, and `epoll_pwait`. Legacy entry points are provided
+where the architecture has them.
+
+Event counters support semaphore mode, nonblocking I/O, shared dup/fork state,
+and blocking read/write through the existing readiness waiters. Epoll supports
+level-triggered and one-shot watches, packed architecture-specific user data,
+timeouts, and final-close cleanup. Registrations follow the open description
+rather than a reused descriptor number. Edge-triggered/exclusive watches,
+nested epoll, and nonempty temporary signal masks are explicitly rejected.
+Interest sets are bounded by the 64-descriptor guest limit; Alter holds at most
+256 counter/epoll objects in total and allocates their storage only on use.
+
+`pipe2` accepts `O_CLOEXEC | O_NONBLOCK`. `FIONBIO` shares the `F_SETFL`
+nonblocking implementation, including anonymous pipes used by libuv; each pipe
+end's status is shared by its dup/fork aliases, independently of the other end.
+`F_GETFL` reports the pipe end's actual access direction and the native terminal's
+read/write access. A nonblocking terminal read with no input returns `EAGAIN`
+instead of parking the guest event loop.
 
 ## Networking
 
@@ -62,6 +80,10 @@ page cache, and pages wholly past EOF do not yet deliver Linux `SIGBUS`.
 Hardware enforcement of `mprotect` permissions and preservation of data across
 `PROT_NONE` transitions remain incomplete; this is not a security isolation
 boundary equivalent to Linux VM protection.
+
+VMA metadata supports up to 128 tracked ranges per process. The table is
+allocated lazily and released on process removal, rather than increasing
+Alter's startup stack or every process snapshot with an inline array.
 
 ## Terminal Applications
 
@@ -102,7 +124,7 @@ See `tests/alter-linux/README.md` at the repository root for reproducible tests.
 
 ## Time, Signals, and Scheduling
 
-`time` (x86_64), `gettimeofday`, `clock_gettime`, `nanosleep`, `clock_nanosleep`,
+`time` (x86_64), `gettimeofday`, `clock_gettime`, `clock_getres`, `nanosleep`, `clock_nanosleep`,
 `setitimer`, `rt_sigaction`,
 `rt_sigprocmask`, `rt_sigsuspend`, `sigaltstack`, `sched_getaffinity`, and
 `futex`.
@@ -111,6 +133,10 @@ See `tests/alter-linux/README.md` at the repository root for reproducible tests.
 `tloc`, using the same RTC epoch anchor and fresh monotonic sample as
 `gettimeofday`/`CLOCK_REALTIME`. AArch64 has no separate `time` syscall; its libc
 uses `clock_gettime` instead.
+
+`clock_getres` reports the timer backend's resolution for the implemented
+clocks and accepts a NULL result pointer. It does not fabricate CPU-clock
+accounting for unsupported clock IDs.
 
 `clock_nanosleep` supports relative and absolute waits against `CLOCK_REALTIME`,
 `CLOCK_MONOTONIC`, and `CLOCK_BOOTTIME`, sharing the existing one-shot alarm and

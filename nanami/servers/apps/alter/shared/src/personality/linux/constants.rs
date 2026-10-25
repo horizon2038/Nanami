@@ -29,6 +29,7 @@ pub(super) const EPIPE: i32 = 32;
 pub(super) const EINVAL: i32 = 22;
 
 pub(super) const EMFILE: i32 = 24;
+pub(super) const ENOSPC: i32 = 28;
 
 pub(super) const ENOTTY: i32 = 25;
 pub(super) const ENXIO: i32 = 6;
@@ -267,6 +268,7 @@ pub(super) const LINUX_O_CREAT: Word = 0o100;
 pub(super) const LINUX_O_ACCMODE: Word = 0o3;
 
 pub(super) const LINUX_O_RDONLY: Word = 0;
+pub(super) const LINUX_O_RDWR: Word = 2;
 
 pub(super) const LINUX_O_WRONLY: Word = 1;
 
@@ -359,6 +361,7 @@ pub(super) const LINUX_TCSETSW: Word = 0x5403;
 pub(super) const LINUX_TCSETSF: Word = 0x5404;
 
 pub(super) const LINUX_TIOCGWINSZ: Word = 0x5413;
+pub(super) const LINUX_FIONBIO: Word = 0x5421;
 pub(super) const LINUX_TIOCSWINSZ: Word = 0x5414;
 pub(super) const LINUX_TIOCSCTTY: Word = 0x540e;
 pub(super) const LINUX_TIOCGPGRP: Word = 0x540f;

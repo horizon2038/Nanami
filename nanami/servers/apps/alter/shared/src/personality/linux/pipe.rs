@@ -96,10 +96,10 @@ pub(super) fn sys_pipe(
     if pipefd_ptr == 0 {
         return Err(EFAULT);
     }
-    if (flags & !LINUX_O_CLOEXEC) != 0 {
+    if (flags & !(LINUX_O_CLOEXEC | super::LINUX_O_NONBLOCK)) != 0 {
         return Err(EINVAL);
     }
-    let fd_flags = if (flags & LINUX_O_CLOEXEC) != 0 {
+    let fd_flags = (flags & super::LINUX_O_NONBLOCK) | if (flags & LINUX_O_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {
         0

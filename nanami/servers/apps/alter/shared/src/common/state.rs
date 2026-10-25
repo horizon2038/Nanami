@@ -11,10 +11,15 @@ pub mod job_control;
 pub use job_control::{JobControlError, ProcessJobControl, TerminalControl};
 #[path = "state/mappings.rs"]
 mod mappings;
+#[path = "state/mapping_table.rs"]
+mod mapping_table;
+pub use mapping_table::MappingTable;
 #[path = "state/processes.rs"]
 mod processes;
 #[path = "state/readiness.rs"]
 pub mod readiness;
+#[path = "state/poll_objects.rs"]
+pub mod poll_objects;
 #[path = "state/signals.rs"]
 mod signals;
 #[path = "state/waiters.rs"]
@@ -61,6 +66,8 @@ pub enum LinuxFileKind {
     EvdevKeyboard,
     EvdevMouse,
     Framebuffer,
+    EventFd,
+    Epoll,
 }
 
 #[derive(Clone, Copy)]
@@ -334,7 +341,7 @@ pub struct ManagedProcess {
     pub sleep_deadline: Word,
     pub sleep_context: LinuxSyscallContext,
     pub readiness_wait: Option<readiness::ReadinessWait>,
-    pub mappings: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
+    pub mappings: MappingTable,
 }
 
 #[derive(Clone, Copy)]
@@ -397,7 +404,7 @@ impl ManagedProcess {
         sleep_deadline: 0,
         sleep_context: LinuxSyscallContext::EMPTY,
         readiness_wait: None,
-        mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
+        mappings: MappingTable::EMPTY,
     };
 }
 
@@ -456,7 +463,6 @@ impl GraphicsSession {
     };
 }
 
-#[derive(Clone, Copy)]
 pub struct Runtime {
     pub terminal_controls: [TerminalControl; ALTER_MANAGED_PROCESS_MAX],
     pub clients: [clients::ClientMemory; ALTER_MANAGED_PROCESS_MAX],
@@ -514,6 +520,7 @@ pub struct Runtime {
     pub signals_pending: bool,
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
+    pub poll_objects: poll_objects::Objects,
 }
 
 impl Runtime {
@@ -582,6 +589,7 @@ impl Runtime {
             signals_pending: false,
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
+            poll_objects: poll_objects::Objects::new(),
         }
     }
 }

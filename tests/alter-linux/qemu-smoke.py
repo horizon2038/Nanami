@@ -20,6 +20,9 @@ parser.add_argument("--capture-running-after", type=float,
                     help="capture each guest's running screen this many seconds after launch (0-30)")
 parser.add_argument("--visual-program",
                     help="after checked fixtures, launch this guest untraced and capture two animation frames")
+parser.add_argument("--nvim-editor", action="store_true",
+                    help="edit/save/quit in untraced Neovim, then verify the file with BusyBox")
+parser.add_argument("--diagnostics", action="store_true", help="send explicit Alter traces to serial (-t -d)")
 parser.add_argument("--network", action="store_true", help="attach an isolated user-mode virtio NIC (no external network access)")
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
@@ -85,17 +88,31 @@ with (logs / "qemu.log").open("w") as diagnostics:
                     raise RuntimeError("QEMU monitor closed")
                 received += chunk
 
-        def type_command(command):
-            keys = {" ": "spc", "/": "slash", "-": "minus", ".": "dot", "\n": "ret"}
-            for character in command + "\n":
-                send(f"sendkey {keys.get(character, character)} 50")
+        def type_keys(text):
+            keys = {" ": "spc", "/": "slash", "-": "minus", ".": "dot", "\n": "ret",
+                    ":": "shift-semicolon"}
+            for character in text:
+                key = keys.get(character, character)
+                if character.isascii() and character.isupper():
+                    key = "shift-" + character.lower()
+                send(f"sendkey {key} 50")
                 time.sleep(0.35)
 
-        for index, program in enumerate(args.program or ["linux-syscall-smoke", "glibc-true", "glibc-regression"]):
+        def type_command(command):
+            type_keys(command + "\n")
+
+        programs = args.program
+        if programs is None:
+            if args.nvim_editor:
+                programs = ["nvim --headless -u /dev/null -i NONE -c q"]
+            else:
+                programs = ["linux-syscall-smoke", "glibc-true", "glibc-regression"]
+        for index, program in enumerate(programs):
             # Match against the same decoded/newline-normalized text used below.
             # Byte offsets drift with CRLF or UTF-8 serial output.
             start = len(serial.read_text(errors="replace"))
-            type_command(f"alter -t /alter/linux/bin/{program}")
+            flags = "-t -d" if args.diagnostics else "-t"
+            type_command(f"alter {flags} /alter/linux/bin/{program}")
             if args.ctrl_c_after is not None:
                 wait_for(lambda text: re.search(
                     r"managed rootfs process image=" + re.escape(program.split()[0]) + r" pid=(\d+)",
@@ -122,6 +139,36 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 raise RuntimeError(f"{program} exited with status {exited[1]}")
             print(f"PASS {program} (smp={args.smp})", flush=True)
             time.sleep(1)
+        if args.nvim_editor:
+            start = len(serial.read_text(errors="replace"))
+            flags = "-t -d " if args.diagnostics else ""
+            type_command(f"alter {flags}/alter/linux/bin/nvim -u /dev/null -i NONE --noplugin /tmp/nvim-editor.txt")
+            wait_for(lambda text: re.search(r"managed rootfs process image=nvim pid=(\d+)", text[start:]))
+            # Keep strace out of the alternate screen; it is itself terminal output.
+            time.sleep(7)
+            send(f"screendump {logs / 'nvim-started.png'} -f png")
+            type_keys("invim-compat-ok")
+            send("sendkey esc 50")
+            time.sleep(0.5)
+            send(f"screendump {logs / 'nvim-edited.png'} -f png")
+            type_keys(":wq\n")
+            time.sleep(2)
+            send(f"screendump {logs / 'nvim-after-quit.png'} -f png")
+            start = len(serial.read_text(errors="replace"))
+            type_command("alter -t /alter/linux/bin/busybox grep -x nvim-compat-ok /tmp/nvim-editor.txt")
+
+            def verified_file(text):
+                text = text[start:]
+                spawned = re.search(r"managed rootfs process image=busybox pid=(\d+)", text)
+                if not spawned:
+                    return None
+                return re.search(r"exit pid=" + spawned[1] + r" syscall=\d+ status=(\d+)", text)
+
+            verified = wait_for(verified_file)
+            if verified[1] != "0":
+                raise RuntimeError("Neovim edit/save/quit verification failed")
+            mode = "serial-traced" if args.diagnostics else "untraced"
+            print(f"PASS {mode} Neovim edit/save/quit and independent readback (smp={args.smp})", flush=True)
         if args.visual_program:
             start = len(serial.read_text(errors="replace"))
             type_command(f"alter /alter/linux/bin/{args.visual_program}")

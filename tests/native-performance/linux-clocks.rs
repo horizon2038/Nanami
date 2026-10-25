@@ -565,3 +565,20 @@ fn zero_sleep_is_immediate_and_arm_error_does_not_park_guest() {
     assert_eq!(sleep(&mut runtime, 1, 1), EmulationAction::Return(-5));
     assert!(!runtime.managed[0].sleep_waiting);
 }
+
+#[test]
+fn clock_getres_reports_backend_tick_and_accepts_null_destination() {
+    let mut runtime = runtime(250);
+    let mut scratch = [0u64; 2];
+    runtime.posix_shm = scratch.as_mut_ptr() as Word;
+    let mut ts = [0u64; 2];
+    let pointer = ts.as_mut_ptr() as Word;
+    assert_eq!(sys_clock_getres(&mut runtime, 1, 1, pointer), Ok(0));
+    assert_eq!(scratch, [0, 4_000_000]);
+    assert_eq!(sys_clock_getres(&mut runtime, 1, 1, 0), Ok(0));
+    assert_eq!(sys_clock_getres(&mut runtime, 1, 99, 0), Err(EINVAL));
+    runtime.monotonic_tick_hz = 1_000_000_000;
+    FAKE.with(|fake| fake.borrow_mut().hz = 1_000_000_000);
+    assert_eq!(sys_clock_getres(&mut runtime, 1, 0, pointer), Ok(0));
+    assert_eq!(scratch, [0, 1]);
+}

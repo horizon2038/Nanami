@@ -556,6 +556,8 @@ pub(super) fn map_anonymous_tracked(
     let (base, mapped) =
         nanami_runtime::request_process_map_anonymous(pid, len).map_err(map_request_error)?;
     if !runtime.add_mapping(pid, base, mapped, prot) {
+        nanami_runtime::request_process_mapping_release(pid, base, mapped)
+            .map_err(map_request_error)?;
         return Err(ENOMEM);
     }
     Ok((base, mapped))

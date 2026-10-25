@@ -4,6 +4,9 @@
 alter [-t] [-d] [-g [--fb-size WIDTHxHEIGHT]] [-os linux|freebsd] <binary> [args]
 ```
 
+`-t` prints syscall traces to the guest terminal. Combining `-t -d` sends them
+to serial instead, so diagnostics do not overwrite an ncurses/TUI screen.
+
 `-g` / `--graphics` exposes the graphics devices to the guest. For Linux,
 `--fb-size` selects the initial `/dev/fb0` content size, for example:
 

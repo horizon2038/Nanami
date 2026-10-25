@@ -5,6 +5,7 @@ pub const READY_TERMINAL: Word = 2;
 pub const READY_NETWORK: Word = 4;
 pub const READY_PIPE: Word = 8;
 pub const READY_TIMER: Word = 16;
+pub const READY_OBJECT: Word = 32;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

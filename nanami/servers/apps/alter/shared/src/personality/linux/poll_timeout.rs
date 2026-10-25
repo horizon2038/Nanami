@@ -8,6 +8,7 @@ pub(super) fn poll_timeout(
 ) -> Result<Option<u128>, i32> {
     let (mask, size) = match context.number {
         SYS_PPOLL => (context.args[3], context.args[4]),
+        number if number == super::SYS_EPOLL_PWAIT => (context.args[4], context.args[5]),
         SYS_PSELECT6 if context.args[5] != 0 => {
             read_target_memory(runtime, pid, context.args[5], 16)?;
             unsafe {
@@ -31,9 +32,13 @@ pub(super) fn poll_timeout(
             return Err(EOPNOTSUPP);
         }
     }
-    if context.number == SYS_POLL {
+    if context.number == SYS_POLL || super::epoll::is_wait(context.number) {
         // Linux poll takes an int, even on a 64-bit syscall ABI.
-        let millis = context.args[2] as i32;
+        let millis = if context.number == SYS_POLL {
+            context.args[2]
+        } else {
+            context.args[3]
+        } as i32;
         return Ok(if millis < 0 {
             None
         } else {

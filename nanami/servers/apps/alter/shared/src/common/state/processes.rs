@@ -132,7 +132,7 @@ impl Runtime {
                     sleep_deadline: 0,
                     sleep_context: LinuxSyscallContext::EMPTY,
                     readiness_wait: None,
-                    mappings: [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX],
+                    mappings: MappingTable::EMPTY,
                 };
                 self.initialize_job_control(pid, parent_pid);
                 return true;
@@ -165,6 +165,7 @@ impl Runtime {
         while i < self.managed.len() {
             if self.managed[i].pid == pid {
                 self.release_signals(i);
+                self.managed[i].mappings.release();
                 self.managed[i] = ManagedProcess::EMPTY;
                 return true;
             }
@@ -255,7 +256,7 @@ impl Runtime {
         process.sleep_deadline = 0;
         process.sleep_context = LinuxSyscallContext::EMPTY;
         process.readiness_wait = None;
-        process.mappings = [ProcessMapping::EMPTY; ALTER_PROCESS_MAPPING_MAX];
+        process.mappings.fill(ProcessMapping::EMPTY);
         true
     }
 

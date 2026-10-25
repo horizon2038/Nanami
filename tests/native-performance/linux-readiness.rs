@@ -1,4 +1,5 @@
 #![allow(dead_code, private_interfaces)]
+extern crate alloc;
 extern crate self as a9n_abi;
 extern crate self as nanami_client;
 extern crate self as nanami_runtime;
@@ -43,6 +44,18 @@ const SYS_POLL: usize = 7;
 const SYS_SELECT: usize = 23;
 const SYS_PPOLL: usize = 271;
 const SYS_PSELECT6: usize = 270;
+const SYS_EPOLL_WAIT: usize = 232;
+const SYS_EPOLL_PWAIT: usize = 281;
+const SYS_EPOLL_CTL: usize = 233;
+const TEST_EVENT_BYTES: usize = if cfg!(target_arch = "x86_64") { 12 } else { 16 };
+const LINUX_O_CLOEXEC: usize = 0x80000;
+const LINUX_FD_CLOEXEC: usize = 1;
+const EMFILE: i32 = 24;
+const ENOMEM: i32 = 12;
+const ENOSPC: i32 = 28;
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EPERM: i32 = 1;
 
 #[derive(Default, Clone, Copy)]
 struct LinuxSyscallContext {
@@ -57,8 +70,11 @@ enum EmulationAction {
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/readiness.rs"]
 pub mod readiness_state;
 pub mod state {
+    pub use crate::poll_objects;
     pub use crate::readiness_state as readiness;
 }
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/poll_objects.rs"]
+pub mod poll_objects;
 use readiness_state::*;
 #[derive(Clone, Copy, PartialEq)]
 enum LinuxFileKind {
@@ -77,6 +93,8 @@ enum LinuxFileKind {
     EvdevMouse,
     Framebuffer,
     Empty,
+    EventFd,
+    Epoll,
 }
 #[derive(Clone, Copy)]
 struct LinuxFile {
@@ -85,6 +103,15 @@ struct LinuxFile {
     posix_fd: Word,
     resource: Word,
     peer_port: u16,
+}
+impl LinuxFile {
+    const EMPTY: Self = Self {
+        kind: LinuxFileKind::Empty,
+        flags: 0,
+        posix_fd: 0,
+        resource: 0,
+        peer_port: 0,
+    };
 }
 #[derive(Default)]
 struct Pipe {
@@ -99,6 +126,8 @@ struct Process {
     personality: Word,
     exited: bool,
     readiness_wait: Option<ReadinessWait>,
+    files: Vec<LinuxFile>,
+    terminal_id: Word,
 }
 struct Runtime {
     io_calls: usize,
@@ -122,13 +151,45 @@ struct Runtime {
     readiness_changes: Word,
     clock_error: bool,
     alarm_error: bool,
+    copy_error: bool,
+    posix_shm_size: Word,
+    poll_objects: poll_objects::Objects,
 }
 impl Runtime {
     fn is_signal_stopped(&self, _: Word) -> bool {
         false
     }
     fn linux_file(&self, _: Word, fd: Word) -> Option<LinuxFile> {
-        self.files.get(fd).copied()
+        self.files
+            .get(fd)
+            .copied()
+            .filter(|file| file.kind != LinuxFileKind::Empty)
+    }
+    fn terminal_id(&self, pid: Word) -> Option<Word> {
+        self.managed
+            .iter()
+            .find(|process| process.pid == pid)
+            .map(|process| process.terminal_id)
+    }
+    fn allocate_linux_file(&mut self, pid: Word, file: LinuxFile, _: Word) -> Option<Word> {
+        let index = self
+            .files
+            .iter()
+            .position(|file| file.kind == LinuxFileKind::Empty)
+            .unwrap_or(self.files.len());
+        if index >= LINUX_FD_MAX {
+            return None;
+        }
+        if index >= self.files.len() {
+            self.files.resize(index + 1, LinuxFile::EMPTY);
+        }
+        self.files[index] = file;
+        let process = self.managed_process_mut(pid)?;
+        if index >= process.files.len() {
+            process.files.resize(index + 1, LinuxFile::EMPTY);
+        }
+        process.files[index] = file;
+        Some(index)
     }
     fn pipe(&self, _: Word) -> Option<&Pipe> {
         Some(&self.pipe)
@@ -166,7 +227,7 @@ fn read_target_memory(r: &mut Runtime, _: Word, ptr: Word, bytes: Word) -> Resul
     Ok(())
 }
 fn write_target_memory(r: &mut Runtime, _: Word, ptr: Word, bytes: Word) -> Result<(), i32> {
-    if ptr == 0 && bytes != 0 {
+    if r.copy_error || (ptr == 0 && bytes != 0) {
         return Err(EFAULT);
     }
     r.writes += usize::from(bytes != 0);
@@ -234,6 +295,10 @@ use poll_timeout::*;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/poll_wait.rs"]
 mod poll_wait;
 use poll_wait::*;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/epoll.rs"]
+mod epoll;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/eventfd.rs"]
+mod eventfd;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/pipe_wait.rs"]
 mod pipe_wait;
 
@@ -253,6 +318,9 @@ fn runtime() -> Runtime {
     Runtime {
         io_calls: 0,
         io_result: Ok(0),
+        copy_error: false,
+        posix_shm_size: 4096,
+        poll_objects: poll_objects::Objects::new(),
         posix_shm: scratch.as_mut_ptr() as Word,
         scratch,
         files: [
@@ -582,4 +650,201 @@ fn zero_fds_still_sleeps_and_subtick_timeout_rounds_up() {
         poll_deadline(1, 1_000_000_000, i64::MAX as u128 * 1_000_000_000),
         Word::MAX
     );
+}
+
+fn counter_file(r: &Runtime, fd: Word) -> LinuxFile {
+    r.linux_file(1, fd).unwrap()
+}
+
+fn counter_write(r: &mut Runtime, fd: Word, value: u64) -> Result<Word, i32> {
+    eventfd::write(r, 1, counter_file(r, fd), &value as *const _ as Word, 8)
+}
+
+fn counter_read(r: &mut Runtime, fd: Word) -> Result<u64, i32> {
+    let mut value = 0u64;
+    eventfd::read(r, 1, counter_file(r, fd), &mut value as *mut _ as Word, 8)?;
+    Ok(value)
+}
+
+fn watch(
+    r: &mut Runtime,
+    epfd: Word,
+    fd: Word,
+    operation: Word,
+    events: u32,
+    data: u64,
+) -> Result<Word, i32> {
+    let mut event = [0u8; TEST_EVENT_BYTES];
+    event[..4].copy_from_slice(&events.to_le_bytes());
+    event[TEST_EVENT_BYTES - 8..].copy_from_slice(&data.to_le_bytes());
+    epoll::control(r, 1, epfd, operation, fd, event.as_ptr() as Word)
+}
+
+fn epoll_context(epfd: Word, output: &mut [u8], timeout: i32) -> LinuxSyscallContext {
+    LinuxSyscallContext {
+        number: SYS_EPOLL_WAIT,
+        args: [
+            epfd,
+            output.as_mut_ptr() as Word,
+            output.len() / TEST_EVENT_BYTES,
+            timeout as Word,
+            0,
+            0,
+        ],
+    }
+}
+
+#[test]
+fn eventfd_counter_semaphore_overflow_and_invalid_copy_are_transactional() {
+    let mut r = runtime();
+    let fd = eventfd::create(&mut r, 1, 2, 0).unwrap();
+    assert_eq!(counter_write(&mut r, fd, 3), Ok(8));
+    let file = counter_file(&r, fd);
+    assert_eq!(eventfd::read(&mut r, 1, file, 0, 8), Err(EFAULT));
+    assert_eq!(counter_read(&mut r, fd), Ok(5));
+    assert_eq!(counter_read(&mut r, fd), Err(EAGAIN));
+    assert_eq!(counter_write(&mut r, fd, u64::MAX), Err(EINVAL));
+    assert_eq!(counter_write(&mut r, fd, u64::MAX - 1), Ok(8));
+    assert_eq!(counter_write(&mut r, fd, 1), Err(EAGAIN));
+    assert_eq!(eventfd::readiness(&r, file) & LINUX_POLLOUT, 0);
+    assert_eq!(counter_read(&mut r, fd), Ok(u64::MAX - 1));
+    let sem = eventfd::create(&mut r, 1, 2, 1 | LINUX_O_NONBLOCK | LINUX_O_CLOEXEC).unwrap();
+    assert!(eventfd::nonblocking(&r, counter_file(&r, sem)));
+    assert_eq!(
+        counter_file(&r, sem).flags & LINUX_FD_CLOEXEC,
+        LINUX_FD_CLOEXEC
+    );
+    assert_eq!(counter_read(&mut r, sem), Ok(1));
+    assert_eq!(counter_read(&mut r, sem), Ok(1));
+    assert_eq!(counter_read(&mut r, sem), Err(EAGAIN));
+    assert_eq!(eventfd::create(&mut r, 1, 0, 2), Err(EINVAL));
+}
+
+#[test]
+fn epoll_delivers_packed_user_data_and_level_triggering_without_consuming_counter() {
+    let mut r = runtime();
+    let fd = eventfd::create(&mut r, 1, 0, 0).unwrap();
+    let ep = epoll::create(&mut r, 1, LINUX_O_CLOEXEC).unwrap();
+    assert_eq!(
+        watch(&mut r, ep, fd, 1, LINUX_POLLIN as u32, 0xfedcba9876543210),
+        Ok(0)
+    );
+    assert_eq!(watch(&mut r, ep, fd, 1, 1, 1), Err(EEXIST));
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, 0);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
+    counter_write(&mut r, fd, 1).unwrap();
+    for _ in 0..2 {
+        assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(1));
+        assert_eq!(&output[..4], &1u32.to_le_bytes());
+        assert_eq!(
+            &output[TEST_EVENT_BYTES - 8..],
+            &0xfedcba9876543210u64.to_le_bytes()
+        );
+    }
+    assert_eq!(counter_read(&mut r, fd), Ok(1));
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
+    assert_eq!(epoll::control(&mut r, 1, ep, 2, fd, 0), Ok(0));
+    assert_eq!(epoll::control(&mut r, 1, ep, 2, fd, 0), Err(ENOENT));
+}
+
+#[test]
+fn epoll_one_shot_rearms_and_fault_does_not_consume_the_event() {
+    let mut r = runtime();
+    let fd = eventfd::create(&mut r, 1, 1, 0).unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(&mut r, ep, fd, 1, 1 | (1 << 30), 7).unwrap();
+    let bad = LinuxSyscallContext {
+        number: SYS_EPOLL_WAIT,
+        args: [ep, 0, 1, 0, 0, 0],
+    };
+    assert_eq!(
+        sys_poll_action(&mut r, 1, bad),
+        EmulationAction::Return(-(EFAULT as isize))
+    );
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, 0);
+    r.copy_error = true;
+    assert_eq!(
+        sys_poll_action(&mut r, 1, ctx),
+        EmulationAction::Return(-(EFAULT as isize))
+    );
+    r.copy_error = false;
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(1));
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
+    watch(&mut r, ep, fd, 3, 1 | (1 << 30), 8).unwrap();
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(1));
+    assert_eq!(&output[TEST_EVENT_BYTES - 8..], &8u64.to_le_bytes());
+}
+
+#[test]
+fn eventfd_wakes_parked_epoll_and_timer_expiry_returns_zero() {
+    let mut r = runtime();
+    let fd = eventfd::create(&mut r, 1, 0, 0).unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(&mut r, ep, fd, 1, 1, 9).unwrap();
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, -1);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    counter_write(&mut r, fd, 1).unwrap();
+    handle_readiness_changes(&mut r);
+    assert!(r.managed[0].readiness_wait.is_none());
+    RETURNS.with(|returns| assert_eq!(*returns.borrow(), [(101, 1)]));
+    counter_read(&mut r, fd).unwrap();
+    let ctx = epoll_context(ep, &mut output, 10);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    r.monotonic_ticks += 10;
+    wake_readiness_waiters(&mut r, READY_TIMER);
+    RETURNS.with(|returns| assert_eq!(returns.borrow().last(), Some(&(101, 0))));
+}
+
+#[test]
+fn changing_a_parked_epoll_interest_set_retains_new_wakeup_sources() {
+    let mut r = runtime();
+    r.terminal_ready = false;
+    let terminal = r
+        .allocate_linux_file(
+            1,
+            LinuxFile {
+                kind: LinuxFileKind::Terminal,
+                ..LinuxFile::EMPTY
+            },
+            0,
+        )
+        .unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, -1);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    watch(&mut r, ep, terminal, 1, 1, 13).unwrap();
+    handle_readiness_changes(&mut r);
+    assert_ne!(
+        r.managed[0].readiness_wait.unwrap().sources & READY_TERMINAL,
+        0
+    );
+    r.terminal_ready = true;
+    wake_readiness_waiters(&mut r, READY_TERMINAL);
+    assert!(r.managed[0].readiness_wait.is_none());
+    RETURNS.with(|returns| assert_eq!(*returns.borrow(), [(101, 1)]));
+    assert_eq!(&output[TEST_EVENT_BYTES - 8..], &13u64.to_le_bytes());
+}
+
+#[test]
+fn final_close_removes_registration_and_ids_cannot_alias_recycled_fds() {
+    let mut r = runtime();
+    let fd = eventfd::create(&mut r, 1, 1, 0).unwrap();
+    let old = counter_file(&r, fd);
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(&mut r, ep, fd, 1, 1, 9).unwrap();
+    r.files[fd] = LinuxFile::EMPTY;
+    r.managed[0].files[fd] = LinuxFile::EMPTY;
+    epoll::forget_closed(&mut r, 1, old);
+    eventfd::release(&mut r, old);
+    assert!(r.poll_objects.get(old.resource).is_none());
+    let replacement = eventfd::create(&mut r, 1, 1, 0).unwrap();
+    assert_eq!(replacement, fd);
+    assert_ne!(counter_file(&r, replacement).resource, old.resource);
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, 0);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
 }

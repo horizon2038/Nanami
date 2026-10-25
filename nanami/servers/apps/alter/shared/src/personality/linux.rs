@@ -56,6 +56,10 @@ mod pipe;
 use pipe::*;
 #[path = "linux/pipe_wait.rs"]
 mod pipe_wait;
+#[path = "linux/eventfd.rs"]
+mod eventfd;
+#[path = "linux/epoll.rs"]
+mod epoll;
 
 #[path = "linux/filesystem.rs"]
 mod filesystem;
@@ -336,6 +340,39 @@ pub fn dispatch_syscall(
         ),
         SYS_PIPE => sys_pipe(runtime, native_pid, context.args[0], 0),
         SYS_PIPE2 => sys_pipe(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_EVENTFD | SYS_EVENTFD2 => eventfd::create(
+            runtime,
+            native_pid,
+            context.args[0],
+            if context.number == SYS_EVENTFD {
+                0
+            } else {
+                context.args[1]
+            },
+        ),
+        SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 => {
+            if context.number == SYS_EPOLL_CREATE && context.args[0] as i32 <= 0 {
+                Err(EINVAL)
+            } else {
+                epoll::create(
+                    runtime,
+                    native_pid,
+                    if context.number == SYS_EPOLL_CREATE {
+                        0
+                    } else {
+                        context.args[0]
+                    },
+                )
+            }
+        }
+        SYS_EPOLL_CTL => epoll::control(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+        ),
         SYS_SOCKET => sys_socket(
             runtime,
             native_pid,
@@ -430,7 +467,7 @@ pub fn dispatch_syscall(
             context.args[3],
             context.args[4],
         ),
-        SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 => {
+        SYS_POLL | SYS_PPOLL | SYS_SELECT | SYS_PSELECT6 | SYS_EPOLL_WAIT | SYS_EPOLL_PWAIT => {
             let action = sys_poll_action(runtime, native_pid, context);
             record_action_result(runtime, native_pid, context.number, action);
             trace_critical_action(runtime, native_pid, context, action);
@@ -777,6 +814,7 @@ pub fn dispatch_syscall(
         SYS_CLOCK_GETTIME => {
             sys_clock_gettime(runtime, native_pid, context.args[0], context.args[1])
         }
+        SYS_CLOCK_GETRES => sys_clock_getres(runtime, native_pid, context.args[0], context.args[1]),
         SYS_UTIMES => sys_utime_path(runtime, native_pid, context.args[0]),
         SYS_FUTIMESAT => sys_utime_path(runtime, native_pid, context.args[1]),
         SYS_UTIMENSAT => sys_utime_path(runtime, native_pid, context.args[1]),

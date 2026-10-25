@@ -119,6 +119,7 @@ pub(super) fn sys_statx(
             | LinuxFileKind::EvdevMouse
             | LinuxFileKind::Framebuffer => virtual_node_stat(runtime, pid, file)?,
             LinuxFileKind::Empty => return Err(EBADF),
+            LinuxFileKind::EventFd | LinuxFileKind::Epoll => return Err(EOPNOTSUPP),
         };
         write_linux_statx(runtime, pid, statx_ptr, stat)?;
         return Ok(0);

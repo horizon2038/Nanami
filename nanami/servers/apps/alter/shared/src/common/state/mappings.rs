@@ -31,6 +31,9 @@ impl Runtime {
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
         };
+        if !process.mappings.ensure() {
+            return false;
+        }
         let mut new_base = base;
         let Some(mut new_end) = base.checked_add(size) else {
             return false;

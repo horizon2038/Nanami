@@ -16,6 +16,8 @@ use super::{
     SYS_SIGALTSTACK, SYS_STAT, SYS_STATX, SYS_SYNC, SYS_SYNCFS, SYS_UNAME, SYS_UNLINK,
     SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK, SYS_WAIT4, SYS_WRITE, SYS_WRITEV,
 };
+use super::{SYS_CLOCK_GETRES, SYS_EPOLL_CREATE, SYS_EPOLL_CREATE1, SYS_EPOLL_CTL,
+    SYS_EPOLL_WAIT, SYS_EPOLL_PWAIT, SYS_EVENTFD, SYS_EVENTFD2};
 
 pub(super) fn trace_syscall_action(
     runtime: &mut Runtime,
@@ -74,6 +76,14 @@ pub(super) fn trace_syscall_action(
         }
     }
     pos = trace_append_bytes(&mut line, pos, b"\n");
+    if process.diagnostics_enabled {
+        // Keep explicit -t -d diagnostics outside the application's curses
+        // screen. Ordinary -t retains the existing terminal trace.
+        if let Ok(text) = core::str::from_utf8(&line[..pos]) {
+            nanami_runtime::print!("{}", text);
+        }
+        return;
+    }
     unsafe {
         ::core::ptr::copy_nonoverlapping(line.as_ptr(), runtime.terminal_shm as *mut u8, pos);
     }
@@ -185,12 +195,12 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_FSYNC
         | SYS_FDATASYNC
         | SYS_SYNCFS
-        | super::SYS_TIME => 1,
+        | super::SYS_TIME | SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 | SYS_EVENTFD => 1,
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
         | SYS_RENAME | SYS_RT_SIGSUSPEND | SYS_SIGALTSTACK | SYS_PIPE2 | SYS_KILL | SYS_SETPGID
-        | SYS_MSYNC | SYS_NANOSLEEP | SYS_FTRUNCATE => 2,
+        | SYS_MSYNC | SYS_NANOSLEEP | SYS_FTRUNCATE | SYS_CLOCK_GETRES | SYS_EVENTFD2 => 2,
         SYS_READ
         | SYS_WRITE
         | SYS_READV
@@ -236,7 +246,7 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_PREAD64
         | SYS_PWRITE64
         | SYS_NEWFSTATAT
-        | super::SYS_CLOCK_NANOSLEEP => 4,
+        | super::SYS_CLOCK_NANOSLEEP | SYS_EPOLL_CTL | SYS_EPOLL_WAIT => 4,
         SYS_CLONE | SYS_STATX | SYS_FCHOWNAT | SYS_LINKAT => 5,
         _ => 6,
     }
@@ -245,6 +255,14 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
 pub(super) fn syscall_name(number: Word) -> &'static [u8] {
     match number {
         SYS_READ => b"read",
+        SYS_CLOCK_GETRES => b"clock_getres",
+        SYS_EVENTFD => b"eventfd",
+        SYS_EVENTFD2 => b"eventfd2",
+        SYS_EPOLL_CREATE => b"epoll_create",
+        SYS_EPOLL_CREATE1 => b"epoll_create1",
+        SYS_EPOLL_CTL => b"epoll_ctl",
+        SYS_EPOLL_WAIT => b"epoll_wait",
+        SYS_EPOLL_PWAIT => b"epoll_pwait",
         SYS_PREAD64 => b"pread64",
         SYS_PWRITE64 => b"pwrite64",
         SYS_WRITE => b"write",

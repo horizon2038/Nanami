@@ -251,6 +251,24 @@ pub(super) fn sys_ioctl(
     argument: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    // FIONBIO changes the open-file status, not tty attributes. libuv also
+    // uses it on anonymous pipes before starting a child/RPC channel.
+    if request == super::LINUX_FIONBIO {
+        if argument == 0 {
+            return Err(EFAULT);
+        }
+        read_target_memory(runtime, pid, argument, 4)?;
+        let enabled = unsafe {
+            core::ptr::read_unaligned(runtime.posix_shm as *const i32) != 0
+        };
+        let mut flags = super::sys_fcntl(runtime, pid, fd, super::LINUX_F_GETFL, 0)?;
+        if enabled {
+            flags |= super::LINUX_O_NONBLOCK;
+        } else {
+            flags &= !super::LINUX_O_NONBLOCK;
+        }
+        return super::sys_fcntl(runtime, pid, fd, super::LINUX_F_SETFL, flags);
+    }
     match file.kind {
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
             return sys_evdev_ioctl(runtime, pid, file, request, argument);

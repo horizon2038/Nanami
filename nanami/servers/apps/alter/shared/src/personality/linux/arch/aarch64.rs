@@ -39,6 +39,15 @@ pub const SYS_SETITIMER: Word = 103;
 pub const SYS_GETITIMER: Word = 102;
 pub const SYS_ALARM: Word = 0xffff_fffc;
 pub const SYS_CLOCK_GETTIME: Word = 113;
+pub const SYS_CLOCK_GETRES: Word = 114;
+pub const SYS_EVENTFD2: Word = 19;
+pub const SYS_EPOLL_CREATE1: Word = 20;
+pub const SYS_EPOLL_CTL: Word = 21;
+pub const SYS_EPOLL_PWAIT: Word = 22;
+// Legacy interfaces do not have AArch64 syscall numbers.
+pub const SYS_EVENTFD: Word = 0x1_001b;
+pub const SYS_EPOLL_CREATE: Word = 0x1_001c;
+pub const SYS_EPOLL_WAIT: Word = 0x1_001d;
 pub const SYS_CLOCK_NANOSLEEP: Word = 115;
 pub const SYS_SCHED_GETAFFINITY: Word = 123;
 pub const SYS_KILL: Word = 129;

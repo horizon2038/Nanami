@@ -6,6 +6,18 @@ use super::{
 };
 use crate::state::readiness::*;
 
+pub(super) fn file_sources(file: LinuxFile) -> Word {
+    match file.kind {
+        LinuxFileKind::Terminal => READY_TERMINAL,
+        LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
+        LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
+        LinuxFileKind::SocketUdp | LinuxFileKind::SocketTcp | LinuxFileKind::SocketTcpListener
+        | LinuxFileKind::SocketIcmp => READY_NETWORK,
+        _ => 0,
+    }
+}
+
 pub(super) fn scan_readiness(
     runtime: &mut Runtime,
     pid: Word,
@@ -18,16 +30,10 @@ pub(super) fn scan_readiness(
         entry.revents = if entry.fd < 0 {
             0
         } else if let Some(file) = runtime.linux_file(pid, entry.fd as Word) {
-            wait.sources |= match file.kind {
-                LinuxFileKind::Terminal => READY_TERMINAL,
-                LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
-                LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
-                LinuxFileKind::SocketUdp
-                | LinuxFileKind::SocketTcp
-                | LinuxFileKind::SocketTcpListener
-                | LinuxFileKind::SocketIcmp => READY_NETWORK,
-                _ => 0,
-            };
+            wait.sources |= file_sources(file);
+            if file.kind == LinuxFileKind::Epoll {
+                wait.sources |= super::epoll::sources(runtime, file.resource);
+            }
             let available = fd_readiness(
                 runtime,
                 pid,
@@ -58,7 +64,7 @@ pub(super) fn scan_readiness(
     Ok(ready)
 }
 
-fn fd_readiness(
+pub(super) fn fd_readiness(
     runtime: &mut Runtime,
     pid: Word,
     fd: Word,
@@ -69,6 +75,10 @@ fn fd_readiness(
     let read = LINUX_POLLIN | LINUX_POLLRDNORM;
     let write = LINUX_POLLOUT | LINUX_POLLWRNORM;
     Ok(match file.kind {
+        LinuxFileKind::EventFd => super::eventfd::readiness(runtime, file),
+        LinuxFileKind::Epoll => {
+            if super::epoll::ready(runtime, pid, file.resource)? { read } else { 0 }
+        }
         LinuxFileKind::Terminal => {
             write
                 | if events & read != 0 && terminal_readable(runtime, pid)? {

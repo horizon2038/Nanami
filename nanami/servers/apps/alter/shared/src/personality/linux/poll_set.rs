@@ -6,6 +6,9 @@ pub(super) fn read_poll_set(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> Result<ReadinessWait, i32> {
+    if super::epoll::is_wait(context.number) {
+        return super::epoll::wait_set(runtime, pid, context);
+    }
     let select = matches!(context.number, SYS_SELECT | SYS_PSELECT6);
     let mut wait = ReadinessWait {
         context,
@@ -72,6 +75,9 @@ pub(super) fn write_poll_set(
     pid: Word,
     wait: &ReadinessWait,
 ) -> Result<Word, i32> {
+    if super::epoll::is_wait(wait.context.number) {
+        return super::epoll::complete(runtime, pid, wait.context);
+    }
     if wait.select {
         let mut sets = [0usize; 3];
         for entry in &wait.entries[..wait.count] {

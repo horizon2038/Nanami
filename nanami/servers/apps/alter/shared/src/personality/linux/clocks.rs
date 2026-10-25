@@ -80,6 +80,32 @@ pub(super) fn sys_clock_gettime(
     Ok(0)
 }
 
+pub(super) fn sys_clock_getres(
+    runtime: &mut Runtime,
+    pid: Word,
+    clock_id: Word,
+    timespec: Word,
+) -> Result<Word, i32> {
+    match clock_id {
+        0 | 1 | 4 | 5 | 6 | 7 | 8 | 9 => {}
+        _ => return Err(EINVAL),
+    }
+    if timespec != 0 {
+        refresh_clock(runtime)?;
+        let hz = runtime.monotonic_tick_hz;
+        if hz == 0 {
+            return Err(EIO);
+        }
+        let nanos = 1_000_000_000usize.div_ceil(hz).max(1);
+        unsafe {
+            write_u64(runtime.posix_shm, nanos / 1_000_000_000);
+            write_u64(runtime.posix_shm + 8, nanos % 1_000_000_000);
+        }
+        write_target_memory(runtime, pid, timespec, LINUX_TIMESPEC_BYTES).map_err(|_| EFAULT)?;
+    }
+    Ok(0)
+}
+
 pub(super) fn split_ticks(ticks: Word, tick_hz: Word) -> (Word, Word) {
     if tick_hz == 1_000_000_000 {
         // HPET already reports nanoseconds. Constant division avoids the

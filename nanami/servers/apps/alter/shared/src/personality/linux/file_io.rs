@@ -23,6 +23,8 @@ pub(super) fn sys_read(
     ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::EventFd => return super::eventfd::read(runtime, pid, file, user_buffer, len),
+        LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_read(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeRead => {
             return sys_pipe_read(runtime, pid, file.posix_fd, user_buffer, len);
@@ -199,6 +201,9 @@ pub(super) fn sys_read_action(
 
     match sys_terminal_read_now(runtime, pid, user_buffer, len) {
         Ok(Some(bytes)) => EmulationAction::Return(bytes as isize),
+        Ok(None) if file.flags & LINUX_O_NONBLOCK != 0 => {
+            EmulationAction::Return(-(EAGAIN as isize))
+        }
         Ok(None) => {
             if runtime.park_terminal_reader(pid, user_buffer, len, context) {
                 EmulationAction::Park
@@ -223,6 +228,8 @@ pub(super) fn sys_write(
     ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::EventFd => return super::eventfd::write(runtime, pid, file, user_buffer, len),
+        LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_write(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeWrite => {
             return sys_pipe_write(runtime, pid, file.posix_fd, user_buffer, len);

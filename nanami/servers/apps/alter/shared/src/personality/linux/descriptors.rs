@@ -80,7 +80,7 @@ pub(super) fn sys_openat(
 }
 
 pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
-    let file = runtime.clear_linux_file(pid, fd).ok_or(EBADF)?;
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     if fd <= 2 {
         nanami_runtime::println!(
             "[alter/linux] close stdio pid={} fd={} kind={}",
@@ -89,25 +89,7 @@ pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Wo
             linux_file_kind_name(file.kind)
         );
     }
-    match file.kind {
-        _ if file.has_posix_backend() => {
-            posix::posix_close(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
-        }
-        LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
-        LinuxFileKind::SocketUdp
-        | LinuxFileKind::SocketTcp
-        | LinuxFileKind::SocketTcpListener
-        | LinuxFileKind::SocketIcmp
-        | LinuxFileKind::SocketNetlink => close_socket_file(runtime, file),
-        LinuxFileKind::Terminal
-        | LinuxFileKind::VirtualDirectory
-        | LinuxFileKind::VirtualFile
-        | LinuxFileKind::EvdevKeyboard
-        | LinuxFileKind::EvdevMouse
-        | LinuxFileKind::Framebuffer
-        | LinuxFileKind::Posix
-        | LinuxFileKind::Empty => {}
-    }
+    close_linux_fd(runtime, pid, fd)?;
     Ok(0)
 }
 
@@ -196,6 +178,9 @@ pub(super) fn sys_lseek(
             whence,
         ));
     }
+    if matches!(file.kind, LinuxFileKind::EventFd | LinuxFileKind::Epoll) {
+        return Err(ESPIPE);
+    }
     if file.kind == LinuxFileKind::PipeRead
         || file.kind == LinuxFileKind::PipeWrite
         || file.kind == LinuxFileKind::Terminal
@@ -271,8 +256,23 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_GETFL => {
             let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind == LinuxFileKind::EventFd {
+                let nonblocking = if super::eventfd::nonblocking(runtime, file) {
+                    LINUX_O_NONBLOCK
+                } else {
+                    0
+                };
+                return Ok(super::LINUX_O_RDWR | nonblocking);
+            }
             if file.kind != LinuxFileKind::Posix {
-                return Ok(file.flags & !LINUX_FD_CLOEXEC);
+                let access = match file.kind {
+                    LinuxFileKind::PipeWrite => super::LINUX_O_WRONLY,
+                    // Native terminal descriptors support both directions.
+                    // libuv uses this access mode to enable TUI writes too.
+                    LinuxFileKind::Terminal => super::LINUX_O_RDWR,
+                    _ => 0,
+                };
+                return Ok((file.flags & !LINUX_FD_CLOEXEC) | access);
             }
             let flags = posix::posix_fcntl_status_flags(runtime.posix_port, file.posix_fd, None)
                 .map_err(map_request_error)?;
@@ -295,6 +295,15 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_SETFL => {
             let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind == LinuxFileKind::EventFd {
+                let Some(crate::state::poll_objects::Object::Counter(counter)) =
+                    runtime.poll_objects.get_mut(file.resource)
+                else {
+                    return Err(EBADF);
+                };
+                counter.nonblocking = argument & LINUX_O_NONBLOCK != 0;
+                return Ok(0);
+            }
             if file.kind == LinuxFileKind::Posix {
                 return posix::posix_fcntl_status_flags(
                     runtime.posix_port,
@@ -302,6 +311,19 @@ pub(super) fn sys_fcntl(
                     Some(translate_open_flags(argument)),
                 )
                 .map_err(map_request_error);
+            }
+            if matches!(file.kind, LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite) {
+                // dup/fork share each pipe end's open-file status. The read
+                // and write ends remain independent descriptions.
+                for process in &mut runtime.managed {
+                    for alias in &mut process.files {
+                        if alias.kind == file.kind && alias.posix_fd == file.posix_fd {
+                            alias.flags = (alias.flags & !LINUX_O_NONBLOCK)
+                                | (argument & LINUX_O_NONBLOCK);
+                        }
+                    }
+                }
+                return Ok(0);
             }
             file.flags = (file.flags & LINUX_FD_CLOEXEC) | (argument & LINUX_SOCK_NONBLOCK);
             if runtime.set_linux_file(pid, fd, file) {
@@ -355,6 +377,8 @@ pub(super) fn linux_file_kind_name(kind: LinuxFileKind) -> &'static str {
         LinuxFileKind::EvdevKeyboard => "evdev-keyboard",
         LinuxFileKind::EvdevMouse => "evdev-mouse",
         LinuxFileKind::Framebuffer => "framebuffer",
+        LinuxFileKind::EventFd => "eventfd",
+        LinuxFileKind::Epoll => "epoll",
     }
 }
 
@@ -371,6 +395,7 @@ pub(super) fn duplicate_linux_file(
             })
         }
         LinuxFileKind::Empty => Err(EBADF),
+        LinuxFileKind::EventFd | LinuxFileKind::Epoll => Ok(file),
         LinuxFileKind::Terminal
         | LinuxFileKind::VirtualDirectory
         | LinuxFileKind::VirtualFile
@@ -431,7 +456,9 @@ pub(super) fn close_linux_fd(runtime: &mut Runtime, pid: Word, fd: Word) -> Resu
         }
         // Socket last-reference checks must not count the FD being closed.
         runtime.clear_linux_file(pid, fd);
+        super::epoll::forget_closed(runtime, pid, file);
         match file.kind {
+            LinuxFileKind::EventFd | LinuxFileKind::Epoll => super::eventfd::release(runtime, file),
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
             LinuxFileKind::SocketUdp
             | LinuxFileKind::SocketTcp

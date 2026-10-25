@@ -1,5 +1,70 @@
 # Alter/Linux dynamic-loader regression
 
+## Static Neovim and libuv regression
+
+The existing, unmodified `bin/nvim` is an x86_64 static musl executable.
+Its original fault at `0x8883bd` is `hlt` inside musl's `abort`, following
+failed libuv initialization, not an FPU instruction. Libuv requires
+`clock_getres`, epoll, eventfd, nonblocking `pipe2`, `FIONBIO`, and correct
+pipe/terminal access modes from `F_GETFL`. Reporting a write end as read-only
+prevents TUI RPC, while a read-only terminal mode disables libuv's TTY writes.
+Nonblocking terminal reads must also return `EAGAIN`, not park the event loop.
+
+A static binary still needs its **matching Neovim runtime data**. The checked
+payload identifies itself as `v0.13.0-dev-1895+g0851e7dabe`; do not substitute
+an unrelated host installation's runtime. Prepare a staging tree containing
+`usr/local/share/nvim/runtime` from that build, then create a fresh test image:
+
+```sh
+mkdir -p out/nvim-runtime-overlay/usr/local/share/nvim
+cp -R /path/to/matching/neovim/runtime out/nvim-runtime-overlay/usr/local/share/nvim/
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -mno-sse -mno-sse2 -O2 -Wall -Wextra -Werror \
+  -Wl,--image-base=0x400000,-z,norelro,-z,separate-loadable-segments \
+  tests/alter-linux/events.c tests/alter-linux/signals-x86_64.S -o out/events-test
+cargo xtask build --no-linux-bins --linux-bin bin/nvim --linux-bin bin/busybox \
+  --linux-bin out/events-test --linux-rootfs-dir out/nvim-runtime-overlay \
+  --size-mib 128 --rootfs out/nvim-rootfs.img --output-image out/nvim.img
+python3 tests/alter-linux/qemu-smoke.py --image out/nvim.img \
+  --program events-test --program 'nvim --headless -u /dev/null -i NONE -c q' \
+  --nvim-editor --smp 1
+python3 tests/alter-linux/qemu-smoke.py --image out/nvim.img \
+  --program events-test --nvim-editor --smp 4
+```
+
+The event fixture checks counter semantics, packed epoll data, readiness across
+fork, final-close cleanup, and pipe nonblocking/access flags through real guest
+syscalls. The editor test types text, saves with `:wq`, then requires a separate
+BusyBox process to read back the exact saved line. Screenshots alone are not a
+passing test. QEMU uses snapshots and does not modify the supplied image.
+`--diagnostics` sends explicit `-t -d` traces to serial without corrupting the
+curses screen; ordinary `-t` continues to trace to the terminal.
+
+Inside Nanami, launch without terminal tracing:
+
+```sh
+alter /alter/linux/bin/nvim -u /dev/null -i NONE --noplugin /tmp/example.txt
+```
+
+Use `-i NONE`, not `-i /dev/null`: the latter asks Neovim to write ShaDa
+temporary files beside `/dev/null` when quitting.
+
+This is a bounded editor/libuv compatibility target, not complete Linux or
+plugin compatibility. The kernel and FPU/signal-frame implementation are
+unchanged. See the syscall support document for explicit epoll limits.
+
+Validated on x86_64 QEMU with one and four CPUs: the raw event fixture,
+headless startup/exit, and untraced interactive editing, save/quit and independent
+BusyBox readback all pass. The native suite passes 751 tests (7 timing tests
+ignored), and all 24 xtask tests pass. Native services build for x86_64 and
+AArch64; the supplied Neovim executable itself was exercised only on x86_64.
+The prepared local image is `out/nvim-verified.img`, with matching runtime data;
+the default guest image/rootfs is not replaced.
+
+```sh
+cargo xtask run --image out/nvim-verified.img --storage ahci --net none --snapshot
+```
+
 ## Terminal Ctrl-C regression (2026-10-25)
 
 The Negoto smoke includes a real terminal control byte interrupting a foreground

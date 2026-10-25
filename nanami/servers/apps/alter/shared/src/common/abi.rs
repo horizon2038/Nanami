@@ -28,7 +28,8 @@ pub const ALTER_DEFAULT_SHM_BYTES: Word = 0x10000;
 pub const ALTER_PATH_MAX: usize = 256;
 pub const ALTER_IO_OFFSET: usize = 512;
 pub const ALTER_MANAGED_PROCESS_MAX: usize = 16;
-pub const ALTER_PROCESS_MAPPING_MAX: usize = 32;
+// LuaJIT and editor runtime loading need more than 32 independently protected VMAs.
+pub const ALTER_PROCESS_MAPPING_MAX: usize = 128;
 pub const ALTER_MANAGED_PCB_SLOT_BASE: Word = 40;
 pub const ALTER_IMAGE_NAME_MAX: usize = 24;
 pub const ALTER_LAUNCH_MAX_ARGS: usize = 64;

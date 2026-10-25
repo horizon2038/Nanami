@@ -96,7 +96,13 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
             }
         });
         let value = match result {
-            Ok(None) => continue,
+            Ok(None) => {
+                // Another process can modify a shared epoll interest set.
+                // Retain the newly discovered notification sources even when
+                // this change did not immediately make an FD ready.
+                runtime.managed[index].readiness_wait = Some(wait);
+                continue;
+            }
             Ok(Some(value)) => value as isize,
             Err(errno) => -(errno as isize),
         };

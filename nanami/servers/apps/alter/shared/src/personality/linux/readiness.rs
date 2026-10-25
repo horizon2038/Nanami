@@ -11,6 +11,7 @@ pub(super) fn file_sources(file: LinuxFile) -> Word {
         LinuxFileKind::Terminal => READY_TERMINAL,
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
         LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
+        LinuxFileKind::SocketUnix => READY_UNIX,
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
         LinuxFileKind::SocketUdp | LinuxFileKind::SocketTcp | LinuxFileKind::SocketTcpListener
         | LinuxFileKind::SocketIcmp => READY_NETWORK,
@@ -75,6 +76,7 @@ pub(super) fn fd_readiness(
     let read = LINUX_POLLIN | LINUX_POLLRDNORM;
     let write = LINUX_POLLOUT | LINUX_POLLWRNORM;
     Ok(match file.kind {
+        LinuxFileKind::SocketUnix => super::unix::readiness(runtime, file.resource)?,
         LinuxFileKind::EventFd => super::eventfd::readiness(runtime, file),
         LinuxFileKind::Epoll => {
             if super::epoll::ready(runtime, pid, file.resource)? { read } else { 0 }

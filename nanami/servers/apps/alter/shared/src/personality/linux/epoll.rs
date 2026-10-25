@@ -294,7 +294,7 @@ pub(super) fn forget_closed(runtime: &mut Runtime, pid: Word, file: LinuxFile) {
                 .iter()
                 .any(|other| super::eventfd::same_file(*other, file))
     });
-    if !referenced {
+    if !referenced && !runtime.unix_sockets.references(file) {
         runtime.poll_objects.forget_file(file, terminal);
     }
 }

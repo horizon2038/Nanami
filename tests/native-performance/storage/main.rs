@@ -59,6 +59,13 @@ mod directory {
     }
 }
 
+mod file_io {
+    pub(super) fn reclaim_closed_sockets(runtime: &mut super::Ext2Runtime) -> Result<(), super::RequestError> {
+        assert!(runtime.frozen_by.is_none());
+        Ok(())
+    }
+}
+
 struct FileHandle {
     active: bool,
     owner_pid: Word,

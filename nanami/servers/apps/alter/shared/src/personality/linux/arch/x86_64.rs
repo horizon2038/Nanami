@@ -47,6 +47,7 @@ pub const SYS_GETITIMER: Word = 36;
 pub const SYS_ALARM: Word = 37;
 pub const SYS_GETPID: Word = 39;
 pub const SYS_SOCKET: Word = 41;
+pub const SYS_SOCKETPAIR: Word = 53;
 pub const SYS_CONNECT: Word = 42;
 pub const SYS_ACCEPT: Word = 43;
 pub const SYS_SENDTO: Word = 44;

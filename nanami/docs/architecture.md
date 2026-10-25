@@ -890,6 +890,34 @@ and FreeBSD support remains partial; a dispatched syscall may intentionally
 implement only the semantics needed by currently tested static binaries.
 Canonical syscall lists are maintained beside each personality implementation.
 
+### Local UNIX Socket Transport
+
+Alter/Linux owns `AF_UNIX` stream, datagram and sequenced-packet endpoints.
+Local data and `SCM_RIGHTS` stay in the Alter event loop rather than passing
+through `net-server` or introducing a kernel socket object. Blocking operations
+reuse the existing readiness waiters, including poll/epoll and signal interruption.
+Passed descriptors retain open descriptions until delivery or queue disposal;
+tracing from guest FDs and listener accept queues collects ancillary reference
+cycles without making connected peers strong references.
+
+Pathname sockets are real ext2 `S_IFSOCK` inodes, not regular-file markers.
+`VFS_REQUEST_CREATE` accepts an optional fourth request word (`arg2`) containing
+`VFS_FILE_TYPE_SOCKET` (3); zero/omission retains ordinary-file creation.
+VFS stat/readdir return that type, and POSIX translates it to
+`POSIX_FILE_TYPE_SOCKET` (5). `POSIX_REQUEST_CREATE_SOCKET_NODE` (`0xa13b`)
+accepts shared-memory path offset/length and returns `(status, inode, pin_fd)`.
+The caller must keep the pin FD open until the bound endpoint is reclaimed.
+Ext2 defers freeing an unlinked socket inode until the final handle closes,
+preserving identity across unlink/rebind, rename and hardlinks. Socket closes
+during a storage freeze defer reclamation until thaw without dirtying frozen
+storage. The pin is an internal POSIX handle, not a guest-visible descriptor.
+
+Abstract names use their exact byte length and the prepared execution context's
+namespace; pathname resolution follows the guest root/cwd. No native UNIX socket
+service or cross-Alter-instance transport is implied. Supported flags, ancillary
+types, limits and Wayland prerequisites are documented in the
+[Linux syscall list](../servers/apps/alter/linux/linux-supported-syscalls.md#unix-domain-sockets).
+
 ## Build Integration
 
 Nanami delegates final image construction to SPENCER:

@@ -76,6 +76,10 @@ name = "linux-readiness"
 path = "linux-readiness.rs"
 
 [[test]]
+name = "linux-unix"
+path = "linux-unix.rs"
+
+[[test]]
 name = "linux-mappings"
 path = "linux-mappings.rs"
 

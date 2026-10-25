@@ -23,6 +23,13 @@ pub(super) fn sys_read(
     ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::SocketUnix => {
+            return super::unix_message::io(runtime, pid, file, LinuxSyscallContext {
+                number: super::SYS_READ,
+                args: [fd, user_buffer, len, 0, 0, 0],
+                ..LinuxSyscallContext::EMPTY
+            });
+        }
         LinuxFileKind::EventFd => return super::eventfd::read(runtime, pid, file, user_buffer, len),
         LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_read(runtime, pid, user_buffer, len),
@@ -228,6 +235,13 @@ pub(super) fn sys_write(
     ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::SocketUnix => {
+            return super::unix_message::io(runtime, pid, file, LinuxSyscallContext {
+                number: super::SYS_WRITE,
+                args: [fd, user_buffer, len, 0, 0, 0],
+                ..LinuxSyscallContext::EMPTY
+            });
+        }
         LinuxFileKind::EventFd => return super::eventfd::write(runtime, pid, file, user_buffer, len),
         LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_write(runtime, pid, user_buffer, len),

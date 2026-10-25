@@ -75,7 +75,7 @@ pub(crate) fn handle_read_into(
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let file = runtime.handles[handle];
-    if (file.mode & EXT2_S_IFREG) != EXT2_S_IFREG {
+    if (file.mode & EXT2_S_IFMT) != EXT2_S_IFREG {
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     if request.arg1 as usize >= file.size as usize || request.arg2 == 0 {
@@ -106,10 +106,36 @@ pub(crate) fn handle_close(
         && runtime.handles[handle].active
         && runtime.handles[handle].owner_pid == request.identifier
     {
+        let file = runtime.handles[handle];
+        if file.mode & EXT2_S_IFMT == EXT2_S_IFSOCK && runtime.frozen_by.is_some() {
+            runtime.handles[handle].active = false;
+            runtime.handles[handle].close_pending = true;
+            return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
+        }
         runtime.handles[handle] = FileHandle::EMPTY;
+        if file.mode & EXT2_S_IFMT == EXT2_S_IFSOCK {
+            if let Err(error) = release_socket_inode(runtime, file.inode) {
+                runtime.handles[handle] = file;
+                return (map_request_error_to_status(error), 0, 0);
+            }
+        }
         return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
     (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0)
+}
+
+pub(super) fn reclaim_closed_sockets(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
+    for index in 0..runtime.handles.len() {
+        let file = runtime.handles[index];
+        if file.close_pending {
+            runtime.handles[index] = FileHandle::EMPTY;
+            if let Err(error) = release_socket_inode(runtime, file.inode) {
+                runtime.handles[index] = file;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn handle_read_dir(
@@ -127,7 +153,7 @@ pub(crate) fn handle_read_dir(
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let file = runtime.handles[handle];
-    if (file.mode & EXT2_S_IFDIR) != EXT2_S_IFDIR {
+    if (file.mode & EXT2_S_IFMT) != EXT2_S_IFDIR {
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     let Ok(inode) = read_inode(runtime, file.inode) else {
@@ -185,7 +211,7 @@ fn handle_write_from(
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let file = runtime.handles[handle];
-    if (file.mode & EXT2_S_IFREG) != EXT2_S_IFREG {
+    if (file.mode & EXT2_S_IFMT) != EXT2_S_IFREG {
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     let len = request.arg2 as usize;

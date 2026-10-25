@@ -3,7 +3,7 @@ use super::{
     align_up_word, map_request_error, posix, sys_virtual_getdents, vfs, virtual_fs,
     write_target_memory, write_u16, write_u64, LinuxFile, LinuxFileKind, Runtime, Word,
     ALTER_IO_OFFSET, EBADF, EFAULT, EINVAL, EIO, ENOTDIR, LINUX_DIRENT64_NAME_OFFSET, LINUX_DT_BLK,
-    LINUX_DT_CHR, LINUX_DT_DIR, LINUX_DT_REG, LINUX_DT_UNKNOWN,
+    LINUX_DT_CHR, LINUX_DT_DIR, LINUX_DT_REG, LINUX_DT_SOCK, LINUX_DT_UNKNOWN,
 };
 
 pub(super) fn sys_getdents64(
@@ -147,6 +147,7 @@ fn read_backing(
                     posix::POSIX_FILE_TYPE_CHAR_DEVICE => LINUX_DT_CHR,
                     posix::POSIX_FILE_TYPE_BLOCK_DEVICE => LINUX_DT_BLK,
                     posix::POSIX_FILE_TYPE_REGULAR => LINUX_DT_REG,
+                    posix::POSIX_FILE_TYPE_SOCKET => LINUX_DT_SOCK,
                     _ => LINUX_DT_UNKNOWN,
                 };
                 write_entry(

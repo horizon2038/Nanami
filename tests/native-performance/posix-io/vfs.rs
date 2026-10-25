@@ -5,6 +5,25 @@ pub use constants::*;
 #[path = "../../../nanami/servers/libs/nanami-client/src/vfs/truncate.rs"]
 mod truncate;
 pub use truncate::*;
+#[path = "../../../nanami/servers/libs/nanami-client/src/vfs/service.rs"]
+mod service;
+
+#[test]
+fn socket_creation_transmits_the_node_type_as_the_fourth_word() {
+    reset();
+    assert_eq!(
+        service::vfs_create_node(8, 128, 17, VFS_FILE_TYPE_SOCKET),
+        Ok(VFS_FILE_TYPE_SOCKET)
+    );
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.calls.len(), 1);
+        assert_eq!(backend.calls[0].code, VFS_REQUEST_CREATE);
+        assert_eq!(backend.calls[0].handle, 128);
+        assert_eq!(backend.calls[0].buffer, 17);
+        assert_eq!(backend.calls[0].len, VFS_FILE_TYPE_SOCKET);
+    });
+}
 
 pub fn vfs_fsync(_port: Word, handle: Word) -> Result<(), RequestError> {
     record(Call {

@@ -29,6 +29,9 @@ pub(super) fn handle_freeze(
         if runtime.frozen_by == Some(request.identifier) {
             runtime.frozen_by = None;
         }
+        if let Err(error) = file_io::reclaim_closed_sockets(runtime) {
+            return (map_request_error_to_status(error), 0, 0);
+        }
         return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     }
     // The server is single-threaded: no write can slip between flush and freeze.

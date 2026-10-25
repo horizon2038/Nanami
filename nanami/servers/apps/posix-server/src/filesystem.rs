@@ -89,6 +89,10 @@ pub(crate) fn handle_open(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
         flags,
     ) {
         Ok((vfs_handle, _, _, kind)) => {
+            if kind == nanami_client::vfs::VFS_FILE_TYPE_SOCKET {
+                let _ = nanami_client::vfs::vfs_close(runtime.vfs_port, vfs_handle);
+                return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+            }
             let fd_kind = if kind == nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY {
                 FdKind::Directory
             } else {
@@ -97,6 +101,45 @@ pub(crate) fn handle_open(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
             alloc_open_file_and_fd(runtime, index, fd_kind, vfs_handle, request.arg2)
         }
         Err(e) => (map_request_error_to_status(e), 0, 0),
+    }
+}
+
+pub(crate) fn handle_create_socket_node(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+) -> (Word, Word, Word) {
+    let Some(index) = find_session(runtime, request.identifier) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some((path, len)) =
+        resolve_client_path(runtime, index, request.arg0 as usize, request.arg1 as usize)
+    else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    if special_device_kind(&path[..len]) != FdKind::Empty {
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
+    write_vfs_path(runtime, VFS_PATH_OFFSET, &path[..len]);
+    match nanami_client::vfs::vfs_create_node(
+        runtime.vfs_port,
+        VFS_PATH_OFFSET,
+        len,
+        nanami_client::vfs::VFS_FILE_TYPE_SOCKET,
+    ) {
+        Ok(inode) => {
+            let result = nanami_client::vfs::vfs_open(runtime.vfs_port, VFS_PATH_OFFSET, len);
+            let result = match result {
+                Ok(handle) => alloc_open_file_and_fd(runtime, index, FdKind::Regular, handle, 0),
+                Err(error) => (map_request_error_to_status(error), 0, 0),
+            };
+            if result.0 == nanami_runtime::OS_RESPONSE_OK {
+                (result.0, inode, result.1)
+            } else {
+                let _ = nanami_client::vfs::vfs_remove(runtime.vfs_port, VFS_PATH_OFFSET, len);
+                result
+            }
+        }
+        Err(error) => (map_request_error_to_status(error), 0, 0),
     }
 }
 

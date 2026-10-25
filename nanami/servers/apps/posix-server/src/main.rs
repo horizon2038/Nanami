@@ -150,6 +150,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         }
         POSIX_REQUEST_STAT => handle_stat(runtime, request),
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
+        POSIX_REQUEST_CREATE_SOCKET_NODE => handle_create_socket_node(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
         POSIX_REQUEST_LINK => handle_link(runtime, request),
         POSIX_REQUEST_RENAME => handle_rename(runtime, request),

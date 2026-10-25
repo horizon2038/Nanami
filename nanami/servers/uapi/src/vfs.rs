@@ -36,6 +36,7 @@ pub const VFS_OPEN_INODE_SHIFT: Word = 32;
 pub const VFS_FILE_TYPE_UNKNOWN: Word = 0;
 pub const VFS_FILE_TYPE_REGULAR: Word = 1;
 pub const VFS_FILE_TYPE_DIRECTORY: Word = 2;
+pub const VFS_FILE_TYPE_SOCKET: Word = 3;
 
 pub const VFS_DIRECTORY_ENTRY_NAME_BYTES: usize = 256;
 pub const VFS_DIRECTORY_ENTRY_RECORD_BYTES: usize = 32 + VFS_DIRECTORY_ENTRY_NAME_BYTES;

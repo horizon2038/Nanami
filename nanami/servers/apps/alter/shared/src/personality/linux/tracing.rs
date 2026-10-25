@@ -185,6 +185,11 @@ pub(super) fn trace_critical_action(
 
 pub(super) fn syscall_arg_count(number: Word) -> usize {
     match number {
+        super::SYS_LISTEN | super::SYS_SHUTDOWN => 2,
+        super::SYS_SOCKET | super::SYS_BIND | super::SYS_CONNECT | super::SYS_ACCEPT
+        | super::SYS_GETSOCKNAME | super::SYS_GETPEERNAME => 3,
+        super::SYS_SOCKETPAIR | super::SYS_ACCEPT4 => 4,
+        super::SYS_SETSOCKOPT | super::SYS_GETSOCKOPT => 5,
         SYS_GETPID | SYS_GETPPID | SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID
         | SYS_FORK | SYS_VFORK | SYS_GETTID | SYS_SYNC => 0,
         SYS_CLOSE
@@ -275,6 +280,20 @@ pub(super) fn syscall_name(number: Word) -> &'static [u8] {
         SYS_DUP2 => b"dup2",
         SYS_DUP3 => b"dup3",
         SYS_PIPE => b"pipe",
+        super::SYS_SOCKETPAIR => b"socketpair",
+        super::SYS_SOCKET => b"socket",
+        super::SYS_BIND => b"bind",
+        super::SYS_LISTEN => b"listen",
+        super::SYS_CONNECT => b"connect",
+        super::SYS_ACCEPT => b"accept",
+        super::SYS_ACCEPT4 => b"accept4",
+        super::SYS_GETSOCKNAME => b"getsockname",
+        super::SYS_GETPEERNAME => b"getpeername",
+        super::SYS_SETSOCKOPT => b"setsockopt",
+        super::SYS_GETSOCKOPT => b"getsockopt",
+        super::SYS_SHUTDOWN => b"shutdown",
+        super::SYS_SENDTO => b"sendto",
+        super::SYS_RECVFROM => b"recvfrom",
         SYS_PIPE2 => b"pipe2",
         SYS_CREAT => b"creat",
         SYS_CLOSE => b"close",

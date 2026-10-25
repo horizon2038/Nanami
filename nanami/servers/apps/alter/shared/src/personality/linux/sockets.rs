@@ -437,7 +437,8 @@ pub(super) fn socket_any_port_in_use(runtime: &Runtime, port: u16) -> bool {
 pub(super) fn is_socket_kind(kind: LinuxFileKind) -> bool {
     matches!(
         kind,
-        LinuxFileKind::SocketUdp
+        LinuxFileKind::SocketUnix
+            | LinuxFileKind::SocketUdp
             | LinuxFileKind::SocketTcp
             | LinuxFileKind::SocketTcpListener
             | LinuxFileKind::SocketIcmp
@@ -504,13 +505,14 @@ pub(super) fn close_socket_file(runtime: &mut Runtime, file: LinuxFile) {
 }
 
 pub(super) fn socket_file_still_open(runtime: &Runtime, file: LinuxFile) -> bool {
-    runtime.managed.iter().any(|process| {
-        process.pid != 0
-            && process.files.iter().any(|candidate| {
-                candidate.is_open()
-                    && candidate.kind == file.kind
-                    && candidate.posix_fd == file.posix_fd
-                    && candidate.local_port == file.local_port
-            })
-    })
+    runtime.unix_sockets.references(file)
+        || runtime.managed.iter().any(|process| {
+            process.pid != 0
+                && process.files.iter().any(|candidate| {
+                    candidate.is_open()
+                        && candidate.kind == file.kind
+                        && candidate.posix_fd == file.posix_fd
+                        && candidate.local_port == file.local_port
+                })
+        })
 }

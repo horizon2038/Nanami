@@ -78,6 +78,7 @@ pub const SYS_GETGID: Word = 176;
 pub const SYS_GETEGID: Word = 177;
 pub const SYS_GETTID: Word = 178;
 pub const SYS_SOCKET: Word = 198;
+pub const SYS_SOCKETPAIR: Word = 199;
 pub const SYS_BIND: Word = 200;
 pub const SYS_LISTEN: Word = 201;
 pub const SYS_ACCEPT: Word = 202;

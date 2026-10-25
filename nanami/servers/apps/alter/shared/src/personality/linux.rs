@@ -58,6 +58,10 @@ use pipe::*;
 mod pipe_wait;
 #[path = "linux/eventfd.rs"]
 mod eventfd;
+#[path = "linux/unix.rs"]
+mod unix;
+#[path = "linux/unix_message.rs"]
+mod unix_message;
 #[path = "linux/epoll.rs"]
 mod epoll;
 
@@ -233,6 +237,11 @@ pub fn dispatch_syscall(
     native_pid: Word,
     context: LinuxSyscallContext,
 ) -> EmulationAction {
+    if let Some(action) = unix::dispatch(runtime, native_pid, context) {
+        record_action_result(runtime, native_pid, context.number, action);
+        trace_syscall_action(runtime, native_pid, context, action);
+        return action;
+    }
     let result = match context.number {
         SYS_READ => {
             let mut action = sys_read_action(

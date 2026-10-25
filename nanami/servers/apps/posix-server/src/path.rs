@@ -155,6 +155,7 @@ pub(crate) fn vfs_kind_to_posix(kind: Word) -> Word {
     match kind {
         nanami_client::vfs::VFS_FILE_TYPE_REGULAR => POSIX_FILE_TYPE_REGULAR,
         nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY => POSIX_FILE_TYPE_DIRECTORY,
+        nanami_client::vfs::VFS_FILE_TYPE_SOCKET => POSIX_FILE_TYPE_SOCKET,
         _ => POSIX_FILE_TYPE_UNKNOWN,
     }
 }

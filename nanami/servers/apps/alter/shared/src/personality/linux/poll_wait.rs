@@ -53,6 +53,9 @@ fn start_wait(
 }
 
 fn complete_wait(runtime: &mut Runtime, pid: Word, wait: &ReadinessWait) -> Result<Word, i32> {
+    if let Some(result) = super::unix::retry(runtime, pid, wait.context) {
+        return result;
+    }
     if let Some(result) = super::pipe_wait::retry(runtime, pid, wait.context) {
         return result;
     }

@@ -2,6 +2,13 @@ use super::*;
 use ipc::ServiceRequest;
 
 const EXT2_S_IFREG: u16 = 0x8000;
+const EXT2_S_IFMT: u16 = 0xf000;
+const EXT2_S_IFSOCK: u16 = 0xc000;
+fn release_socket_inode(runtime: &mut Ext2Runtime, _: u32) -> Result<(), RequestError> {
+    assert!(runtime.frozen_by.is_none());
+    runtime.socket_reclaims += 1;
+    Ok(())
+}
 const EXT2_S_IFDIR: u16 = 0x4000;
 
 // Only the storage/session fixtures are mocked; dispatch checks below are production code.
@@ -22,6 +29,7 @@ struct DelegatedSession {
 #[derive(Clone, Copy)]
 struct FileHandle {
     active: bool,
+    close_pending: bool,
     owner_pid: Word,
     inode: u32,
     size: u32,
@@ -30,6 +38,7 @@ struct FileHandle {
 impl FileHandle {
     const EMPTY: Self = Self {
         active: false,
+        close_pending: false,
         owner_pid: 0,
         inode: 0,
         size: 0,
@@ -47,6 +56,8 @@ struct Ext2Runtime {
     writes: usize,
     inode_reads: usize,
     error: Option<Word>,
+    frozen_by: Option<Word>,
+    socket_reclaims: usize,
 }
 
 #[path = "../../../nanami/servers/core-services/ext2-server/src/file_io.rs"]
@@ -168,6 +179,7 @@ fn runtime(input: &[u8]) -> Ext2Runtime {
     Ext2Runtime {
         handles: [FileHandle {
             active: true,
+            close_pending: false,
             owner_pid: 10,
             inode: 7,
             size: 0,
@@ -186,7 +198,54 @@ fn runtime(input: &[u8]) -> Ext2Runtime {
         writes: 0,
         inode_reads: 0,
         error: None,
+        frozen_by: None,
+        socket_reclaims: 0,
     }
+}
+
+#[test]
+fn socket_mode_is_not_mistaken_for_a_regular_file_or_directory() {
+    let mut runtime = runtime(&[]);
+    runtime.session = Some(ClientSession {
+        active: true,
+        pid: 10,
+        shm_local: 0,
+        shm_size: 0,
+    });
+    runtime.handles[0].mode = EXT2_S_IFSOCK;
+    let request = request(1, 0, 0);
+    assert_eq!(
+        file_io::handle_read(request, &mut runtime).0,
+        OS_RESPONSE_ILLEGAL_OPERATION
+    );
+    assert_eq!(
+        file_io::handle_read_dir(request, &mut runtime).0,
+        OS_RESPONSE_ILLEGAL_OPERATION
+    );
+    assert_eq!(
+        file_io::handle_write_file(request, &mut runtime).0,
+        OS_RESPONSE_ILLEGAL_OPERATION
+    );
+    assert_eq!(runtime.inode_reads, 0);
+}
+
+#[test]
+fn frozen_socket_close_defers_inode_reclamation_until_thaw() {
+    let mut runtime = runtime(&[]);
+    runtime.handles[0].mode = EXT2_S_IFSOCK;
+    runtime.frozen_by = Some(9);
+    let request = request(1, 0, 0);
+    assert_eq!(
+        file_io::handle_close(request, &mut runtime).0,
+        OS_RESPONSE_OK
+    );
+    assert!(!runtime.handles[0].active);
+    assert!(runtime.handles[0].close_pending);
+    assert_eq!(runtime.socket_reclaims, 0);
+    runtime.frozen_by = None;
+    file_io::reclaim_closed_sockets(&mut runtime).unwrap();
+    assert!(!runtime.handles[0].close_pending);
+    assert_eq!(runtime.socket_reclaims, 1);
 }
 
 fn request(delegate: Word, input: Word, len: Word) -> ServiceRequest {

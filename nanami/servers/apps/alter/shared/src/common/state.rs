@@ -20,6 +20,8 @@ mod processes;
 pub mod readiness;
 #[path = "state/poll_objects.rs"]
 pub mod poll_objects;
+#[path = "state/unix_sockets.rs"]
+pub mod unix_sockets;
 #[path = "state/signals.rs"]
 mod signals;
 #[path = "state/waiters.rs"]
@@ -61,6 +63,7 @@ pub enum LinuxFileKind {
     SocketTcpListener,
     SocketIcmp,
     SocketNetlink,
+    SocketUnix,
     VirtualDirectory,
     VirtualFile,
     EvdevKeyboard,
@@ -521,6 +524,7 @@ pub struct Runtime {
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
     pub poll_objects: poll_objects::Objects,
+    pub unix_sockets: unix_sockets::Sockets,
 }
 
 impl Runtime {
@@ -590,6 +594,7 @@ impl Runtime {
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
             poll_objects: poll_objects::Objects::new(),
+            unix_sockets: unix_sockets::Sockets::new(),
         }
     }
 }

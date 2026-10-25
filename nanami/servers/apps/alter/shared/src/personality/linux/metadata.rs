@@ -112,7 +112,8 @@ pub(super) fn sys_statx(
             | LinuxFileKind::SocketTcp
             | LinuxFileKind::SocketTcpListener
             | LinuxFileKind::SocketIcmp
-            | LinuxFileKind::SocketNetlink => (0, 0, POSIX_FILE_TYPE_SOCKET, 0, 0),
+            | LinuxFileKind::SocketNetlink
+            | LinuxFileKind::SocketUnix => (0, 0, POSIX_FILE_TYPE_SOCKET, 0, 0),
             LinuxFileKind::VirtualDirectory
             | LinuxFileKind::VirtualFile
             | LinuxFileKind::EvdevKeyboard
@@ -166,6 +167,10 @@ pub(super) fn sys_fstat(
     stat_ptr: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::SocketUnix {
+        write_linux_stat(runtime, pid, stat_ptr, (file.resource, 0, POSIX_FILE_TYPE_SOCKET, 0, 0))?;
+        return Ok(0);
+    }
     if file.kind == LinuxFileKind::Terminal {
         write_linux_stat(
             runtime,

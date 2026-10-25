@@ -2,6 +2,21 @@ use super::constants::*;
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 use a9n_abi::CapabilityDescriptor;
 
+/// Create a persistent socket inode and return (inode, pin_fd).
+/// Keep pin_fd open while the endpoint exists, then close it with posix_close.
+/// Unlinking the pathname does not allow reuse of the pinned inode.
+pub fn posix_create_socket_node(
+    port: CapabilityDescriptor,
+    offset: Word,
+    len: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, inode, pin) = call_port(port, POSIX_REQUEST_CREATE_SOCKET_NODE, offset, len, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((inode, pin))
+}
+
 /// Positioned I/O never changes the shared open-file-description offset.
 pub fn posix_pread(
     port: CapabilityDescriptor,

@@ -61,6 +61,7 @@ pub const POSIX_REQUEST_PWRITE_DIRECT: Word = 0xa137;
 pub const POSIX_REQUEST_FSYNC: Word = 0xa138;
 pub const POSIX_REQUEST_SYNC: Word = 0xa139;
 pub const POSIX_REQUEST_FTRUNCATE: Word = 0xa13a;
+pub const POSIX_REQUEST_CREATE_SOCKET_NODE: Word = 0xa13b;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;
@@ -107,6 +108,7 @@ pub const POSIX_FILE_TYPE_REGULAR: Word = 1;
 pub const POSIX_FILE_TYPE_DIRECTORY: Word = 2;
 pub const POSIX_FILE_TYPE_CHAR_DEVICE: Word = 3;
 pub const POSIX_FILE_TYPE_BLOCK_DEVICE: Word = 4;
+pub const POSIX_FILE_TYPE_SOCKET: Word = 5;
 
 pub const POSIX_DEV_NULL_MAJOR: Word = 1;
 pub const POSIX_DEV_NULL_MINOR: Word = 3;

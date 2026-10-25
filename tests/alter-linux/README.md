@@ -1,5 +1,53 @@
 # Alter/Linux dynamic-loader regression
 
+## UNIX domain socket regression
+
+Build the freestanding fixture, then install it in a fresh image:
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -fno-stack-protector -fno-builtin -mno-sse -mno-sse2 -O2 -Wall -Wextra -Werror \
+  -Wl,--image-base=0x400000,-z,norelro,-z,separate-loadable-segments \
+  tests/alter-linux/unix.c tests/alter-linux/signals-x86_64.S -o out/unix-test
+cargo xtask build --no-linux-bins --linux-bin out/unix-test --linux-bin bin/busybox \
+  --size-mib 64 --rootfs out/unix-rootfs.img --output-image out/unix.img
+python3 tests/alter-linux/qemu-smoke.py --image out/unix.img \
+  --program unix-test --diagnostics --smp 1
+python3 tests/alter-linux/qemu-smoke.py --image out/unix.img \
+  --program unix-test --diagnostics --smp 4
+```
+
+`unix.c` exercises actual Linux syscalls without libc, FPU or networking:
+stream/datagram/seqpacket pairs, pathname and binary abstract names, real socket
+stat mode, rename/hardlink/unlink/rebind, peer credentials, half-close, fork and
+epoll, `SCM_RIGHTS` for regular files and eventfd (including across fork),
+`MSG_CMSG_CLOEXEC`, in-flight pipe status changes, record truncation, and 160 ancillary reference-cycle
+create/close iterations. Success prints `unix-socket-ok` and exits zero.
+The runner requires the exit status and uses a QEMU disk snapshot.
+
+Native tests execute the production local-socket handlers with memory/IPC
+mocked, covering backpressure, backlog retry, failed accept/recvmsg copyout,
+descriptor exhaustion, FD ownership/truncation/GC, stream barriers, abstract
+namespace separation and sockaddr length handling:
+
+```sh
+cargo test --manifest-path tests/native-performance/Cargo.toml --offline \
+  --test linux-unix --test linux-readiness --test posix-io -- --test-threads=1
+```
+
+The POSIX/VFS tests also check the socket creation request's fourth word,
+socket-vs-directory mode discrimination, and deferred close during filesystem
+freeze. Scope and explicit compatibility limits are in
+[the syscall support document](../../nanami/servers/apps/alter/linux/linux-supported-syscalls.md#unix-domain-sockets).
+
+Validated on x86_64 QEMU with one and four CPUs, together with the eventfd/epoll
+fixture. The Neovim edit/save/quit regression and independent BusyBox readback
+also pass on both CPU configurations. The native suite passes 772 tests
+(7 timing tests ignored), all 18 UNIX socket tests also pass in release mode,
+and all 24 xtask tests pass. Native services build for x86_64 and AArch64;
+the raw guest fixture is x86_64-only. The prepared combined test image is
+`out/unix-final.img`; it leaves the default guest image/rootfs unchanged.
+
 ## Static Neovim and libuv regression
 
 The existing, unmodified `bin/nvim` is an x86_64 static musl executable.
@@ -55,7 +103,7 @@ unchanged. See the syscall support document for explicit epoll limits.
 
 Validated on x86_64 QEMU with one and four CPUs: the raw event fixture,
 headless startup/exit, and untraced interactive editing, save/quit and independent
-BusyBox readback all pass. The native suite passes 751 tests (7 timing tests
+BusyBox readback all pass. The native suite passes 772 tests (7 timing tests
 ignored), and all 24 xtask tests pass. Native services build for x86_64 and
 AArch64; the supplied Neovim executable itself was exercised only on x86_64.
 The prepared local image is `out/nvim-verified.img`, with matching runtime data;

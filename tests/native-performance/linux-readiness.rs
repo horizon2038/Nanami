@@ -14,6 +14,15 @@ pub mod input {
 }
 pub use std::println;
 type Word = usize;
+struct UnixSocketMock;
+impl UnixSocketMock {
+    fn references(&self, _: LinuxFile) -> bool { false }
+}
+mod unix {
+    use super::*;
+    pub(super) fn retry(_: &mut Runtime, _: Word, _: LinuxSyscallContext) -> Option<Result<Word, i32>> { None }
+    pub(super) fn readiness(_: &Runtime, _: Word) -> Result<i16, i32> { Ok(0) }
+}
 const EFAULT: i32 = 14;
 const EINVAL: i32 = 22;
 const EBADF: i32 = 9;
@@ -78,6 +87,7 @@ pub mod poll_objects;
 use readiness_state::*;
 #[derive(Clone, Copy, PartialEq)]
 enum LinuxFileKind {
+    SocketUnix,
     Terminal,
     Posix,
     PipeRead,
@@ -130,6 +140,7 @@ struct Process {
     terminal_id: Word,
 }
 struct Runtime {
+    unix_sockets: UnixSocketMock,
     io_calls: usize,
     io_result: Result<Word, i32>,
     posix_shm: Word,
@@ -316,6 +327,7 @@ fn runtime() -> Runtime {
     RETURNS.with(|v| v.borrow_mut().clear());
     let mut scratch = vec![0; 4096].into_boxed_slice();
     Runtime {
+        unix_sockets: UnixSocketMock,
         io_calls: 0,
         io_result: Ok(0),
         copy_error: false,

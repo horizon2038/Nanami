@@ -60,13 +60,64 @@ instead of parking the guest event loop.
 
 ## Networking
 
-`socket`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendto`,
+`socket`, `socketpair`, `connect`, `bind`, `listen`, `accept`, `accept4`, `sendto`,
 `sendmsg`, `recvfrom`, `recvmsg`, `shutdown`, `getsockname`, `getpeername`,
 `setsockopt`, and `getsockopt`.
 
 Supported socket paths include TCP/UDP through `net-server`, raw ICMP used by
 `ping`, and read-only route netlink queries used by tools such as BusyBox
 `ip a`.
+
+### UNIX domain sockets
+
+`AF_UNIX` supports `SOCK_STREAM`, `SOCK_DGRAM`, and `SOCK_SEQPACKET`, including
+`socketpair`, pathname and length-sensitive abstract addresses. Stream/seqpacket
+listeners implement a bounded accept backlog. `accept4`, `SOCK_NONBLOCK`,
+`SOCK_CLOEXEC`, shared `F_SETFL`/`FIONBIO`, `shutdown`, `getsockname`, and
+`getpeername` are supported. A full backlog or data queue parks a blocking caller
+on the existing readiness mechanism; nonblocking calls return `EAGAIN`.
+Poll/select and level-triggered epoll observe input, output, half-close and hangup.
+
+Local transport is owned by the Alter instance, with no `net-server` round trip.
+Forked and independently launched guests managed by that instance can connect.
+Abstract names are scoped to the prepared execution context (ordinary guests
+share the default context). Pathnames use the guest's cwd/root translation and
+real ext2 socket inodes: stat reports `S_IFSOCK`, readdir reports `DT_SOCK`,
+rename/hardlink preserve identity, and unlink does not invalidate established
+connections. A hidden native FD pins a bound inode until the endpoint is freed,
+preventing inode reuse from reconnecting a new pathname to the wrong listener.
+Closing an endpoint does not unlink its pathname; a stale socket file must be
+removed before binding the same path again.
+
+`sendmsg`/`recvmsg` implement LP64 `SCM_RIGHTS` on all three socket types.
+Ancillary queues own file descriptions, not sender FD numbers, so closing a
+sender's FD does not destroy an in-flight resource. Regular-file offset/status
+state stays shared through native POSIX dup. Receive supports `MSG_PEEK`,
+`MSG_CMSG_CLOEXEC` and `MSG_CTRUNC`; undisclosed/truncated FDs are closed, while
+copyout failures roll back newly installed FDs without consuming the message.
+Plain read discards attached rights. Unreachable cycles of passed UNIX FDs are
+traced and collected without retaining peers merely because they are connected.
+
+`read`/`write`, vectored I/O, `sendto`/`recvfrom`, `MSG_DONTWAIT`, record
+`MSG_TRUNC`, and `MSG_NOSIGNAL` are supported. Writing a closed stream queues
+`SIGPIPE` unless suppressed. Socket options include `SO_TYPE`, `SO_ERROR`,
+`SO_SNDBUF`, `SO_RCVBUF`, `SO_ACCEPTCONN`, `SO_PROTOCOL`, `SO_DOMAIN`, and
+`SO_PEERCRED`; credentials use Alter's current PID and uid/gid-zero identity.
+
+Limits are 128 local endpoints per Alter instance, 64 KiB queued payload,
+256 queued messages and 64 in-flight FDs per receiving endpoint, plus the
+existing 64-FD process limit. Buffer options can reduce the payload limit.
+Transferable descriptions are POSIX-backed files/directories, pipes, UNIX
+sockets, eventfd and epoll. Process-relative terminal/evdev/framebuffer/virtual
+descriptions and legacy Internet/netlink socket descriptions return
+`EOPNOTSUPP` rather than transferring a copy of mutable per-FD state. `SCM_CREDENTIALS`,
+`SO_PASSCRED`, `MSG_WAITALL`, and unsupported options/flags are rejected, not
+silently treated as successful operations.
+
+This supplies the stream and FD-passing transport used by the
+[Wayland wire protocol](https://wayland.freedesktop.org/docs/book/Protocol.html).
+It does not add file-backed shared mappings, memfd, DRM, or a compositor; those
+are separate compatibility requirements. A9N and its IPC fastpath are unchanged.
 
 ## Memory
 

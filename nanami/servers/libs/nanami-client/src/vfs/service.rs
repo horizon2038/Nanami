@@ -207,14 +207,23 @@ pub fn vfs_create(
     path_offset: Word,
     path_len: Word,
 ) -> Result<Word, RequestError> {
+    vfs_create_node(service_port, path_offset, path_len, 0)
+}
+
+pub fn vfs_create_node(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    kind: Word,
+) -> Result<Word, RequestError> {
     let (status, inode, _) = call_port(
         service_port,
         VFS_REQUEST_CREATE,
         path_offset,
         path_len,
+        kind,
         0,
-        0,
-        3,
+        if kind == 0 { 3 } else { 4 },
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));

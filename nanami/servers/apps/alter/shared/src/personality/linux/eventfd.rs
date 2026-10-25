@@ -138,9 +138,11 @@ pub(super) fn same_file(left: LinuxFile, right: LinuxFile) -> bool {
 pub(super) fn release(runtime: &mut Runtime, file: LinuxFile) {
     // Watches do not own an FD reference. dup/fork aliases keep the object
     // alive, while final close removes its allocation (also on failed exec).
-    if runtime.managed.iter().any(|process| {
-        process.pid != 0 && process.files.iter().any(|other| same_file(*other, file))
-    }) {
+    if runtime.unix_sockets.references(file)
+        || runtime.managed.iter().any(|process| {
+            process.pid != 0 && process.files.iter().any(|other| same_file(*other, file))
+        })
+    {
         return;
     }
     runtime.poll_objects.remove(file.resource);

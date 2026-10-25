@@ -427,7 +427,7 @@ pub(super) const LINUX_STATX_BASIC_STATS: u32 = 0x07ff;
 
 pub(super) const POSIX_FILE_TYPE_PIPE: Word = 0xffff_fffe;
 
-pub(super) const POSIX_FILE_TYPE_SOCKET: Word = 0xffff_fffd;
+pub(super) const POSIX_FILE_TYPE_SOCKET: Word = 5;
 
 pub(super) const LINUX_S_IFSOCK: Word = 0o140000;
 
@@ -544,3 +544,4 @@ pub(super) const LINUX_DT_DIR: Word = 4;
 pub(super) const LINUX_DT_BLK: Word = 6;
 
 pub(super) const LINUX_DT_REG: Word = 8;
+pub(super) const LINUX_DT_SOCK: Word = 12;

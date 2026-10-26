@@ -9,7 +9,30 @@ use std::hint::black_box;
 
 pub type Word = usize;
 #[derive(Debug)]
-pub struct RequestError;
+pub enum RequestError {
+    InvalidArgument,
+    Unsupported,
+    Protocol,
+    Transport,
+    Status(Word),
+}
+pub const OS_RESPONSE_OK: Word = 0;
+#[path = "../../nanami/servers/libs/nanami-client/src/gpu.rs"]
+pub mod gpu;
+pub fn call_port(
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: u8,
+) -> Result<(Word, Word, Word), RequestError> {
+    panic!("software hot-path tests must not issue GPU IPC");
+}
+pub fn request_mapping_release(_: Word, _: Word) -> Result<(), RequestError> {
+    panic!("software hot-path tests must not release GPU mappings");
+}
 #[derive(Debug)]
 pub struct NanamiError;
 impl NanamiError {
@@ -63,8 +86,14 @@ fn terminal_controls_filter_wraparound_without_losing_ordinary_input() {
     let padding = [b'x'; RING_BYTES - 2];
     let mut scratch = [0; RING_BYTES];
     unsafe {
-        assert_eq!(ring.write_from(padding.as_ptr(), padding.len()), padding.len());
-        assert_eq!(ring.read_into(scratch.as_mut_ptr(), padding.len()), padding.len());
+        assert_eq!(
+            ring.write_from(padding.as_ptr(), padding.len()),
+            padding.len()
+        );
+        assert_eq!(
+            ring.read_into(scratch.as_mut_ptr(), padding.len()),
+            padding.len()
+        );
         let input = b"ab\x03c\x1cd\x1ae\0";
         assert_eq!(ring.write_from(input.as_ptr(), input.len()), input.len());
         assert_eq!(ring.take_controls([3, 28, 26], false), 7);
@@ -268,7 +297,7 @@ fn background_damage_is_pixel_exact_with_padding_and_translucent_overlay() {
         let destination = canvas(&mut actual, screen);
         let reference = canvas(&mut expected, screen);
         let cache =
-            background::BackgroundCache::new(screen, |fb| paint_reference(fb, full)).unwrap();
+            background::BackgroundCache::new(&destination, |fb| paint_reference(fb, full)).unwrap();
         let mut seed = 193;
         for step in 0..1000 {
             let x = next(&mut seed) as usize % screen.width;
@@ -305,7 +334,10 @@ fn background_cache_budget_and_invalid_geometry_fall_back() {
             ..screen(10, 10)
         },
     ] {
-        assert!(background::BackgroundCache::new(geometry, |_| panic!("must not draw")).is_none());
+        let fb = framebuffer::Framebuffer::new(1, 4096, 4096, geometry)
+            .ok()
+            .unwrap();
+        assert!(background::BackgroundCache::new(&fb, |_| panic!("must not draw")).is_none());
     }
 }
 
@@ -359,7 +391,7 @@ fn hotpath_benchmark() {
     let full = framebuffer::Rect::new(0, 0, 712, 396);
     let mut pixels = vec![0; screen.stride_bytes / 4 * screen.height];
     let fb = canvas(&mut pixels, screen);
-    let cache = background::BackgroundCache::new(screen, |fb| paint_reference(fb, full)).unwrap();
+    let cache = background::BackgroundCache::new(&fb, |fb| paint_reference(fb, full)).unwrap();
     for cached in [false, true] {
         let ns = median_ns(100, || {
             if cached {

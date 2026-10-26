@@ -67,6 +67,22 @@ Other display configurations use `fb-server`. See
 [device drivers](../docs/device-drivers.md) for the protocol, ownership rules,
 supported modes and validation limits.
 
+The display providers also implement `gpu-service`, the common synchronous
+buffer/fill/copy/present protocol in `nanami-uapi::gpu`, with typed wrappers in
+`nanami-client::gpu` and provider validation in `nanami-gpu`. Gen9 uses a private
+PPGTT/Execlists BCS context after a scratch self-test; the framebuffer provider
+implements CPU fallback with zero hardware flags. Honoka accelerates large
+opaque fills, background copies and native presentation while keeping CPU
+text/alpha/cursor rendering. See [GPU service](../docs/gpu.md) for wire details,
+failure ownership and model-versus-hardware validation boundaries.
+
+`virtio-gpu-server` is a third provider for modern PCI `1af4:1050` displays.
+It implements standard virtio 2D resource/backing/transfer/scanout commands via
+a fenced split queue. Shared CPU/DMA surfaces avoid an extra presentation copy;
+fill/copy use the CPU and accelerated flags remain zero. Driver Manager selects
+it automatically on QEMU; normal x86_64 `xtask run` now uses virtio-vga, with
+`--gpu std` available for GOP fallback. No A9N changes or virgl/DRM API are added.
+
 Normal services/apps under `apps/` are installed into ext2 `/bin`.
 Nested paths join with `-`: `apps/alter/linux` becomes `/bin/alter-linux`.
 Rust binaries are discovered from Cargo manifests. Freestanding x86_64 C++

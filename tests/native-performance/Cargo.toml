@@ -12,6 +12,18 @@ name = "intel-graphics"
 path = "intel-graphics.rs"
 
 [[test]]
+name = "gpu"
+path = "gpu.rs"
+
+[[test]]
+name = "gpu-blt"
+path = "gpu-blt.rs"
+
+[[test]]
+name = "virtio-gpu"
+path = "virtio-gpu.rs"
+
+[[test]]
 name = "display-selection"
 path = "display-selection.rs"
 

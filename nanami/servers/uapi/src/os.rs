@@ -74,6 +74,10 @@ pub const OS_REQUEST_NANAMI_INFO: Word = 0x1023;
 
 pub const OS_REQUEST_DRIVER_PLATFORM_INFO: Word = 0x1024;
 
+/// Share an entire caller-owned RAM allocation, preserving the caller mapping.
+/// (peer PID, page-aligned caller VA, byte length) -> (caller VA, peer VA).
+pub const OS_REQUEST_MAPPING_SHARE: Word = 0x1029;
+
 pub const OS_REQUEST_DEBUG_PING: Word = 0x10ff;
 
 pub const DRIVER_PLATFORM_INFO_RSDP_ADDRESS: Word = 1;

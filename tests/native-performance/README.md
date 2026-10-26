@@ -70,6 +70,25 @@ Add `--native-info --network` to capture the three PCI listing modes and the
 renamed `net-info` builtin for visual inspection; this does not claim automated
 text recognition of those screenshots.
 
+`gpu` exercises the common GPU client/provider protocol, ownership, padding,
+quotas and dead-client reclamation. `gpu-blt` runs production Gen9 command
+encoding, PPGTT and Execlists submission through a checked host MMIO/DMA model,
+including incomplete completion and CSB wrap. `honoka-motion` also compares
+GPU-protocol composition to CPU pixels and checks that a failed copy poisons
+both operands. The Alpha shared-memory transaction tests cover sharing existing
+owned RAM without reallocating/zeroing, release order and failure rollback.
+These models are not physical Intel validation; see [GPU service](../../nanami/docs/gpu.md).
+
+`virtio-gpu` covers the real modern PCI capability parser, split control queue,
+wire commands and common GPU provider. Tests check row padding, resource
+switching, CPU copy, display ownership and the legacy API; ring-index wrap and
+bad fences/used entries cannot release DMA before acknowledged reset. Failed
+sharing detaches resources before releasing RAM. QEMU `--gpu virtio
+--expect-virtio-gpu` exercises the actual device; `--gpu virtio
+--virtio-gpu-iommu --expect-framebuffer` deliberately declines unsupported
+ACCESS_PLATFORM and checks framebuffer fallback. The default smoke-test display
+remains `std` so existing framebuffer regressions retain their original scope.
+
 ## Choice and boundaries
 
 The previous implicit-list allocator scanned occupied blocks on every

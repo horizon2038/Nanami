@@ -24,7 +24,11 @@ fn setup_with_vblank(vblank: bool) -> (Compositor, Vec<u32>) {
         framebuffer::Framebuffer::new(1, pixels.as_mut_ptr() as usize, pixels.len() * 4, screen)
             .ok()
             .unwrap()
-            .with_vblank_flip(vblank);
+            .with_merged_present(vblank);
+    (setup_framebuffer(fb), pixels)
+}
+
+fn setup_framebuffer(fb: framebuffer::Framebuffer) -> Compositor {
     let theme = include_bytes!("../../../nanami/servers/apps/honoka/assets/themes/default.theme");
     let fields = [
         "Kernel Version: A9N v0.3.4",
@@ -38,7 +42,115 @@ fn setup_with_vblank(vblank: bool) -> (Compositor, Vec<u32>) {
     compositor.create_window(18, 80, 80, 400, 300).unwrap();
     compositor.render_if_needed();
     PRESENTED.with(|rects| rects.borrow_mut().clear());
-    (compositor, pixels)
+    compositor
+}
+
+fn gpu_screen() -> framebuffer::ScreenInfo {
+    framebuffer::ScreenInfo {
+        width: 800,
+        height: 600,
+        stride_bytes: 3200,
+        bits_per_pixel: 32,
+        red_position: 16,
+        red_size: 8,
+        green_position: 8,
+        green_size: 8,
+        blue_position: 0,
+        blue_size: 8,
+    }
+}
+
+#[test]
+fn gpu_protocol_compositor_matches_cpu_pixels_through_motion_and_drag() {
+    gpu_mock::reset();
+    gpu_mock::FAKE.with(|fake| fake.borrow_mut().accelerated = gpu::CAP_ALL);
+    let fb = framebuffer::Framebuffer::try_gpu(1, gpu_screen())
+        .unwrap()
+        .unwrap()
+        .with_merged_present(true);
+    let (mut cpu, expected) = setup_with_vblank(true);
+    let mut accelerated = setup_framebuffer(fb);
+    let compare = || {
+        gpu_mock::FAKE.with(|fake| {
+            let fake = fake.borrow();
+            let pixels = unsafe {
+                std::slice::from_raw_parts(expected.as_ptr() as *const u8, expected.len() * 4)
+            };
+            assert_eq!(&fake.presented[..pixels.len()], pixels);
+        })
+    };
+    compare();
+    for event in [
+        move_by(-300, -210),
+        button(true),
+        move_by(40, 18),
+        move_by(70, 30),
+        button(false),
+        move_by(200, 220),
+        move_by(-150, -180),
+    ] {
+        cpu.process_input(event);
+        accelerated.process_input(event);
+        cpu.render_if_needed();
+        accelerated.render_if_needed();
+        compare();
+    }
+    gpu_mock::FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert!(fake.fills > 0);
+        assert!(fake.copies > 0);
+        assert!(fake.presents > 1);
+        // Drawing a desktop must not turn each text/cursor pixel into IPC.
+        assert!(fake.calls.len() < 1000);
+    });
+}
+
+#[test]
+fn software_gpu_backend_uses_cpu_drawing_but_the_same_present_protocol() {
+    gpu_mock::reset();
+    let fb = framebuffer::Framebuffer::try_gpu(1, gpu_screen())
+        .unwrap()
+        .unwrap();
+    let (_cpu, expected) = setup();
+    let _software = setup_framebuffer(fb);
+    gpu_mock::FAKE.with(|fake| {
+        let fake = fake.borrow();
+        let pixels = unsafe {
+            std::slice::from_raw_parts(expected.as_ptr() as *const u8, expected.len() * 4)
+        };
+        assert_eq!(&fake.presented[..pixels.len()], pixels);
+        assert_eq!((fake.fills, fake.copies), (0, 0));
+        assert!(fake.presents > 0);
+    });
+}
+
+#[test]
+fn gpu_timeout_prevents_cpu_reuse_of_both_copy_surfaces() {
+    gpu_mock::reset();
+    gpu_mock::FAKE.with(|fake| fake.borrow_mut().accelerated = gpu::CAP_ALL);
+    let destination = framebuffer::Framebuffer::try_gpu(1, gpu_screen())
+        .unwrap()
+        .unwrap();
+    let source = destination.new_gpu_canvas().unwrap();
+    gpu_mock::FAKE.with(|fake| fake.borrow_mut().fail_work = true);
+    let rectangle = framebuffer::Rect::new(0, 0, 800, 600);
+    destination.copy_rect_from(&source, rectangle);
+    assert!(!destination.healthy() && !source.healthy());
+    for buffer in [&source, &destination] {
+        buffer.fill_rect(0, 0, 1, 1, 0xff00ff);
+        buffer.put_pixel(0, 0, 0xff00ff);
+        assert_eq!(unsafe { (buffer.vaddr() as *const u32).read() }, 0);
+        assert!(buffer.present(rectangle).is_err());
+    }
+    drop(source);
+    drop(destination);
+    gpu_mock::FAKE.with(|fake| {
+        assert!(!fake
+            .borrow()
+            .calls
+            .iter()
+            .any(|call| call.0 == gpu::DESTROY))
+    });
 }
 
 fn move_by(dx: i32, dy: i32) -> InputEvent {

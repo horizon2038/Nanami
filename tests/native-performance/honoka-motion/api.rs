@@ -2,13 +2,27 @@ use super::*;
 
 pub fn call_port(
     _: Word,
-    _: Word,
-    _: Word,
-    _: Word,
-    _: Word,
-    _: Word,
-    _: u8,
+    code: Word,
+    a: Word,
+    b: Word,
+    c: Word,
+    d: Word,
+    words: u8,
 ) -> Result<(Word, Word, Word), RequestError> {
+    if gpu_mock::provider::Service::handles(code) {
+        let result = gpu_mock::call(code, [a, b, c, d], words)?;
+        if code == gpu::PRESENT && result.0 == 0 {
+            PRESENTED.with(|rects| {
+                rects.borrow_mut().push(framebuffer::Rect::new(
+                    (b & 0xffff_ffff) as i32,
+                    (b >> 32) as i32,
+                    (c & 0xffff_ffff) as i32,
+                    (c >> 32) as i32,
+                ))
+            });
+        }
+        return Ok(result);
+    }
     panic!("unexpected IPC")
 }
 thread_local! {
@@ -26,6 +40,7 @@ pub fn request_shared_memory(_: Word, size: Word) -> Result<(Word, Word), Reques
     Ok((base, base))
 }
 pub fn request_mapping_release(base: Word, size: Word) -> Result<(), RequestError> {
+    gpu_mock::release_if_owned(base, size);
     // Retain allocations until the test thread exits, so tests can verify the
     // other participant's mapping remains accessible after local release.
     RELEASED.with(|released| released.borrow_mut().push((base, size)));

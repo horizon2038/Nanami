@@ -2,12 +2,14 @@
 #![no_main]
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Intel Gen9 graphics requires the x86_64/pc99 backend");
+mod blt;
 #[path = "x86_64/cache.rs"]
 mod cache;
 mod connector;
 mod ddc;
 mod edid;
 mod gen9;
+mod gpu;
 mod hardware;
 mod vbt;
 use hardware::Scanout;
@@ -65,6 +67,7 @@ fn initialize(port: Word) -> Result<Scanout, RequestError> {
             );
             let mut scanout = Scanout::new(port, device, timer)?;
             scanout.inspect_output(port, device);
+            scanout.initialize_acceleration(port, device);
             return Ok(scanout);
         }
         index += 1;
@@ -121,10 +124,11 @@ fn request(
                     nanami_runtime::OS_RESPONSE_PERMISSION_DENIED,
                 ));
             }
-            if shared.owner == 0 {
+            if shared.local == 0 {
+                display.ensure_healthy()?;
                 let (local, peer) =
                     nanami_runtime::request_shared_memory(request.identifier, mode.bytes)?;
-                display.copy_current(local);
+                display.copy_current(local)?;
                 *shared = Shared {
                     owner: request.identifier,
                     local,
@@ -134,7 +138,7 @@ fn request(
             Ok((shared.peer, mode.bytes))
         }
         gfx::DISPLAY_SERVICE_REQUEST_PRESENT => {
-            if shared.owner == 0 || shared.owner != request.identifier {
+            if shared.local == 0 || shared.owner == 0 || shared.owner != request.identifier {
                 return Err(RequestError::Status(
                     nanami_runtime::OS_RESPONSE_PERMISSION_DENIED,
                 ));
@@ -159,6 +163,7 @@ fn status(error: RequestError) -> Word {
 fn serve(display: &mut Scanout) -> Result<(), RequestError> {
     let port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_SLOT);
     let mut shared = Shared::default();
+    let mut gpu_service = nanami_gpu::Service::default();
     let mut reply = None;
     loop {
         let event = if let Some((status, a, b)) = reply.take() {
@@ -167,7 +172,20 @@ fn serve(display: &mut Scanout) -> Result<(), RequestError> {
             nanami_runtime::ipc::service_receive_event(port)?
         };
         if let ServiceEvent::Request(message) = event {
-            reply = Some(match request(message, display, &mut shared) {
+            let result = if nanami_gpu::Service::handles(message.code) {
+                gpu_service.request(
+                    message.identifier,
+                    message.code,
+                    [message.arg0, message.arg1, message.arg2, message.arg3],
+                    &mut gpu::Adapter {
+                        display,
+                        shared: &mut shared,
+                    },
+                )
+            } else {
+                request(message, display, &mut shared)
+            };
+            reply = Some(match result {
                 Ok((a, b)) => (nanami_runtime::OS_RESPONSE_OK, a, b),
                 Err(error) => (status(error), 0, 0),
             });
@@ -198,6 +216,12 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         // readiness reply is not permission to start another display owner.
         nanami_runtime::println!(
             "[intel-graphics] readiness report failed: {}; keeping published display",
+            error
+        );
+    }
+    if let Err(error) = nanami_client::registry::register_service(nanami_client::gpu::GPU_SERVICE) {
+        nanami_runtime::println!(
+            "[intel-graphics] GPU service alias unavailable: {}; display endpoint remains usable",
             error
         );
     }

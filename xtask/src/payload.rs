@@ -79,7 +79,15 @@ fn discover_at(
         if args.arch == Arch::Aarch64
             && matches!(
                 installed.as_str(),
-                "acpi-server" | "ahci-server" | "hpet-server" | "timer-server" | "pci-server" | "intel-graphics-server" | "ps2-server" | "virtio-net"
+                "acpi-server"
+                    | "ahci-server"
+                    | "hpet-server"
+                    | "timer-server"
+                    | "pci-server"
+                    | "intel-graphics-server"
+                    | "virtio-gpu-server"
+                    | "ps2-server"
+                    | "virtio-net"
             )
         {
             continue;

@@ -187,16 +187,31 @@ pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, nanami_run
         return Err(nanami_runtime::NanamiError::UNSUPPORTED);
     }
 
+    let capabilities =
+        nanami_client::gfx::display_service_get_capabilities(display_port).unwrap_or(0);
+    let merged_present = capabilities
+        & (nanami_client::gfx::DISPLAY_CAP_NATIVE_SCANOUT
+            | nanami_client::gfx::DISPLAY_CAP_VBLANK_FLIP)
+        != 0;
+    if capabilities & nanami_client::gfx::DISPLAY_CAP_GPU_INTERFACE != 0 {
+        match Framebuffer::try_gpu(display_port, screen) {
+            Ok(Some(framebuffer)) => {
+                nanami_runtime::println!("[honoka] GPU surface ready (shared CPU/GPU canvas)");
+                return Ok(framebuffer.with_merged_present(merged_present));
+            }
+            Ok(None) => {}
+            Err(error) => nanami_runtime::println!(
+                "[honoka] GPU surface unavailable: {}; using legacy framebuffer",
+                error
+            ),
+        }
+    }
     let (framebuffer_vaddr, framebuffer_size) =
         nanami_client::gfx::display_service_prepare_shared_framebuffer(display_port)
             .map_err(|e| log_error("[honoka] prepare shared framebuffer failed: ", e))?;
 
-    let capabilities =
-        nanami_client::gfx::display_service_get_capabilities(display_port).unwrap_or(0);
-    Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen).map(|framebuffer| {
-        framebuffer
-            .with_vblank_flip(capabilities & nanami_client::gfx::DISPLAY_CAP_VBLANK_FLIP != 0)
-    })
+    Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen)
+        .map(|framebuffer| framebuffer.with_merged_present(merged_present))
 }
 
 pub fn subscribe_input(input_port: Word) -> Result<(Word, Word), nanami_runtime::NanamiError> {

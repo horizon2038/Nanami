@@ -3,6 +3,7 @@
 
 extern crate alloc;
 mod damage;
+mod gpu;
 mod presentation;
 mod profile;
 use presentation::present_shared_framebuffer;
@@ -188,6 +189,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
+    let mut gpu_service = nanami_gpu::Service::default();
 
     fill_screen(&screen_info, mapped_fb);
     let mut display = DisplayState {
@@ -216,6 +218,9 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         return Err(log_error("[fb-server] service register failed: ", e));
     }
     nanami_runtime::print!("[fb-server] service registered: display_service\n");
+    if let Err(error) = nanami_client::registry::register_service(nanami_client::gpu::GPU_SERVICE) {
+        nanami_runtime::println!("[fb-server] GPU service alias unavailable: {}", error);
+    }
 
     loop {
         let used_reply_receive = has_pending_reply;
@@ -241,7 +246,19 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 
         match event {
             ServiceEvent::Request(request) => {
-                pending_status = handle_request(request, &mut display);
+                pending_status = if nanami_gpu::Service::handles(request.code) {
+                    match gpu_service.request(
+                        request.identifier,
+                        request.code,
+                        [request.arg0, request.arg1, request.arg2, request.arg3],
+                        &mut gpu::Adapter(&mut display),
+                    ) {
+                        Ok((a, b)) => (nanami_runtime::OS_RESPONSE_OK, a, b),
+                        Err(error) => (map_request_error_to_status(error), 0, 0),
+                    }
+                } else {
+                    handle_request(request, &mut display)
+                };
                 has_pending_reply = true;
             }
             ServiceEvent::Notification { .. } => {}
@@ -277,9 +294,11 @@ fn fill_screen(screen_info: &ScreenInfo, mapped_address: usize) {
 
 fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word, Word, Word) {
     match request.code {
-        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_CAPABILITIES => {
-            (nanami_runtime::OS_RESPONSE_OK, 0, 0)
-        }
+        nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_CAPABILITIES => (
+            nanami_runtime::OS_RESPONSE_OK,
+            nanami_client::gfx::DISPLAY_CAP_GPU_INTERFACE,
+            0,
+        ),
         nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {
             let detail0 = pack_screen_info_detail0(&display.screen);
             let detail1 = pack_screen_info_detail1(&display.screen);
@@ -289,14 +308,14 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
             if request.identifier == 0 {
                 return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
-            if display.shared.owner_pid == request.identifier {
+            if display.shared.owner_pid == request.identifier && display.shared.local_vaddr != 0 {
                 return (
                     nanami_runtime::OS_RESPONSE_OK,
                     display.shared.peer_vaddr,
                     display.shared.bytes,
                 );
             }
-            if display.shared.owner_pid != 0 {
+            if display.shared.owner_pid != 0 && display.shared.owner_pid != request.identifier {
                 return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
             }
 

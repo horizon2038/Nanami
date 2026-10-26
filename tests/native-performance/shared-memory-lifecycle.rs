@@ -18,6 +18,7 @@ struct Machine {
     zeroed: BTreeSet<usize>,
     next_page: usize,
     freed: usize,
+    zero_calls: usize,
     operation: usize,
     fail_at: Option<usize>,
     fail_unmap: bool,
@@ -53,8 +54,9 @@ mod arch {
         pub fn copy(node: usize, slot: Word, source: usize) -> Result<(), CapabilityError> {
             machine(|m| {
                 operation(m)?;
+                let physical = m.frames.get(&source).copied().unwrap_or(source);
                 assert!(
-                    m.frames.insert(node + slot, source).is_none(),
+                    m.frames.insert(node + slot, physical).is_none(),
                     "overwrote live capability"
                 );
                 Ok(())
@@ -155,6 +157,8 @@ struct OsRequestEvent {
     identifier: usize,
     arg0: usize,
     arg1: usize,
+    arg2: usize,
+    arg3: usize,
 }
 struct Alpha {
     processes: ProcessManager,
@@ -192,6 +196,7 @@ impl Alpha {
         pages: usize,
     ) -> Result<(), CapabilityError> {
         machine(|m| {
+            m.zero_calls += 1;
             for i in 0..pages {
                 let page = m.frames[&process_frame_descriptor(root, slot + i)];
                 m.zeroed.insert(page);
@@ -231,6 +236,8 @@ fn create(alpha: &mut Alpha, pages: usize) -> Result<(usize, usize), CapabilityE
         identifier: 1,
         arg0: 2,
         arg1: pages * PAGE_SIZE,
+        arg2: 0,
+        arg3: 0,
     })
 }
 
@@ -249,6 +256,107 @@ fn assert_empty() {
         assert!(m.maps.is_empty());
         assert!(m.live.is_empty());
     });
+}
+
+fn share(
+    alpha: &mut Alpha,
+    pid: usize,
+    peer: usize,
+    va: usize,
+    bytes: usize,
+) -> Result<(usize, usize), CapabilityError> {
+    alpha.handle_mapping_share_request(OsRequestEvent {
+        identifier: pid,
+        arg0: peer,
+        arg1: va,
+        arg2: bytes,
+        arg3: 0,
+    })
+}
+
+#[test]
+fn sharing_owned_ram_adds_a_reference_without_allocation_or_zeroing() {
+    for source_first in [false, true] {
+        let mut alpha = alpha();
+        let (source, original_peer) = create(&mut alpha, 3).unwrap();
+        let (next_page, zero_calls) = machine(|m| (m.next_page, m.zero_calls));
+        let (unchanged, peer) = share(&mut alpha, 1, 2, source, 3 * PAGE_SIZE).unwrap();
+        assert_eq!(unchanged, source);
+        assert_ne!(peer, original_peer);
+        machine(|m| {
+            assert_eq!(m.next_page, next_page);
+            assert_eq!(m.zero_calls, zero_calls);
+            assert_eq!(m.live.len(), 1);
+            assert_eq!(m.frames.len(), 9);
+        });
+        if source_first {
+            release(&mut alpha, 1, source, 3).unwrap();
+        }
+        release(&mut alpha, 2, original_peer, 3).unwrap();
+        assert_eq!(machine(|m| m.live.len()), 1);
+        release(&mut alpha, 2, peer, 3).unwrap();
+        if !source_first {
+            assert_eq!(machine(|m| m.live.len()), 1);
+            release(&mut alpha, 1, source, 3).unwrap();
+        }
+        assert_empty();
+    }
+}
+
+#[test]
+fn share_rejects_foreign_partial_unaligned_and_missing_mappings() {
+    let mut alpha = alpha();
+    let (source, peer) = create(&mut alpha, 3).unwrap();
+    for (pid, to, va, bytes) in [
+        (0, 2, source, 3 * PAGE_SIZE),
+        (1, 1, source, 3 * PAGE_SIZE),
+        (1, 3, source, 3 * PAGE_SIZE),
+        (1, 2, source + 1, 3 * PAGE_SIZE),
+        (1, 2, source + PAGE_SIZE, 2 * PAGE_SIZE),
+        (1, 2, source, PAGE_SIZE),
+        (1, 2, source, usize::MAX),
+        (1, 2, source + 10 * PAGE_SIZE, 3 * PAGE_SIZE),
+    ] {
+        assert!(share(&mut alpha, pid, to, va, bytes).is_err());
+    }
+    let vm = alpha.processes.vm_space_mut(1).unwrap();
+    let frame = vm.find_frame(source).unwrap();
+    vm.forget_frame(source);
+    assert!(share(&mut alpha, 1, 2, source, 3 * PAGE_SIZE).is_err());
+    vm_restore(&mut alpha, 1, source, frame);
+    release(&mut alpha, 1, source, 3).unwrap();
+    release(&mut alpha, 2, peer, 3).unwrap();
+    assert_empty();
+}
+
+fn vm_restore(alpha: &mut Alpha, pid: usize, va: usize, frame: usize) {
+    alpha
+        .processes
+        .vm_space_mut(pid)
+        .unwrap()
+        .record_frame(va, frame)
+        .unwrap();
+}
+
+#[test]
+fn every_share_install_failure_preserves_the_source_and_original_peer() {
+    for fail in 1..=7 {
+        // ensure chunks, three copies, three strict maps.
+        let mut alpha = alpha();
+        let (source, peer) = create(&mut alpha, 3).unwrap();
+        machine(|m| m.fail_at = Some(m.operation + fail));
+        assert!(share(&mut alpha, 1, 2, source, 3 * PAGE_SIZE).is_err());
+        machine(|m| {
+            m.fail_at = None;
+            assert_eq!(m.frames.len(), 6);
+            assert_eq!(m.maps.len(), 6);
+            assert_eq!(m.live.len(), 1);
+            assert_eq!(m.freed, 0);
+        });
+        release(&mut alpha, 1, source, 3).unwrap();
+        release(&mut alpha, 2, peer, 3).unwrap();
+        assert_empty();
+    }
 }
 
 #[test]
@@ -369,7 +477,9 @@ fn missing_peer_recycles_caller_reservation_without_allocating_ram() {
         .handle_shared_memory_request(OsRequestEvent {
             identifier: 1,
             arg0: 99,
-            arg1: PAGE_SIZE
+            arg1: PAGE_SIZE,
+            arg2: 0,
+            arg3: 0,
         })
         .is_err());
     assert_empty();

@@ -9,6 +9,125 @@ struct SharedMapping {
 }
 
 impl Alpha {
+    pub(super) fn handle_mapping_share_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(usize, usize), CapabilityError> {
+        let pid = request.identifier;
+        let peer_pid = request.arg0;
+        let source_va = request.arg1;
+        if pid == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        if peer_pid == 0
+            || peer_pid == pid
+            || source_va == 0
+            || source_va & (PAGE_SIZE - 1) != 0
+            || request.arg2 == 0
+            || request.arg3 != 0
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let pages = request
+            .arg2
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(CapabilityError::InvalidArgument)?
+            / PAGE_SIZE;
+        let allocation = self
+            .processes
+            .find_active_physical_allocation_reference(pid, source_va, pages)
+            .ok_or(CapabilityError::PermissionDenied)?;
+        let source = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if source.exited
+            || self
+                .processes
+                .find_entry_by_pid(peer_pid)
+                .is_none_or(|peer| peer.exited)
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let vm = self
+            .processes
+            .vm_space_mut(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        for page in 0..pages {
+            if vm.find_frame(source_va + page * PAGE_SIZE)
+                != Some(process_frame_descriptor(
+                    source.root_node,
+                    allocation.start_slot + page,
+                ))
+            {
+                return Err(CapabilityError::IllegalOperation);
+            }
+        }
+        let mut peer = self.reserve_shared_mapping(peer_pid, pages)?;
+        if let Err(error) = self.processes.register_physical_allocation(
+            peer_pid,
+            peer.reservation.base_va,
+            peer.reservation.start_slot,
+            allocation.base_page,
+            pages,
+        ) {
+            self.processes
+                .recycle_shared_memory(peer_pid, peer.reservation);
+            return Err(error);
+        }
+        let result = (|| {
+            self.ensure_process_frame_chunks(
+                peer_pid,
+                peer.entry.root_node,
+                peer.reservation.start_slot,
+                pages,
+            )?;
+            for page in 0..pages {
+                let slot = peer.reservation.start_slot + page;
+                arch::node::copy(
+                    process_frame_chunk_descriptor(
+                        peer.entry.root_node,
+                        slot / PROCESS_FRAME_CHUNK_PAGES,
+                    ),
+                    (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                    process_frame_descriptor(source.root_node, allocation.start_slot + page),
+                )?;
+                peer.copied += 1;
+            }
+            let vm = self
+                .processes
+                .vm_space_mut(peer_pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            for page in 0..pages {
+                let va = peer.reservation.base_va + page * PAGE_SIZE;
+                if vm.find_frame(va).is_some() {
+                    return Err(CapabilityError::IllegalOperation);
+                }
+                peer.mapped += 1;
+                self.memory.map_frame_strict(
+                    peer.entry.address_space,
+                    process_frame_descriptor(
+                        peer.entry.root_node,
+                        peer.reservation.start_slot + page,
+                    ),
+                    va,
+                    vm,
+                )?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if let Err(cleanup) = self.remove_shared_mapping(&mut peer) {
+                error!(
+                    "[shm.err] share rollback pid={} va={:#x} err={:?}",
+                    peer_pid, peer.reservation.base_va, cleanup
+                );
+            }
+            return Err(error);
+        }
+        Ok((source_va, peer.reservation.base_va))
+    }
+
     pub(super) fn handle_shared_memory_request(
         &mut self,
         request: OsRequestEvent,

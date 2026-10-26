@@ -12,6 +12,7 @@ pub mod block;
 pub mod device;
 pub mod exec;
 pub mod gfx;
+pub mod gpu;
 pub mod input;
 pub mod intel_graphics;
 pub mod ipc;

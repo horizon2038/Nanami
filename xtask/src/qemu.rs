@@ -1,5 +1,5 @@
 use crate::{
-    cli::{Arch, Network, Platform, Run, Storage},
+    cli::{Arch, Gpu, Network, Platform, Run, Storage},
     rootfs, util,
 };
 use anyhow::{ensure, Context, Result};
@@ -31,6 +31,10 @@ pub fn validate(args: &Run) -> Result<()> {
         "Raspberry Pi images must be booted on hardware"
     );
     if args.common.arch == Arch::Aarch64 {
+        ensure!(
+            args.gpu.is_none(),
+            "--gpu selects the x86_64 display adapter only"
+        );
         ensure!(
             args.network() == Network::None,
             "AArch64 has no native network driver yet; use --net none"
@@ -152,6 +156,15 @@ fn arguments(root: &Path, args: &Run, host: Host) -> Result<Vec<String>> {
         ]);
     }
     if args.common.arch == Arch::X86_64 {
+        match args.gpu.unwrap_or(Gpu::Virtio) {
+            Gpu::Virtio => result.extend([
+                "-vga".into(),
+                "none".into(),
+                "-device".into(),
+                "virtio-vga,addr=2,xres=1920,yres=1080".into(),
+            ]),
+            Gpu::Std => result.extend(["-vga".into(), "std".into()]),
+        }
         result.extend([
             "-machine".into(),
             format!("hpet={}", if args.no_hpet { "off" } else { "on" }),
@@ -351,5 +364,22 @@ mod tests {
         assert!(args.contains(&"virt,gic-version=2".into()));
         assert!(args.contains(&"virtio-blk-device,drive=blk0".into()));
         assert!(args.contains(&"tcg,thread=multi".into()));
+    }
+
+    #[test]
+    fn default_virtio_display_and_explicit_framebuffer_fallback_are_mutually_exclusive() {
+        for (tail, virtio) in [
+            (vec![], true),
+            (vec!["--gpu", "virtio"], true),
+            (vec!["--gpu", "std"], false),
+        ] {
+            let arguments = arguments(Path::new("."), &parse(&tail), Host::Other).unwrap();
+            assert_eq!(
+                arguments.iter().any(|arg| arg.starts_with("virtio-vga,")),
+                virtio
+            );
+            assert_eq!(arguments.iter().any(|arg| arg == "std"), !virtio);
+        }
+        assert!(validate(&parse(&["--arch", "aarch64", "--gpu", "virtio"])).is_err());
     }
 }

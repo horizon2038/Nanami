@@ -516,7 +516,8 @@ Current service names include:
 | `input-service` | `input-server` | Input event distribution |
 | `device-manager` | `driver-manager` | Platform driver selection and resource coordination |
 | `pci-service` | `pci-server` | Serialized PCI configuration and cached enumeration |
-| `display_service` | `intel-graphics-server` or `fb-server` | Native Gen9 scanout or boot framebuffer sharing |
+| `display_service` | `intel-graphics-server`, `virtio-gpu-server` or `fb-server` | Native Gen9/virtio scanout or boot framebuffer sharing |
+| `gpu-service` | Selected display provider | Common owned-buffer fill, copy and present protocol; hardware capabilities queried separately |
 | `honoka-service` | Honoka | Compositor and window service |
 | `net-device` | `virtio-net` | Network-device backend |
 | `network-service` | `net-server` | IPv4, ICMP, UDP, DNS, and TCP |
@@ -866,7 +867,7 @@ tools such as `ip` and `ping` to use the native Nanami network stack.
 
 ```text
 Driver Manager
-  -> Intel Gen9 native scanout OR boot framebuffer fallback
+  -> Intel Gen9 / virtio GPU native scanout OR boot framebuffer fallback
   -> display_service
   -> Honoka compositor
   -> shared window framebuffers
@@ -882,6 +883,20 @@ probe selects the boot framebuffer. Providers expose the same display service;
 the framebuffer backend publishes only after mapping/initialization succeeds
 and does not require native-GPU capabilities. An active native display is not
 silently replaced by a second framebuffer writer.
+
+Honoka can use the [GPU protocol](gpu.md) on that same selected display endpoint.
+Large opaque fills/background copies and native presentation use Gen9 BCS when
+its scratch self-test succeeds. CPU text/alpha/cursor drawing and the independent
+framebuffer fallback remain available. Alpha's owned-RAM sharing request exposes
+the driver's buffers without changing A9N or the kernel IPC fastpath.
+
+On QEMU/pc99, modern virtio GPU PCI capability regions and a fenced split
+control queue implement resource creation, shared DMA backing, damaged-region
+transfer and scanout. Standard virtio 2D FILL/COPY remain CPU operations and do
+not advertise hardware acceleration. Honoka merges presentation once per frame
+for native scanout, including virtio without a vblank flag. The independent
+framebuffer driver remains available through applicability fallback or the
+launcher's explicit `--gpu std` selection.
 
 The Intel server dispatches explicitly supported Skylake, Kaby Lake and Coffee
 Lake PCI IDs to its Gen9 backend. It adopts a single active linear XRGB8888 mode,

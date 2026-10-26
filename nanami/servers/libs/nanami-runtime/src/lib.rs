@@ -296,6 +296,27 @@ pub fn request_shared_framebuffer_memory(
     Ok((local_vaddr, peer_vaddr))
 }
 
+/// Share existing owned RAM (including DMA RAM) with a peer. Both mappings
+/// remain Normal/WB; this is not an arbitrary-physical-address mapping API.
+pub fn request_mapping_share(
+    peer_pid: Word,
+    local_vaddr: Word,
+    bytes: Word,
+) -> Result<Word, RequestError> {
+    if peer_pid == 0 || local_vaddr == 0 || local_vaddr & 4095 != 0 || bytes == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, local, peer) =
+        call_os_port(OS_REQUEST_MAPPING_SHARE, peer_pid, local_vaddr, bytes, 0, 4)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if local != local_vaddr || peer == 0 || peer & 4095 != 0 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(peer)
+}
+
 pub fn get_self_pid() -> Result<Word, RequestError> {
     let (status, pid, _) = call_os_port(OS_REQUEST_SELF_PID, 0, 0, 0, 0, 1)?;
     if status != OS_RESPONSE_OK {

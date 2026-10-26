@@ -667,6 +667,9 @@ impl Alpha {
             OS_REQUEST_SHARED_MEMORY_CREATE => {
                 response_from_details_result(self.handle_shared_memory_request(request))
             }
+            nanami_uapi::os::OS_REQUEST_MAPPING_SHARE => {
+                response_from_details_result(self.handle_mapping_share_request(request))
+            }
             OS_REQUEST_MAPPING_RELEASE => {
                 response_from_status_result(self.handle_mapping_release_request(request))
             }

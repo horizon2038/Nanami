@@ -55,8 +55,11 @@ pub fn start_peripherals() -> Result<Option<&'static str>, RequestError> {
     let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_SERVICE);
     let mut index = 0;
     let mut intel_graphics = false;
+    let mut virtio_graphics = false;
     let mut network_started = false;
     while let Some(device) = pci::enumerate(port, index)? {
+        virtio_graphics |=
+            device.vendor_id == 0x1af4 && device.device_id == 0x1050 && device.class >> 16 == 3;
         intel_graphics |= nanami_client::uapi::intel_graphics::generation(
             device.vendor_id,
             device.device_id,
@@ -71,6 +74,9 @@ pub fn start_peripherals() -> Result<Option<&'static str>, RequestError> {
             network_started = true;
         }
         index += 1;
+    }
+    if virtio_graphics {
+        return Ok(Some("./bin/virtio-gpu-server"));
     }
     if intel_graphics {
         return Ok(Some("./bin/intel-graphics-server"));

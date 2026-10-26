@@ -1,4 +1,8 @@
-use core::sync::atomic::{fence, Ordering};
+use core::{
+    cell::Cell,
+    sync::atomic::{fence, Ordering},
+};
+use nanami_client::gpu;
 use nanami_runtime::Word;
 
 #[path = "cursor.rs"]
@@ -62,7 +66,9 @@ pub struct Framebuffer {
     vaddr: Word,
     bytes: Word,
     screen: ScreenInfo,
-    vblank_flip: bool,
+    merged_present: bool,
+    gpu: Option<gpu::Surface>,
+    gpu_failed: Cell<bool>,
 }
 
 impl Framebuffer {
@@ -85,17 +91,117 @@ impl Framebuffer {
             vaddr,
             bytes,
             screen,
-            vblank_flip: false,
+            merged_present: false,
+            gpu: None,
+            gpu_failed: Cell::new(false),
         })
     }
 
-    pub fn with_vblank_flip(mut self, enabled: bool) -> Self {
-        self.vblank_flip = enabled;
+    pub fn try_gpu(
+        display_port: Word,
+        screen: ScreenInfo,
+    ) -> Result<Option<Self>, nanami_runtime::RequestError> {
+        if (
+            screen.red_position,
+            screen.red_size,
+            screen.green_position,
+            screen.green_size,
+            screen.blue_position,
+            screen.blue_size,
+        ) != (16, 8, 8, 8, 0, 8)
+        {
+            return Ok(None);
+        }
+        let info = gpu::info(display_port)?;
+        if info.supported & gpu::CAP_PRESENT == 0 {
+            return Ok(None);
+        }
+        let layout = gpu::Layout::new(screen.width, screen.height, screen.stride_bytes)
+            .ok_or(nanami_runtime::RequestError::Unsupported)?;
+        let surface = gpu::create(display_port, layout, info.accelerated)?;
+        Ok(Some(Self {
+            display_port,
+            vaddr: surface.address,
+            bytes: layout.bytes,
+            screen,
+            merged_present: false,
+            gpu: Some(surface),
+            gpu_failed: Cell::new(false),
+        }))
+    }
+
+    pub fn new_gpu_canvas(&self) -> Option<Self> {
+        let parent = self.gpu.as_ref()?;
+        if parent.accelerated & gpu::CAP_COPY == 0 || self.gpu_failed.get() {
+            return None;
+        }
+        Self::try_gpu(self.display_port, self.screen).ok().flatten()
+    }
+
+    pub fn healthy(&self) -> bool {
+        !self.gpu_failed.get()
+    }
+
+    fn gpu_result(
+        &self,
+        result: Result<(), nanami_runtime::RequestError>,
+    ) -> Result<(), nanami_runtime::RequestError> {
+        if result.is_err() {
+            self.gpu_failed.set(true);
+        }
+        result
+    }
+
+    pub fn copy_rect_from(&self, source: &Self, rect: Rect) {
+        if self.gpu_failed.get() || !source.healthy() {
+            return;
+        }
+        if rect.is_empty() || rect.x < 0 || rect.y < 0 {
+            return;
+        }
+        let from = gpu::Rect {
+            x: rect.x as Word,
+            y: rect.y as Word,
+            width: rect.width as Word,
+            height: rect.height as Word,
+        };
+        if let (Some(source_surface), Some(target)) = (&source.gpu, &self.gpu) {
+            if source_surface.port == target.port
+                && target.accelerated & gpu::CAP_COPY != 0
+                && from.width * from.height >= 4096
+            {
+                if self
+                    .gpu_result(gpu::copy(source_surface, target, from, from.x, from.y))
+                    .is_err()
+                {
+                    // A timed-out copy may still read its source as well as
+                    // write its destination. Neither mapping can be reused.
+                    source.gpu_failed.set(true);
+                }
+                return;
+            }
+        }
+        self.blit_bgra32_from_alpha(
+            rect.x,
+            rect.y,
+            rect.width,
+            rect.height,
+            source.vaddr,
+            source.bytes,
+            source.screen.stride_bytes / 4,
+            from.x,
+            from.y,
+            u8::MAX,
+        );
+    }
+
+    pub fn with_merged_present(mut self, enabled: bool) -> Self {
+        self.merged_present = enabled;
         self
     }
 
-    pub fn vblank_flip(&self) -> bool {
-        self.vblank_flip
+    pub fn merged_present(&self) -> bool {
+        self.merged_present
     }
 
     pub fn screen(&self) -> ScreenInfo {
@@ -111,6 +217,9 @@ impl Framebuffer {
     }
 
     pub fn present(&self, rect: Rect) -> Result<(), nanami_runtime::RequestError> {
+        if self.gpu_failed.get() {
+            return Err(nanami_runtime::RequestError::Transport);
+        }
         if rect.is_empty() {
             return Ok(());
         }
@@ -130,6 +239,17 @@ impl Framebuffer {
             return Ok(());
         }
         fence(Ordering::Release);
+        if let Some(surface) = &self.gpu {
+            return self.gpu_result(gpu::present(
+                surface,
+                gpu::Rect {
+                    x,
+                    y,
+                    width: x1 - x,
+                    height: y1 - y,
+                },
+            ));
+        }
         nanami_client::gfx::display_service_present(self.display_port, x, y, x1 - x, y1 - y)
     }
 
@@ -141,7 +261,7 @@ impl Framebuffer {
     }
 
     pub fn fill_rect(&self, x: i32, y: i32, width: i32, height: i32, color: u32) {
-        if width <= 0 || height <= 0 {
+        if self.gpu_failed.get() || width <= 0 || height <= 0 {
             return;
         }
 
@@ -153,6 +273,22 @@ impl Framebuffer {
         let row_pixels = x1.saturating_sub(x0) as usize;
         if row_pixels == 0 {
             return;
+        }
+
+        if let Some(surface) = &self.gpu {
+            let rect = gpu::Rect {
+                x: x0 as Word,
+                y: y0 as Word,
+                width: row_pixels,
+                height: (y1 - y0) as Word,
+            };
+            if rect.height != 0
+                && rect.width * rect.height >= 4096
+                && surface.accelerated & gpu::CAP_FILL != 0
+            {
+                let _ = self.gpu_result(gpu::fill(surface, rect, color));
+                return;
+            }
         }
 
         let mut py = y0;
@@ -214,7 +350,13 @@ impl Framebuffer {
         src_y: usize,
         alpha: u8,
     ) {
-        if width <= 0 || height <= 0 || src_vaddr == 0 || src_bytes == 0 || src_stride_pixels == 0 {
+        if self.gpu_failed.get()
+            || width <= 0
+            || height <= 0
+            || src_vaddr == 0
+            || src_bytes == 0
+            || src_stride_pixels == 0
+        {
             return;
         }
         if alpha == 0 {
@@ -289,7 +431,7 @@ impl Framebuffer {
     }
 
     pub fn put_pixel(&self, x: i32, y: i32, color: u32) {
-        if x < 0 || y < 0 {
+        if self.gpu_failed.get() || x < 0 || y < 0 {
             return;
         }
         let x = x as usize;
@@ -330,7 +472,7 @@ impl Framebuffer {
     }
 
     fn pixel_ptr(&self, x: i32, y: i32) -> Option<*mut u32> {
-        if x < 0 || y < 0 {
+        if self.gpu_failed.get() || x < 0 || y < 0 {
             return None;
         }
         let x = x as usize;
@@ -428,6 +570,16 @@ pub fn parse_screen_info(detail0: Word, detail1: Word) -> ScreenInfo {
         green_size: ((detail1 >> 47) & 0x1f) as usize,
         blue_position: ((detail1 >> 52) & 0x1f) as usize,
         blue_size: ((detail1 >> 57) & 0x1f) as usize,
+    }
+}
+
+impl Drop for Framebuffer {
+    fn drop(&mut self) {
+        if !self.gpu_failed.get() {
+            if let Some(surface) = &self.gpu {
+                let _ = gpu::destroy(surface);
+            }
+        }
     }
 }
 

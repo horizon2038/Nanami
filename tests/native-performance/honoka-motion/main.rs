@@ -2,8 +2,8 @@
 #![allow(dead_code)]
 extern crate alloc;
 extern crate self as a9n_abi;
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 use std::cell::RefCell;
 pub use std::println;
 #[path = "../../../nanami/servers/libs/nanami-runtime/src/diagnostics.rs"]
@@ -12,6 +12,11 @@ pub type Word = usize;
 pub type CapabilityDescriptor = Word;
 pub const PROCESS_SLOT_NOTIFICATION: Word = 21;
 pub const OS_RESPONSE_OK: Word = 0;
+pub const OS_RESPONSE_PERMISSION_DENIED: Word = 2;
+#[path = "../../../nanami/servers/libs/nanami-client/src/gpu.rs"]
+pub mod gpu;
+#[path = "../gpu/mock.rs"]
+mod gpu_mock;
 #[derive(Debug)]
 pub enum RequestError {
     InvalidArgument,
@@ -37,10 +42,10 @@ mod compositor;
 mod constants;
 #[path = "../../../nanami/servers/apps/honoka/src/app/framebuffer.rs"]
 mod framebuffer;
-#[path = "../../../nanami/servers/apps/honoka/src/app/input.rs"]
-mod input_events;
 #[path = "../../../nanami/servers/apps/honoka/src/app/info_panel.rs"]
 mod info_panel;
+#[path = "../../../nanami/servers/apps/honoka/src/app/input.rs"]
+mod input_events;
 #[path = "../../../nanami/servers/apps/honoka/src/app/motion_damage.rs"]
 mod motion_damage;
 #[path = "../../../nanami/servers/apps/honoka/src/app/profile.rs"]

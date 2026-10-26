@@ -163,7 +163,7 @@ impl Compositor {
         let screen = framebuffer.screen();
         let theme = parse_theme(&framebuffer, theme_data)?;
         let info_panel = InfoPanel::new(screen, &text, desktop_info);
-        let background = BackgroundCache::new(screen, |canvas| {
+        let background = BackgroundCache::new(&framebuffer, |canvas| {
             let full = Rect::new(0, 0, screen.width as i32, screen.height as i32);
             draw_background(canvas, screen, theme, full);
             draw_menu_bar(canvas, screen, theme, full);
@@ -237,10 +237,10 @@ impl Compositor {
 
         let composited = self.profile.now();
         let mut present_count = count;
-        if self.framebuffer.vblank_flip() {
-            // Compose sparse rectangles independently, then flip once. The
+        if self.framebuffer.merged_present() {
+            // Compose sparse rectangles independently, then present once. The
             // untouched gaps are already current in our persistent RAM image.
-            // Presenting each rectangle would wait for N vblanks per frame.
+            // Avoid N vblank waits (Gen9) or transfer/flush round trips (virtio).
             for index in 1..count {
                 self.dirty_rects[0] = union_rect(self.dirty_rects[0], self.dirty_rects[index]);
             }

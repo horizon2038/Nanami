@@ -41,7 +41,9 @@ name = "intel_graphics_server"
 version = "0.1.0"
 dependencies = [
  "nanami-client",
+ "nanami-gpu",
  "nanami-runtime",
+ "nanami-uapi",
 ]
 
 [[package]]
@@ -55,6 +57,14 @@ name = "nanami-client"
 version = "0.1.0"
 dependencies = [
  "a9n_abi",
+ "nanami-runtime",
+ "nanami-uapi",
+]
+
+[[package]]
+name = "nanami-gpu"
+version = "0.1.0"
+dependencies = [
  "nanami-runtime",
  "nanami-uapi",
 ]

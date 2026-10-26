@@ -145,6 +145,11 @@ pub enum Storage {
     Ahci,
     Virtio,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Gpu {
+    Virtio,
+    Std,
+}
 #[derive(Clone, Debug, Args)]
 pub struct Run {
     #[command(flatten)]
@@ -173,6 +178,9 @@ pub struct Run {
     pub no_usb_input: bool,
     #[arg(long, value_enum, default_value = "usb")]
     pub storage: Storage,
+    /// x86_64 display adapter; defaults to virtio-vga. Use std for GOP fallback.
+    #[arg(long, value_enum)]
+    pub gpu: Option<Gpu>,
     /// Defaults to user; BRIDGE_IF/--bridge-if selects bridged unless overridden.
     #[arg(long, value_enum, env = "NET_MODE")]
     pub net: Option<Network>,

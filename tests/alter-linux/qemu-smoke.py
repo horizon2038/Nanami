@@ -29,6 +29,12 @@ parser.add_argument("--native-info", action="store_true",
                     help="also capture pci-info, its numeric/verbose modes and net-info for visual inspection")
 parser.add_argument("--expect-framebuffer", action="store_true",
                     help="require exactly one fb-server startup, published after initialization, with no active native display")
+parser.add_argument("--gpu", choices=("std", "virtio"), default="std",
+                    help="select the emulated display; defaults to the framebuffer regression")
+parser.add_argument("--expect-virtio-gpu", action="store_true",
+                    help="require the selected virtio-gpu service and Honoka GPU protocol canvas")
+parser.add_argument("--virtio-gpu-iommu", action="store_true",
+                    help="offer unsupported ACCESS_PLATFORM to test pre-activation framebuffer fallback")
 parser.add_argument("--network", action="store_true", help="attach an isolated user-mode virtio NIC (no external network access)")
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
@@ -39,6 +45,12 @@ if args.capture_running_after is not None and not 0 <= args.capture_running_afte
     parser.error("--capture-running-after must be between 0 and 30 seconds")
 if args.visual_program and args.ui_stress:
     parser.error("--visual-program leaves its guest running; it cannot precede --ui-stress")
+if args.expect_framebuffer and args.expect_virtio_gpu:
+    parser.error("framebuffer and native virtio-gpu expectations are mutually exclusive")
+if args.expect_virtio_gpu and args.gpu != "virtio":
+    parser.error("--expect-virtio-gpu requires --gpu virtio")
+if args.virtio_gpu_iommu and args.gpu != "virtio":
+    parser.error("--virtio-gpu-iommu requires --gpu virtio")
 repo = pathlib.Path(__file__).resolve().parents[2]
 logs = pathlib.Path(tempfile.mkdtemp(prefix="nanami-alter-test-"))
 firmware = repo / "spencer/a9nloader-rs/tools"
@@ -56,6 +68,13 @@ command = [
     "-drive", f"if=pflash,format=raw,file={logs / 'OVMF_VARS.fd'}",
     "-drive", f"if=none,id=disk,format=raw,snapshot=on,file={args.image.resolve()}",
 ]
+if args.gpu == "virtio":
+    gpu = "virtio-vga,addr=2,xres=1920,yres=1080"
+    if args.virtio_gpu_iommu:
+        gpu += ",iommu_platform=on"
+    command += ["-vga", "none", "-device", gpu]
+else:
+    command += ["-vga", "std"]
 if args.storage == "ahci":
     command += ["-device", "ich9-ahci,id=ahci,addr=3",
                 "-device", "ide-hd,drive=disk,bus=ahci.0,bootindex=1"]
@@ -102,6 +121,19 @@ with (logs / "qemu.log").open("w") as diagnostics:
             if re.search(r"\[\s*driver-manager\] (?:Intel )?native display ready", text):
                 raise RuntimeError("Native and framebuffer display backends are both active")
             print(f"PASS framebuffer fallback (smp={args.smp})", flush=True)
+
+        if args.expect_virtio_gpu:
+            text = serial.read_text(errors="replace")
+            # Another CPU may print between "spawned" and the image path.
+            if len(re.findall(r"\./bin/virtio-gpu-server pid=\d+", text)) != 1:
+                raise RuntimeError("Virtio GPU was not selected exactly once")
+            if re.search(r"\[\s*virtio-gpu\] native 2D scanout=", text) is None or "GPU surface ready" not in text:
+                raise RuntimeError("Virtio GPU or Honoka common GPU canvas did not initialize")
+            if re.search(r"spawned \./bin/fb-server pid=\d+", text):
+                raise RuntimeError("A framebuffer writer competes with native virtio scanout")
+            if re.search(r"\[\s*virtio-gpu\] controlq failed", text):
+                raise RuntimeError("Virtio control queue failed during desktop initialization")
+            print(f"PASS virtio-gpu common protocol (smp={args.smp})", flush=True)
 
         def send(command):
             monitor.write(command.encode() + b"\n")

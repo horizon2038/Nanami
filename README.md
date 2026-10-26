@@ -206,6 +206,15 @@ cargo xtask run --arch aarch64 --net none
 `--snapshot` prevents guest writes from changing disks. AArch64 is headless
 and currently has no native timer/display/input/network stack.
 
+On x86_64 the default adapter is `virtio-vga`. Driver Manager selects
+`virtio-gpu-server`, which serves the common GPU/display protocols to Honoka.
+The standard virtio 2D path uses CPU fill/copy and fenced resource transfers;
+it does not claim virgl/OpenGL acceleration. Use `cargo xtask run --gpu std`
+to exercise the independent GOP/framebuffer fallback. Rebuild the boot image
+after changing driver code or its boot policy. Rootfs applications such as
+Honoka still require a refreshed rootfs to update; rebuilding a boot image alone
+retains an existing staging rootfs. See [GPU service](nanami/docs/gpu.md).
+
 User networking is the x86_64 default, forwarding guest HTTP port 80 to
 `127.0.0.1:1234`. Select a bridge explicitly:
 
@@ -223,6 +232,7 @@ permissions. Bridge setup is not automatic.
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--storage` | `usb` | Root controller: `usb`, `ahci`, `virtio` |
+| `--gpu` | `virtio` on x86_64 | `virtio-vga` native driver or `std` framebuffer fallback |
 | `--no-usb-input` | off | Omit USB keyboard/mouse; PS/2 remains available |
 | `--no-hpet` | off | Exercise PIT fallback |
 | `--memory` / `--smp` | `4G` / `4` | RAM / CPU count (1–64) |

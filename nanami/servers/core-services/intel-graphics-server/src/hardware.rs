@@ -45,6 +45,7 @@ pub struct Scanout {
     pub output: Option<crate::connector::Connector>,
     hardware: Hardware,
     memory: Word,
+    physical: Word,
     frame_bytes: Word,
     ggtt_start: Word,
     bound_pages: Word,
@@ -53,6 +54,7 @@ pub struct Scanout {
     started: bool,
     failed: bool,
     timer: Word,
+    blitter: Option<crate::blt::Engine>,
 }
 
 impl Scanout {
@@ -132,6 +134,7 @@ impl Scanout {
             output: None,
             hardware,
             memory,
+            physical,
             frame_bytes,
             ggtt_start: start,
             bound_pages: pages,
@@ -140,6 +143,7 @@ impl Scanout {
             started: false,
             failed: false,
             timer,
+            blitter: None,
         })
     }
 
@@ -154,7 +158,8 @@ impl Scanout {
 
     pub fn capabilities(&self) -> Word {
         use nanami_client::gfx::*;
-        let mut flags = DISPLAY_CAP_NATIVE_SCANOUT | DISPLAY_CAP_VBLANK_FLIP;
+        let mut flags =
+            DISPLAY_CAP_NATIVE_SCANOUT | DISPLAY_CAP_VBLANK_FLIP | DISPLAY_CAP_GPU_INTERFACE;
         if let Some(output) = &self.output {
             flags |= DISPLAY_CAP_CONNECTOR_INFO;
             if output.edid.len != 0 {
@@ -169,7 +174,15 @@ impl Scanout {
         gen9::unbind(&mut self.hardware, self.ggtt_start, self.bound_pages);
     }
 
-    pub fn copy_current(&self, destination: Word) {
+    pub fn ensure_healthy(&self) -> Result<(), RequestError> {
+        if self.failed || self.blitter.as_ref().is_some_and(|engine| engine.failed) {
+            return Err(RequestError::Transport);
+        }
+        Ok(())
+    }
+
+    pub fn copy_current(&self, destination: Word) -> Result<(), RequestError> {
+        self.ensure_healthy()?;
         unsafe {
             ptr::copy_nonoverlapping(
                 (self.memory + self.front * self.frame_bytes) as *const u8,
@@ -177,12 +190,11 @@ impl Scanout {
                 self.mode.bytes,
             );
         }
+        Ok(())
     }
 
     pub fn present(&mut self, source: Word, rect: Rect) -> Result<Word, RequestError> {
-        if self.failed {
-            return Err(RequestError::Transport);
-        }
+        self.ensure_healthy()?;
         let back = if self.started { 1 - self.front } else { 0 };
         let damage = self.dirty[back].map_or(rect, |old| old.union(rect));
         let destination = self.memory + back * self.frame_bytes;
@@ -202,6 +214,10 @@ impl Scanout {
         let span = (damage.height - 1) * self.mode.stride + damage.width * 4;
         crate::cache::flush(destination + first, span);
         let surface = self.ggtt_start * PAGE_BYTES + back * self.frame_bytes;
+        self.flip(back, surface, rect)
+    }
+
+    fn flip(&mut self, back: Word, surface: Word, rect: Rect) -> Result<Word, RequestError> {
         gen9::flip(&mut self.hardware, self.mode, surface)?;
         self.started = true;
         // Waiting on the timer yields the CPU; no unbounded MMIO spin loop.
@@ -224,5 +240,213 @@ impl Scanout {
             "[intel-graphics] flip timeout; retaining scanout DMA and GGTT mappings"
         );
         Err(RequestError::Transport)
+    }
+
+    pub fn initialize_acceleration(&mut self, pci: Word, device: Device) {
+        let Some(_) =
+            nanami_uapi::gpu::Layout::new(self.mode.width, self.mode.height, self.mode.stride)
+        else {
+            return;
+        };
+        let result: Result<crate::blt::Engine, RequestError> = (|| {
+            let command = pci::read(pci, device.address, 4, 2)?;
+            pci::write(pci, device.address, 4, 2, command | 6)?;
+            let entries = self.hardware.entries;
+            let mut engine = crate::blt::Engine::new(&mut self.hardware, entries, self.timer)?;
+            engine.map(
+                self.ggtt_start * PAGE_BYTES,
+                self.physical,
+                self.frame_bytes * 2,
+            )?;
+            Ok(engine)
+        })();
+        match result {
+            Ok(engine) => self.blitter = Some(engine),
+            Err(error) => nanami_runtime::println!(
+                "[intel-graphics] acceleration unavailable: {}; retaining CPU rendering",
+                error
+            ),
+        }
+    }
+    pub fn accelerated(&self) -> Word {
+        if self.blitter.as_ref().is_some_and(|engine| !engine.failed) {
+            nanami_uapi::gpu::CAP_ALL
+        } else {
+            0
+        }
+    }
+    pub fn allocate_surface(
+        &mut self,
+        owner: Word,
+        layout: nanami_uapi::gpu::Layout,
+    ) -> Result<nanami_gpu::Allocation, RequestError> {
+        if self.blitter.is_none() {
+            let (local, peer) = nanami_runtime::request_shared_memory(owner, layout.bytes)?;
+            return Ok(nanami_gpu::Allocation {
+                local,
+                peer,
+                gpu: 0,
+            });
+        }
+        if self.blitter.as_ref().unwrap().failed {
+            return Err(RequestError::Transport);
+        }
+        let start = gen9::free_span(
+            &self.hardware,
+            self.hardware.entries.min((1usize << 32) / PAGE_BYTES),
+            layout.bytes / PAGE_BYTES,
+        )?;
+        let (physical, local) = nanami_runtime::request_dma(layout.bytes)?;
+        unsafe {
+            ptr::write_bytes(local as *mut u8, 0, layout.bytes);
+        }
+        crate::cache::flush(local, layout.bytes);
+        let gpu = start * PAGE_BYTES;
+        if let Err(error) = gen9::bind(
+            &mut self.hardware,
+            start,
+            physical,
+            layout.bytes / PAGE_BYTES,
+        ) {
+            let _ = nanami_runtime::request_mapping_release(local, layout.bytes);
+            return Err(error);
+        }
+        if let Err(error) = self
+            .blitter
+            .as_mut()
+            .unwrap()
+            .map(gpu, physical, layout.bytes)
+        {
+            // map() publishes no leaf entries on failure. In particular, do
+            // not unmap a previous owner's PPGTT entries on a collision.
+            gen9::unbind(&mut self.hardware, start, layout.bytes / PAGE_BYTES);
+            let _ = nanami_runtime::request_mapping_release(local, layout.bytes);
+            return Err(error);
+        }
+        let result = nanami_runtime::request_mapping_share(owner, local, layout.bytes);
+        match result {
+            Ok(peer) => Ok(nanami_gpu::Allocation { local, peer, gpu }),
+            Err(error) => {
+                let _ = self.blitter.as_mut().unwrap().unmap(gpu, layout.bytes);
+                gen9::unbind(&mut self.hardware, start, layout.bytes / PAGE_BYTES);
+                let _ = nanami_runtime::request_mapping_release(local, layout.bytes);
+                Err(error)
+            }
+        }
+    }
+    pub fn release_surface(&mut self, buffer: nanami_gpu::Buffer) -> Result<(), RequestError> {
+        if buffer.allocation.gpu != 0 {
+            self.blitter
+                .as_mut()
+                .ok_or(RequestError::Protocol)?
+                .unmap(buffer.allocation.gpu, buffer.layout.bytes)?;
+            gen9::unbind(
+                &mut self.hardware,
+                buffer.allocation.gpu / PAGE_BYTES,
+                buffer.layout.bytes / PAGE_BYTES,
+            );
+        }
+        nanami_runtime::request_mapping_release(buffer.allocation.local, buffer.layout.bytes)
+    }
+    pub fn fill_surface(
+        &mut self,
+        buffer: nanami_gpu::Buffer,
+        rect: nanami_uapi::gpu::Rect,
+        color: u32,
+    ) -> Result<(), RequestError> {
+        if let Some(engine) = &mut self.blitter {
+            engine.fill(
+                &mut self.hardware,
+                buffer.allocation.gpu,
+                buffer.layout,
+                buffer.allocation.local,
+                rect,
+                color,
+            )
+        } else {
+            nanami_gpu::cpu_fill(buffer, rect, color);
+            Ok(())
+        }
+    }
+    pub fn copy_surface(
+        &mut self,
+        source: nanami_gpu::Buffer,
+        target: nanami_gpu::Buffer,
+        rect: nanami_uapi::gpu::Rect,
+        x: Word,
+        y: Word,
+    ) -> Result<(), RequestError> {
+        if let Some(engine) = &mut self.blitter {
+            engine.copy(
+                &mut self.hardware,
+                source.allocation.gpu,
+                source.layout,
+                source.allocation.local,
+                target.allocation.gpu,
+                target.layout,
+                target.allocation.local,
+                rect,
+                x,
+                y,
+            )
+        } else {
+            nanami_gpu::cpu_copy(source, target, rect, x, y);
+            Ok(())
+        }
+    }
+    pub fn present_surface(
+        &mut self,
+        buffer: nanami_gpu::Buffer,
+        rect: nanami_uapi::gpu::Rect,
+    ) -> Result<(), RequestError> {
+        if buffer.layout.width != self.mode.width
+            || buffer.layout.height != self.mode.height
+            || buffer.layout.stride != self.mode.stride
+        {
+            return Err(RequestError::InvalidArgument);
+        }
+        let damage = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        if self.blitter.is_none() {
+            return self.present(buffer.allocation.local, damage).map(|_| ());
+        }
+        if self.failed {
+            return Err(RequestError::Transport);
+        }
+        let back = if self.started { 1 - self.front } else { 0 };
+        let damage = self.dirty[back].map_or(damage, |old| old.union(damage));
+        let gpu_rect = nanami_uapi::gpu::Rect {
+            x: damage.x,
+            y: damage.y,
+            width: damage.width,
+            height: damage.height,
+        };
+        let layout =
+            nanami_uapi::gpu::Layout::new(self.mode.width, self.mode.height, self.mode.stride)
+                .ok_or(RequestError::Protocol)?;
+        let surface = self.ggtt_start * PAGE_BYTES + back * self.frame_bytes;
+        self.blitter.as_mut().unwrap().copy(
+            &mut self.hardware,
+            buffer.allocation.gpu,
+            buffer.layout,
+            buffer.allocation.local,
+            surface,
+            layout,
+            self.memory + back * self.frame_bytes,
+            gpu_rect,
+            damage.x,
+            damage.y,
+        )?;
+        let changed = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        self.flip(back, surface, changed).map(|_| ())
     }
 }

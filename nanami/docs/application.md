@@ -613,6 +613,12 @@ cargo xtask build --rebuild-rootfs
 ```
 
 For user-visible or lifecycle changes, run QEMU and verify the actual workflow.
+Native applications can use [GPU service](gpu.md) through `nanami_client::gpu`
+for owned XRGB8888 buffers, synchronous fills/copies and presentation. Query
+supported versus hardware-accelerated flags; a framebuffer provider implements
+the same protocol without claiming a GPU. Honoka window clients can continue
+using the existing shared-window framebuffer API.
+
 For graphics changes, inspect the framebuffer at the target resolution. For
 network changes, test both QEMU user networking and bridged networking when the
 change touches the device path.

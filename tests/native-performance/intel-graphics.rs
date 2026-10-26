@@ -2,11 +2,18 @@
 //! This checks software sequencing, not electrical/display hardware behavior.
 #![allow(dead_code)]
 extern crate self as nanami_client;
+extern crate self as nanami_gpu;
 extern crate self as nanami_runtime;
 use std::cell::RefCell;
 pub type Word = usize;
 pub type CapabilityDescriptor = Word;
 pub const OS_RESPONSE_OK: Word = 0;
+pub const OS_RESPONSE_PERMISSION_DENIED: Word = 2;
+#[path = "../../nanami/servers/libs/nanami-gpu/src/lib.rs"]
+mod gpu_provider;
+pub use gpu_provider::{cpu_copy, cpu_fill, Allocation, Buffer};
+#[path = "../../nanami/servers/core-services/intel-graphics-server/src/blt.rs"]
+mod blt;
 use nanami_uapi::gfx::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestError {
@@ -138,7 +145,21 @@ pub fn request_dma(bytes: Word) -> Result<(Word, Word), RequestError> {
         Ok((DMA_BASE, model.dma.as_mut_ptr() as Word))
     })
 }
+pub fn request_shared_memory(_: Word, _: Word) -> Result<(Word, Word), RequestError> {
+    panic!("unexpected shared buffer allocation");
+}
+pub fn request_mapping_share(_: Word, _: Word, _: Word) -> Result<Word, RequestError> {
+    panic!("unexpected DMA share");
+}
+pub fn request_mapping_release(_: Word, _: Word) -> Result<(), RequestError> {
+    panic!("unexpected DMA release");
+}
 pub mod cache {
+    pub fn flush_rect(address: usize, stride: usize, rect: nanami_uapi::gpu::Rect) {
+        for row in rect.y..rect.y + rect.height {
+            flush(address + row * stride + rect.x * 4, rect.width * 4);
+        }
+    }
     pub fn flush(address: usize, bytes: usize) {
         super::MODEL.with(|model| model.borrow_mut().flushed.push((address, bytes)));
     }
@@ -147,6 +168,15 @@ pub mod pci {
     pub use crate::pci_uapi::*;
     pub fn enumerate(_: usize, _: usize) -> Result<Option<Device>, crate::RequestError> {
         Ok(None)
+    }
+    pub fn write(
+        _: usize,
+        _: Address,
+        _: usize,
+        _: usize,
+        _: u32,
+    ) -> Result<(), crate::RequestError> {
+        panic!("unexpected PCI command write");
     }
     pub fn probe_bar(_: usize, _: Address, index: usize) -> Result<Bar, crate::RequestError> {
         let physical = match index {
@@ -229,7 +259,7 @@ fn native_setup_preserves_firmware_and_copies_the_inherited_picture() {
     reset();
     let mut display = scanout();
     let mut shared = vec![0u8; display.mode.bytes];
-    display.copy_current(shared.as_mut_ptr() as Word);
+    display.copy_current(shared.as_mut_ptr() as Word).unwrap();
     assert!(shared.iter().all(|byte| *byte == 0x35));
     MODEL.with(|model| {
         let model = model.borrow();

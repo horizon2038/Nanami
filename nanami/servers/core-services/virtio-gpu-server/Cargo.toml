@@ -1,0 +1,17 @@
+[package]
+name = "virtio_gpu_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
+nanami-gpu = { path = "../../libs/nanami-gpu" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace]

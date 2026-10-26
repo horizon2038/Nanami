@@ -9,7 +9,31 @@ pub struct NanamiError;
 impl NanamiError {
     pub const INVALID_ARGUMENT: Self = Self;
 }
-pub struct RequestError;
+#[derive(Debug)]
+pub enum RequestError {
+    InvalidArgument,
+    Unsupported,
+    Protocol,
+    Transport,
+    Status(Word),
+}
+pub const OS_RESPONSE_OK: Word = 0;
+#[path = "../../nanami/servers/libs/nanami-client/src/gpu.rs"]
+pub mod gpu;
+fn call_port(
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+    _: u8,
+) -> Result<(Word, Word, Word), RequestError> {
+    panic!("software panel must not issue GPU IPC");
+}
+pub fn request_mapping_release(_: Word, _: Word) -> Result<(), RequestError> {
+    panic!("software panel must not release GPU memory");
+}
 pub mod heap {
     pub fn heap_stats() -> (usize, usize, usize) {
         (0, 0, 0)

@@ -6,6 +6,7 @@ pub mod exec;
 #[cfg(target_arch = "x86_64")]
 pub mod firmware;
 pub mod gfx;
+pub mod gpu;
 pub mod input;
 pub mod net;
 pub mod pci;

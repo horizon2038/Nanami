@@ -29,7 +29,8 @@ failed native-driver spawn or an explicit failed applicability probe select
 `fb-server`, provided the boot framebuffer exists. Peripheral rediscovery errors
 also take this display fallback instead of terminating the ready manager.
 
-For supported Gen9 IDs the manager starts `intel-graphics-server`. That process
+Modern virtio GPU display IDs select `virtio-gpu-server`; supported Gen9 IDs
+otherwise select `intel-graphics-server`. The selected process
 either publishes `display_service` and reports success, or reports failed
 initialization so the manager starts `fb-server`. Probe reports are accepted
 only from the selected PID; duplicate success/fallback reports are rejected.
@@ -39,8 +40,9 @@ success. Missing boot framebuffer permits headless startup and is logged.
 `fb-server` remains a separate backend with its own WB shared composition RAM
 and WC hardware framebuffer mapping. It validates the existing 32-bpp layout,
 maps/initializes it, then publishes `display_service`; failed setup does not
-publish a port clients would block on. Its zero native-capability flags retain
-Honoka's software/damage path, without native GPU, EDID, vblank or timer support.
+publish a port clients would block on. It also supplies the common GPU message
+protocol with zero hardware-acceleration flags, retaining Honoka's CPU/damage
+path without native GPU, EDID, vblank or timer support.
 
 Fallback applies **before native display activation**: a declining driver must
 leave the firmware scanout intact. After publication, native readiness-report
@@ -49,7 +51,14 @@ There is no automatic restart/replacement of an active display owner, crash
 watchdog or safe post-modeset handback to the original boot framebuffer.
 
 AArch64 retains its virtio-MMIO storage path and optional boot framebuffer;
-the pc99 PCI and Intel backends are not built for it.
+the pc99 PCI, Intel and virtio-gpu PCI backends are not built for it.
+
+The [GPU service guide](gpu.md#virtio-gpu-2d-backend) describes the virtio 2D
+backend's capability discovery, fenced queue, shared DMA resources and
+pre-activation fallback. `cargo xtask run` defaults to virtio-vga on x86_64;
+`--gpu std` explicitly selects standard VGA/GOP. The common message protocol and
+legacy display interface are both implemented. CPU fill/copy and virtual
+resource transfer must not be confused with virgl or physical-GPU acceleration.
 
 ## PCI service
 
@@ -147,14 +156,18 @@ It does not obtain mode/stride/surface from UEFI framebuffer metadata. It:
   `PLANE_SURF`, not just BAR2's smaller CPU aperture. Uploads use the DMA's CPU
   mapping; only the inherited image is read through BAR2. Existing
   firmware/scratch mappings are never overwritten.
-- Exposes the existing shared-framebuffer/damage display protocol. CPU copies
-  update damaged areas; damage history repairs the stale alternating buffer.
+- Exposes the existing display protocol and the common GPU protocol. GPU-buffer
+  presentation uses the BLT engine when its self-test succeeds; the legacy
+  shared-framebuffer path retains CPU copies. Damage history repairs the stale
+  alternating buffer.
 - Arms `PLANE_SURF`, then checks `PLANE_SURFLIVE` using bounded 1-ms timer sleeps.
   Register write readback alone is not considered flip completion. A timeout
   poisons presentation and retains DMA/PTEs because either buffer may be live.
 
 `GET_CAPABILITIES` (`0x5004`) returns `DISPLAY_CAP_NATIVE_SCANOUT` and
-`DISPLAY_CAP_VBLANK_FLIP` for this backend; `fb-server` returns zero. This denotes
+`DISPLAY_CAP_VBLANK_FLIP` for this backend. Both providers additionally return
+`DISPLAY_CAP_GPU_INTERFACE`; this flag alone does not mean hardware acceleration.
+The native flip flags denote
 hardware-vblank-latched flips, not a vblank IRQ subscription API. Honoka queries
 these capabilities once while connecting. With vblank flips it composes sparse
 damage independently, then presents their bounding rectangle once per frame.
@@ -209,7 +222,7 @@ program them. There is deliberately no `SET_MODE` request at this stage.
 
 This initial backend leaves clocks, watermarks, PLLs and HDMI/DisplayPort links
 unchanged. It does not provide resolution changes, complete physical-connector
-enumeration, hotplug, suspend/resume, render/BLT acceleration, DRM ioctls or Mesa integration.
+enumeration, hotplug, suspend/resume, 3D rendering, DRM ioctls or Mesa integration.
 It is therefore not yet a Linux/Wayland GPU ABI. Firmware that fills all GGTT
 entries with scratch mappings will fall back instead of guessing ownership.
 
@@ -219,6 +232,10 @@ QEMU regression exercises PCI, selected drivers and the framebuffer fallback.
 Neither result proves native scanout on physical Intel hardware. A real-machine
 test should retain serial output and require the `[intel-graphics] native
 scanout ...` and manager readiness messages before evaluating page flips.
+
+The independent [GPU service guide](gpu.md) describes the shared message ABI,
+Honoka integration and Gen9 BCS fill/copy/presentation acceleration. Its scratch
+self-test must succeed before the provider reports accelerated capabilities.
 
 Register/reference sources:
 

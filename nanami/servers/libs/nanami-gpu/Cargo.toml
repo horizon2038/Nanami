@@ -1,0 +1,10 @@
+[package]
+name = "nanami-gpu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanami-runtime = { path = "../nanami-runtime" }
+nanami-uapi = { path = "../../uapi" }
+
+[workspace]

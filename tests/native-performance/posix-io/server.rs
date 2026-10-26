@@ -12,10 +12,119 @@ fn map_request_error_to_status(error: RequestError) -> Word {
         OS_RESPONSE_FATAL
     }
 }
+#[path = "../../../nanami/servers/apps/posix-server/src/fd.rs"]
+mod fd;
+#[path = "../../../nanami/servers/apps/posix-server/src/flock.rs"]
+mod flock;
 #[path = "../../../nanami/servers/apps/posix-server/src/sync.rs"]
 mod sync;
 #[path = "../../../nanami/servers/apps/posix-server/src/truncate.rs"]
 mod truncate;
+
+fn flock(runtime: &mut Runtime, fd: Word, operation: Word) -> Word {
+    flock::handle(runtime, request(POSIX_REQUEST_FLOCK, fd, operation, 0)).0
+}
+
+fn contended_runtime() -> Runtime {
+    let mut runtime = runtime();
+    runtime.open_files[1] = OpenFile {
+        ref_count: 1,
+        vfs_handle: 10,
+        ..runtime.open_files[0]
+    };
+    runtime.sessions[0].fds[5] = FileDescriptor {
+        open_file: 1,
+        ..runtime.sessions[0].fds[3]
+    };
+    runtime
+}
+
+#[test]
+fn flock_uses_open_descriptions_and_not_descriptor_or_process_numbers() {
+    let mut runtime = contended_runtime();
+    assert_eq!(
+        flock(&mut runtime, 3, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+    assert_eq!(
+        flock(&mut runtime, 4, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+    assert_eq!(
+        flock(&mut runtime, 5, POSIX_FLOCK_SHARED),
+        POSIX_FLOCK_WOULD_BLOCK
+    );
+    assert_eq!(flock(&mut runtime, 4, POSIX_FLOCK_UNLOCK), OS_RESPONSE_OK);
+    assert_eq!(flock(&mut runtime, 5, POSIX_FLOCK_SHARED), OS_RESPONSE_OK);
+    assert_eq!(flock(&mut runtime, 3, POSIX_FLOCK_SHARED), OS_RESPONSE_OK);
+    assert_eq!(
+        flock(&mut runtime, 3, POSIX_FLOCK_EXCLUSIVE),
+        POSIX_FLOCK_WOULD_BLOCK
+    );
+    // Linux upgrades release the old lock before trying the new one.
+    assert_eq!(runtime.open_files[0].lock, 0);
+    assert_eq!(
+        flock(&mut runtime, 5, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+}
+
+#[test]
+fn flock_releases_only_on_final_close_and_notifies_other_sessions() {
+    let mut runtime = contended_runtime();
+    runtime.sessions[1] = Session {
+        active: true,
+        owner_pid: 200,
+        lock_notification: 33,
+        ..Session::EMPTY
+    };
+    ipc::NOTIFIED.with(|values| values.borrow_mut().clear());
+    assert_eq!(
+        flock(&mut runtime, 3, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+    assert_eq!(
+        fd::handle_close(&mut runtime, request(POSIX_REQUEST_CLOSE, 3, 0, 0)).0,
+        OS_RESPONSE_OK
+    );
+    assert_eq!(
+        flock(&mut runtime, 5, POSIX_FLOCK_EXCLUSIVE),
+        POSIX_FLOCK_WOULD_BLOCK
+    );
+    ipc::NOTIFIED.with(|values| assert!(values.borrow().is_empty()));
+    assert_eq!(
+        fd::handle_close(&mut runtime, request(POSIX_REQUEST_CLOSE, 4, 0, 0)).0,
+        OS_RESPONSE_OK
+    );
+    ipc::NOTIFIED.with(|values| assert_eq!(*values.borrow(), vec![33]));
+    assert_eq!(
+        flock(&mut runtime, 5, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+}
+
+#[test]
+fn flock_validates_operations_and_subscribes_before_waiting() {
+    let mut runtime = contended_runtime();
+    assert_eq!(
+        flock(&mut runtime, 99, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_INVALID_DESCRIPTOR
+    );
+    assert_eq!(flock(&mut runtime, 3, 3), OS_RESPONSE_INVALID_ARGUMENT);
+    assert_eq!(
+        flock(&mut runtime, 3, POSIX_FLOCK_EXCLUSIVE),
+        OS_RESPONSE_OK
+    );
+    assert_eq!(
+        flock::handle(
+            &mut runtime,
+            request(POSIX_REQUEST_FLOCK, 5, POSIX_FLOCK_EXCLUSIVE, 21)
+        )
+        .0,
+        POSIX_FLOCK_WOULD_BLOCK
+    );
+    assert_eq!(runtime.sessions[0].lock_notification, 32);
+}
 
 #[test]
 fn truncate_keeps_dup_offset_and_only_syncs_when_requested() {
@@ -106,6 +215,8 @@ fn runtime() -> Runtime {
         status_flags: 0,
         vfs_handle: 9,
         ref_count: 2,
+        lock_inode: 0,
+        lock: 0,
     };
     runtime
 }

@@ -43,7 +43,7 @@ pub(super) fn sys_read(
         LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => {
             return super::fd_events::read(runtime, pid, file, user_buffer, len)
         }
-        LinuxFileKind::Epoll => return Err(EINVAL),
+        LinuxFileKind::Epoll | LinuxFileKind::IoUring => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_read(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeRead => {
             return sys_pipe_read(runtime, pid, file.posix_fd, user_buffer, len);
@@ -269,7 +269,7 @@ pub(super) fn sys_write(
             return super::memfd::io(runtime, pid, file, user_buffer, len, None, true)
         }
         LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => return Err(EINVAL),
-        LinuxFileKind::Epoll => return Err(EINVAL),
+        LinuxFileKind::Epoll | LinuxFileKind::IoUring => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_write(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeWrite => {
             return sys_pipe_write(runtime, pid, file.posix_fd, user_buffer, len);

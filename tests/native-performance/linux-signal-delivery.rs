@@ -571,6 +571,34 @@ fn parked_syscalls_keep_existing_eintr_and_sa_restart_without_another_stop() {
 }
 
 #[test]
+fn interrupted_uring_wait_returns_accepted_submissions_without_restarting_them() {
+    for submitted in [0, 3] {
+        let mut runtime = Runtime::new();
+        runtime.managed[0].signal_waiting = true;
+        runtime.managed[0].signal_context = LinuxSyscallContext {
+            number: SYS_IO_URING_ENTER,
+            args: [7, submitted, 4, 1, 0, 0],
+            program_counter: 0x4000,
+        };
+        runtime.managed[0].signals_mut().actions.borrow_mut()[9].flags |= signals::SA_RESTART;
+        BACKEND.with(|state| state.borrow_mut().stopped = true);
+        runtime.queue(10);
+        delivery::pump(&mut runtime, 0);
+        assert_eq!(calls(), ["read", "write", "resume"]);
+        let saved = saved_context();
+        assert_eq!(saved[signal_frame::PC], 0x4000);
+        assert_eq!(
+            saved[0] as isize,
+            if submitted == 0 {
+                -(EINTR as isize)
+            } else {
+                submitted as isize
+            }
+        );
+    }
+}
+
+#[test]
 fn stop_and_continue_preserve_a_running_context_and_defer_handlers_until_continue() {
     let mut runtime = Runtime::new();
     runtime.queue(signals::SIGSTOP);

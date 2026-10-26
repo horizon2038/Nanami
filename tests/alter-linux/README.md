@@ -1,5 +1,48 @@
 # Alter/Linux dynamic-loader regression
 
+## Neovim colors
+
+Shell and Alter default to `TERM=nanami-256color` and `COLORTERM=truecolor`.
+Fresh rootfs images include this profile under both `n/nanami-256color` and
+`6e/nanami-256color`; the old monochrome `vt100` profile remains unchanged.
+Existing images need the new terminfo files: build a separate rootfs to preserve
+guest data, or explicitly replace a disposable image using `--rebuild-rootfs`.
+
+```sh
+python3 tests/alter-linux/qemu-smoke.py --image out/alter-memory-boot.img \
+  --nvim-editor --nvim-colors --diagnostics --smp 4
+```
+
+The color check first verifies RGB pixels without forcing `termguicolors`, then
+disables that option and checks the 256-color palette. QEMU PPM screenshots are
+checked directly, without requiring Pillow or a host image library. Editing,
+saving, quitting and independent BusyBox readback are still verified. Repeat
+with `--smp 1` for the same-core path.
+
+## Neovim startup syscalls
+
+`nvim-syscalls.c` is an integer-only Linux ABI regression for `umask`, `flock`
+and `io_uring_setup/enter/register`. It checks persisted creation modes including
+mode zero, forked masks, description-shared locks, nonblocking contention,
+blocking release notifications, signal interruption, real SQ/CQ/SQE mappings,
+positioned vectored I/O, completion overflow/backpressure, duplicate lifetime
+and accurate unsupported-feature/probe results.
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-sse2 \
+  -mno-red-zone -O2 -Wl,-e,_start,--image-base=0x400000 \
+  tests/alter-linux/nvim-syscalls.c tests/alter-linux/signals-x86_64.S \
+  -o out/nanami-nvim-syscalls
+# Include --linux-bin out/nanami-nvim-syscalls in a disposable xtask image build.
+python3 tests/alter-linux/qemu-smoke.py --image out/alter-memory-boot.img \
+  --program nanami-nvim-syscalls \
+  --program 'nvim --headless -u /dev/null -i NONE -c q' \
+  --nvim-editor --diagnostics --smp 4
+```
+
+Repeat with `--smp 1`. These changes do not modify A9N or require FPU support.
+
 ## Shared memory, namespace and thread regressions
 
 The integer-only fixtures `memory-events.c`, `namespace.c` and `threads.c`
@@ -51,7 +94,7 @@ cargo test --manifest-path tests/native-performance/Cargo.toml -- --test-threads
 Validated with one and four QEMU CPUs: all three fixtures, the existing UNIX
 socket and eventfd/epoll fixtures, Neovim headless startup, and interactive
 edit/save/quit followed by independent BusyBox readback. The native suite passes
-877 tests (7 timing tests ignored); all 25 xtask tests pass. Release builds for
+886 tests (7 timing tests ignored); all 27 xtask tests pass. Release builds for
 x86_64 and AArch64 checks for Alter, POSIX, ext2 and Alpha pass. A9N sources and
 the kernel IPC fastpath are unchanged. The raw guest fixtures are x86_64-only.
 

@@ -84,12 +84,28 @@ pub struct Epoll {
     pub cursor: usize,
 }
 
+pub struct IoUring {
+    pub memory: Word,
+    pub sqes: Word,
+    pub entries: u32,
+    pub cq_entries: u32,
+    pub cq_offset: Word,
+    pub ring_bytes: Word,
+    pub sqe_bytes: Word,
+    pub array: bool,
+    pub head: u32,
+    pub tail: u32,
+    pub cancel_next: bool,
+    pub overflow: alloc::collections::VecDeque<(u64, i32)>,
+}
+
 pub enum Object {
     Counter(EventCounter),
     Timer(Timer),
     Signals(SignalFd),
     Memory(MemoryFile),
     Epoll(Epoll),
+    Ring(IoUring),
 }
 
 pub struct Objects {

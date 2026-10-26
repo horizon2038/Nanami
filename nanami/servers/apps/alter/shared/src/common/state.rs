@@ -81,6 +81,7 @@ pub enum LinuxFileKind {
     SignalFd,
     MemoryFile,
     Epoll,
+    IoUring,
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +307,7 @@ pub struct ManagedProcess {
     pub tgid: Word,
     pub vm_group: Word,
     pub fs_group: Word,
+    pub umask: Word,
     pub parent_pid: Word,
     pub job: ProcessJobControl,
     pub owner_pid: Word,
@@ -373,6 +375,7 @@ impl ManagedProcess {
         tgid: 0,
         vm_group: 0,
         fs_group: 0,
+        umask: 0o022,
         parent_pid: 0,
         job: ProcessJobControl::EMPTY,
         owner_pid: 0,

@@ -105,16 +105,22 @@ pub(super) fn sys_statx(
     if raw_len == 0 && (flags & LINUX_AT_EMPTY_PATH) != 0 {
         let file = runtime.linux_file(pid, dirfd).ok_or(EBADF)?;
         let stat = match file.kind {
-            _ if file.is_root_directory() => {
-                posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?
-            }
+            _ if file.is_root_directory() => posix::posix_fstat_flags(
+                runtime.posix_port,
+                file.posix_fd,
+                posix::POSIX_STAT_INCLUDE_MODE,
+            )
+            .map_err(map_request_error)?,
             LinuxFileKind::Terminal => (0, 0, posix::POSIX_FILE_TYPE_CHAR_DEVICE, 5, 0),
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => {
                 (0, 0, POSIX_FILE_TYPE_PIPE, 0, 0)
             }
-            LinuxFileKind::Posix => {
-                posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?
-            }
+            LinuxFileKind::Posix => posix::posix_fstat_flags(
+                runtime.posix_port,
+                file.posix_fd,
+                posix::POSIX_STAT_INCLUDE_MODE,
+            )
+            .map_err(map_request_error)?,
             LinuxFileKind::MemoryFile => (
                 file.resource,
                 super::memfd::size(runtime, file)?,
@@ -138,6 +144,7 @@ pub(super) fn sys_statx(
             | LinuxFileKind::TimerFd
             | LinuxFileKind::SignalFd
             | LinuxFileKind::Epoll => return Err(EOPNOTSUPP),
+            LinuxFileKind::IoUring => return Err(EOPNOTSUPP),
         };
         write_linux_statx(runtime, pid, statx_ptr, stat)?;
         return Ok(0);
@@ -165,7 +172,15 @@ pub(super) fn stat_current_path(
     }
     let fallback = virtual_fs::fallback_file(path);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    match (posix::posix_stat(runtime.posix_port, 0, vfs_len), fallback) {
+    match (
+        posix::posix_stat_flags(
+            runtime.posix_port,
+            0,
+            vfs_len,
+            posix::POSIX_STAT_INCLUDE_MODE,
+        ),
+        fallback,
+    ) {
         (
             Err(nanami_runtime::RequestError::Status(
                 nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR,
@@ -233,7 +248,12 @@ pub(super) fn sys_fstat(
     if !file.has_posix_backend() {
         return Err(EBADF);
     }
-    let stat = posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
+    let stat = posix::posix_fstat_flags(
+        runtime.posix_port,
+        file.posix_fd,
+        posix::POSIX_STAT_INCLUDE_MODE,
+    )
+    .map_err(map_request_error)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
 }
@@ -322,7 +342,7 @@ pub(super) fn write_linux_stat(
         return Err(EFAULT);
     }
     let (inode, size, kind, major, minor) = stat;
-    let mode = linux_mode_for_kind(kind);
+    let (inode, mode) = unpack_inode_mode(inode, kind);
     let rdev = ((major & 0xfff) << 8) | (minor & 0xff);
     unsafe {
         arch::write_stat_buffer(runtime.posix_shm, inode, size, mode, rdev);
@@ -337,7 +357,7 @@ pub(super) fn write_linux_statx(
     stat: (Word, Word, Word, Word, Word),
 ) -> Result<(), i32> {
     let (inode, size, kind, _major, _minor) = stat;
-    let mode = linux_mode_for_kind(kind);
+    let (inode, mode) = unpack_inode_mode(inode, kind);
     unsafe {
         ::core::ptr::write_bytes(runtime.posix_shm as *mut u8, 0, LINUX_STATX_SIZE);
         write_u32(runtime.posix_shm, LINUX_STATX_BASIC_STATS);
@@ -352,6 +372,15 @@ pub(super) fn write_linux_statx(
         write_u64(runtime.posix_shm + 56, LINUX_STATX_BASIC_STATS as Word);
     }
     write_target_memory(runtime, pid, user_ptr, LINUX_STATX_SIZE as Word)
+}
+
+// Extended replies pack an ext2 mode alongside its 32-bit inode number.
+fn unpack_inode_mode(inode: Word, kind: Word) -> (Word, Word) {
+    let mode = inode >> 32;
+    if mode != 0 {
+        return (inode & 0xffff_ffff, mode);
+    }
+    (inode, linux_mode_for_kind(kind))
 }
 
 pub(super) fn linux_mode_for_kind(kind: Word) -> Word {

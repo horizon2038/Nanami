@@ -228,6 +228,7 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                     resolved.name.as_ptr(),
                     resolved.name.len(),
                     EXT2_S_IFLNK,
+                    VFS_MODE_PRESENT | 0o777,
                 )
                 .map_err(|_| Error::Io)?;
                 let mut inode = read_inode(runtime, number).map_err(|_| Error::Io)?;

@@ -49,6 +49,7 @@ enum LinuxFileKind {
     TimerFd,
     SignalFd,
     MemoryFile,
+    IoUring,
     Epoll,
     VirtualDirectory,
     VirtualFile,
@@ -87,6 +88,12 @@ mod state {
 use readiness::*;
 struct Rootfs {
     leader: Word,
+}
+mod filesystem {
+    use super::*;
+    pub(super) fn creation_mode(_: &Runtime, _: Word, mode: Word) -> Result<Word, i32> {
+        Ok((1 << 16) | (mode & !0o022))
+    }
 }
 struct Process {
     pid: Word,
@@ -247,6 +254,14 @@ type Nodes = std::collections::BTreeMap<Vec<u8>, (Word, Word)>;
 thread_local! { static FS: std::cell::RefCell<Nodes> = const { std::cell::RefCell::new(Nodes::new()) }; }
 mod posix {
     use super::*;
+    pub fn posix_create_socket_node_mode(
+        shm: Word,
+        offset: Word,
+        len: Word,
+        _: Word,
+    ) -> Result<(Word, Word), RequestError> {
+        posix_create_socket_node(shm, offset, len)
+    }
     pub const POSIX_FILE_TYPE_SOCKET: Word = 5;
     pub fn posix_create_socket_node(
         shm: Word,

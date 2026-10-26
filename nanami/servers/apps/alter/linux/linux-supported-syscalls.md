@@ -44,6 +44,49 @@ types and output devices return an error rather than fabricated success.
 
 ## File Descriptors and Polling
 
+### File creation and advisory locks
+
+`umask` stores a task's creation mask (initially `022`), returns the previous
+mask, and retains it across fork/exec. `CLONE_FS` shares changes between tasks.
+The mask is applied to open/openat/creat, mkdir/mkdirat, regular mknod and pathname
+UNIX socket creation; symlinks retain mode `0777`. POSIX/VFS forward explicit
+creation permissions to ext2, including mode zero, and stat/fstat/statx report
+the actual persisted mode. Existing files are not chmodded by `O_CREAT`.
+
+`flock` supports shared/exclusive locks, unlock, nonblocking contention and
+blocking waits interrupted by signals (including `SA_RESTART`). Locks are
+advisory, keyed by inode and owned by POSIX open-file descriptions: dup, fork
+and transferred descriptions share the lock until unlock or final close.
+Release notifications wake Alter waiters without polling or blocking POSIX's
+server loop. This backend covers POSIX-backed regular files and directories;
+personality-local descriptor kinds currently return `EOPNOTSUPP`.
+
+### io_uring
+
+`io_uring_setup`, `io_uring_enter` and `io_uring_register` implement an
+enter-driven shared-ring backend. SQEs are 64 bytes and CQEs 16 bytes, with
+acquire/release ring counters, optional SQ arrays, CQSIZE/CLAMP, and at most 256
+SQ / 512 CQ entries. `mmap` exposes real shared SQ/CQ/SQE pages; duplicate,
+fork and SCM_RIGHTS aliases share ring state. Closing the final FD releases
+the ring while existing mappings retain their pages until unmap/exit.
+
+Supported operations: NOP, READ/WRITE, READV/WRITEV, FSYNC, OPENAT, CLOSE,
+STATX, EPOLL_CTL, RENAMEAT, UNLINKAT, MKDIRAT, SYMLINKAT, LINKAT and FTRUNCATE.
+Read/write operations cover regular POSIX files and memfd, including positioned
+I/O and short transfers. The register PROBE operation reports this exact set.
+CQ overflow is retained with bounded backpressure rather than dropping accepted
+completions. GETEVENTS waits participate in readiness/signals and support a
+temporary signal mask; poll/epoll observe completion readiness.
+
+The advertised features are SINGLE_MMAP and NODROP only. SQPOLL/IOPOLL,
+registered files/buffers/resource tags, linked/async SQE flags, direct
+descriptors, socket/pipe async I/O and closing a ring through a CLOSE SQE are
+explicitly unsupported. Libuv versions requiring RSRC_TAGS therefore select
+their existing epoll/file-I/O fallback; no unsupported feature is advertised
+merely to enable that path.
+
+### Descriptor events
+
 `dup`, `dup2`, `dup3`, `pipe`, `pipe2`, `fcntl`, `ioctl`, `poll`, `ppoll`,
 `select`, `pselect6`, `eventfd`, `eventfd2`, `epoll_create`, `epoll_create1`,
 `epoll_ctl`, `epoll_wait`, `epoll_pwait`, `timerfd_create`, `timerfd_settime`,
@@ -59,7 +102,7 @@ nested epoll are explicitly rejected. `ppoll`, `pselect6`, and `epoll_pwait`
 temporarily install the supplied signal mask while parked and restore it on
 completion or signal delivery.
 Interest sets are bounded by the 64-descriptor guest limit; Alter holds at most
-256 counter/timer/signal/memory/epoll objects in total and allocates storage only on use.
+256 counter/timer/signal/memory/epoll/ring objects in total and allocates storage only on use.
 
 Timer descriptors count missed periodic expirations, support relative and
 absolute realtime/monotonic/boottime deadlines, and integrate with the same
@@ -168,12 +211,19 @@ Alter's startup stack or every process snapshot with an inline array.
 
 ## Terminal Applications
 
-The Alter launcher supplies `TERM=vt100` and `TERMINFO=/usr/share/terminfo`.
-New rootfs images include a compact terminfo entry for Shell's implemented
-cursor, erase, scrolling, text-attribute and application-cursor-key sequences.
-It deliberately does not advertise DEC line drawing or other unsupported
-features. Rebuild an existing rootfs explicitly to add the entry; recompiling
-Alter alone does not change an already-created filesystem image.
+The Shell and Alter launchers supply `TERM=nanami-256color` and
+`COLORTERM=truecolor`; Alter also supplies `TERMINFO=/usr/share/terminfo`.
+New rootfs images include matching terminfo with 256-color foreground/background,
+default-color reset, background-color erase and alternate-screen support, along
+with the implemented cursor, scrolling, text-attribute and cursor-key sequences.
+Neovim detects RGB support from COLORTERM; ncurses can use the indexed palette
+through terminfo. The legacy monochrome `vt100` entry is retained for explicit
+compatibility use. Neither entry claims unsupported DEC line drawing, blink,
+function keys or a complete xterm implementation.
+
+Rebuild an existing rootfs explicitly to install the new entry: recompiling
+Alter alone does not change an existing filesystem image. Use a separate rootfs
+path to preserve guest data; `--rebuild-rootfs` replaces that image's contents.
 
 ## Processes and Execution
 

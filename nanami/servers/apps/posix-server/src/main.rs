@@ -16,6 +16,7 @@ use io::*;
 
 mod environment;
 mod fd;
+mod flock;
 mod namespace;
 mod path;
 pub(crate) mod process;
@@ -138,6 +139,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_DUP => handle_dup(runtime, request),
         POSIX_REQUEST_DUP2 => handle_dup2(runtime, request),
         POSIX_REQUEST_FCNTL => handle_fcntl(runtime, request),
+        POSIX_REQUEST_FLOCK => flock::handle(runtime, request),
         POSIX_REQUEST_GETENV => handle_getenv(runtime, request),
         POSIX_REQUEST_SETENV => handle_setenv(runtime, request),
         POSIX_REQUEST_UNSETENV => handle_unsetenv(runtime, request),

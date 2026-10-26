@@ -68,6 +68,8 @@ pub const VFS_DELEGATE_VALUE_MASK: Word = 0xffff_ffff;
 pub const VFS_OPEN_CREATE: Word = 1 << 0;
 pub const VFS_OPEN_TRUNCATE: Word = 1 << 1;
 pub const VFS_OPEN_DIRECTORY: Word = 1 << 2;
+/// Creation-mode argument: zero preserves the native client's default mode.
+pub const VFS_MODE_PRESENT: Word = 1 << 16;
 pub const VFS_OPEN_HANDLE_MASK: Word = 0xffff_ffff;
 pub const VFS_OPEN_INODE_SHIFT: Word = 32;
 pub const VFS_FILE_TYPE_UNKNOWN: Word = 0;
@@ -85,4 +87,6 @@ pub const VFS_DIRECTORY_ENTRY_RECORD_LEN_OFFSET: usize = 24;
 pub const VFS_DIRECTORY_ENTRY_NAME_OFFSET: usize = 32;
 
 pub const VFS_STAT_TYPE_SHIFT: Word = 56;
+/// STAT arg2 / FSTAT arg1: detail0 contains (mode << 32) | inode.
+pub const VFS_STAT_INCLUDE_MODE: Word = 1;
 pub const VFS_STAT_SIZE_MASK: Word = 0x00ff_ffff_ffff_ffff;

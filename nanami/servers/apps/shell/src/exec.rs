@@ -12,11 +12,12 @@ const MAX_ARGS: usize = 16;
 const MAX_ENVS: usize = 8;
 const LAUNCH_OFFSET: usize = 512;
 const MAX_OUTPUT_LINES: usize = 4;
-const DEFAULT_ENVS: [&[u8]; 4] = [
+const DEFAULT_ENVS: [&[u8]; 5] = [
     b"PATH=/bin:/usr/bin",
     b"HOME=/",
     b"USER=root",
-    b"TERM=vt100",
+    b"TERM=nanami-256color",
+    b"COLORTERM=truecolor",
 ];
 
 pub struct ExecShell {

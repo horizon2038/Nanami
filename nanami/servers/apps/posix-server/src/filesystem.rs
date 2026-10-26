@@ -1,6 +1,6 @@
 use core::ptr;
-use nanami_runtime::{ipc::ServiceRequest, Word};
 use nanami_client::posix::*;
+use nanami_runtime::{ipc::ServiceRequest, Word};
 
 use super::{
     fd::alloc_open_file_and_fd,
@@ -82,11 +82,12 @@ pub(crate) fn handle_open(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
     if (request.arg2 & POSIX_O_DIRECTORY) != 0 {
         flags |= nanami_client::vfs::VFS_OPEN_DIRECTORY;
     }
-    match nanami_client::vfs::vfs_open_compound(
+    match nanami_client::vfs::vfs_open_compound_mode(
         runtime.vfs_port,
         VFS_PATH_OFFSET as Word,
         len as Word,
         flags,
+        request.arg3,
     ) {
         Ok((vfs_handle, _, _, kind)) => {
             if kind == nanami_client::vfs::VFS_FILE_TYPE_SOCKET {
@@ -120,11 +121,12 @@ pub(crate) fn handle_create_socket_node(
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
     write_vfs_path(runtime, VFS_PATH_OFFSET, &path[..len]);
-    match nanami_client::vfs::vfs_create_node(
+    match nanami_client::vfs::vfs_create_node_mode(
         runtime.vfs_port,
         VFS_PATH_OFFSET,
         len,
         nanami_client::vfs::VFS_FILE_TYPE_SOCKET,
+        request.arg2,
     ) {
         Ok(inode) => {
             let result = nanami_client::vfs::vfs_open(runtime.vfs_port, VFS_PATH_OFFSET, len);
@@ -178,7 +180,12 @@ pub(crate) fn handle_stat(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
         );
     }
     write_vfs_path(runtime, VFS_PATH_OFFSET, &path[..len]);
-    match nanami_client::vfs::vfs_stat(runtime.vfs_port, VFS_PATH_OFFSET as Word, len as Word) {
+    match nanami_client::vfs::vfs_stat_flags(
+        runtime.vfs_port,
+        VFS_PATH_OFFSET as Word,
+        len as Word,
+        request.arg2,
+    ) {
         Ok((inode, size, kind)) => (
             nanami_runtime::OS_RESPONSE_OK,
             inode,
@@ -198,7 +205,12 @@ pub(crate) fn handle_mkdir(runtime: &mut Runtime, request: ServiceRequest) -> (W
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     write_vfs_path(runtime, VFS_PATH_OFFSET, &path[..len]);
-    match nanami_client::vfs::vfs_mkdir(runtime.vfs_port, VFS_PATH_OFFSET as Word, len as Word) {
+    match nanami_client::vfs::vfs_mkdir_mode(
+        runtime.vfs_port,
+        VFS_PATH_OFFSET as Word,
+        len as Word,
+        request.arg2,
+    ) {
         Ok(_) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         Err(e) => (map_request_error_to_status(e), 0, 0),
     }
@@ -339,7 +351,11 @@ pub(crate) fn handle_fstat(runtime: &mut Runtime, request: ServiceRequest) -> (W
             ),
         ),
         FdKind::Regular | FdKind::Directory => {
-            match nanami_client::vfs::vfs_fstat(runtime.vfs_port, entry.vfs_handle) {
+            match nanami_client::vfs::vfs_fstat_flags(
+                runtime.vfs_port,
+                entry.vfs_handle,
+                request.arg1,
+            ) {
                 Ok((inode, size, kind)) => (
                     nanami_runtime::OS_RESPONSE_OK,
                     inode,

@@ -66,7 +66,7 @@ pub(super) fn size(runtime: &Runtime, file: LinuxFile) -> Result<Word, i32> {
     Ok(object(runtime, file.resource)?.size)
 }
 
-fn page(runtime: &mut Runtime, id: Word, index: Word) -> Result<Word, i32> {
+pub(super) fn page(runtime: &mut Runtime, id: Word, index: Word) -> Result<Word, i32> {
     if let Some(address) = object(runtime, id)?.pages.get(&index) {
         return Ok(*address);
     }
@@ -690,6 +690,11 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
 }
 
 pub(super) fn collect(runtime: &mut Runtime, id: Word) {
+    if runtime.poll_objects.iter().any(
+        |(_, object)| matches!(object, Object::Ring(ring) if ring.memory == id || ring.sqes == id),
+    ) {
+        return;
+    }
     let Ok(memory) = object(runtime, id) else {
         return;
     };

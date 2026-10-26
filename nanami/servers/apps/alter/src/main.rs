@@ -23,11 +23,12 @@ const ALTER_LAUNCH_FLAG_DIAGNOSTICS: Word = 1 << 1;
 const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 const ALTER_SHM_BYTES: Word = 0x4000;
 const ALTER_LAUNCH_MAX_ENVS: usize = 8;
-const ALTER_ENV: [&[u8]; 5] = [
+const ALTER_ENV: [&[u8]; 6] = [
     b"PATH=/bin:/usr/bin",
     b"HOME=/",
     b"USER=root",
-    b"TERM=vt100",
+    b"TERM=nanami-256color",
+    b"COLORTERM=truecolor",
     b"TERMINFO=/usr/share/terminfo",
 ];
 
@@ -139,7 +140,8 @@ struct AlterClient {
 
 impl AlterClient {
     fn connect(service_name: &str) -> Result<Self, ()> {
-        nanami_runtime::connect_service_by_name(service_name, SLOT_ALTER_SERVICE).map_err(|_| ())?;
+        nanami_runtime::connect_service_by_name(service_name, SLOT_ALTER_SERVICE)
+            .map_err(|_| ())?;
         let port = nanami_runtime::ipc::process_slot_descriptor(SLOT_ALTER_SERVICE);
         let (status, shm, size) = nanami_runtime::call_service_port(
             port,
@@ -165,7 +167,11 @@ impl AlterClient {
         if ALTER_ENV.len() > ALTER_LAUNCH_MAX_ENVS {
             return None;
         }
-        let mut cursor = if launch.framebuffer_size.is_some() { 24 } else { 16 };
+        let mut cursor = if launch.framebuffer_size.is_some() {
+            24
+        } else {
+            16
+        };
         if self.shm_size < cursor {
             return None;
         }
@@ -212,8 +218,7 @@ impl TerminalClient {
     }
 
     fn connect(&mut self, terminal_id: Word) -> Result<(), ()> {
-        nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE)
-            .map_err(|_| ())?;
+        nanami_client::registry::connect_terminal_service(SLOT_TERMINAL_SERVICE).map_err(|_| ())?;
         self.port = nanami_runtime::ipc::process_slot_descriptor(SLOT_TERMINAL_SERVICE);
         let (shm, size) = nanami_client::terminal::terminal_attach_shared_memory(
             self.port,
@@ -278,8 +283,15 @@ fn wait_child(pid: Word, alter_port: Word, terminal: &mut TerminalClient) {
     loop {
         match nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_STATUS, pid, 0, 0, 0, 2) {
             Ok((nanami_runtime::OS_RESPONSE_OK, 1, status)) => {
-                let _ =
-                    nanami_runtime::call_service_port(alter_port, ALTER_REQUEST_KILL, pid, 0, 0, 0, 3);
+                let _ = nanami_runtime::call_service_port(
+                    alter_port,
+                    ALTER_REQUEST_KILL,
+                    pid,
+                    0,
+                    0,
+                    0,
+                    3,
+                );
                 if status != 0 {
                     terminal.write_status_line(b"alter: exited status=", status);
                 }
@@ -315,7 +327,9 @@ fn wait_child(pid: Word, alter_port: Word, terminal: &mut TerminalClient) {
 
 fn connect_timer_service() -> Option<Word> {
     match nanami_client::registry::connect_timer_service(SLOT_TIMER_SERVICE) {
-        Ok(()) => Some(nanami_runtime::ipc::process_slot_descriptor(SLOT_TIMER_SERVICE)),
+        Ok(()) => Some(nanami_runtime::ipc::process_slot_descriptor(
+            SLOT_TIMER_SERVICE,
+        )),
         Err(_) => None,
     }
 }

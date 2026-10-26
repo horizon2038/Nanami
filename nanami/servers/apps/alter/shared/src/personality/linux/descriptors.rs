@@ -13,6 +13,7 @@ pub(super) fn sys_open(
     pid: Word,
     path_ptr: Word,
     linux_flags: Word,
+    mode: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
     let len = super::resolve_at(
@@ -25,7 +26,7 @@ pub(super) fn sys_open(
     if linux_flags & super::LINUX_O_NOFOLLOW != 0 {
         check_no_follow(runtime, pid, len)?;
     }
-    open_current_path(runtime, pid, len, linux_flags)
+    open_current_path(runtime, pid, len, linux_flags, mode)
 }
 
 fn open_current_path(
@@ -33,6 +34,7 @@ fn open_current_path(
     pid: Word,
     len: Word,
     linux_flags: Word,
+    mode: Word,
 ) -> Result<Word, i32> {
     if linux_flags & (super::LINUX_O_ACCMODE | LINUX_O_CREAT | LINUX_O_TRUNC) != 0
         && runtime
@@ -49,8 +51,9 @@ fn open_current_path(
     let fallback = super::virtual_fs::fallback_file(path);
     let flags = translate_open_flags(linux_flags);
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
+    let mode = super::filesystem::creation_mode(runtime, pid, mode)?;
     let fd = match (
-        posix::posix_open(runtime.posix_port, 0, vfs_len, flags),
+        posix::posix_open_mode(runtime.posix_port, 0, vfs_len, flags, mode),
         fallback,
     ) {
         (
@@ -79,6 +82,7 @@ pub(super) fn sys_openat(
     dirfd: Word,
     path_ptr: Word,
     linux_flags: Word,
+    mode: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
     let len = super::resolve_at(
@@ -91,7 +95,7 @@ pub(super) fn sys_openat(
     if linux_flags & super::LINUX_O_NOFOLLOW != 0 {
         check_no_follow(runtime, pid, len)?;
     }
-    open_current_path(runtime, pid, len, linux_flags)
+    open_current_path(runtime, pid, len, linux_flags, mode)
 }
 
 fn check_no_follow(runtime: &mut Runtime, pid: Word, bytes: Word) -> Result<(), i32> {
@@ -215,6 +219,7 @@ pub(super) fn sys_lseek(
             | LinuxFileKind::TimerFd
             | LinuxFileKind::SignalFd
             | LinuxFileKind::Epoll
+            | LinuxFileKind::IoUring
             | LinuxFileKind::SocketUnix
     ) {
         return Err(ESPIPE);
@@ -338,7 +343,7 @@ pub(super) fn sys_fcntl(
                     LinuxFileKind::PipeWrite => super::LINUX_O_WRONLY,
                     // Native terminal descriptors support both directions.
                     // libuv uses this access mode to enable TUI writes too.
-                    LinuxFileKind::Terminal => super::LINUX_O_RDWR,
+                    LinuxFileKind::Terminal | LinuxFileKind::IoUring => super::LINUX_O_RDWR,
                     _ => 0,
                 };
                 return Ok((file.flags & !LINUX_FD_CLOEXEC) | access);
@@ -465,6 +470,7 @@ pub(super) fn linux_file_kind_name(kind: LinuxFileKind) -> &'static str {
         LinuxFileKind::TimerFd => "timerfd",
         LinuxFileKind::SignalFd => "signalfd",
         LinuxFileKind::Epoll => "epoll",
+        LinuxFileKind::IoUring => "io-uring",
     }
 }
 
@@ -486,6 +492,7 @@ pub(super) fn duplicate_linux_file(
         | LinuxFileKind::SignalFd
         | LinuxFileKind::MemoryFile
         | LinuxFileKind::Epoll
+        | LinuxFileKind::IoUring
         | LinuxFileKind::SocketUnix => Ok(file),
         LinuxFileKind::Terminal
         | LinuxFileKind::VirtualDirectory
@@ -564,6 +571,7 @@ pub(super) fn release_file_description(runtime: &mut Runtime, file: LinuxFile) {
     match file.kind {
         LinuxFileKind::SocketUnix => super::unix::collect(runtime),
         LinuxFileKind::MemoryFile => super::memfd::collect(runtime, file.resource),
+        LinuxFileKind::IoUring => super::io_uring::release(runtime, file),
         LinuxFileKind::EventFd
         | LinuxFileKind::TimerFd
         | LinuxFileKind::SignalFd

@@ -69,6 +69,9 @@ impl Runtime {
             .managed_process(parent_pid)
             .map(|parent| parent.rootfs)
             .unwrap_or(super::super::context::RootfsContext::DEFAULT);
+        let umask = self
+            .managed_process(parent_pid)
+            .map_or(0o022, |parent| parent.umask);
         let (terminal_canonical, terminal_echo, terminal_termios) = self
             .managed
             .iter()
@@ -85,6 +88,7 @@ impl Runtime {
                     tgid: pid,
                     vm_group: pid,
                     fs_group: pid,
+                    umask,
                     parent_pid,
                     job: ProcessJobControl::EMPTY,
                     owner_pid,

@@ -12,6 +12,22 @@ pub mod net {
 pub mod input {
     pub const INPUT_NOTIFICATION_IDENTIFIER: usize = 1 << 19;
 }
+pub mod posix {
+    pub const POSIX_NOTIFICATION_LOCK_CHANGE: usize = 1 << 21;
+}
+const SYS_FLOCK: Word = 73;
+const SYS_IO_URING_ENTER: Word = 426;
+mod flock {
+    use super::*;
+    pub(super) fn lock(_: &mut Runtime, _: Word, _: Word, _: Word) -> Result<Word, i32> {
+        Err(EAGAIN)
+    }
+}
+#[path = "linux-uring.rs"]
+mod uring_tests;
+use uring_tests::*;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/io_uring.rs"]
+mod io_uring;
 pub use std::println;
 type Word = usize;
 struct UnixSocketMock;
@@ -158,6 +174,7 @@ enum LinuxFileKind {
     SignalFd,
     MemoryFile,
     Epoll,
+    IoUring,
 }
 #[derive(Clone, Copy)]
 struct LinuxFile {

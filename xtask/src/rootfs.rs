@@ -309,6 +309,7 @@ mod tests {
             b"native-payload",
             b"theme-payload",
             b"vt100|Nanami VT100-compatible terminal\0",
+            b"nanami-256color|Nanami color terminal\0",
         ] {
             assert!(image.windows(contents.len()).any(|w| w == contents));
         }

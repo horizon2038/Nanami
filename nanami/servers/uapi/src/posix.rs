@@ -63,6 +63,15 @@ pub const POSIX_REQUEST_SYNC: Word = 0xa139;
 pub const POSIX_REQUEST_FTRUNCATE: Word = 0xa13a;
 pub const POSIX_REQUEST_CREATE_SOCKET_NODE: Word = 0xa13b;
 pub const POSIX_REQUEST_PATH: Word = 0xa13c;
+pub const POSIX_REQUEST_FLOCK: Word = 0xa13d;
+pub const POSIX_FLOCK_SHARED: Word = 1;
+pub const POSIX_FLOCK_EXCLUSIVE: Word = 2;
+pub const POSIX_FLOCK_UNLOCK: Word = 8;
+pub const POSIX_FLOCK_WOULD_BLOCK: Word = 0xa13d_0001;
+pub const POSIX_NOTIFICATION_LOCK_CHANGE: Word = 1 << 21;
+pub const POSIX_MODE_PRESENT: Word = 1 << 16;
+/// STAT arg2 / FSTAT arg1: detail0 contains (mode << 32) | inode.
+pub const POSIX_STAT_INCLUDE_MODE: Word = 1;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;

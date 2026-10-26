@@ -16,8 +16,10 @@ use super::{
     SYS_SIGALTSTACK, SYS_STAT, SYS_STATX, SYS_SYNC, SYS_SYNCFS, SYS_UNAME, SYS_UNLINK,
     SYS_UNLINKAT, SYS_UTIMENSAT, SYS_UTIMES, SYS_VFORK, SYS_WAIT4, SYS_WRITE, SYS_WRITEV,
 };
-use super::{SYS_CLOCK_GETRES, SYS_EPOLL_CREATE, SYS_EPOLL_CREATE1, SYS_EPOLL_CTL,
-    SYS_EPOLL_WAIT, SYS_EPOLL_PWAIT, SYS_EVENTFD, SYS_EVENTFD2};
+use super::{
+    SYS_CLOCK_GETRES, SYS_EPOLL_CREATE, SYS_EPOLL_CREATE1, SYS_EPOLL_CTL, SYS_EPOLL_PWAIT,
+    SYS_EPOLL_WAIT, SYS_EVENTFD, SYS_EVENTFD2,
+};
 
 pub(super) fn trace_syscall_action(
     runtime: &mut Runtime,
@@ -185,9 +187,20 @@ pub(super) fn trace_critical_action(
 
 pub(super) fn syscall_arg_count(number: Word) -> usize {
     match number {
+        super::SYS_UMASK => return 1,
+        super::SYS_FLOCK | super::SYS_IO_URING_SETUP => return 2,
+        super::SYS_IO_URING_REGISTER => return 4,
+        super::SYS_IO_URING_ENTER => return 6,
+        _ => {}
+    }
+    match number {
         super::SYS_LISTEN | super::SYS_SHUTDOWN => 2,
-        super::SYS_SOCKET | super::SYS_BIND | super::SYS_CONNECT | super::SYS_ACCEPT
-        | super::SYS_GETSOCKNAME | super::SYS_GETPEERNAME => 3,
+        super::SYS_SOCKET
+        | super::SYS_BIND
+        | super::SYS_CONNECT
+        | super::SYS_ACCEPT
+        | super::SYS_GETSOCKNAME
+        | super::SYS_GETPEERNAME => 3,
         super::SYS_SOCKETPAIR | super::SYS_ACCEPT4 => 4,
         super::SYS_SETSOCKOPT | super::SYS_GETSOCKOPT => 5,
         SYS_GETPID | SYS_GETPPID | SYS_GETUID | SYS_GETEUID | SYS_GETGID | SYS_GETEGID
@@ -200,7 +213,10 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_FSYNC
         | SYS_FDATASYNC
         | SYS_SYNCFS
-        | super::SYS_TIME | SYS_EPOLL_CREATE | SYS_EPOLL_CREATE1 | SYS_EVENTFD => 1,
+        | super::SYS_TIME
+        | SYS_EPOLL_CREATE
+        | SYS_EPOLL_CREATE1
+        | SYS_EVENTFD => 1,
         SYS_OPEN | SYS_CREAT | SYS_STAT | SYS_LSTAT | SYS_FSTAT | SYS_ACCESS | SYS_ARCH_PRCTL
         | SYS_DUP | SYS_CLOCK_GETTIME | SYS_SET_TID_ADDRESS | SYS_GETRANDOM | SYS_GETRLIMIT
         | SYS_CHDIR | SYS_MKDIR | SYS_RMDIR | SYS_LINK | SYS_UNLINK | SYS_UTIMES | SYS_DUP2
@@ -251,13 +267,23 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
         | SYS_PREAD64
         | SYS_PWRITE64
         | SYS_NEWFSTATAT
-        | super::SYS_CLOCK_NANOSLEEP | SYS_EPOLL_CTL | SYS_EPOLL_WAIT => 4,
+        | super::SYS_CLOCK_NANOSLEEP
+        | SYS_EPOLL_CTL
+        | SYS_EPOLL_WAIT => 4,
         SYS_CLONE | SYS_STATX | SYS_FCHOWNAT | SYS_LINKAT => 5,
         _ => 6,
     }
 }
 
 pub(super) fn syscall_name(number: Word) -> &'static [u8] {
+    match number {
+        super::SYS_UMASK => return b"umask",
+        super::SYS_FLOCK => return b"flock",
+        super::SYS_IO_URING_SETUP => return b"io_uring_setup",
+        super::SYS_IO_URING_ENTER => return b"io_uring_enter",
+        super::SYS_IO_URING_REGISTER => return b"io_uring_register",
+        _ => {}
+    }
     match number {
         SYS_READ => b"read",
         SYS_CLOCK_GETRES => b"clock_getres",

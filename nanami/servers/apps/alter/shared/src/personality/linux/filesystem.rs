@@ -65,13 +65,28 @@ pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Res
     }
 }
 
-pub(super) fn sys_mkdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
+pub(super) fn creation_mode(runtime: &Runtime, pid: Word, mode: Word) -> Result<Word, i32> {
+    let mask = runtime.managed_process(pid).ok_or(ESRCH)?.umask;
+    Ok(posix::POSIX_MODE_PRESENT | (mode & 0o7777 & !mask))
+}
+
+pub(super) fn sys_mkdir(
+    runtime: &mut Runtime,
+    pid: Word,
+    path_ptr: Word,
+    mode: Word,
+) -> Result<Word, i32> {
     let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
-        .map(|_| 0)
-        .map_err(map_create_request_error)
+    posix::posix_mkdir_mode(
+        runtime.posix_port,
+        0,
+        vfs_len,
+        creation_mode(runtime, pid, mode)?,
+    )
+    .map(|_| 0)
+    .map_err(map_create_request_error)
 }
 
 pub(super) fn sys_mkdirat(
@@ -79,14 +94,20 @@ pub(super) fn sys_mkdirat(
     pid: Word,
     dirfd: Word,
     path_ptr: Word,
+    mode: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
     let len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
-        .map(|_| 0)
-        .map_err(map_create_request_error)
+    posix::posix_mkdir_mode(
+        runtime.posix_port,
+        0,
+        vfs_len,
+        creation_mode(runtime, pid, mode)?,
+    )
+    .map(|_| 0)
+    .map_err(map_create_request_error)
 }
 
 pub(super) fn sys_mknod(
@@ -126,11 +147,12 @@ pub(super) fn mknod_current_path(
         return Err(ENOSYS);
     }
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    let fd = posix::posix_open(
+    let fd = posix::posix_open_mode(
         runtime.posix_port,
         0,
         vfs_len,
         posix::POSIX_O_CREAT | posix::POSIX_O_TRUNC,
+        creation_mode(runtime, pid, mode)?,
     )
     .map_err(map_create_request_error)?;
     let _ = posix::posix_close(runtime.posix_port, fd);

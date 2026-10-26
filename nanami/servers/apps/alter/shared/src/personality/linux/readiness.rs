@@ -11,6 +11,7 @@ pub(super) fn file_sources(file: LinuxFile) -> Word {
         LinuxFileKind::Terminal => READY_TERMINAL,
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
         LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
+        LinuxFileKind::IoUring => READY_OBJECT,
         LinuxFileKind::TimerFd => READY_OBJECT | READY_TIMER,
         LinuxFileKind::SignalFd => READY_OBJECT,
         LinuxFileKind::SocketUnix => READY_UNIX,
@@ -82,6 +83,7 @@ pub(super) fn fd_readiness(
     Ok(match file.kind {
         LinuxFileKind::SocketUnix => super::unix::readiness(runtime, file.resource)?,
         LinuxFileKind::EventFd => super::eventfd::readiness(runtime, file),
+        LinuxFileKind::IoUring => super::io_uring::readiness(runtime, file.resource)?,
         LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => {
             super::fd_events::readiness(runtime, pid, file)?
         }

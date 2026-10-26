@@ -19,6 +19,7 @@ static int worker(void) {
     *(volatile word *)memory = 0xabcdef;
     allocation = memory;
     if (call(80, (word)"/tmp", 0, 0, 0) != 0) { done = 13; return 13; }
+    if (call(95, 077, 0, 0, 0) != 022) { done = 17; return 17; }
     ready = 1;
     word count = 1;
     if (call(1, event, (word)&count, 8, 0) != 8) { done = 14; return 14; }
@@ -70,6 +71,7 @@ int test_main(void) {
         if (result != 0 && result != -11) { return 22; }
     }
     if (done != 0 || *(volatile word *)allocation != 0xabcdef) { return 23; }
+    if (call(95, 022, 0, 0, 0) != 077) { return 27; }
     word count = 0;
     if (call(0, event, (word)&count, 8, 0) != 8 || count != 1) { return 24; }
     char cwd[16];

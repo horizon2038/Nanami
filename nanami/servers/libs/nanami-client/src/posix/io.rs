@@ -10,7 +10,24 @@ pub fn posix_create_socket_node(
     offset: Word,
     len: Word,
 ) -> Result<(Word, Word), RequestError> {
-    let (status, inode, pin) = call_port(port, POSIX_REQUEST_CREATE_SOCKET_NODE, offset, len, 0, 0, 3)?;
+    posix_create_socket_node_mode(port, offset, len, 0)
+}
+
+pub fn posix_create_socket_node_mode(
+    port: CapabilityDescriptor,
+    offset: Word,
+    len: Word,
+    mode: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, inode, pin) = call_port(
+        port,
+        POSIX_REQUEST_CREATE_SOCKET_NODE,
+        offset,
+        len,
+        mode,
+        0,
+        4,
+    )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }

@@ -79,14 +79,24 @@ pub fn vfs_open_compound(
     path_len: Word,
     flags: Word,
 ) -> Result<(Word, Word, Word, Word), RequestError> {
+    vfs_open_compound_mode(service_port, path_offset, path_len, flags, 0)
+}
+
+pub fn vfs_open_compound_mode(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    flags: Word,
+    mode: Word,
+) -> Result<(Word, Word, Word, Word), RequestError> {
     let (status, opened, metadata) = call_port(
         service_port,
         VFS_REQUEST_OPEN_COMPOUND,
         path_offset,
         path_len,
         flags,
-        0,
-        4,
+        mode,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -216,14 +226,24 @@ pub fn vfs_create_node(
     path_len: Word,
     kind: Word,
 ) -> Result<Word, RequestError> {
+    vfs_create_node_mode(service_port, path_offset, path_len, kind, 0)
+}
+
+pub fn vfs_create_node_mode(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    kind: Word,
+    mode: Word,
+) -> Result<Word, RequestError> {
     let (status, inode, _) = call_port(
         service_port,
         VFS_REQUEST_CREATE,
         path_offset,
         path_len,
         kind,
-        0,
-        if kind == 0 { 3 } else { 4 },
+        mode,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -236,14 +256,23 @@ pub fn vfs_mkdir(
     path_offset: Word,
     path_len: Word,
 ) -> Result<Word, RequestError> {
+    vfs_mkdir_mode(service_port, path_offset, path_len, 0)
+}
+
+pub fn vfs_mkdir_mode(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    mode: Word,
+) -> Result<Word, RequestError> {
     let (status, inode, _) = call_port(
         service_port,
         VFS_REQUEST_MKDIR,
         path_offset,
         path_len,
         0,
-        0,
-        3,
+        mode,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -320,14 +349,24 @@ pub fn vfs_stat(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(Word, Word, Word), RequestError> {
+    vfs_stat_flags(service_port, path_offset, path_len, 0)
+}
+
+/// INCLUDE_MODE packs the persisted mode into the high 32 bits of inode.
+pub fn vfs_stat_flags(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    flags: Word,
+) -> Result<(Word, Word, Word), RequestError> {
     let (status, inode, metadata) = call_port(
         service_port,
         VFS_REQUEST_STAT,
         path_offset,
         path_len,
+        flags,
         0,
-        0,
-        3,
+        4,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -339,7 +378,17 @@ pub fn vfs_fstat(
     service_port: CapabilityDescriptor,
     handle: Word,
 ) -> Result<(Word, Word, Word), RequestError> {
-    let (status, inode, metadata) = call_port(service_port, VFS_REQUEST_FSTAT, handle, 0, 0, 0, 2)?;
+    vfs_fstat_flags(service_port, handle, 0)
+}
+
+/// INCLUDE_MODE packs the persisted mode into the high 32 bits of inode.
+pub fn vfs_fstat_flags(
+    service_port: CapabilityDescriptor,
+    handle: Word,
+    flags: Word,
+) -> Result<(Word, Word, Word), RequestError> {
+    let (status, inode, metadata) =
+        call_port(service_port, VFS_REQUEST_FSTAT, handle, flags, 0, 0, 3)?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }

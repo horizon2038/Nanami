@@ -163,6 +163,14 @@ fn enter_handler(
     let mut stack = state.altstack;
     let onstack = stack.contains(original_stack);
     let mask = state.suspend_mask.unwrap_or(state.blocked);
+    let submitted = if context.is_some_and(|context| context.number == SYS_IO_URING_ENTER) {
+        process
+            .parked_context()
+            .filter(|context| context.number == SYS_IO_URING_ENTER)
+            .map_or(0, |context| context.args[1])
+    } else {
+        0
+    };
     let top =
         if action.flags & SA_ONSTACK != 0 && stack.flags & signals::SS_DISABLE == 0 && !onstack {
             stack.sp.checked_add(stack.size).ok_or(EFAULT)?
@@ -179,7 +187,11 @@ fn enter_handler(
         configure_personality_syscall_reply(
             registers,
             context,
-            -(EINTR as isize),
+            if context.number == SYS_IO_URING_ENTER && submitted != 0 {
+                submitted as isize
+            } else {
+                -(EINTR as isize)
+            },
             OsPersonality::Linux,
         );
         if action.flags & SA_RESTART != 0 && restartable(context) {
@@ -230,6 +242,7 @@ fn restartable(context: LinuxSyscallContext) -> bool {
     matches!(
         context.number,
         SYS_READ
+            | SYS_FLOCK
             | SYS_READV
             | SYS_WRITE
             | SYS_WRITEV

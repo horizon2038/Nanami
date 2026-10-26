@@ -79,6 +79,16 @@ pub(super) fn sys_mmap(
     if (flags & LINUX_MAP_ANONYMOUS) == 0 {
         let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
         return match file.kind {
+            LinuxFileKind::IoUring => super::io_uring::map(
+                runtime,
+                pid,
+                requested_addr,
+                len,
+                _prot,
+                flags,
+                file,
+                offset,
+            ),
             LinuxFileKind::MemoryFile => super::memfd::map(
                 runtime,
                 pid,

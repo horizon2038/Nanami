@@ -1,5 +1,5 @@
-use nanami_runtime::Word;
 use nanami_client::posix::*;
+use nanami_runtime::Word;
 
 pub(crate) const SLOT_SERVICE_PORT: Word = 20;
 pub(crate) const SLOT_VFS_SERVICE: Word = 23;
@@ -24,6 +24,7 @@ pub(crate) struct Session {
     pub(crate) owner_pid: Word,
     pub(crate) shm_local: Word,
     pub(crate) shm_size: Word,
+    pub(crate) lock_notification: Word,
     pub(crate) direct_vfs_delegate: Word,
     pub(crate) direct_io_size: Word,
     pub(crate) posix_pid: Word,
@@ -48,6 +49,7 @@ impl Session {
         owner_pid: 0,
         shm_local: 0,
         shm_size: 0,
+        lock_notification: 0,
         direct_vfs_delegate: 0,
         direct_io_size: 0,
         posix_pid: 0,
@@ -109,6 +111,8 @@ pub(crate) struct OpenFile {
     pub(crate) status_flags: Word,
     pub(crate) vfs_handle: Word,
     pub(crate) ref_count: Word,
+    pub(crate) lock_inode: Word,
+    pub(crate) lock: Word,
 }
 
 impl OpenFile {
@@ -119,6 +123,8 @@ impl OpenFile {
         status_flags: 0,
         vfs_handle: 0,
         ref_count: 0,
+        lock_inode: 0,
+        lock: 0,
     };
 }
 

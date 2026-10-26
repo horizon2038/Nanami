@@ -552,7 +552,14 @@ fn handle_open_compound(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (
             else {
                 return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
             };
-            match create_node(runtime, parent_inode, name_ptr, name_len, EXT2_S_IFREG) {
+            match create_node(
+                runtime,
+                parent_inode,
+                name_ptr,
+                name_len,
+                EXT2_S_IFREG,
+                request.arg3,
+            ) {
                 Ok(inode_no) => inode_no,
                 Err(status) => return (status, 0, 0),
             }
@@ -616,7 +623,7 @@ fn handle_stat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
     };
     (
         nanami_runtime::OS_RESPONSE_OK,
-        inode_no as Word,
+        stat_inode(inode_no, inode.mode, request.arg2),
         pack_stat(inode.size as Word, file_kind(inode.mode)),
     )
 }
@@ -632,9 +639,16 @@ fn handle_fstat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wo
     let file = runtime.handles[handle];
     (
         nanami_runtime::OS_RESPONSE_OK,
-        file.inode as Word,
+        stat_inode(file.inode, file.mode, request.arg1),
         pack_stat(file.size as Word, file_kind(file.mode)),
     )
+}
+
+fn stat_inode(inode: u32, mode: u16, flags: Word) -> Word {
+    if flags & nanami_client::vfs::VFS_STAT_INCLUDE_MODE != 0 {
+        return ((mode as Word) << 32) | inode as Word;
+    }
+    inode as Word
 }
 
 fn handle_create(
@@ -665,7 +679,14 @@ fn handle_create(
     } else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
-    match create_node(runtime, parent_inode, name_ptr, name_len, mode) {
+    match create_node(
+        runtime,
+        parent_inode,
+        name_ptr,
+        name_len,
+        mode,
+        request.arg3,
+    ) {
         Ok(inode) => (nanami_runtime::OS_RESPONSE_OK, inode as Word, 0),
         Err(status) => (status, 0, 0),
     }
@@ -1213,11 +1234,19 @@ fn create_node(
     name: *const u8,
     name_len: usize,
     file_type: u16,
+    requested_mode: Word,
 ) -> Result<u32, Word> {
     let is_directory = file_type == EXT2_S_IFDIR;
+    let permissions = if requested_mode & nanami_client::vfs::VFS_MODE_PRESENT != 0 {
+        (requested_mode & 0o7777) as u16
+    } else if is_directory {
+        0o755
+    } else {
+        0o644
+    };
     let inode_no = alloc_inode(runtime).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as u32;
     let mut inode = Ext2Inode {
-        mode: file_type | if is_directory { 0o755 } else { 0o644 },
+        mode: file_type | permissions,
         size: if is_directory {
             runtime.block_size as u32
         } else {

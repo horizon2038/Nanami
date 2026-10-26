@@ -41,8 +41,10 @@ Foreground output uses a streaming cell-based VT screen: cursor addressing,
 erase, insert/delete characters and lines, scroll regions, deferred wrapping,
 alternate screen, SGR colors/background/reverse/underline, and device/cursor
 queries. Escape sequences may cross IPC boundaries. Navigation keys are sent
-as CSI/SS3 sequences, with Ctrl and Alt handling. The default `TERM` is `vt100`
-instead of the unregistered `nanami`. This is not a complete xterm emulator:
+as CSI/SS3 sequences, with Ctrl and Alt handling. The default `TERM` is
+`nanami-256color`, with matching rootfs terminfo and `COLORTERM=truecolor` for
+RGB-aware programs. A monochrome `vt100` entry remains available for explicit
+compatibility use. This is not a complete xterm emulator:
 UTF-8/wide characters, programmable tab stops and DEC character sets remain
 unsupported. Normal-screen scrollback is bounded to 128 rows; alternate-screen
 output does not enter that history.

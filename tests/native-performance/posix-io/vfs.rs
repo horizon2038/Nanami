@@ -7,6 +7,7 @@ mod truncate;
 pub use truncate::*;
 #[path = "../../../nanami/servers/libs/nanami-client/src/vfs/service.rs"]
 mod service;
+pub use service::vfs_close;
 
 #[test]
 fn socket_creation_transmits_the_node_type_as_the_fourth_word() {

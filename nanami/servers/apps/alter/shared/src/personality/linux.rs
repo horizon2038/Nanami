@@ -60,8 +60,12 @@ use pipe::*;
 mod eventfd;
 #[path = "linux/fd_events.rs"]
 mod fd_events;
+#[path = "linux/flock.rs"]
+mod flock;
 #[path = "linux/futex.rs"]
 mod futex;
+#[path = "linux/io_uring.rs"]
+mod io_uring;
 #[path = "linux/memfd.rs"]
 mod memfd;
 #[path = "linux/namespace.rs"]
@@ -335,22 +339,48 @@ pub fn dispatch_syscall(
             native_pid,
             context.args[0],
             LINUX_O_WRONLY | LINUX_O_CREAT | LINUX_O_TRUNC,
+            context.args[1],
         ),
-        SYS_OPEN => sys_open(runtime, native_pid, context.args[0], context.args[1]),
-        SYS_OPENAT => sys_openat(
+        SYS_OPEN => sys_open(
             runtime,
             native_pid,
             context.args[0],
             context.args[1],
             context.args[2],
         ),
+        SYS_OPENAT => sys_openat(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+        ),
         SYS_CLOSE => sys_close(runtime, native_pid, context.args[0]),
+        SYS_FLOCK => flock::lock(runtime, native_pid, context.args[0], context.args[1]),
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => sys_fsync(runtime, native_pid, context.args[0]),
         SYS_SYNC => sys_sync(runtime),
         SYS_FTRUNCATE => {
             truncate::sys_ftruncate(runtime, native_pid, context.args[0], context.args[1])
         }
         SYS_MEMFD_CREATE => memfd::create(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_IO_URING_SETUP => {
+            io_uring::setup(runtime, native_pid, context.args[0], context.args[1])
+        }
+        SYS_IO_URING_REGISTER => io_uring::register(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+        ),
+        SYS_IO_URING_ENTER => {
+            let action = io_uring::enter(runtime, native_pid, context);
+            record_action_result(runtime, native_pid, context.number, action);
+            trace_syscall_action(runtime, native_pid, context, action);
+            return action;
+        }
         SYS_DUP => sys_dup(runtime, native_pid, context.args[0]),
         SYS_DUP2 => sys_dup2(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP3 => sys_dup3(
@@ -749,7 +779,8 @@ pub fn dispatch_syscall(
         SYS_UNAME => sys_uname(runtime, native_pid, context.args[0]),
         SYS_GETCWD => sys_getcwd(runtime, native_pid, context.args[0], context.args[1]),
         SYS_CHDIR => sys_chdir(runtime, native_pid, context.args[0]),
-        SYS_MKDIR => sys_mkdir(runtime, native_pid, context.args[0]),
+        SYS_UMASK => runtime.set_umask(native_pid, context.args[0]).ok_or(ESRCH),
+        SYS_MKDIR => sys_mkdir(runtime, native_pid, context.args[0], context.args[1]),
         SYS_RMDIR => sys_rmdir(runtime, native_pid, context.args[0]),
         SYS_RENAME => sys_rename(runtime, native_pid, context.args[0], context.args[1]),
         SYS_LINK => sys_link(runtime, native_pid, context.args[0], context.args[1]),
@@ -770,7 +801,13 @@ pub fn dispatch_syscall(
             context.args[2],
             context.args[3],
         ),
-        SYS_MKDIRAT => sys_mkdirat(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_MKDIRAT => sys_mkdirat(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
         SYS_MKNOD => sys_mknod(
             runtime,
             native_pid,
@@ -913,7 +950,10 @@ pub fn dispatch_syscall(
         }
     };
 
-    if result == Err(EAGAIN) && pipe_wait::park(runtime, native_pid, context) {
+    if result == Err(EAGAIN)
+        && (pipe_wait::park(runtime, native_pid, context)
+            || flock::park(runtime, native_pid, context))
+    {
         let action = EmulationAction::Park;
         trace_syscall_action(runtime, native_pid, context, action);
         return action;

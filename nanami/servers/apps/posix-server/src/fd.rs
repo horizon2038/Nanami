@@ -1,8 +1,8 @@
+use nanami_client::posix::*;
 use nanami_runtime::ipc::ServiceRequest;
 use nanami_runtime::Word;
-use nanami_client::posix::*;
 
-use crate::state::*;
+use super::state::*;
 
 pub(crate) fn alloc_open_file_and_fd(
     runtime: &mut Runtime,
@@ -20,7 +20,9 @@ pub(crate) fn alloc_open_file_and_fd(
     runtime.open_files[open_index].status_flags =
         status_flags & (POSIX_O_APPEND | POSIX_O_NONBLOCK | POSIX_O_SYNC);
     match alloc_fd(&mut runtime.sessions[session_index], open_index) {
-        (nanami_runtime::OS_RESPONSE_OK, fd, detail) => (nanami_runtime::OS_RESPONSE_OK, fd, detail),
+        (nanami_runtime::OS_RESPONSE_OK, fd, detail) => {
+            (nanami_runtime::OS_RESPONSE_OK, fd, detail)
+        }
         _ => {
             release_open_file(runtime, open_index);
             (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
@@ -71,7 +73,7 @@ pub(crate) fn release_cloexec_session_fds(runtime: &mut Runtime, session_index: 
 }
 
 pub(crate) fn handle_close(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
+    let Some(index) = super::process::find_session(runtime, request.identifier) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
@@ -85,14 +87,14 @@ pub(crate) fn handle_close(runtime: &mut Runtime, request: ServiceRequest) -> (W
 }
 
 pub(crate) fn handle_dup(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
+    let Some(index) = super::process::find_session(runtime, request.identifier) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(runtime, index, request.arg0 as usize, None)
 }
 
 pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
-    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
+    let Some(index) = super::process::find_session(runtime, request.identifier) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     duplicate_fd(
@@ -103,11 +105,8 @@ pub(crate) fn handle_dup2(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
     )
 }
 
-pub(crate) fn handle_fcntl(
-    runtime: &mut Runtime,
-    request: ServiceRequest,
-) -> (Word, Word, Word) {
-    let Some(index) = crate::process::find_session(runtime, request.identifier) else {
+pub(crate) fn handle_fcntl(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
+    let Some(index) = super::process::find_session(runtime, request.identifier) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
     let fd = request.arg0 as usize;
@@ -135,10 +134,14 @@ pub(crate) fn handle_fcntl(
             if request.arg1 == POSIX_F_SETFL {
                 runtime.open_files[open_index].status_flags =
                     (runtime.open_files[open_index].status_flags & POSIX_O_SYNC)
-                    | (request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK));
+                        | (request.arg2 & (POSIX_O_APPEND | POSIX_O_NONBLOCK));
                 (nanami_runtime::OS_RESPONSE_OK, 0, 0)
             } else {
-                (nanami_runtime::OS_RESPONSE_OK, runtime.open_files[open_index].status_flags, 0)
+                (
+                    nanami_runtime::OS_RESPONSE_OK,
+                    runtime.open_files[open_index].status_flags,
+                    0,
+                )
             }
         }
         _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
@@ -156,6 +159,8 @@ fn alloc_open_file(runtime: &mut Runtime, kind: FdKind, vfs_handle: Word) -> Opt
                 status_flags: 0,
                 vfs_handle,
                 ref_count: 1,
+                lock_inode: 0,
+                lock: 0,
             };
             return Some(i);
         }
@@ -250,4 +255,7 @@ fn release_open_file(runtime: &mut Runtime, open_index: usize) {
         let _ = nanami_client::vfs::vfs_close(runtime.vfs_port, entry.vfs_handle);
     }
     runtime.open_files[open_index] = OpenFile::EMPTY;
+    if entry.lock != 0 {
+        super::flock::notify(runtime);
+    }
 }

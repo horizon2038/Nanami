@@ -1,8 +1,8 @@
 //! Run the production handlers/client helpers with only IPC and storage mocked.
 #![allow(dead_code)]
 extern crate self as a9n_abi;
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 
 use std::cell::RefCell;
 pub use std::{print, println};
@@ -25,6 +25,14 @@ pub enum RequestError {
 
 pub mod ipc {
     use super::Word;
+    pub fn process_slot_descriptor(slot: Word) -> Word {
+        slot
+    }
+    pub fn notification_notify(slot: Word) -> Result<(), super::RequestError> {
+        NOTIFIED.with(|values| values.borrow_mut().push(slot));
+        Ok(())
+    }
+    thread_local! { pub static NOTIFIED: std::cell::RefCell<Vec<Word>> = const { std::cell::RefCell::new(Vec::new()) }; }
     #[derive(Clone, Copy, Default)]
     pub struct ServiceRequest {
         pub identifier: Word,
@@ -34,6 +42,14 @@ pub mod ipc {
         pub arg2: Word,
         pub arg3: Word,
     }
+}
+pub fn request_notification_port_copy(
+    _: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+) -> Result<(), RequestError> {
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -91,9 +107,19 @@ pub fn call_port(
     let synchronize = matches!(code, posix::POSIX_REQUEST_FSYNC | posix::POSIX_REQUEST_SYNC);
     assert_eq!(
         words,
-        if synchronize {
+        if matches!(
+            code,
+            vfs::VFS_REQUEST_CREATE | vfs::VFS_REQUEST_OPEN_COMPOUND | vfs::VFS_REQUEST_MKDIR
+        ) {
+            5
+        } else if code == vfs::VFS_REQUEST_CLOSE {
             2
-        } else if matches!(code, posix::POSIX_REQUEST_FTRUNCATE | vfs::VFS_REQUEST_FTRUNCATE) {
+        } else if synchronize {
+            2
+        } else if matches!(
+            code,
+            posix::POSIX_REQUEST_FTRUNCATE | vfs::VFS_REQUEST_FTRUNCATE
+        ) {
             3
         } else if positioned {
             5

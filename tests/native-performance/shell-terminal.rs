@@ -212,6 +212,26 @@ fn colors_background_reverse_and_reset_are_cell_attributes() {
 }
 
 #[test]
+fn advertised_color_sequences_and_background_erase_survive_ipc_chunking() {
+    let mut t = Terminal::new(8, 2);
+    for sequence in [
+        &b"\x1b[?1049h\x1b[38;5;196m\x1b[48;5;22mA\x1b[K"[..],
+        &b"\x1b[2;1H\x1b[38;2;18;171;52m\x1b[48;2;37;54;71mB\x1b[K"[..],
+    ] {
+        for chunk in sequence.chunks(3) {
+            feed(&mut t, chunk);
+        }
+    }
+    assert_eq!((t.row(0)[0].fg, t.row(0)[0].bg), (0xff0000, 0x005f00));
+    assert_eq!(t.row(0)[7].bg, 0x005f00);
+    assert_eq!((t.row(1)[0].fg, t.row(1)[0].bg), (0x12ab34, 0x253647));
+    assert_eq!(t.row(1)[7].bg, 0x253647);
+    feed(&mut t, b"\x1b[39;49mC");
+    assert_eq!(t.row(1)[1].fg, 0xe8e0cf);
+    assert_eq!(t.row(1)[1].bg, 0x101418);
+}
+
+#[test]
 fn split_sequences_osc_and_reports_do_not_leak_escape_text() {
     let mut t = Terminal::new(8, 4);
     for s in [

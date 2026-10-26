@@ -211,12 +211,12 @@ fn address_name(
     }
     let len = translate_guest_path_for_vfs(runtime, pid, len)?;
     if create {
-        let (inode, pin) = posix::posix_create_socket_node(runtime.posix_port, 0, len).map_err(
-            |error| match error {
-                RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EADDRINUSE,
-                error => map_path_request_error(error),
-            },
-        )?;
+        let mode = super::filesystem::creation_mode(runtime, pid, 0o777)?;
+        let (inode, pin) = posix::posix_create_socket_node_mode(runtime.posix_port, 0, len, mode)
+            .map_err(|error| match error {
+            RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EADDRINUSE,
+            error => map_path_request_error(error),
+        })?;
         return Ok((Name::Inode(inode), Some(pin)));
     }
     let stat = posix::posix_stat(runtime.posix_port, 0, len).map_err(map_path_request_error)?;

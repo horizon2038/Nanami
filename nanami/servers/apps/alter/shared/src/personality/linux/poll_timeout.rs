@@ -50,6 +50,7 @@ pub(super) fn temporary_signal_mask(
     let (mask, size) = match context.number {
         SYS_PPOLL => (context.args[3], context.args[4]),
         number if number == super::SYS_EPOLL_PWAIT => (context.args[4], context.args[5]),
+        super::SYS_IO_URING_ENTER => (context.args[4], context.args[5]),
         SYS_PSELECT6 if context.args[5] != 0 => {
             read_target_memory(runtime, pid, context.args[5], 16)?;
             unsafe {

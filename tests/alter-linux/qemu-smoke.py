@@ -24,6 +24,8 @@ parser.add_argument("--visual-program",
                     help="after checked fixtures, launch this guest untraced and capture two animation frames")
 parser.add_argument("--nvim-editor", action="store_true",
                     help="edit/save/quit in untraced Neovim, then verify the file with BusyBox")
+parser.add_argument("--nvim-colors", action="store_true",
+                    help="with --nvim-editor, verify automatic RGB and indexed-color pixels")
 parser.add_argument("--diagnostics", action="store_true", help="send explicit Alter traces to serial (-t -d)")
 parser.add_argument("--native-info", action="store_true",
                     help="also capture pci-info, its numeric/verbose modes and net-info for visual inspection")
@@ -39,6 +41,8 @@ parser.add_argument("--network", action="store_true", help="attach an isolated u
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
 args = parser.parse_args()
+if args.nvim_colors and not args.nvim_editor:
+    parser.error("--nvim-colors requires --nvim-editor")
 if args.ctrl_c_after is not None and not 0 < args.ctrl_c_after <= 30:
     parser.error("--ctrl-c-after must be greater than 0 and at most 30 seconds")
 if args.capture_running_after is not None and not 0 <= args.capture_running_after <= 30:
@@ -53,6 +57,37 @@ if args.virtio_gpu_iommu and args.gpu != "virtio":
     parser.error("--virtio-gpu-iommu requires --gpu virtio")
 repo = pathlib.Path(__file__).resolve().parents[2]
 logs = pathlib.Path(tempfile.mkdtemp(prefix="nanami-alter-test-"))
+
+
+def verify_ppm_color(path, color):
+    # QEMU's binary PPM avoids a host image-library dependency. Count complete
+    # RGB pixels, not byte substrings that could straddle adjacent pixels.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            fields = path.read_bytes().split(b"\n", 3)
+        except FileNotFoundError:
+            fields = []
+        if len(fields) == 4:
+            magic, dimensions, maximum, pixels = fields
+            width, height = map(int, dimensions.split())
+            if len(pixels) == width * height * 3:
+                break
+        # HMP may return its prompt before the screenshot is written.
+        time.sleep(0.05)
+    else:
+        raise RuntimeError(f"QEMU screenshot was not completed: {path}")
+    if magic != b"P6" or maximum != b"255":
+        raise RuntimeError(f"Unexpected QEMU PPM format: {path}")
+    # Shell currently uses opacity 224. Most of its test window lies over the
+    # white desktop; allow the exact compositor blend as well as opaque pixels.
+    blended = bytes((channel * 224 + 255 * (255 - 224) + 127) // 255 for channel in color)
+    expected = {color, blended}
+    count = sum(pixels[index:index + 3] in expected for index in range(0, len(pixels), 3))
+    if count < 10000:
+        raise RuntimeError(f"Expected Neovim background {color.hex()}, found only {count} pixels: {path}")
+
+
 firmware = repo / "spencer/a9nloader-rs/tools"
 shutil.copyfile(firmware / "OVMF_VARS.fd", logs / "OVMF_VARS.fd")
 serial = logs / "serial.log"
@@ -150,7 +185,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
 
         def type_keys(text):
             keys = {" ": "spc", "/": "slash", "-": "minus", ".": "dot", "\n": "ret",
-                    ":": "shift-semicolon"}
+                    ":": "shift-semicolon", "=": "equal", "#": "shift-3"}
             for character in text:
                 key = keys.get(character, character)
                 if character.isascii() and character.isupper():
@@ -219,6 +254,18 @@ with (logs / "qemu.log").open("w") as diagnostics:
             send("sendkey esc 50")
             time.sleep(0.5)
             send(f"screendump {logs / 'nvim-edited.png'} -f png")
+            if args.nvim_colors:
+                for label, commands, color in [
+                    ("rgb", ["hi Normal guifg=#12ab34 guibg=#253647"], bytes((37, 54, 71))),
+                    ("indexed", ["set notermguicolors", "hi Normal ctermfg=196 ctermbg=22"], bytes((0, 95, 0))),
+                ]:
+                    for command in commands:
+                        type_keys(":" + command + "\n")
+                    time.sleep(1)
+                    screenshot = logs / f"nvim-{label}.ppm"
+                    send(f"screendump {screenshot}")
+                    verify_ppm_color(screenshot, color)
+                print(f"PASS Neovim automatic RGB and indexed-color rendering (smp={args.smp})", flush=True)
             type_keys(":wq\n")
             time.sleep(2)
             send(f"screendump {logs / 'nvim-after-quit.png'} -f png")

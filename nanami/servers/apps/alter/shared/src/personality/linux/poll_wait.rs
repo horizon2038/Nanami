@@ -116,6 +116,29 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
         let (pid, pcb, personality) = (process.pid, process.pcb, process.personality);
         let mut wait = *wait;
         let result = scan_readiness(runtime, pid, &mut wait).and_then(|ready| {
+            if wait.context.number == super::SYS_IO_URING_ENTER {
+                return match super::io_uring::retry(runtime, pid, wait.context) {
+                    Err(EAGAIN) => {
+                        wait.sources = READY_OBJECT;
+                        Ok(None)
+                    }
+                    result => result.map(Some),
+                };
+            }
+            if wait.context.number == super::SYS_FLOCK {
+                return match super::flock::lock(
+                    runtime,
+                    pid,
+                    wait.context.args[0],
+                    wait.context.args[1],
+                ) {
+                    Err(EAGAIN) => {
+                        wait.sources = READY_FLOCK;
+                        Ok(None)
+                    }
+                    result => result.map(Some),
+                };
+            }
             if ready == 0 && !expired {
                 return Ok(None);
             }
@@ -164,6 +187,9 @@ pub fn handle_readiness_changes(runtime: &mut Runtime) {
 }
 
 pub fn handle_readiness_notification(runtime: &mut Runtime, identifier: Word) {
+    if identifier & nanami_client::posix::POSIX_NOTIFICATION_LOCK_CHANGE != 0 {
+        wake_readiness_waiters(runtime, READY_FLOCK);
+    }
     let sources = (if identifier & nanami_client::terminal::TERMINAL_NOTIFICATION_INPUT != 0 {
         READY_TERMINAL
     } else {

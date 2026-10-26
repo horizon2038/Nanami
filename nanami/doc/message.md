@@ -864,3 +864,25 @@ filesystem errorは専用status `0x91160001`とdetail0のerror codeで返す。
 1=invalid、2=missing、3=not-directory、4=link-loop、5=too-long、6=exists、
 7=I/O、8=no-space、9=read-only。IPC/Capability errorとは別のerror domainであり、
 IDLでは通常のAlpha statusと区別する必要がある。新file typeはVFS symlink=4、POSIX symlink=6。
+
+### 16.3 Creation mode・stat mode・advisory lock
+
+作成時modeは既存requestの未使用引数を拡張する。POSIX OPENとVFS
+OPEN_COMPOUNDはarg3、POSIX MKDIR／CREATE_SOCKET_NODEはarg2、VFS
+MKDIR／CREATEはarg3を使用する。0は従来のdefault、`(1 << 16) | permissions`
+は明示指定（permissionは下位12bit）で、mode 0000とも区別する。
+Linux umaskはAlterのFS contextに保持し、マスク適用後のmodeを転送する。
+Kernelのmapping属性とは別のfilesystem metadataである。
+
+POSIX／VFS STATのarg2、FSTATのarg1に`INCLUDE_MODE=1`を指定すると、
+detail0は`(mode << 32) | inode`になる。inodeはext2の32bit番号、modeは
+file typeを含む16bitのディスク値。detail1の既存packed metadataは変更しない。
+flags=0の従来clientはinodeのみを受け取る。
+
+`POSIX_REQUEST_FLOCK=0xa13d`はarg0=FD、arg1=SHARED(1)／EXCLUSIVE(2)／
+UNLOCK(8)、arg2=呼出元notification slot（0なら通知登録なし）。成功は通常の
+OK、競合は専用status `0xa13d0001`。Server自体は待機しない。非zeroの通知slotを
+登録したsessionには、unlock・lock変換・最終closeでidentifierのbit 21を通知する。
+通知は競合判定より前に接続する。Alterは競合時に対象taskをparkし、通知後に
+再試行するため、他のRPCを処理でき、check/park間の通知も取りこぼさない。
+lockの所有者はPOSIX open-file description、対象はinodeであり、FD番号やPIDではない。

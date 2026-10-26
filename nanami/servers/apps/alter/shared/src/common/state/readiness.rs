@@ -7,6 +7,7 @@ pub const READY_PIPE: Word = 8;
 pub const READY_TIMER: Word = 16;
 pub const READY_OBJECT: Word = 32;
 pub const READY_UNIX: Word = 64;
+pub const READY_FLOCK: Word = 128;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

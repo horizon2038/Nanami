@@ -185,6 +185,7 @@ fn rights(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Vec<Lin
                         | LinuxFileKind::SignalFd
                         | LinuxFileKind::MemoryFile
                         | LinuxFileKind::Epoll
+                        | LinuxFileKind::IoUring
                 )
             {
                 return Err(EOPNOTSUPP);

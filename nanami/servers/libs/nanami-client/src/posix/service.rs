@@ -302,14 +302,25 @@ pub fn posix_open(
     path_len: Word,
     flags: Word,
 ) -> Result<Word, RequestError> {
+    posix_open_mode(service_port, path_offset, path_len, flags, 0)
+}
+
+/// `mode` is zero for legacy defaults, or POSIX_MODE_PRESENT | permissions.
+pub fn posix_open_mode(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    flags: Word,
+    mode: Word,
+) -> Result<Word, RequestError> {
     let (status, fd, _) = call_port(
         service_port,
         POSIX_REQUEST_OPEN,
         path_offset,
         path_len,
         flags,
-        0,
-        4,
+        mode,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -323,6 +334,32 @@ pub fn posix_close(service_port: CapabilityDescriptor, fd: Word) -> Result<(), R
         return Err(RequestError::Status(status));
     }
     Ok(())
+}
+
+/// Try an advisory lock. Contention is a normal false result, never a blocked
+/// server IPC. A nonzero notification slot subscribes to future releases.
+pub fn posix_flock(
+    service_port: CapabilityDescriptor,
+    fd: Word,
+    op: Word,
+    notification: Word,
+) -> Result<bool, RequestError> {
+    let (status, _, _) = call_port(
+        service_port,
+        POSIX_REQUEST_FLOCK,
+        fd,
+        op,
+        notification,
+        0,
+        4,
+    )?;
+    if status == POSIX_FLOCK_WOULD_BLOCK {
+        return Ok(false);
+    }
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(true)
 }
 
 pub fn posix_dup(service_port: CapabilityDescriptor, old_fd: Word) -> Result<Word, RequestError> {
@@ -507,14 +544,24 @@ pub fn posix_stat(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(Word, Word, Word, Word, Word), RequestError> {
+    posix_stat_flags(service_port, path_offset, path_len, 0)
+}
+
+/// INCLUDE_MODE packs the persisted mode into the high 32 bits of inode.
+pub fn posix_stat_flags(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    flags: Word,
+) -> Result<(Word, Word, Word, Word, Word), RequestError> {
     let (status, inode, metadata) = call_port(
         service_port,
         POSIX_REQUEST_STAT,
         path_offset,
         path_len,
+        flags,
         0,
-        0,
-        3,
+        4,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
@@ -530,7 +577,17 @@ pub fn posix_fstat(
     service_port: CapabilityDescriptor,
     fd: Word,
 ) -> Result<(Word, Word, Word, Word, Word), RequestError> {
-    let (status, inode, metadata) = call_port(service_port, POSIX_REQUEST_FSTAT, fd, 0, 0, 0, 2)?;
+    posix_fstat_flags(service_port, fd, 0)
+}
+
+/// INCLUDE_MODE packs the persisted mode into the high 32 bits of inode.
+pub fn posix_fstat_flags(
+    service_port: CapabilityDescriptor,
+    fd: Word,
+    flags: Word,
+) -> Result<(Word, Word, Word, Word, Word), RequestError> {
+    let (status, inode, metadata) =
+        call_port(service_port, POSIX_REQUEST_FSTAT, fd, flags, 0, 0, 3)?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
@@ -581,14 +638,23 @@ pub fn posix_mkdir(
     path_offset: Word,
     path_len: Word,
 ) -> Result<(), RequestError> {
+    posix_mkdir_mode(service_port, path_offset, path_len, 0)
+}
+
+pub fn posix_mkdir_mode(
+    service_port: CapabilityDescriptor,
+    path_offset: Word,
+    path_len: Word,
+    mode: Word,
+) -> Result<(), RequestError> {
     let (status, _, _) = call_port(
         service_port,
         POSIX_REQUEST_MKDIR,
         path_offset,
         path_len,
+        mode,
         0,
-        0,
-        3,
+        4,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));

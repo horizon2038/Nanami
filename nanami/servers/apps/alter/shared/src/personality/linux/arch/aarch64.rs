@@ -1,4 +1,9 @@
 use nanami_runtime::Word;
+pub const SYS_UMASK: Word = 166;
+pub const SYS_FLOCK: Word = 32;
+pub const SYS_IO_URING_SETUP: Word = 425;
+pub const SYS_IO_URING_ENTER: Word = 426;
+pub const SYS_IO_URING_REGISTER: Word = 427;
 
 pub const SYS_GETCWD: Word = 17;
 pub const SYS_IOCTL: Word = 29;

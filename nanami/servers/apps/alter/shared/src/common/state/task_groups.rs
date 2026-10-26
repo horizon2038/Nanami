@@ -1,6 +1,18 @@
 use super::*;
 
 impl Runtime {
+    pub fn set_umask(&mut self, pid: Word, mask: Word) -> Option<Word> {
+        let process = self.managed_process(pid)?;
+        let previous = process.umask;
+        let group = process.fs_group;
+        for process in &mut self.managed {
+            if process.pid != 0 && process.fs_group == group {
+                process.umask = mask & 0o777;
+            }
+        }
+        Some(previous)
+    }
+
     pub fn thread_group(&self, pid: Word) -> Word {
         self.managed_process(pid)
             .map_or(pid, |process| process.tgid)

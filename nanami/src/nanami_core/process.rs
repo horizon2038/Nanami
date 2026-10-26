@@ -49,6 +49,9 @@ pub struct ProcessEntry {
     pub used: bool,
     pub pid: usize,
     pub reaper_pid: usize,
+    // A thread owns its PCB/root, but shares this process's VM and frame arena.
+    pub memory_owner: usize,
+    pub deferred_vm_reap: bool,
     pub root_slot: usize,
     pub root_node: CapabilityDescriptor,
     pub pcb: CapabilityDescriptor,
@@ -173,6 +176,8 @@ impl ProcessManager {
             used: true,
             pid: 0,
             reaper_pid: 0,
+            memory_owner: 0,
+            deferred_vm_reap: false,
             root_slot: 0,
             root_node: alpha_root_node,
             pcb: alpha_pcb,
@@ -258,6 +263,7 @@ impl ProcessManager {
     }
 
     pub fn vm_space_mut(&mut self, pid: usize) -> Option<&mut VmSpace> {
+        let pid = self.memory_owner_pid(pid);
         let index = self
             .vm_spaces
             .binary_search_by_key(&pid, |vm| vm.pid)
@@ -293,6 +299,7 @@ impl ProcessManager {
     }
 
     pub fn has_frame_chunk(&self, pid: usize, chunk_index: usize) -> bool {
+        let pid = self.memory_owner_pid(pid);
         self.frame_chunks
             .iter()
             .any(|chunk| chunk.pid == pid && chunk.chunk_index == chunk_index)
@@ -303,6 +310,7 @@ impl ProcessManager {
         pid: usize,
         chunk_index: usize,
     ) -> Result<(), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if self.has_frame_chunk(pid, chunk_index) {
             return Ok(());
         }
@@ -319,6 +327,7 @@ impl ProcessManager {
         base_page: usize,
         page_count: usize,
     ) -> Result<(), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if pid == 0 || page_count == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -342,6 +351,7 @@ impl ProcessManager {
         start_slot: usize,
         kind: ProcessLazyMappingKind,
     ) -> Result<(), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if pid == 0 || page_count == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -362,6 +372,7 @@ impl ProcessManager {
         pid: usize,
         virtual_address: usize,
     ) -> Option<ProcessLazyMapping> {
+        let pid = self.memory_owner_pid(pid);
         for entry in self.lazy_mappings.iter() {
             if entry.pid != pid {
                 continue;
@@ -404,6 +415,7 @@ impl ProcessManager {
         pid: usize,
         allocation: ProcessPhysicalAllocation,
     ) {
+        let pid = self.memory_owner_pid(pid);
         self.deferred_physical_allocations.insert(pid, allocation);
     }
 
@@ -413,6 +425,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
+        let pid = self.memory_owner_pid(pid);
         self.deferred_physical_allocations
             .take(pid, base_va, page_count)
             .map(|(allocation, _)| allocation)
@@ -472,6 +485,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
+        let pid = self.memory_owner_pid(pid);
         self.physical_allocations.find(pid, base_va, page_count)
     }
 
@@ -481,6 +495,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Result<(ProcessPhysicalAllocation, bool), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         self.physical_allocations
             .take(pid, base_va, page_count)
             .ok_or(CapabilityError::InvalidArgument)
@@ -506,6 +521,8 @@ impl ProcessManager {
             used: true,
             pid,
             reaper_pid,
+            memory_owner: pid,
+            deferred_vm_reap: false,
             root_slot,
             root_node,
             pcb,
@@ -626,6 +643,40 @@ impl ProcessManager {
             .filter(|entry| pid != 0 && !entry.exited)
             .map(|entry| &mut entry.root_types)
             .ok_or(CapabilityError::PermissionDenied)
+    }
+
+    pub fn memory_owner_pid(&self, pid: usize) -> usize {
+        self.find_entry_by_pid(pid)
+            .map_or(pid, |entry| entry.memory_owner)
+    }
+
+    pub fn memory_entry(&self, pid: usize) -> Option<ProcessEntry> {
+        self.find_entry_by_pid(self.memory_owner_pid(pid))
+    }
+
+    pub fn share_address_space(
+        &mut self,
+        pid: usize,
+        source: usize,
+    ) -> Result<(), CapabilityError> {
+        let owner = self.memory_owner_pid(source);
+        self.entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?
+            .memory_owner = owner;
+        Ok(())
+    }
+
+    pub fn has_memory_peers(&self, pid: usize) -> bool {
+        let owner = self.memory_owner_pid(pid);
+        self.entries
+            .iter()
+            .any(|entry| entry.pid != pid && entry.memory_owner == owner)
+    }
+
+    pub fn defer_vm_reap(&mut self, pid: usize) {
+        if let Some(entry) = self.entry_mut_by_pid(pid) {
+            entry.deferred_vm_reap = true;
+        }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = ProcessEntry> + '_ {
@@ -801,6 +852,7 @@ impl ProcessManager {
         page_size: usize,
         max_frame_slots: usize,
     ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize, usize), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if page_count == 0 || page_size == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -841,6 +893,7 @@ impl ProcessManager {
         page_size: usize,
         max_frame_slots: usize,
     ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if base_va == 0 || page_count == 0 || page_size == 0 || (base_va & (page_size - 1)) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -871,6 +924,7 @@ impl ProcessManager {
         page_count: usize,
         page_size: usize,
     ) -> Result<usize, CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         if page_count == 0 || page_size == 0 {
             return Err(CapabilityError::InvalidArgument);
         }

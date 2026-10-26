@@ -19,6 +19,10 @@ pub(super) const EFAULT: i32 = 14;
 pub(super) const ECHILD: i32 = 10;
 
 pub(super) const EEXIST: i32 = 17;
+pub(super) const EBUSY: i32 = 16;
+pub(super) const ELOOP: i32 = 40;
+pub(super) const LINUX_O_NOFOLLOW: Word = 0x20000;
+pub(super) const ETIMEDOUT: i32 = 110;
 
 pub(super) const ENODEV: i32 = 19;
 

@@ -2,6 +2,9 @@
 mod clients;
 #[path = "state/descriptors.rs"]
 mod descriptors;
+#[path = "state/file_table.rs"]
+mod file_table;
+pub use file_table::FileTable;
 #[path = "state/events.rs"]
 mod events;
 #[path = "state/io.rs"]
@@ -9,21 +12,25 @@ mod io;
 #[path = "state/job_control.rs"]
 pub mod job_control;
 pub use job_control::{JobControlError, ProcessJobControl, TerminalControl};
-#[path = "state/mappings.rs"]
-mod mappings;
 #[path = "state/mapping_table.rs"]
 mod mapping_table;
+#[path = "state/mappings.rs"]
+mod mappings;
 pub use mapping_table::MappingTable;
+#[path = "state/poll_objects.rs"]
+pub mod poll_objects;
 #[path = "state/processes.rs"]
 mod processes;
 #[path = "state/readiness.rs"]
 pub mod readiness;
-#[path = "state/poll_objects.rs"]
-pub mod poll_objects;
-#[path = "state/unix_sockets.rs"]
-pub mod unix_sockets;
 #[path = "state/signals.rs"]
 mod signals;
+#[path = "state/task_groups.rs"]
+mod task_groups;
+#[path = "state/task_sync.rs"]
+pub mod task_sync;
+#[path = "state/unix_sockets.rs"]
+pub mod unix_sockets;
 #[path = "state/waiters.rs"]
 mod waiters;
 
@@ -70,6 +77,9 @@ pub enum LinuxFileKind {
     EvdevMouse,
     Framebuffer,
     EventFd,
+    TimerFd,
+    SignalFd,
+    MemoryFile,
     Epoll,
 }
 
@@ -293,6 +303,9 @@ impl ProcessMapping {
 #[derive(Clone, Copy)]
 pub struct ManagedProcess {
     pub pid: Word,
+    pub tgid: Word,
+    pub vm_group: Word,
+    pub fs_group: Word,
     pub parent_pid: Word,
     pub job: ProcessJobControl,
     pub owner_pid: Word,
@@ -321,7 +334,7 @@ pub struct ManagedProcess {
     pub image_name_len: usize,
     pub cwd: [u8; LINUX_CWD_MAX],
     pub cwd_len: usize,
-    pub files: [LinuxFile; LINUX_FD_MAX],
+    pub files: FileTable,
     pub terminal_line: [u8; LINUX_TERMINAL_LINE_MAX],
     pub terminal_line_read: usize,
     pub terminal_line_len: usize,
@@ -357,6 +370,9 @@ pub struct FaultProcess {
 impl ManagedProcess {
     pub const EMPTY: Self = Self {
         pid: 0,
+        tgid: 0,
+        vm_group: 0,
+        fs_group: 0,
         parent_pid: 0,
         job: ProcessJobControl::EMPTY,
         owner_pid: 0,
@@ -384,7 +400,7 @@ impl ManagedProcess {
         image_name_len: 0,
         cwd: [0; LINUX_CWD_MAX],
         cwd_len: 0,
-        files: [LinuxFile::EMPTY; LINUX_FD_MAX],
+        files: FileTable::EMPTY,
         terminal_line: [0; LINUX_TERMINAL_LINE_MAX],
         terminal_line_read: 0,
         terminal_line_len: 0,
@@ -524,6 +540,7 @@ pub struct Runtime {
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
     pub poll_objects: poll_objects::Objects,
+    pub tasks: task_sync::Tasks,
     pub unix_sockets: unix_sockets::Sockets,
 }
 
@@ -594,6 +611,7 @@ impl Runtime {
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
             poll_objects: poll_objects::Objects::new(),
+            tasks: task_sync::Tasks::new(),
             unix_sockets: unix_sockets::Sockets::new(),
         }
     }

@@ -82,6 +82,9 @@ impl Runtime {
                 stored_name[..image_name.len()].copy_from_slice(image_name);
                 self.managed[i] = ManagedProcess {
                     pid,
+                    tgid: pid,
+                    vm_group: pid,
+                    fs_group: pid,
                     parent_pid,
                     job: ProcessJobControl::EMPTY,
                     owner_pid,
@@ -109,7 +112,7 @@ impl Runtime {
                     image_name_len: image_name.len(),
                     cwd: root_cwd(),
                     cwd_len: 1,
-                    files: default_files(terminal_id),
+                    files: FileTable::new(default_files(terminal_id)),
                     terminal_line: [0; LINUX_TERMINAL_LINE_MAX],
                     terminal_line_read: 0,
                     terminal_line_len: 0,
@@ -143,6 +146,7 @@ impl Runtime {
     }
 
     pub fn has_child(&self, parent_pid: Word, target_pid: Word) -> bool {
+        let parent_pid = self.thread_group(parent_pid);
         let group = self
             .managed_process(parent_pid)
             .map_or(0, |process| process.job.group);
@@ -150,6 +154,7 @@ impl Runtime {
         while i < self.managed.len() {
             let child = self.managed[i];
             if child.pid != 0
+                && child.pid == child.tgid
                 && child.parent_pid == parent_pid
                 && wait_target_matches(child.pid, target_pid, child.job.group, group)
             {
@@ -165,7 +170,21 @@ impl Runtime {
         while i < self.managed.len() {
             if self.managed[i].pid == pid {
                 self.release_signals(i);
-                self.managed[i].mappings.release();
+                let process = self.managed[i];
+                if !self
+                    .managed
+                    .iter()
+                    .any(|other| other.pid != pid && other.files.same_storage(process.files))
+                {
+                    self.managed[i].files.release();
+                }
+                if !self
+                    .managed
+                    .iter()
+                    .any(|other| other.pid != pid && other.mappings.same_storage(process.mappings))
+                {
+                    self.managed[i].mappings.release();
+                }
                 self.managed[i] = ManagedProcess::EMPTY;
                 return true;
             }
@@ -181,9 +200,14 @@ impl Runtime {
         report_stops: bool,
         report_continues: bool,
     ) -> Option<(Word, u32, bool)> {
+        let parent = self.thread_group(parent);
         let group = self.managed_process(parent)?.job.group;
         for child in &self.managed {
             if child.pid == 0
+                || child.pid != child.tgid
+                || self.managed.iter().any(|other| {
+                    other.pid != child.pid && !other.exited && other.tgid == child.tgid
+                })
                 || child.parent_pid != parent
                 || !wait_target_matches(child.pid, target, child.job.group, group)
             {
@@ -310,6 +334,10 @@ impl Runtime {
         while i < self.managed.len() {
             let process = self.managed[i];
             if process.pid != 0 && process.exited && process.rootfs.root_len == 0 {
+                if process.pid == process.tgid && self.has_live_threads(process.pid) {
+                    i += 1;
+                    continue;
+                }
                 return Some(process);
             }
             i += 1;
@@ -325,6 +353,11 @@ impl Runtime {
                 return Some(depth);
             }
             let process = self.managed_process(current)?;
+            if process.pid != process.tgid {
+                current = process.tgid;
+                depth += 1;
+                continue;
+            }
             if process.parent_pid == 0 {
                 return None;
             }
@@ -426,11 +459,13 @@ impl Runtime {
     }
 
     pub fn mark_process_exited(&mut self, pid: Word, status: Word) {
+        let group = self.thread_group(pid);
         if self
-            .managed_process(pid)
-            .is_some_and(|process| process.job.session == pid)
+            .managed_process(group)
+            .is_some_and(|process| process.job.session == group)
+            && !self.has_live_threads(pid)
         {
-            self.release_session_terminal(pid);
+            self.release_session_terminal(group);
         }
         if let Some(process) = self.managed_process_mut(pid) {
             process.exited = true;

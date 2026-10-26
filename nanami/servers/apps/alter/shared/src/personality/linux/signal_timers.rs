@@ -6,7 +6,11 @@ pub(super) fn next_deadline(runtime: &Runtime) -> Option<Word> {
         .managed
         .iter()
         .filter(|process| process.pid != 0 && !process.exited)
-        .filter_map(|process| process.signals().and_then(|state| state.timer_deadline))
+        .filter_map(|process| {
+            process
+                .signals()
+                .and_then(|state| state.timer.get().deadline)
+        })
         .min()
 }
 
@@ -19,18 +23,20 @@ pub(super) fn expire(runtime: &mut Runtime) {
         }
         let pid = process.pid;
         let state = process.signals_mut();
-        let Some(deadline) = state.timer_deadline.filter(|deadline| *deadline <= now) else {
+        let mut timer = state.timer.get();
+        let Some(deadline) = timer.deadline.filter(|deadline| *deadline <= now) else {
             continue;
         };
-        state.timer_deadline = if state.timer_interval == 0 {
+        timer.deadline = if timer.interval == 0 {
             None
         } else {
-            let intervals = (now - deadline) / state.timer_interval + 1;
+            let intervals = (now - deadline) / timer.interval + 1;
             deadline
-                .checked_add(intervals.saturating_mul(state.timer_interval))
+                .checked_add(intervals.saturating_mul(timer.interval))
                 .filter(|next| *next > now)
         };
-        let _ = signals_runtime::queue(runtime, pid, Info::new(14, 128, 0));
+        state.timer.set(timer);
+        let _ = signals_runtime::queue_group(runtime, pid, Info::new(14, 128, 0));
     }
 }
 
@@ -65,8 +71,8 @@ pub(super) fn get(
             .signals()
             .map_or((0, 0), |state| {
                 (
-                    state.timer_interval,
-                    state.timer_deadline.map_or(0, |deadline| {
+                    state.timer.get().interval,
+                    state.timer.get().deadline.map_or(0, |deadline| {
                         deadline.saturating_sub(runtime.monotonic_ticks)
                     }),
                 )
@@ -110,12 +116,13 @@ pub(super) fn set(
         get(runtime, pid, which, old)?;
     }
     let state = runtime.managed_process_mut(pid).ok_or(ESRCH)?.signals_mut();
-    let previous = (state.timer_interval, state.timer_deadline);
-    state.timer_interval = interval;
-    state.timer_deadline = deadline;
+    let previous = state.timer.get();
+    state
+        .timer
+        .set(crate::common::signals::Timer { interval, deadline });
     if let Err(errno) = arm_clock_timer(runtime) {
         let state = runtime.managed_process_mut(pid).unwrap().signals_mut();
-        (state.timer_interval, state.timer_deadline) = previous;
+        state.timer.set(previous);
         return Err(errno);
     }
     Ok(0)
@@ -127,18 +134,23 @@ pub(super) fn alarm(runtime: &mut Runtime, pid: Word, seconds: Word) -> Result<W
     let hz = runtime.monotonic_tick_hz;
     let state = runtime.managed_process_mut(pid).ok_or(ESRCH)?.signals_mut();
     let old = state
-        .timer_deadline
+        .timer
+        .get()
+        .deadline
         .map_or(0, |deadline| deadline.saturating_sub(now).div_ceil(hz));
-    let previous = (state.timer_interval, state.timer_deadline);
-    state.timer_interval = 0;
-    state.timer_deadline = if seconds == 0 {
+    let previous = state.timer.get();
+    let deadline = if seconds == 0 {
         None
     } else {
         Some(now.saturating_add(seconds.saturating_mul(hz)))
     };
+    state.timer.set(crate::common::signals::Timer {
+        interval: 0,
+        deadline,
+    });
     if let Err(errno) = arm_clock_timer(runtime) {
         let state = runtime.managed_process_mut(pid).unwrap().signals_mut();
-        (state.timer_interval, state.timer_deadline) = previous;
+        state.timer.set(previous);
         return Err(errno);
     }
     Ok(old)

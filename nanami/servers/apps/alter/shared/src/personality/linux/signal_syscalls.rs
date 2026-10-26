@@ -29,7 +29,7 @@ pub(super) fn sys_rt_sigaction(
     let process = runtime.managed_process(pid).ok_or(ESRCH)?;
     let old = process
         .signals()
-        .map_or(Action::default(), |state| state.actions[signal - 1]);
+        .map_or(Action::default(), |state| state.action(signal));
     if oldact != 0 {
         let bytes = unsafe { ::core::slice::from_raw_parts_mut(runtime.posix_shm as *mut u8, 32) };
         for (index, value) in [old.handler, old.flags, old.restorer, old.mask as usize]
@@ -42,7 +42,7 @@ pub(super) fn sys_rt_sigaction(
     }
     if let Some(action) = new {
         let state = runtime.managed_process_mut(pid).ok_or(ESRCH)?.signals_mut();
-        state.actions[signal - 1] = action;
+        state.set_action(signal, action);
         if action.handler == signals::SIG_IGN
             || (action.handler == signals::SIG_DFL && signals::default_ignored(signal))
         {
@@ -109,15 +109,17 @@ pub(super) fn sys_rt_sigpending(
 pub(super) fn consume_wait(runtime: &mut Runtime, pid: Word, pointer: Word) -> Option<isize> {
     let state = runtime.managed_process_mut(pid)?.signals_mut();
     let mask = state.wait_mask?;
-    let info = state.take_matching(mask)?;
+    let (info, group) = state.take_matching_record(mask)?;
+    state.wait_mask = None;
     if pointer != 0 {
-        if write_target_memory_from(pid, pointer, info.bytes.as_ptr() as Word, 128).is_err() {
-            state.enqueue(info);
-            state.wait_mask = None;
+        if super::copyout_from(runtime, pid, pointer, info.bytes.as_ptr() as Word, 128).is_err() {
+            runtime
+                .managed_process_mut(pid)?
+                .signals_mut()
+                .restore_pending(info, group);
             return Some(-(EFAULT as isize));
         }
     }
-    state.wait_mask = None;
     Some(info.signal() as isize)
 }
 
@@ -261,11 +263,10 @@ pub(super) fn sys_tgkill(
     tid: Word,
     signal: Word,
 ) -> Result<Word, i32> {
-    // Alter currently supports one thread per process, not CLONE_THREAD.
     if (tgid as isize) <= 0 || (tid as isize) <= 0 || signal > 64 {
         return Err(EINVAL);
     }
-    if tgid != tid {
+    if runtime.thread_group(tid) != tgid {
         return Err(ESRCH);
     }
     sys_kill(runtime, caller, tid, 0)?;
@@ -301,6 +302,6 @@ pub(super) fn sys_sigqueue(
         return Err(EPERM);
     }
     info.bytes[..4].copy_from_slice(&(signal as u32).to_le_bytes());
-    signals_runtime::queue(runtime, target, info)?;
+    signals_runtime::queue_group(runtime, target, info)?;
     Ok(0)
 }

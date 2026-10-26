@@ -4,6 +4,11 @@ extern crate self as nun;
 
 pub type Word = usize;
 pub type CapabilityDescriptor = usize;
+pub mod capability_call {
+    pub mod address_space {
+        pub use a9n_abi::capability_call::address_space::Attribute;
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityError {
     IllegalOperation,
@@ -57,6 +62,55 @@ fn manager() -> ProcessManager {
 #[test]
 fn alpha_uses_its_actual_pcb_capability() {
     assert_eq!(manager().alpha_entry().pcb, 99);
+}
+
+#[test]
+fn tasks_share_vm_and_allocation_metadata_without_duplicating_physical_ownership() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    install(&mut manager, 2, 202);
+    manager.ensure_vm_space_for_pid(1).unwrap();
+    manager.share_address_space(2, 1).unwrap();
+    manager
+        .vm_space_mut(2)
+        .unwrap()
+        .record_frame(0x1000, 0xabcd)
+        .unwrap();
+    manager.vm_space_mut(2).unwrap().set_permissions(0x1000, 0);
+    assert_eq!(
+        manager.vm_space_mut(1).unwrap().find_frame(0x1000),
+        Some(0xabcd)
+    );
+    assert_eq!(manager.vm_space_mut(1).unwrap().permissions(0x1000), 0);
+    manager
+        .register_physical_allocation(2, 0x1000, 7, 100, 1)
+        .unwrap();
+    assert!(manager
+        .find_active_physical_allocation_reference(1, 0x1000, 1)
+        .is_some());
+    assert_eq!(manager.releasable_physical_allocations_for_pid(1).len(), 1);
+    assert_eq!(manager.releasable_physical_allocations_for_pid(2).len(), 0);
+    assert!(manager.has_memory_peers(1));
+    manager.mark_exited(1, 1, 0).unwrap();
+    manager.defer_vm_reap(1);
+    assert!(manager.memory_entry(2).unwrap().deferred_vm_reap);
+    manager.mark_exited(2, 1, 0).unwrap();
+    manager.reap_process(2, true).unwrap();
+    assert!(!manager.has_memory_peers(1));
+    assert_eq!(
+        manager.vm_space_mut(1).unwrap().find_frame(0x1000),
+        Some(0xabcd)
+    );
+}
+
+#[test]
+fn sparse_vm_walk_includes_retained_prot_none_backing_not_unpopulated_holes() {
+    let mut vm = vm_space::VmSpace::new();
+    for va in [0x1000, 0x4000, 0x9000] {
+        vm.record_frame(va, va + 1).unwrap();
+    }
+    vm.set_permissions(0x4000, 0);
+    assert_eq!(vm.backed_pages(0x2000, 0x9000), [(0x4000, 0)]);
 }
 
 #[test]

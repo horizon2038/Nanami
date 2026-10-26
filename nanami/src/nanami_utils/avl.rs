@@ -53,6 +53,29 @@ impl AvlTree {
         self.root = root;
         removed
     }
+
+    pub fn visit_range(&self, start: usize, end: usize, mut visit: impl FnMut(usize, usize)) {
+        fn walk(
+            node: Option<&AvlNode>,
+            start: usize,
+            end: usize,
+            visit: &mut impl FnMut(usize, usize),
+        ) {
+            let Some(node) = node else {
+                return;
+            };
+            if node.key > start {
+                walk(node.left.as_deref(), start, end, visit);
+            }
+            if node.key >= start && node.key < end {
+                visit(node.key, node.value);
+            }
+            if node.key < end {
+                walk(node.right.as_deref(), start, end, visit);
+            }
+        }
+        walk(self.root.as_deref(), start, end, &mut visit);
+    }
 }
 
 fn insert_node(node: Option<Box<AvlNode>>, key: usize, value: usize) -> Box<AvlNode> {

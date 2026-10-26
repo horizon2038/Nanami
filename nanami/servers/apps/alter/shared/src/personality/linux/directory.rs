@@ -148,6 +148,7 @@ fn read_backing(
                     posix::POSIX_FILE_TYPE_BLOCK_DEVICE => LINUX_DT_BLK,
                     posix::POSIX_FILE_TYPE_REGULAR => LINUX_DT_REG,
                     posix::POSIX_FILE_TYPE_SOCKET => LINUX_DT_SOCK,
+                    posix::POSIX_FILE_TYPE_SYMLINK => 10, // DT_LNK
                     _ => LINUX_DT_UNKNOWN,
                 };
                 write_entry(

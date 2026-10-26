@@ -91,12 +91,16 @@ impl Runtime {
         if path.is_empty() || path.len() >= LINUX_CWD_MAX || path[0] != b'/' {
             return false;
         }
-        let Some(process) = self.managed_process_mut(pid) else {
+        let Some(group) = self.managed_process(pid).map(|process| process.fs_group) else {
             return false;
         };
-        process.cwd = [0; LINUX_CWD_MAX];
-        process.cwd[..path.len()].copy_from_slice(path);
-        process.cwd_len = path.len();
+        for process in &mut self.managed {
+            if process.pid != 0 && process.fs_group == group {
+                process.cwd = [0; LINUX_CWD_MAX];
+                process.cwd[..path.len()].copy_from_slice(path);
+                process.cwd_len = path.len();
+            }
+        }
         true
     }
 
@@ -110,7 +114,7 @@ impl Runtime {
         };
         child.cwd = cwd;
         child.cwd_len = cwd_len;
-        child.files = files;
+        child.files.copy_from_slice(&files);
         true
     }
 

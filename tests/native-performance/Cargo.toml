@@ -112,6 +112,10 @@ name = "linux-mappings"
 path = "linux-mappings.rs"
 
 [[test]]
+name = "linux-namespace"
+path = "linux-namespace.rs"
+
+[[test]]
 name = "posix-io"
 path = "posix-io/main.rs"
 

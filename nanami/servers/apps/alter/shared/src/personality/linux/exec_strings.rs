@@ -35,8 +35,13 @@ impl ExecGuestPage {
     fn ensure(&mut self, pid: Word, address: Word) -> Result<usize, i32> {
         let page = address & !(LINUX_PAGE_SIZE - 1);
         if !self.valid || self.pid != pid || self.page != page {
-            nanami_runtime::request_process_memory_read(pid, page, self.buffer, LINUX_PAGE_SIZE)
-                .map_err(map_request_error)?;
+            nanami_runtime::request_process_memory_read_checked(
+                pid,
+                page,
+                self.buffer,
+                LINUX_PAGE_SIZE,
+            )
+            .map_err(|_| EFAULT)?;
             self.pid = pid;
             self.page = page;
             self.valid = true;

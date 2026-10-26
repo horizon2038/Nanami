@@ -11,9 +11,13 @@ pub(super) fn file_sources(file: LinuxFile) -> Word {
         LinuxFileKind::Terminal => READY_TERMINAL,
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
         LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
+        LinuxFileKind::TimerFd => READY_OBJECT | READY_TIMER,
+        LinuxFileKind::SignalFd => READY_OBJECT,
         LinuxFileKind::SocketUnix => READY_UNIX,
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
-        LinuxFileKind::SocketUdp | LinuxFileKind::SocketTcp | LinuxFileKind::SocketTcpListener
+        LinuxFileKind::SocketUdp
+        | LinuxFileKind::SocketTcp
+        | LinuxFileKind::SocketTcpListener
         | LinuxFileKind::SocketIcmp => READY_NETWORK,
         _ => 0,
     }
@@ -78,8 +82,15 @@ pub(super) fn fd_readiness(
     Ok(match file.kind {
         LinuxFileKind::SocketUnix => super::unix::readiness(runtime, file.resource)?,
         LinuxFileKind::EventFd => super::eventfd::readiness(runtime, file),
+        LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => {
+            super::fd_events::readiness(runtime, pid, file)?
+        }
         LinuxFileKind::Epoll => {
-            if super::epoll::ready(runtime, pid, file.resource)? { read } else { 0 }
+            if super::epoll::ready(runtime, pid, file.resource)? {
+                read
+            } else {
+                0
+            }
         }
         LinuxFileKind::Terminal => {
             write
@@ -89,9 +100,10 @@ pub(super) fn fd_readiness(
                     0
                 }
         }
-        LinuxFileKind::Posix | LinuxFileKind::VirtualFile | LinuxFileKind::Framebuffer => {
-            read | write
-        }
+        LinuxFileKind::Posix
+        | LinuxFileKind::MemoryFile
+        | LinuxFileKind::VirtualFile
+        | LinuxFileKind::Framebuffer => read | write,
         LinuxFileKind::VirtualDirectory => read,
         LinuxFileKind::PipeRead => match runtime.pipe(file.posix_fd) {
             Some(pipe) => {

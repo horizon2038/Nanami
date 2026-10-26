@@ -8,7 +8,7 @@ policy in isolated user processes.
 This document describes the current implementation. It is not an ABI stability
 guarantee.
 
-The current baseline is Nanami v0.6.1, `AlphaEnvironment` ABI 2 and `a9n_abi`
+The current baseline is Nanami v0.6.2, `AlphaEnvironment` ABI 2 and `a9n_abi`
 0.8.0. The checked-out Spencer revision includes A9N v0.3.11-smp. Historical
 QEMU results below retain their original scope; they are not evidence that
 every fixture was rerun after a kernel revision change.

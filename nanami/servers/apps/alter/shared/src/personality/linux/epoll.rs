@@ -60,6 +60,7 @@ pub(super) fn control(
     if matches!(
         file.kind,
         LinuxFileKind::Posix
+            | LinuxFileKind::MemoryFile
             | LinuxFileKind::VirtualFile
             | LinuxFileKind::VirtualDirectory
             | LinuxFileKind::Framebuffer
@@ -202,7 +203,10 @@ fn watch_events(runtime: &mut Runtime, pid: Word, watch: Watch) -> Result<u32, i
     let mut pumped = false;
     let available = super::readiness::fd_readiness(
         runtime,
-        if watch.file.kind == LinuxFileKind::Terminal {
+        if matches!(
+            watch.file.kind,
+            LinuxFileKind::Terminal | LinuxFileKind::SignalFd
+        ) {
             pid
         } else {
             owner

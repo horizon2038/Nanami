@@ -4,7 +4,7 @@ This guide describes how to add native Nanami applications, services, and
 drivers. The Rust application ABI supports x86_64 and AArch64; the freestanding
 C++ SDK remains x86_64-only.
 
-This guide follows Nanami v0.6.1 and `AlphaEnvironment` ABI 2. Public wire types
+This guide follows Nanami v0.6.2 and `AlphaEnvironment` ABI 2. Public wire types
 are defined in `nanami-uapi`; generic Alpha requests and managed-Service helpers
 are exposed through `nanami-runtime`.
 

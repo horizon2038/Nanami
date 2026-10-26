@@ -7,6 +7,9 @@ pub(super) fn sys_ftruncate(
     length: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::MemoryFile {
+        return super::memfd::truncate(runtime, file, length);
+    }
     if (length as isize) < 0
         || file.kind != LinuxFileKind::Posix
         || file.resource & LINUX_O_ACCMODE == LINUX_O_RDONLY

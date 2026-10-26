@@ -60,6 +60,20 @@ impl Drop for Runtime {
 mod mappings;
 
 #[test]
+fn copyin_copyout_checks_cover_prot_none_and_crossing_vma_boundaries() {
+    let mut runtime = Runtime::new();
+    assert!(runtime.add_mapping(1, 0x1000, 0x3000, 3));
+    assert!(runtime.protect_mapping(1, 0x2000, 0x1000, 0));
+    assert!(runtime.memory_access_allowed(1, 0x1000, 0x1000, 2));
+    assert!(!runtime.memory_access_allowed(1, 0x2000, 4, 1));
+    assert!(!runtime.memory_access_allowed(1, 0x1fff, 2, 1));
+    assert!(!runtime.memory_access_allowed(1, usize::MAX, 2, 1));
+    assert!(runtime.protect_mapping(1, 0x2000, 0x1000, 1));
+    assert!(runtime.memory_access_allowed(1, 0x2000, 4, 1));
+    assert!(!runtime.memory_access_allowed(1, 0x2000, 4, 2));
+}
+
+#[test]
 fn mapping_table_is_lazy_and_does_not_expand_process_snapshots_or_server_stack() {
     assert_eq!(
         core::mem::size_of::<MappingTable>(),
@@ -112,4 +126,18 @@ fn adjacent_ranges_coalesce_and_partial_unmap_preserves_both_sides() {
     assert!(!runtime.has_mapping(1, 0x2000, 0x1000));
     assert!(!runtime.add_mapping(1, Word::MAX - 1, 4096, 3));
     assert!(!runtime.add_mapping(2, 0x1000, 4096, 3));
+}
+
+#[test]
+fn protection_capacity_failure_leaves_original_vma_unchanged() {
+    let mut runtime = Runtime::new();
+    assert!(runtime.add_mapping(1, 0x1000, 0x3000, 3));
+    for index in 1..ALTER_PROCESS_MAPPING_MAX {
+        assert!(runtime.add_mapping(1, 0x10000 + index * 0x2000, 0x1000, 3));
+    }
+    assert!(!runtime.can_protect_mapping(1, 0x2000, 0x1000));
+    assert!(!runtime.protect_mapping(1, 0x2000, 0x1000, 0));
+    assert_eq!(runtime.mapping_prot(1, 0x1000, 0x3000), Some(3));
+    assert!(runtime.protect_mapping(1, 0x1000, 0x3000, 1));
+    assert_eq!(runtime.mapping_prot(1, 0x1000, 0x3000), Some(1));
 }

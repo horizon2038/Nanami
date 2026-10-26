@@ -1,7 +1,7 @@
 use core::ptr;
 
-use nanami_runtime::Word;
 use nanami_client::posix::*;
+use nanami_runtime::Word;
 
 use crate::state::{FdKind, Runtime, MAX_COMPONENTS, PATH_MAX};
 
@@ -156,6 +156,7 @@ pub(crate) fn vfs_kind_to_posix(kind: Word) -> Word {
         nanami_client::vfs::VFS_FILE_TYPE_REGULAR => POSIX_FILE_TYPE_REGULAR,
         nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY => POSIX_FILE_TYPE_DIRECTORY,
         nanami_client::vfs::VFS_FILE_TYPE_SOCKET => POSIX_FILE_TYPE_SOCKET,
+        nanami_client::vfs::VFS_FILE_TYPE_SYMLINK => POSIX_FILE_TYPE_SYMLINK,
         _ => POSIX_FILE_TYPE_UNKNOWN,
     }
 }

@@ -70,11 +70,12 @@ fn create_id(
     if protocol != 0 {
         return Err(EPROTONOSUPPORT);
     }
+    let owner = credentials(runtime.thread_group(pid));
     runtime
         .unix_sockets
         .create(
             kind(socket_type)?,
-            credentials(pid),
+            owner,
             socket_type & LINUX_SOCK_NONBLOCK != 0,
         )
         .ok_or(ENOMEM)
@@ -108,7 +109,8 @@ fn pair(runtime: &mut Runtime, pid: Word, args: [Word; 6]) -> Result<Word, i32> 
             return Err(error);
         }
     };
-    join(runtime, left, right, credentials(pid), credentials(pid));
+    let owner = credentials(runtime.thread_group(pid));
+    join(runtime, left, right, owner, owner);
     let a = runtime.allocate_linux_file(pid, file(left, args[1]), 0);
     let b = runtime.allocate_linux_file(pid, file(right, args[1]), 0);
     let result = match (a, b) {
@@ -255,6 +257,7 @@ fn bind(runtime: &mut Runtime, pid: Word, id: Word, pointer: Word, len: Word) ->
 }
 
 fn listen(runtime: &mut Runtime, pid: Word, id: Word, backlog: Word) -> Result<Word, i32> {
+    let owner = credentials(runtime.thread_group(pid));
     let socket = runtime.unix_sockets.get_mut(id).ok_or(EBADF)?;
     if socket.kind == Kind::Datagram {
         return Err(EOPNOTSUPP);
@@ -263,7 +266,7 @@ fn listen(runtime: &mut Runtime, pid: Word, id: Word, backlog: Word) -> Result<W
         return Err(EINVAL);
     }
     socket.listening = true;
-    socket.credentials = credentials(pid);
+    socket.credentials = owner;
     socket.backlog = (backlog as i32).clamp(0, 127) as usize + 1;
     Ok(0)
 }
@@ -322,7 +325,8 @@ fn connect(
         .create(kind, peer_cred, false)
         .ok_or(ENOMEM)?;
     runtime.unix_sockets.get_mut(child).unwrap().address = local_address;
-    join(runtime, id, child, credentials(pid), peer_cred);
+    let owner = credentials(runtime.thread_group(pid));
+    join(runtime, id, child, owner, peer_cred);
     runtime
         .unix_sockets
         .get_mut(destination)
@@ -660,7 +664,7 @@ pub(super) fn collect(runtime: &mut Runtime) {
         if process.pid == 0 {
             continue;
         }
-        for file in &process.files {
+        for file in process.files.iter() {
             if file.kind == LinuxFileKind::SocketUnix {
                 runtime.unix_sockets.mark(file.resource);
             }

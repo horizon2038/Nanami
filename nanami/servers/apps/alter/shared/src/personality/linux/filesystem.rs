@@ -1,11 +1,11 @@
 use super::{
-    bounded_len, current_virtual_node, is_at_fdcwd, is_linux_virtual_path,
-    map_create_request_error, map_link_request_error, map_path_request_error, map_request_error,
-    map_unit, move_shm_bytes, path_equals, path_is_absolute, posix, read_c_string,
-    reject_virtual_fs_mutation, resolve_current_shm_path, resolve_path, translate_guest_path_at,
-    translate_guest_path_for_vfs, write_target_memory, Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG,
-    ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW,
-    LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
+    bounded_len, current_virtual_node, is_linux_virtual_path, map_create_request_error,
+    map_link_request_error, map_path_request_error, map_request_error, map_unit, move_shm_bytes,
+    path_equals, posix, read_c_string, reject_virtual_fs_mutation, resolve_path,
+    translate_guest_path_at, translate_guest_path_for_vfs, write_target_memory, Runtime, Word,
+    EFAULT, EINVAL, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR,
+    LINUX_AT_SYMLINK_FOLLOW, LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR,
+    LINUX_S_IFMT,
 };
 
 pub(super) fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
@@ -22,10 +22,7 @@ pub(super) fn sys_faccessat(
     _flags: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
-    }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, _flags & 0x100 == 0)?;
     super::stat_current_path(runtime, pid, len).map(|_| 0)
 }
 
@@ -69,7 +66,7 @@ pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Res
 }
 
 pub(super) fn sys_mkdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
@@ -84,10 +81,7 @@ pub(super) fn sys_mkdirat(
     path_ptr: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
-    }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     posix::posix_mkdir(runtime.posix_port, 0, vfs_len)
@@ -102,7 +96,7 @@ pub(super) fn sys_mknod(
     mode: Word,
     dev: Word,
 ) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     mknod_current_path(runtime, pid, len, mode, dev)
 }
 
@@ -115,10 +109,7 @@ pub(super) fn sys_mknodat(
     dev: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
-    }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
     mknod_current_path(runtime, pid, len, mode, dev)
 }
 
@@ -147,7 +138,7 @@ pub(super) fn mknod_current_path(
 }
 
 pub(super) fn sys_unlink(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_unlink(runtime.posix_port, 0, vfs_len), 0)
@@ -159,11 +150,11 @@ pub(super) fn sys_link(
     old_path_ptr: Word,
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
-    let old_len = resolve_path(runtime, pid, old_path_ptr)?;
+    let old_len = super::resolve_nofollow(runtime, pid, old_path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
-    let new_len = resolve_path(runtime, pid, new_path_ptr)?;
+    let new_len = super::resolve_nofollow(runtime, pid, new_path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_link(
@@ -185,10 +176,10 @@ pub(super) fn sys_unlinkat(
     flags: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
+    if flags & !LINUX_AT_REMOVEDIR != 0 {
+        return Err(EINVAL);
     }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     if (flags & LINUX_AT_REMOVEDIR) != 0 {
@@ -210,19 +201,19 @@ pub(super) fn sys_linkat(
         return Err(EINVAL);
     }
     let old_raw_len = read_c_string(runtime, pid, old_path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, old_raw_len) && !is_at_fdcwd(old_dirfd) {
-        return Err(ENOSYS);
-    }
-    let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
+    let old_len = super::resolve_at(
+        runtime,
+        pid,
+        old_dirfd,
+        old_raw_len,
+        flags & LINUX_AT_SYMLINK_FOLLOW != 0,
+    )?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
 
     let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, new_raw_len) && !is_at_fdcwd(new_dirfd) {
-        return Err(ENOSYS);
-    }
-    let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
+    let new_len = super::resolve_at(runtime, pid, new_dirfd, new_raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_link(
@@ -237,7 +228,7 @@ pub(super) fn sys_linkat(
 }
 
 pub(super) fn sys_rmdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, len)?;
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     map_unit(posix::posix_rmdir(runtime.posix_port, 0, vfs_len), 0)
@@ -249,11 +240,11 @@ pub(super) fn sys_rename(
     old_path_ptr: Word,
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
-    let old_len = resolve_path(runtime, pid, old_path_ptr)?;
+    let old_len = super::resolve_nofollow(runtime, pid, old_path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
-    let new_len = resolve_path(runtime, pid, new_path_ptr)?;
+    let new_len = super::resolve_nofollow(runtime, pid, new_path_ptr)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
@@ -276,18 +267,12 @@ pub(super) fn sys_renameat(
     new_path_ptr: Word,
 ) -> Result<Word, i32> {
     let old_raw_len = read_c_string(runtime, pid, old_path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, old_raw_len) && !is_at_fdcwd(old_dirfd) {
-        return Err(ENOSYS);
-    }
-    let old_len = resolve_current_shm_path(runtime, pid, old_raw_len)?;
+    let old_len = super::resolve_at(runtime, pid, old_dirfd, old_raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, old_len)?;
     move_shm_bytes(runtime, 0, LINUX_SECOND_PATH_OFFSET, old_len);
     let old_vfs_len = translate_guest_path_at(runtime, pid, LINUX_SECOND_PATH_OFFSET, old_len)?;
     let new_raw_len = read_c_string(runtime, pid, new_path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, new_raw_len) && !is_at_fdcwd(new_dirfd) {
-        return Err(ENOSYS);
-    }
-    let new_len = resolve_current_shm_path(runtime, pid, new_raw_len)?;
+    let new_len = super::resolve_at(runtime, pid, new_dirfd, new_raw_len, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, new_len)?;
     let new_vfs_len = translate_guest_path_for_vfs(runtime, pid, new_len)?;
     posix::posix_rename(
@@ -308,7 +293,7 @@ pub(super) fn sys_readlink(
     user_buffer: Word,
     len: Word,
 ) -> Result<Word, i32> {
-    let path_len = resolve_path(runtime, pid, path_ptr)?;
+    let path_len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     readlink_from_current_path(runtime, pid, path_len, user_buffer, len)
 }
 
@@ -321,10 +306,7 @@ pub(super) fn sys_readlinkat(
     len: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
-    }
-    let path_len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let path_len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
     readlink_from_current_path(runtime, pid, path_len, user_buffer, len)
 }
 
@@ -379,7 +361,23 @@ pub(super) fn readlink_from_current_path(
         write_target_memory(runtime, pid, user_buffer, bytes as Word)?;
         return Ok(bytes as Word);
     }
-    Err(EINVAL)
+    if len == 0 {
+        return Err(EINVAL);
+    }
+    let path =
+        unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, path_len) }.to_vec();
+    let (bytes, _) = super::namespace::request_path(
+        runtime,
+        pid,
+        nanami_client::vfs::VFS_PATH_READLINK,
+        nanami_client::vfs::VFS_PATH_DIRECTORY_ROOT,
+        &path,
+        &[],
+        0,
+        len.min(4096),
+    )?;
+    write_target_memory(runtime, pid, user_buffer, bytes)?;
+    Ok(bytes)
 }
 
 pub(super) fn sys_utime_path(
@@ -387,10 +385,24 @@ pub(super) fn sys_utime_path(
     pid: Word,
     path_ptr: Word,
 ) -> Result<Word, i32> {
+    sys_utime_at(runtime, pid, super::LINUX_AT_FDCWD, path_ptr, 0)
+}
+
+pub(super) fn sys_utime_at(
+    runtime: &mut Runtime,
+    pid: Word,
+    dirfd: Word,
+    path_ptr: Word,
+    flags: Word,
+) -> Result<Word, i32> {
+    if flags & !0x100 != 0 {
+        return Err(EINVAL);
+    }
     if path_ptr == 0 {
         return Ok(0);
     }
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    let len = super::namespace::resolve_at(runtime, pid, dirfd, bytes, flags & 0x100 == 0)?;
     if current_virtual_node(runtime, pid, len).is_some() {
         return Ok(0);
     }

@@ -1,5 +1,6 @@
 use crate::nanami_utils::avl::AvlTree;
 use crate::nanami_utils::static_avl::StaticAvlTree;
+use alloc::collections::BTreeMap;
 use nun::CapabilityDescriptor;
 
 // Bootstrap mappings are recorded before the alpha heap is available, so this
@@ -88,6 +89,9 @@ pub struct VmSpace {
     frame_by_va: AvlTree,
     page_table_by_va: AvlTree,
     page_table_region: usize,
+    // Only non-default permissions need metadata. PROT_NONE retains its Frame
+    // record and allocation reference while the hardware leaf is absent.
+    permissions: BTreeMap<usize, usize>,
 }
 
 impl VmSpace {
@@ -96,11 +100,32 @@ impl VmSpace {
             frame_by_va: AvlTree::new(),
             page_table_by_va: AvlTree::new(),
             page_table_region: NO_PAGE_TABLE_REGION,
+            permissions: BTreeMap::new(),
         }
     }
 
     pub fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
+        self.permissions.remove(&virtual_address);
         self.frame_by_va.remove(virtual_address)
+    }
+
+    pub fn permissions(&self, virtual_address: usize) -> usize {
+        self.permissions.get(&virtual_address).copied().unwrap_or(7)
+    }
+
+    pub fn set_permissions(&mut self, virtual_address: usize, permissions: usize) {
+        if permissions == 7 {
+            self.permissions.remove(&virtual_address);
+        } else {
+            self.permissions.insert(virtual_address, permissions);
+        }
+    }
+
+    pub fn backed_pages(&self, start: usize, end: usize) -> alloc::vec::Vec<(usize, usize)> {
+        let mut pages = alloc::vec::Vec::new();
+        self.frame_by_va
+            .visit_range(start, end, |va, _| pages.push((va, self.permissions(va))));
+        pages
     }
 }
 
@@ -133,7 +158,7 @@ impl VmTracker for VmSpace {
     }
 
     fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
-        self.frame_by_va.remove(virtual_address)
+        VmSpace::forget_frame(self, virtual_address)
     }
 
     fn page_tables_ready(&self, virtual_address: usize) -> bool {

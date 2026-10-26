@@ -1,6 +1,45 @@
 use super::*;
 
 impl Alpha {
+    pub(super) fn handle_process_compare_exchange(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<Word, CapabilityError> {
+        use core::sync::atomic::{AtomicU32, Ordering};
+        let pid = request.arg0;
+        let address = request.arg1;
+        if address == 0
+            || address & 3 != 0
+            || request.arg2 > u32::MAX as Word
+            || request.arg3 > u32::MAX as Word
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let target = self
+            .processes
+            .find_entry_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if request.identifier == 0
+            || (request.identifier != pid && target.reaper_pid != request.identifier)
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let page = align_down(address, PAGE_SIZE);
+        let frame = self.process_frame_for_page(pid, page)?;
+        let mapped = self.map_process_copy_frame(pid, frame, None)?;
+        // Four-byte alignment guarantees that the atomic cannot cross a page.
+        let atomic = unsafe { &*((mapped + address - page) as *const AtomicU32) };
+        let previous = match atomic.compare_exchange(
+            request.arg2 as u32,
+            request.arg3 as u32,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(previous) | Err(previous) => previous,
+        };
+        Ok(previous as Word)
+    }
+
     pub(super) fn handle_page_alloc_request(
         &mut self,
         request: OsRequestEvent,
@@ -306,6 +345,10 @@ impl Alpha {
         };
         let base_va = request.arg0;
         let size_bytes = request.arg1;
+        let allow_holes = request.arg3 == nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES;
+        if request.arg3 != 0 && !allow_holes {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if size_bytes == 0 || (base_va & (PAGE_SIZE - 1)) != 0 {
             info!(
                 "[map.err] release invalid args caller={:>3} target={:>3} va={:#018x} bytes={:#x}",
@@ -333,6 +376,10 @@ impl Alpha {
         let exact_allocation = self
             .processes
             .find_active_physical_allocation_reference(target_pid, base_va, page_count);
+        let entry = self
+            .processes
+            .memory_entry(target_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         if let Some(reservation) = self
             .processes
             .shared_memory_reservation(target_pid, base_va, page_count)
@@ -340,6 +387,27 @@ impl Alpha {
             return self.release_shared_memory(entry, reservation);
         }
 
+        // Validate the complete range before changing any PTE or allocation reference.
+        let mut allocations = Vec::new();
+        if exact_allocation.is_none() {
+            for page in 0..page_count {
+                let va = base_va + page * PAGE_SIZE;
+                if let Some(allocation) = self
+                    .processes
+                    .find_active_physical_allocation_reference(target_pid, va, 1)
+                {
+                    allocations.push(allocation);
+                } else if !allow_holes
+                    || self
+                        .processes
+                        .vm_space_mut(target_pid)
+                        .and_then(|vm| vm.find_frame(va))
+                        .is_some()
+                {
+                    return Err(CapabilityError::InvalidArgument);
+                }
+            }
+        }
         self.invalidate_process_copy_mappings(target_pid)?;
         let mut i = 0usize;
         while i < page_count {
@@ -347,19 +415,26 @@ impl Alpha {
             let allocation = if let Some(allocation) = exact_allocation {
                 allocation
             } else {
-                self.processes
-                    .find_active_physical_allocation_reference(target_pid, va, 1)
-                    .ok_or_else(|| {
-                        info!(
-                            "[map.err] release lookup failed caller={:>3} target={:>3} va={:#018x} bytes={:#x} page={}/{}",
-                            caller_pid, target_pid, va, mapped_size, i, page_count
-                        );
-                        CapabilityError::InvalidArgument
-                    })?
+                let allocation = self
+                    .processes
+                    .find_active_physical_allocation_reference(target_pid, va, 1);
+                let Some(allocation) = allocation else {
+                    i += 1;
+                    continue;
+                };
+                allocation
             };
             let slot = allocation.start_slot + if allocation.page_count == 1 { 0 } else { i };
             let frame = process_frame_descriptor(entry.root_node, slot);
-            if let Err(e) = arch::address_space::unmap(entry.address_space, frame, va) {
+            let present = self
+                .processes
+                .vm_space_mut(target_pid)
+                .is_some_and(|vm| vm.permissions(va) != 0);
+            if let Err(e) = if present {
+                arch::address_space::unmap(entry.address_space, frame, va)
+            } else {
+                Ok(())
+            } {
                 info!(
                     "[map.err] unmap target={:>3} va={:#018x} frame={:#018x} slot={} err={:?}",
                     target_pid, va, frame, slot, e
@@ -379,15 +454,14 @@ impl Alpha {
             self.processes
                 .defer_physical_allocation_for_pid(target_pid, allocation);
         } else {
-            let mut page = 0usize;
-            while page < page_count {
-                let va = base_va + page * PAGE_SIZE;
-                let (allocation, _) = self
-                    .processes
-                    .release_physical_allocation_reference(target_pid, va, 1)?;
+            for allocation in allocations {
+                let (allocation, _) = self.processes.release_physical_allocation_reference(
+                    target_pid,
+                    allocation.base_va,
+                    1,
+                )?;
                 self.processes
                     .defer_physical_allocation_for_pid(target_pid, allocation);
-                page += 1;
             }
         }
         info!(
@@ -410,7 +484,8 @@ impl Alpha {
         let target_pid = request.arg0;
         let target_va = request.arg1;
         let caller_va = request.arg2;
-        let size_bytes = request.arg3;
+        let user_access = request.arg3 & nanami_uapi::os::OS_MEMORY_COPY_USER_ACCESS != 0;
+        let size_bytes = request.arg3 & !nanami_uapi::os::OS_MEMORY_COPY_USER_ACCESS;
         if caller_pid == 0 || target_pid == 0 || target_va == 0 || caller_va == 0 || size_bytes == 0
         {
             return Err(CapabilityError::InvalidArgument);
@@ -425,6 +500,22 @@ impl Alpha {
         }
         if self.processes.find_entry_by_pid(caller_pid).is_none() {
             return Err(CapabilityError::InvalidArgument);
+        }
+
+        if user_access {
+            let end = target_va
+                .checked_add(size_bytes)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let permission = if write_to_target { 2 } else { 1 };
+            let vm = self
+                .processes
+                .vm_space_mut(target_pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            for va in (align_down(target_va, PAGE_SIZE)..end).step_by(PAGE_SIZE) {
+                if vm.permissions(va) & permission == 0 {
+                    return Err(CapabilityError::PermissionDenied);
+                }
+            }
         }
 
         let (source_pid, source_va, destination_pid, destination_va) = if write_to_target {
@@ -475,7 +566,64 @@ impl Alpha {
         }
         self.validate_process_memory_access(caller_pid, source_pid)?;
         self.validate_process_memory_access(caller_pid, destination_pid)?;
-        self.copy_process_memory(source_pid, base_va, destination_pid, base_va, size_bytes)
+        self.clone_backed_memory(source_pid, base_va, destination_pid, base_va, size_bytes)
+    }
+
+    fn clone_backed_memory(
+        &mut self,
+        source_pid: usize,
+        base_va: usize,
+        destination_pid: usize,
+        target_va: usize,
+        size_bytes: usize,
+    ) -> Result<(), CapabilityError> {
+        let end = base_va
+            .checked_add(size_bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        target_va
+            .checked_add(size_bytes)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if (base_va | target_va | size_bytes) & (PAGE_SIZE - 1) != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let mut pages = self
+            .processes
+            .vm_space_mut(source_pid)
+            .ok_or(CapabilityError::InvalidArgument)?
+            .backed_pages(base_va, end);
+        let destination = self
+            .processes
+            .memory_entry(destination_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if self.processes.memory_owner_pid(source_pid)
+            == self.processes.memory_owner_pid(destination_pid)
+            && target_va > base_va
+        {
+            pages.reverse();
+        }
+        // Sparse reservations stay sparse, including PROT_NONE. Work scales with
+        // populated pages, not the size of a reserved virtual address range.
+        for (va, permissions) in pages {
+            let target = target_va + va - base_va;
+            if self
+                .processes
+                .vm_space_mut(destination_pid)
+                .and_then(|vm| vm.find_frame(target))
+                .is_none()
+            {
+                self.map_process_heap_pages_at(destination_pid, target, 1)?;
+            }
+            self.copy_process_memory(source_pid, va, destination_pid, target, PAGE_SIZE)?;
+            let frame = self.process_frame_for_page(destination_pid, target)?;
+            self.protect_process_page(
+                destination_pid,
+                destination.address_space,
+                target,
+                frame,
+                permissions,
+            )?;
+        }
+        Ok(())
     }
 
     pub(super) fn handle_process_memory_copy_within_request(
@@ -496,6 +644,15 @@ impl Alpha {
             return Err(CapabilityError::InvalidArgument);
         }
         self.validate_process_memory_access(caller_pid, target_pid)?;
+        if (source_va | destination_va | size_bytes) & (PAGE_SIZE - 1) == 0 {
+            return self.clone_backed_memory(
+                target_pid,
+                source_va,
+                target_pid,
+                destination_va,
+                size_bytes,
+            );
+        }
         self.copy_process_memory(
             target_pid,
             source_va,
@@ -710,7 +867,7 @@ impl Alpha {
             None => {
                 let entry = self
                     .processes
-                    .find_entry_by_pid(pid)
+                    .memory_entry(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
                 self.materialize_lazy_page(pid, entry.root_node, entry.address_space, page_va)?;
                 self.processes

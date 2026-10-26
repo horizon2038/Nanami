@@ -181,6 +181,9 @@ fn rights(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Vec<Lin
                         | LinuxFileKind::PipeWrite
                         | LinuxFileKind::SocketUnix
                         | LinuxFileKind::EventFd
+                        | LinuxFileKind::TimerFd
+                        | LinuxFileKind::SignalFd
+                        | LinuxFileKind::MemoryFile
                         | LinuxFileKind::Epoll
                 )
             {

@@ -78,6 +78,20 @@ pub const OS_REQUEST_DRIVER_PLATFORM_INFO: Word = 0x1024;
 /// (peer PID, page-aligned caller VA, byte length) -> (caller VA, peer VA).
 pub const OS_REQUEST_MAPPING_SHARE: Word = 0x1029;
 
+/// Change a supervised process's mapping permissions without discarding backing.
+/// (target PID, page-aligned VA, byte length, R/W/X bits) -> ()
+pub const OS_REQUEST_PROCESS_MAPPING_PROTECT: Word = 0x102a;
+/// Atomic u32 compare/exchange on supervised RAM: (PID, VA, expected, desired) -> previous.
+pub const OS_REQUEST_PROCESS_MEMORY_COMPARE_EXCHANGE: Word = 0x102b;
+/// Create a suspended raw task sharing a supervised task's address space.
+/// args: source PID, PCB destination slot, priority, reserved (zero).
+pub const OS_REQUEST_PROCESS_THREAD_CREATE: Word = 0x102c;
+/// High bit of MEMORY_READ/WRITE byte count: enforce guest read/write access.
+/// Clear retains the supervisor's privileged image/debugging-copy semantics.
+pub const OS_MEMORY_COPY_USER_ACCESS: Word = 1 << (Word::BITS - 1);
+/// MAPPING_RELEASE arg3: ignore pages without allocated backing (virtual reservations).
+pub const OS_MAPPING_RELEASE_ALLOW_HOLES: Word = 1;
+
 pub const OS_REQUEST_DEBUG_PING: Word = 0x10ff;
 
 pub const DRIVER_PLATFORM_INFO_RSDP_ADDRESS: Word = 1;

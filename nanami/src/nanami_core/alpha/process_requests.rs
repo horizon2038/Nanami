@@ -1,7 +1,7 @@
 use super::*;
 
 impl Alpha {
-    fn configure_process_affinity(
+    pub(super) fn configure_process_affinity(
         &mut self,
         pcb: CapabilityDescriptor,
         requested: Option<Word>,
@@ -905,6 +905,11 @@ impl Alpha {
         if target.pcb == 0 || target.root_node == 0 || target.address_space == 0 {
             return Err(CapabilityError::InvalidDescriptor);
         }
+        // Replacing a shared VM must first detach/terminate its other tasks.
+        // Never revoke live aliases or reset the original owner's frame arena.
+        if target.memory_owner != target.pid || self.processes.has_memory_peers(target.pid) {
+            return Err(CapabilityError::IllegalOperation);
+        }
 
         let image_bytes =
             self.read_process_memory_into_static_buffer(caller_pid, image_vaddr, size_bytes)?;
@@ -1241,6 +1246,10 @@ impl Alpha {
         if !entry.exited {
             return Err(CapabilityError::IllegalOperation);
         }
+        if entry.memory_owner == pid && self.processes.has_memory_peers(pid) {
+            self.processes.defer_vm_reap(pid);
+            return Ok(());
+        }
         if entry.resource_quarantined
             || self.communication.bindings.has_live_sessions(pid)
             || self.communication.bindings.has_provider_authority(pid)
@@ -1262,6 +1271,16 @@ impl Alpha {
         self.processes.drop_physical_allocations_for_pid(pid);
         self.memory.reset_process_arena(entry.root_slot)?;
         self.processes.reap_process(pid, true)?;
+        if entry.memory_owner != pid {
+            if let Some(owner) = self.processes.find_entry_by_pid(entry.memory_owner) {
+                if owner.deferred_vm_reap && !self.processes.has_memory_peers(owner.pid) {
+                    return self.handle_process_reap_request(OsRequestEvent {
+                        arg0: owner.pid,
+                        ..request
+                    });
+                }
+            }
+        }
         info!(
             "[proc] reaped pid={:>3} root_slot={:>3}",
             pid, entry.root_slot

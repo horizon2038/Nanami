@@ -184,6 +184,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     },
                     FaultAction::Park => ReplyAction::DropReply,
                     FaultAction::Terminate { pid, status } => {
+                        if runtime
+                            .managed_process(pid)
+                            .and_then(|process| process.signals())
+                            .is_some_and(|signals| signals.exit_signal != 0)
+                        {
+                            linux::exit_thread_group(&mut runtime, pid, status);
+                        }
                         runtime.mark_process_exited(pid, status);
                         // Zombies retain exit status, not open pipe writers.
                         linux::close_process_files(&mut runtime, pid);
@@ -256,6 +263,9 @@ fn notify_terminal_process_exit(runtime: &mut Runtime, pid: Word, status: Word) 
     let Some(process) = runtime.managed_process(pid) else {
         return;
     };
+    if process.pid != process.tgid || runtime.has_live_threads(pid) {
+        return;
+    }
     if runtime.terminal_port == 0 || runtime.terminal_shm == 0 || process.terminal_id == 0 {
         return;
     }

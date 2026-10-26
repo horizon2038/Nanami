@@ -64,6 +64,7 @@ pub(super) fn read_terminal_input(
     for index in 0..runtime.managed.len() {
         let process = runtime.managed[index];
         if process.pid == 0
+            || process.pid != process.tgid
             || process.exited
             || process.personality != OsPersonality::Linux
             || process.job.session != control.session
@@ -74,7 +75,8 @@ pub(super) fn read_terminal_input(
         }
         for (index, signal) in [2, 3, 20].into_iter().enumerate() {
             if events & (1 << index) != 0 {
-                let _ = signals_runtime::queue(runtime, process.pid, Info::new(signal, 128, 0));
+                let _ =
+                    signals_runtime::queue_group(runtime, process.pid, Info::new(signal, 128, 0));
             }
         }
     }

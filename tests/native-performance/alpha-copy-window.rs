@@ -10,6 +10,7 @@ enum CapabilityError {
 }
 
 struct Alpha {
+    processes: Processes,
     copy_window: memory_copy::CopyWindow,
     mappings: BTreeMap<usize, usize>,
     maps: usize,
@@ -20,6 +21,7 @@ struct Alpha {
 impl Alpha {
     fn new() -> Self {
         Self {
+            processes: Processes,
             copy_window: memory_copy::CopyWindow::new(),
             mappings: BTreeMap::new(),
             maps: 0,
@@ -49,6 +51,12 @@ impl Alpha {
         assert_eq!(self.mappings.remove(&va), Some(frame));
         self.unmaps += 1;
         Ok(())
+    }
+}
+struct Processes;
+impl Processes {
+    fn memory_owner_pid(&self, pid: usize) -> usize {
+        pid
     }
 }
 #[path = "../../nanami/src/nanami_core/alpha/memory_copy.rs"]

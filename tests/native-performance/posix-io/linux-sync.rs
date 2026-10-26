@@ -6,9 +6,16 @@ const LINUX_O_RDONLY: Word = 0;
 const LINUX_O_ACCMODE: Word = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LinuxFileKind {
+    MemoryFile,
     Posix,
     VirtualDirectory,
     VirtualFile,
+}
+mod memfd {
+    use super::*;
+    pub(super) fn truncate(_: &mut Runtime, _: LinuxFile, _: Word) -> Result<Word, i32> {
+        Err(EINVAL)
+    }
 }
 enum VirtualNode {
     Root,

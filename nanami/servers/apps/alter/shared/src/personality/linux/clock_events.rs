@@ -38,6 +38,8 @@ pub(super) fn arm_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
         )
         .chain(runtime.framebuffer_deadline)
         .chain(super::signal_timers::next_deadline(runtime))
+        .chain(runtime.poll_objects.timer_deadline())
+        .chain(super::futex::next_deadline(runtime))
         .min();
     if runtime.clock_deadline != deadline {
         nanami_client::timer::timer_service_set_alarm_ticks(
@@ -85,6 +87,8 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
     }
 
     super::signal_timers::expire(runtime);
+    runtime.poll_objects.expire_timers(runtime.monotonic_ticks);
+    super::futex::pump(runtime);
     super::signals_runtime::pump(runtime, 0);
     for index in 0..runtime.managed.len() {
         let process = &runtime.managed[index];

@@ -18,6 +18,8 @@ mod file_io;
 use file_io::*;
 mod directory;
 use directory::{parse_directory_entry, read_directory};
+mod namespace;
+mod path_walk;
 mod truncate;
 
 use core::cmp::min;
@@ -43,6 +45,8 @@ const EXT2_S_IFDIR: u16 = 0x4000;
 const EXT2_S_IFREG: u16 = 0x8000;
 const EXT2_S_IFMT: u16 = 0xf000;
 const EXT2_S_IFSOCK: u16 = 0xc000;
+const EXT2_S_IFLNK: u16 = 0xa000;
+const EXT2_FT_SYMLINK: u8 = 7;
 const EXT2_NAME_LEN_MAX: usize = 255;
 const EXT2_MAX_BLOCK_GROUPS: usize = 32;
 const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
@@ -145,6 +149,7 @@ struct Ext2Inode {
     mode: u16,
     size: u32,
     links_count: u16,
+    sectors: u32,
     block: [u32; EXT2_INODE_BLOCK_POINTERS],
 }
 
@@ -172,6 +177,7 @@ impl CachedInode {
             mode: 0,
             size: 0,
             links_count: 0,
+            sectors: 0,
             block: [0; EXT2_INODE_BLOCK_POINTERS],
         },
     };
@@ -401,6 +407,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         }
     }
     match request.code {
+        nanami_client::vfs::VFS_REQUEST_PATH => namespace::handle(request, runtime),
         nanami_client::vfs::VFS_REQUEST_FREEZE | nanami_client::vfs::VFS_REQUEST_THAW => {
             writeback::handle_freeze(request, runtime)
         }
@@ -512,6 +519,9 @@ fn handle_open(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wor
     let Ok(inode) = read_inode(runtime, inode_no) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
+    if inode.mode & EXT2_S_IFMT == EXT2_S_IFLNK {
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
     match alloc_handle(runtime, request.identifier, inode_no, inode) {
         Some(handle) => (nanami_runtime::OS_RESPONSE_OK, handle as Word, 0),
         None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
@@ -553,6 +563,9 @@ fn handle_open_compound(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     };
     let kind = file_kind(inode.mode);
+    if kind == nanami_client::vfs::VFS_FILE_TYPE_SYMLINK {
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
     if (flags & nanami_client::vfs::VFS_OPEN_DIRECTORY) != 0
         && kind != nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY
     {
@@ -969,6 +982,7 @@ fn read_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<Ext2Inode, Req
         mode: r16(p + 0),
         size: r32(p + 4),
         links_count: r16(p + 26),
+        sectors: r32(p + 28),
         block: blocks,
     };
     store_cached_inode(runtime, inode_no, inode);
@@ -984,6 +998,8 @@ fn write_inode(
         return Err(RequestError::InvalidArgument);
     }
     let sectors = data_sectors(runtime, inode)?;
+    let mut inode = inode;
+    inode.sectors = sectors;
     let index = inode_no as usize - 1;
     if index >= runtime.superblock.inodes_count as usize {
         return Err(RequestError::InvalidArgument);
@@ -1098,6 +1114,13 @@ fn lookup_path(
             }
             current =
                 lookup_in_directory(runtime, current, path.add(component_start), component_len)?;
+            // Only namespace-rooted PATH requests follow links. This keeps
+            // legacy/canonical RPCs from following a concurrently replaced link.
+            if component_end < path_len
+                && read_inode(runtime, current).ok()?.mode & EXT2_S_IFMT == EXT2_S_IFLNK
+            {
+                return None;
+            }
             component_start = component_end;
         }
         Some(current)
@@ -1184,7 +1207,6 @@ unsafe fn lookup_in_directory(
     None
 }
 
-
 fn create_node(
     runtime: &mut Ext2Runtime,
     parent_inode: u32,
@@ -1202,6 +1224,7 @@ fn create_node(
             0
         },
         links_count: if is_directory { 2 } else { 1 },
+        sectors: 0,
         block: [0; EXT2_INODE_BLOCK_POINTERS],
     };
     if is_directory {
@@ -1262,9 +1285,10 @@ fn remove_node(
         store_cached_dentry(runtime, parent_inode, name, name_len, None);
     }
     let pinned_socket = (inode.mode & EXT2_S_IFMT) == EXT2_S_IFSOCK
-        && runtime.handles.iter().any(|handle| {
-            (handle.active || handle.close_pending) && handle.inode == inode_no
-        });
+        && runtime
+            .handles
+            .iter()
+            .any(|handle| (handle.active || handle.close_pending) && handle.inode == inode_no);
     if (inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR && (inode.links_count > 1 || pinned_socket) {
         inode.links_count -= 1;
         write_inode(runtime, inode_no, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
@@ -1278,9 +1302,11 @@ fn remove_node(
 }
 
 fn release_socket_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<(), RequestError> {
-    if runtime.handles.iter().any(|handle| {
-        (handle.active || handle.close_pending) && handle.inode == inode_no
-    }) {
+    if runtime
+        .handles
+        .iter()
+        .any(|handle| (handle.active || handle.close_pending) && handle.inode == inode_no)
+    {
         return Ok(());
     }
     let inode = read_inode(runtime, inode_no)?;
@@ -1751,6 +1777,9 @@ fn free_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestErro
 }
 
 fn free_inode_blocks(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<(), RequestError> {
+    if inode.mode & EXT2_S_IFMT == EXT2_S_IFLNK && inode.sectors == 0 {
+        return Ok(());
+    }
     let mut i = 0usize;
     while i < EXT2_MAX_DIRECT_BLOCKS {
         if inode.block[i] != 0 {
@@ -1911,6 +1940,7 @@ fn file_kind(mode: u16) -> Word {
         EXT2_S_IFDIR => nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY,
         EXT2_S_IFREG => nanami_client::vfs::VFS_FILE_TYPE_REGULAR,
         EXT2_S_IFSOCK => nanami_client::vfs::VFS_FILE_TYPE_SOCKET,
+        EXT2_S_IFLNK => nanami_client::vfs::VFS_FILE_TYPE_SYMLINK,
         _ => nanami_client::vfs::VFS_FILE_TYPE_UNKNOWN,
     }
 }
@@ -1920,6 +1950,7 @@ fn ext2_file_type(mode: u16) -> u8 {
         EXT2_S_IFDIR => EXT2_FT_DIR,
         EXT2_S_IFREG => EXT2_FT_REG_FILE,
         EXT2_S_IFSOCK => EXT2_FT_SOCK,
+        EXT2_S_IFLNK => EXT2_FT_SYMLINK,
         _ => 0,
     }
 }
@@ -1929,6 +1960,7 @@ fn ext2_dirent_file_type_to_vfs(file_type: u8) -> Word {
         1 => nanami_client::vfs::VFS_FILE_TYPE_REGULAR,
         2 => nanami_client::vfs::VFS_FILE_TYPE_DIRECTORY,
         EXT2_FT_SOCK => nanami_client::vfs::VFS_FILE_TYPE_SOCKET,
+        EXT2_FT_SYMLINK => nanami_client::vfs::VFS_FILE_TYPE_SYMLINK,
         _ => nanami_client::vfs::VFS_FILE_TYPE_UNKNOWN,
     }
 }
@@ -1959,6 +1991,12 @@ fn add_signed_u16(value: u16, delta: i32) -> u16 {
 }
 
 fn data_sectors(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<u32, RequestError> {
+    if inode.mode & EXT2_S_IFMT == EXT2_S_IFLNK
+        && inode.sectors == 0
+        && inode.size as usize <= EXT2_INODE_BLOCK_POINTERS * 4
+    {
+        return Ok(0);
+    }
     let mut blocks = 0u32;
     let mut i = 0usize;
     while i < EXT2_MAX_DIRECT_BLOCKS {

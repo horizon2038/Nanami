@@ -13,6 +13,10 @@ pub struct MappingTable {
 impl MappingTable {
     pub const EMPTY: Self = Self { address: 0 };
 
+    pub fn same_storage(self, other: Self) -> bool {
+        self.address != 0 && self.address == other.address
+    }
+
     pub(super) fn ensure(&mut self) -> bool {
         if self.address == 0 {
             // ProcessMapping consists only of words; zero is its EMPTY value.

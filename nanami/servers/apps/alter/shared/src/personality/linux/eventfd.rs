@@ -127,8 +127,24 @@ pub(super) fn readiness(runtime: &Runtime, file: LinuxFile) -> i16 {
 pub(super) fn nonblocking(runtime: &Runtime, file: LinuxFile) -> bool {
     match runtime.poll_objects.get(file.resource) {
         Some(Object::Counter(counter)) => counter.nonblocking,
+        Some(Object::Timer(timer)) => timer.nonblocking,
+        Some(Object::Signals(signals)) => signals.nonblocking,
         _ => true,
     }
+}
+
+pub(super) fn set_nonblocking(
+    runtime: &mut Runtime,
+    file: LinuxFile,
+    value: bool,
+) -> Result<(), i32> {
+    match runtime.poll_objects.get_mut(file.resource) {
+        Some(Object::Counter(counter)) => counter.nonblocking = value,
+        Some(Object::Timer(timer)) => timer.nonblocking = value,
+        Some(Object::Signals(signals)) => signals.nonblocking = value,
+        _ => return Err(EBADF),
+    }
+    Ok(())
 }
 
 pub(super) fn same_file(left: LinuxFile, right: LinuxFile) -> bool {

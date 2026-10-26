@@ -1,6 +1,33 @@
 use super::*;
 
 impl Runtime {
+    // Privileged Alpha copies may inspect retained PROT_NONE backing, but a
+    // Linux copyin/copyout must obey guest permissions. Untracked ELF pages are
+    // still validated by Alpha's frame lookup.
+    pub fn memory_access_allowed(
+        &self,
+        pid: Word,
+        base: Word,
+        bytes: Word,
+        permission: Word,
+    ) -> bool {
+        let Some(end) = base.checked_add(bytes) else {
+            return false;
+        };
+        if bytes == 0 {
+            return true;
+        }
+        let Some(process) = self.managed_process(pid) else {
+            return false;
+        };
+        process.mappings.iter().all(|mapping| {
+            mapping.base == 0
+                || mapping.base >= end
+                || mapping.base.saturating_add(mapping.size) <= base
+                || mapping.prot & permission == permission
+        })
+    }
+
     pub fn reset_stack_mapping(&mut self, pid: Word, base: Word, size: Word, prot: Word) -> bool {
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
@@ -76,7 +103,7 @@ impl Runtime {
         let Some(end) = base.checked_add(size) else {
             return false;
         };
-        if !self.has_mapping(pid, base, size) {
+        if !self.has_mapping(pid, base, size) || !self.can_remove_mapping(pid, base, size) {
             return false;
         }
         let Some(process) = self.managed_process_mut(pid) else {
@@ -175,10 +202,61 @@ impl Runtime {
     }
 
     pub fn protect_mapping(&mut self, pid: Word, base: Word, size: Word, prot: Word) -> bool {
-        if !self.has_mapping(pid, base, size) {
+        if self.mapping_prot(pid, base, size) == Some(prot) {
+            return true;
+        }
+        if !self.can_protect_mapping(pid, base, size) {
             return false;
         }
         self.remove_mapping(pid, base, size) && self.add_mapping(pid, base, size, prot)
+    }
+
+    pub fn can_remove_mapping(&self, pid: Word, base: Word, size: Word) -> bool {
+        let Some(end) = base.checked_add(size) else {
+            return false;
+        };
+        let Some(process) = self.managed_process(pid) else {
+            return false;
+        };
+        let mut required = 0;
+        for mapping in process.mappings.iter().filter(|mapping| mapping.base != 0) {
+            let Some(mapping_end) = mapping.base.checked_add(mapping.size) else {
+                return false;
+            };
+            if mapping_end <= base || mapping.base >= end {
+                required += 1;
+            } else {
+                required += usize::from(mapping.base < base);
+                required += usize::from(mapping_end > end);
+            }
+        }
+        required <= process.mappings.len()
+    }
+
+    /// Reserve enough metadata space before changing hardware permissions.
+    pub fn can_protect_mapping(&self, pid: Word, base: Word, size: Word) -> bool {
+        if !self.has_mapping(pid, base, size) {
+            return false;
+        }
+        let Some(end) = base.checked_add(size) else {
+            return false;
+        };
+        let Some(process) = self.managed_process(pid) else {
+            return false;
+        };
+        let mut required = 1; // The replacement protection interval.
+        for mapping in process.mappings.iter().filter(|mapping| mapping.base != 0) {
+            let Some(mapping_end) = mapping.base.checked_add(mapping.size) else {
+                return false;
+            };
+            if mapping_end <= base || mapping.base >= end {
+                required += 1;
+            } else {
+                required += usize::from(mapping.base < base);
+                required += usize::from(mapping_end > end);
+            }
+        }
+        required <= process.mappings.len()
     }
 
     pub fn has_mapping(&self, pid: Word, base: Word, size: Word) -> bool {

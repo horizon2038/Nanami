@@ -21,6 +21,43 @@ pub const VFS_REQUEST_SYNC: Word = 0x9112;
 pub const VFS_REQUEST_FTRUNCATE: Word = 0x9113;
 pub const VFS_REQUEST_FREEZE: Word = 0x9114;
 pub const VFS_REQUEST_THAW: Word = 0x9115;
+pub const VFS_REQUEST_PATH: Word = 0x9116;
+pub const VFS_PATH_RESPONSE_ERROR: Word = 0x9116_0001;
+pub const VFS_PATH_RESOLVE: Word = 1;
+pub const VFS_PATH_SYMLINK: Word = 2;
+pub const VFS_PATH_READLINK: Word = 3;
+pub const VFS_PATH_STAT: Word = 4;
+pub const VFS_PATH_FOLLOW_FINAL: Word = 1;
+pub const VFS_PATH_ALLOW_MISSING: Word = 2;
+pub const VFS_PATH_DIRECTORY_ROOT: Word = Word::MAX;
+
+/// Word-aligned shared-buffer descriptor for namespace-rooted path operations.
+/// POSIX uses a directory FD; VFS uses an owned directory handle in the same field.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PathRequest {
+    pub operation: Word,
+    pub directory: Word,
+    pub root_offset: Word,
+    pub root_bytes: Word,
+    pub path_offset: Word,
+    pub path_bytes: Word,
+    pub target_offset: Word,
+    pub target_bytes: Word,
+    pub output_offset: Word,
+    pub output_bytes: Word,
+    pub flags: Word,
+}
+
+pub const VFS_PATH_ERROR_INVALID: Word = 1;
+pub const VFS_PATH_ERROR_MISSING: Word = 2;
+pub const VFS_PATH_ERROR_NOT_DIRECTORY: Word = 3;
+pub const VFS_PATH_ERROR_LOOP: Word = 4;
+pub const VFS_PATH_ERROR_TOO_LONG: Word = 5;
+pub const VFS_PATH_ERROR_EXISTS: Word = 6;
+pub const VFS_PATH_ERROR_IO: Word = 7;
+pub const VFS_PATH_ERROR_NO_SPACE: Word = 8;
+pub const VFS_PATH_ERROR_READ_ONLY: Word = 9;
 
 pub const VFS_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY: Word = 2;
@@ -37,6 +74,7 @@ pub const VFS_FILE_TYPE_UNKNOWN: Word = 0;
 pub const VFS_FILE_TYPE_REGULAR: Word = 1;
 pub const VFS_FILE_TYPE_DIRECTORY: Word = 2;
 pub const VFS_FILE_TYPE_SOCKET: Word = 3;
+pub const VFS_FILE_TYPE_SYMLINK: Word = 4;
 
 pub const VFS_DIRECTORY_ENTRY_NAME_BYTES: usize = 256;
 pub const VFS_DIRECTORY_ENTRY_RECORD_BYTES: usize = 32 + VFS_DIRECTORY_ENTRY_NAME_BYTES;

@@ -317,6 +317,53 @@ pub fn request_mapping_share(
     Ok(peer)
 }
 
+/// Allocate zeroed, reclaimable owned RAM, ready to share with supervised guests.
+pub fn request_memory_create(bytes: Word) -> Result<Word, RequestError> {
+    if bytes == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, local, peer) = call_os_port(OS_REQUEST_SHARED_MEMORY_CREATE, 0, bytes, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if local == 0 || local & 4095 != 0 || peer != 0 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(local)
+}
+
+/// Share owned RAM at a fixed address in a process supervised by the caller.
+pub fn request_mapping_share_at(
+    peer_pid: Word,
+    local_vaddr: Word,
+    bytes: Word,
+    peer_vaddr: Word,
+) -> Result<Word, RequestError> {
+    if peer_pid == 0
+        || local_vaddr == 0
+        || peer_vaddr == 0
+        || (local_vaddr | peer_vaddr) & 4095 != 0
+        || bytes == 0
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, local, peer) = call_os_port(
+        OS_REQUEST_MAPPING_SHARE,
+        peer_pid,
+        local_vaddr,
+        bytes,
+        peer_vaddr,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if local != local_vaddr || peer != peer_vaddr {
+        return Err(RequestError::Protocol);
+    }
+    Ok(peer)
+}
+
 pub fn get_self_pid() -> Result<Word, RequestError> {
     let (status, pid, _) = call_os_port(OS_REQUEST_SELF_PID, 0, 0, 0, 0, 1)?;
     if status != OS_RESPONSE_OK {
@@ -534,6 +581,25 @@ pub fn request_process_spawn_memory_fault_handler_suspended(
     Ok(child_pid)
 }
 
+pub fn request_process_thread_create(
+    source_pid: Word,
+    pcb_destination_slot: Word,
+    priority: Word,
+) -> Result<Word, RequestError> {
+    let (status, pid, _) = call_os_port(
+        OS_REQUEST_PROCESS_THREAD_CREATE,
+        source_pid,
+        pcb_destination_slot,
+        priority,
+        0,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(pid)
+}
+
 pub fn request_process_spawn_memory_suspended(
     image_vaddr: Word,
     size_bytes: Word,
@@ -686,6 +752,30 @@ pub fn request_process_memory_read(
     Ok(())
 }
 
+pub fn request_process_memory_read_checked(
+    pid: Word,
+    target: Word,
+    destination: Word,
+    bytes: Word,
+) -> Result<(), RequestError> {
+    if bytes == 0 || bytes & OS_MEMORY_COPY_USER_ACCESS != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    request_process_memory_read(pid, target, destination, bytes | OS_MEMORY_COPY_USER_ACCESS)
+}
+
+pub fn request_process_memory_write_checked(
+    pid: Word,
+    target: Word,
+    source: Word,
+    bytes: Word,
+) -> Result<(), RequestError> {
+    if bytes == 0 || bytes & OS_MEMORY_COPY_USER_ACCESS != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    request_process_memory_write(pid, target, source, bytes | OS_MEMORY_COPY_USER_ACCESS)
+}
+
 pub fn request_process_memory_write(
     target_pid: Word,
     target_vaddr: Word,
@@ -809,6 +899,52 @@ pub fn request_mapping_release(base_vaddr: Word, size_bytes: Word) -> Result<(),
     Ok(())
 }
 
+pub fn request_process_mapping_protect(
+    target_pid: Word,
+    base_vaddr: Word,
+    bytes: Word,
+    permissions: Word,
+) -> Result<(), RequestError> {
+    if target_pid == 0 || base_vaddr & 4095 != 0 || bytes == 0 || permissions & !7 != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, _, _) = call_os_port(
+        OS_REQUEST_PROCESS_MAPPING_PROTECT,
+        target_pid,
+        base_vaddr,
+        bytes,
+        permissions,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+pub fn request_process_memory_compare_exchange_u32(
+    target_pid: Word,
+    address: Word,
+    expected: u32,
+    desired: u32,
+) -> Result<u32, RequestError> {
+    if target_pid == 0 || address == 0 || address & 3 != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, previous, _) = call_os_port(
+        OS_REQUEST_PROCESS_MEMORY_COMPARE_EXCHANGE,
+        target_pid,
+        address,
+        expected as Word,
+        desired as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    u32::try_from(previous).map_err(|_| RequestError::Protocol)
+}
+
 pub fn request_process_mapping_release(
     target_pid: Word,
     base_vaddr: Word,
@@ -824,6 +960,29 @@ pub fn request_process_mapping_release(
         target_pid,
         0,
         4,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
+/// Release a supervised virtual range, including unpopulated reservations.
+pub fn request_process_mapping_release_sparse(
+    target_pid: Word,
+    base_vaddr: Word,
+    size_bytes: Word,
+) -> Result<(), RequestError> {
+    if target_pid == 0 || base_vaddr == 0 || size_bytes == 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, _, _) = call_os_port(
+        OS_REQUEST_MAPPING_RELEASE,
+        base_vaddr,
+        size_bytes,
+        target_pid,
+        OS_MAPPING_RELEASE_ALLOW_HOLES,
+        5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));

@@ -90,30 +90,59 @@ impl ProcessManager {
         page_count: usize,
         max_frame_slots: usize,
     ) -> Result<SharedMemoryReservation, CapabilityError> {
+        self.reserve_shared_memory_at(pid, page_count, max_frame_slots, 0)
+    }
+
+    pub fn reserve_shared_memory_at(
+        &mut self,
+        pid: usize,
+        page_count: usize,
+        max_frame_slots: usize,
+        requested_va: usize,
+    ) -> Result<SharedMemoryReservation, CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
         let entry = self
             .find_entry_by_pid(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
-        if pid == 0 || page_count == 0 {
+        if pid == 0 || page_count == 0 || requested_va & (USER_PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
         let space = self.shared_memory.entry(pid).or_default();
         let free_slot = space.slots.find(page_count);
-        let free_page = space.pages.find(page_count);
+        let free_page = if requested_va == 0 {
+            space.pages.find(page_count)
+        } else {
+            None
+        };
         let start_slot = free_slot.unwrap_or(entry.next_frame_slot);
         let slot_end = start_slot
             .checked_add(page_count)
             .filter(|end| *end <= max_frame_slots)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let base_va = free_page
-            .map(|page| page * USER_PAGE_SIZE)
-            .unwrap_or(entry.user_heap_next_va);
+        let base_va = if requested_va != 0 {
+            requested_va
+        } else {
+            free_page
+                .map(|page| page * USER_PAGE_SIZE)
+                .unwrap_or(entry.user_heap_next_va)
+        };
         let bytes = page_count
             .checked_mul(USER_PAGE_SIZE)
             .ok_or(CapabilityError::InvalidArgument)?;
         let end_va = base_va
             .checked_add(bytes)
-            .filter(|end| base_va != 0 && *end <= entry.user_heap_limit_va)
+            .filter(|end| base_va != 0 && (requested_va != 0 || *end <= entry.user_heap_limit_va))
             .ok_or(CapabilityError::InvalidArgument)?;
+        if space
+            .active
+            .range(..end_va)
+            .next_back()
+            .is_some_and(|(_, reservation)| {
+                reservation.base_va + reservation.page_count * USER_PAGE_SIZE > base_va
+            })
+        {
+            return Err(CapabilityError::IllegalOperation);
+        }
 
         // Validate both resources before consuming either one.
         if let Some(slot) = free_slot {
@@ -121,6 +150,8 @@ impl ProcessManager {
         }
         if let Some(page) = free_page {
             space.pages.take(page, page_count);
+        } else if requested_va != 0 {
+            space.pages.exclude(base_va / USER_PAGE_SIZE, page_count);
         }
         let reservation = SharedMemoryReservation {
             base_va,
@@ -132,7 +163,7 @@ impl ProcessManager {
         if free_slot.is_none() {
             entry.next_frame_slot = slot_end;
         }
-        if free_page.is_none() {
+        if free_page.is_none() && requested_va == 0 {
             entry.user_heap_next_va = end_va;
         }
         Ok(reservation)
@@ -144,6 +175,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) -> Option<SharedMemoryReservation> {
+        let pid = self.memory_owner_pid(pid);
         self.shared_memory
             .get(&pid)?
             .active
@@ -155,6 +187,7 @@ impl ProcessManager {
     // Call only after every mapping and capability in the reservation has been
     // removed (or before any was installed when rolling back a reservation).
     pub fn recycle_shared_memory(&mut self, pid: usize, reservation: SharedMemoryReservation) {
+        let pid = self.memory_owner_pid(pid);
         let space = self.shared_memory.get_mut(&pid).unwrap();
         assert_eq!(space.active.remove(&reservation.base_va), Some(reservation));
         space
@@ -171,6 +204,7 @@ impl ProcessManager {
         base_va: usize,
         page_count: usize,
     ) {
+        let pid = self.memory_owner_pid(pid);
         if let Some(space) = self.shared_memory.get_mut(&pid) {
             space.pages.exclude(base_va / USER_PAGE_SIZE, page_count);
         }

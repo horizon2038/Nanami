@@ -13,6 +13,9 @@ mod common {
     pub(crate) use crate::signals;
 }
 mod state {
+    pub mod readiness {
+        pub const READY_OBJECT: usize = 32;
+    }
     pub const LINUX_FD_MAX: usize = 64;
     pub(crate) use crate::OsPersonality;
 }
@@ -38,6 +41,12 @@ mod delivery;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/signal_frame.rs"]
 mod signal_frame;
 use delivery as signals_runtime;
+mod futex {
+    pub(super) fn pump(_: &mut super::Runtime) {}
+}
+mod threads {
+    pub(super) fn exit_peers(_: &mut super::Runtime, _: usize, _: usize) {}
+}
 use process::{HardwareContext, LinuxSyscallContext};
 use signals::{Action, Info, Signals};
 
@@ -65,6 +74,8 @@ struct Rootfs {
 #[derive(Clone, Copy)]
 struct ManagedProcess {
     pid: Word,
+    tgid: Word,
+    exit_status: Word,
     parent_pid: Word,
     pcb: Word,
     exited: bool,
@@ -100,6 +111,7 @@ impl ManagedProcess {
     }
 }
 struct Runtime {
+    readiness_changes: Word,
     managed: Vec<ManagedProcess>,
     signals_pending: bool,
     posix_shm: Word,
@@ -112,10 +124,21 @@ struct Runtime {
     terminal_controls: Vec<TerminalControl>,
 }
 impl Runtime {
+    fn thread_group(&self, pid: Word) -> Word {
+        self.managed_process(pid)
+            .map_or(pid, |process| process.tgid)
+    }
+    fn has_live_threads(&self, pid: Word) -> bool {
+        let group = self.thread_group(pid);
+        self.managed
+            .iter()
+            .any(|other| other.pid != pid && !other.exited && other.tgid == group)
+    }
     fn new() -> Self {
         BACKEND.with(|state| *state.borrow_mut() = Backend::new());
         let mut scratch = Box::new([0; 8192]);
         let mut runtime = Self {
+            readiness_changes: 0,
             managed: Vec::new(),
             signals_pending: false,
             posix_shm: scratch.as_mut_ptr() as Word,
@@ -133,6 +156,8 @@ impl Runtime {
         };
         runtime.managed.push(ManagedProcess {
             pid: 10,
+            tgid: 10,
+            exit_status: 0,
             parent_pid: 0,
             pcb: 42,
             exited: false,
@@ -155,7 +180,7 @@ impl Runtime {
             terminal_line_ready: false,
         });
         BACKEND.with(|state| state.borrow_mut().input_shm = runtime.posix_shm);
-        runtime.managed[0].signals_mut().actions[9] = Action {
+        runtime.managed[0].signals_mut().actions.borrow_mut()[9] = Action {
             handler: 0x2000,
             restorer: 0x3000,
             flags: signals::SA_RESTORER,
@@ -467,7 +492,7 @@ fn failed_stop_never_reads_or_consumes_the_pending_signal() {
 fn ignored_pending_signal_resumes_without_rewriting_an_unchanged_context() {
     let mut runtime = Runtime::new();
     runtime.queue(10);
-    runtime.managed[0].signals_mut().actions[9].handler = signals::SIG_IGN;
+    runtime.managed[0].signals_mut().actions.borrow_mut()[9].handler = signals::SIG_IGN;
     delivery::pump(&mut runtime, 0);
     assert_eq!(calls(), ["suspend", "read", "resume"]);
     assert!(!runtime.signals_pending);
@@ -504,6 +529,20 @@ fn active_fault_masked_signal_and_unstarted_bundle_do_not_get_suspended() {
 }
 
 #[test]
+fn blocked_group_pending_keeps_delivery_cache_live_until_a_temporary_mask_unblocks_it() {
+    let mut runtime = Runtime::new();
+    runtime.managed[0].signals_mut().blocked = signals::bit(10);
+    delivery::queue_group(&mut runtime, 10, Info::new(10, 0, 10)).unwrap();
+    delivery::pump(&mut runtime, 0);
+    assert!(calls().is_empty());
+    assert!(runtime.signals_pending);
+    runtime.managed[0].signals_mut().blocked = 0;
+    delivery::pump(&mut runtime, 0);
+    assert_eq!(calls(), ["suspend", "read", "write", "resume"]);
+    assert!(!runtime.signals_pending);
+}
+
+#[test]
 fn parked_syscalls_keep_existing_eintr_and_sa_restart_without_another_stop() {
     for restart in [false, true] {
         let mut runtime = Runtime::new();
@@ -514,7 +553,7 @@ fn parked_syscalls_keep_existing_eintr_and_sa_restart_without_another_stop() {
             program_counter: 0x4000,
         };
         if restart {
-            runtime.managed[0].signals_mut().actions[9].flags |= signals::SA_RESTART;
+            runtime.managed[0].signals_mut().actions.borrow_mut()[9].flags |= signals::SA_RESTART;
         }
         BACKEND.with(|state| state.borrow_mut().stopped = true);
         runtime.queue(10);
@@ -611,6 +650,7 @@ fn terminal_interrupt_reaches_only_the_foreground_group_in_its_controlling_sessi
     for pid in [11, 12, 20] {
         let mut child = runtime.managed[0];
         child.pid = pid;
+        child.tgid = pid;
         child.job.group = 11;
         if pid == 20 {
             child.job.session = 20;
@@ -624,7 +664,8 @@ fn terminal_interrupt_reaches_only_the_foreground_group_in_its_controlling_sessi
         let mask = process.signals().unwrap().pending_mask();
         if process.pid == 11 || process.pid == 12 {
             assert_eq!(mask, signals::bit(2));
-            assert_eq!(process.signals().unwrap().pending[0], Info::new(2, 128, 0));
+            let mut snapshot = process.signals().unwrap().clone();
+            assert_eq!(snapshot.take_matching(mask), Some(Info::new(2, 128, 0)));
         } else {
             assert_eq!(mask, 0);
         }

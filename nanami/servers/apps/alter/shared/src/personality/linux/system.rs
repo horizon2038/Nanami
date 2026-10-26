@@ -158,6 +158,7 @@ pub(super) fn sys_kill(
         let mut signal_current = false;
         for process in &runtime.managed {
             if process.pid != 0
+                && process.pid == process.tgid
                 && !process.exited
                 && process.rootfs.leader == domain
                 && group.is_none_or(|group| process.job.group == group)
@@ -208,7 +209,7 @@ pub(super) fn sys_kill(
         };
     }
     if runtime.managed_process(target_pid).is_some() {
-        super::signals_runtime::queue(
+        super::signals_runtime::queue_group(
             runtime,
             target_pid,
             crate::common::signals::Info::new(signal, 0, current_pid),

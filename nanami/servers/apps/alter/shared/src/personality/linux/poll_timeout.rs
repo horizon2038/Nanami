@@ -6,34 +6,7 @@ pub(super) fn poll_timeout(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> Result<Option<u128>, i32> {
-    let (mask, size) = match context.number {
-        SYS_PPOLL => (context.args[3], context.args[4]),
-        number if number == super::SYS_EPOLL_PWAIT => (context.args[4], context.args[5]),
-        SYS_PSELECT6 if context.args[5] != 0 => {
-            read_target_memory(runtime, pid, context.args[5], 16)?;
-            unsafe {
-                (
-                    (runtime.posix_shm as *const Word).read_unaligned(),
-                    ((runtime.posix_shm + 8) as *const Word).read_unaligned(),
-                )
-            }
-        }
-        _ => (0, 0),
-    };
-    if mask != 0 {
-        if size != 8 {
-            return Err(EINVAL);
-        }
-        read_target_memory(runtime, pid, mask, 8)?;
-        let mask = unsafe { (runtime.posix_shm as *const u64).read_unaligned() };
-        // Signal delivery/masking is not implemented yet. An empty mask has
-        // no effect; reject an actual mask instead of silently ignoring it.
-        if mask & !((1 << (9 - 1)) | (1 << (19 - 1))) != 0 {
-            return Err(EOPNOTSUPP);
-        }
-    }
     if context.number == SYS_POLL || super::epoll::is_wait(context.number) {
-        // Linux poll takes an int, even on a 64-bit syscall ABI.
         let millis = if context.number == SYS_POLL {
             context.args[2]
         } else {
@@ -67,6 +40,36 @@ pub(super) fn poll_timeout(
     Ok(Some(
         seconds as u128 * 1_000_000_000 + fraction as u128 * (1_000_000_000 / scale) as u128,
     ))
+}
+
+pub(super) fn temporary_signal_mask(
+    runtime: &mut Runtime,
+    pid: Word,
+    context: LinuxSyscallContext,
+) -> Result<Option<u64>, i32> {
+    let (mask, size) = match context.number {
+        SYS_PPOLL => (context.args[3], context.args[4]),
+        number if number == super::SYS_EPOLL_PWAIT => (context.args[4], context.args[5]),
+        SYS_PSELECT6 if context.args[5] != 0 => {
+            read_target_memory(runtime, pid, context.args[5], 16)?;
+            unsafe {
+                (
+                    (runtime.posix_shm as *const Word).read_unaligned(),
+                    ((runtime.posix_shm + 8) as *const Word).read_unaligned(),
+                )
+            }
+        }
+        _ => (0, 0),
+    };
+    if mask != 0 {
+        if size != 8 {
+            return Err(EINVAL);
+        }
+        read_target_memory(runtime, pid, mask, 8)?;
+        let mask = read_shm_u64(runtime, 0) as u64;
+        return Ok(Some(crate::common::signals::blockable(mask)));
+    }
+    Ok(None)
 }
 
 pub(super) fn poll_deadline(now: Word, hz: Word, nanos: u128) -> Word {

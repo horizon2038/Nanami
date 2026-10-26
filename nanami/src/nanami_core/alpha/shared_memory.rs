@@ -24,7 +24,7 @@ impl Alpha {
             || source_va == 0
             || source_va & (PAGE_SIZE - 1) != 0
             || request.arg2 == 0
-            || request.arg3 != 0
+            || request.arg3 & (PAGE_SIZE - 1) != 0
         {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -49,6 +49,10 @@ impl Alpha {
         {
             return Err(CapabilityError::InvalidArgument);
         }
+        let source = self
+            .processes
+            .memory_entry(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         let vm = self
             .processes
             .vm_space_mut(pid)
@@ -63,7 +67,52 @@ impl Alpha {
                 return Err(CapabilityError::IllegalOperation);
             }
         }
-        let mut peer = self.reserve_shared_mapping(peer_pid, pages)?;
+        let mut peer = if request.arg3 == 0 {
+            self.reserve_shared_mapping(peer_pid, pages)?
+        } else {
+            let entry = self
+                .processes
+                .find_entry_by_pid(peer_pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if entry.reaper_pid != pid {
+                return Err(CapabilityError::PermissionDenied);
+            }
+            let entry = self
+                .processes
+                .memory_entry(peer_pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let end = request
+                .arg3
+                .checked_add(
+                    pages
+                        .checked_mul(PAGE_SIZE)
+                        .ok_or(CapabilityError::InvalidArgument)?,
+                )
+                .ok_or(CapabilityError::InvalidArgument)?;
+            for va in (request.arg3..end).step_by(PAGE_SIZE) {
+                if self.processes.find_lazy_mapping(peer_pid, va).is_some()
+                    || self
+                        .processes
+                        .vm_space_mut(peer_pid)
+                        .and_then(|vm| vm.find_frame(va))
+                        .is_some()
+                {
+                    return Err(CapabilityError::IllegalOperation);
+                }
+            }
+            let reservation = self.processes.reserve_shared_memory_at(
+                peer_pid,
+                pages,
+                PROCESS_FRAME_TOTAL_PAGES,
+                request.arg3,
+            )?;
+            SharedMapping {
+                entry,
+                reservation,
+                copied: 0,
+                mapped: 0,
+            }
+        };
         if let Err(error) = self.processes.register_physical_allocation(
             peer_pid,
             peer.reservation.base_va,
@@ -137,7 +186,7 @@ impl Alpha {
         if pid == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
-        if peer_pid == 0 || peer_pid == pid || request.arg1 == 0 {
+        if peer_pid == pid || request.arg1 == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
         let bytes = request
@@ -147,15 +196,18 @@ impl Alpha {
             & !(PAGE_SIZE - 1);
         let pages = bytes / PAGE_SIZE;
         let caller = self.reserve_shared_mapping(pid, pages)?;
-        let peer = match self.reserve_shared_mapping(peer_pid, pages) {
-            Ok(peer) => peer,
-            Err(error) => {
-                self.processes
-                    .recycle_shared_memory(pid, caller.reservation);
-                return Err(error);
+        let mut mappings = Vec::with_capacity(2);
+        mappings.push(caller);
+        if peer_pid != 0 {
+            match self.reserve_shared_mapping(peer_pid, pages) {
+                Ok(peer) => mappings.push(peer),
+                Err(error) => {
+                    self.processes
+                        .recycle_shared_memory(pid, mappings[0].reservation);
+                    return Err(error);
+                }
             }
-        };
-        let mut mappings = [caller, peer];
+        }
         let base_page = match self.memory.allocate_physical_any(bytes) {
             Ok(page) => page,
             Err(error) => {
@@ -192,7 +244,9 @@ impl Alpha {
             return Err(error);
         }
         let caller_va = mappings[0].reservation.base_va;
-        let peer_va = mappings[1].reservation.base_va;
+        let peer_va = mappings
+            .get(1)
+            .map_or(0, |mapping| mapping.reservation.base_va);
         info!("[shm] granted pid={:>3}<->pid={:>3} size={:#x} paddr={:#018x} local={:#018x} peer={:#018x}",
             pid, peer_pid, bytes, base_page * PAGE_SIZE, caller_va, peer_va);
         Ok((caller_va, peer_va))
@@ -205,7 +259,7 @@ impl Alpha {
     ) -> Result<SharedMapping, CapabilityError> {
         let entry = self
             .processes
-            .find_entry_by_pid(pid)
+            .memory_entry(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         let reservation =
             self.processes
@@ -220,7 +274,7 @@ impl Alpha {
 
     fn install_shared_memory(
         &mut self,
-        mappings: &mut [SharedMapping; 2],
+        mappings: &mut [SharedMapping],
         base_page: usize,
     ) -> Result<(), CapabilityError> {
         let pages = mappings[0].reservation.page_count;
@@ -309,7 +363,13 @@ impl Alpha {
             let page = mapping.mapped - 1;
             let va = r.base_va + page * PAGE_SIZE;
             let frame = process_frame_descriptor(entry.root_node, r.start_slot + page);
-            arch::address_space::unmap(entry.address_space, frame, va)?;
+            if self
+                .processes
+                .vm_space_mut(entry.pid)
+                .is_none_or(|vm| vm.permissions(va) != 0)
+            {
+                arch::address_space::unmap(entry.address_space, frame, va)?;
+            }
             if let Some(vm) = self.processes.vm_space_mut(entry.pid) {
                 vm.forget_frame(va);
             }

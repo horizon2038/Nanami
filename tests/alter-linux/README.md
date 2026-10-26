@@ -1,5 +1,60 @@
 # Alter/Linux dynamic-loader regression
 
+## Shared memory, namespace and thread regressions
+
+The integer-only fixtures `memory-events.c`, `namespace.c` and `threads.c`
+exercise the actual Linux ABI without libc or FPU. Build each with the matching
+x86_64 entry stubs; the thread fixture also needs `threads-x86_64.S`:
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-sse2 \
+  -mno-red-zone -O2 -Wl,-e,_start,--image-base=0x400000 \
+  tests/alter-linux/memory-events.c tests/alter-linux/signals-x86_64.S \
+  -o out/nanami-memory-events
+# Repeat for namespace.c -> out/nanami-namespace.
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-sse2 \
+  -mno-red-zone -O2 -Wl,-e,_start,--image-base=0x400000 \
+  tests/alter-linux/threads.c tests/alter-linux/threads-x86_64.S \
+  tests/alter-linux/signals-x86_64.S -o out/nanami-threads
+cargo xtask build --no-linux-bins --linux-bin out/nanami-memory-events \
+  --linux-bin out/nanami-namespace --linux-bin out/nanami-threads \
+  --rootfs out/alter-memory-rootfs.img --output-image out/alter-memory-boot.img
+python3 tests/alter-linux/qemu-smoke.py --image out/alter-memory-boot.img \
+  --program nanami-memory-events --program nanami-namespace \
+  --program nanami-threads --diagnostics --smp 4
+```
+
+Use `--rebuild-rootfs` only when intentionally replacing that test rootfs. The
+runner uses disk snapshots; it requires each fixture's successful exit status.
+Repeat with `--smp 1` to cover same-core scheduling as well.
+
+- Memory/events: physical sharing across aliases/fork/SCM_RIGHTS, protection
+  faults, retained anonymous PROT_NONE through fork/remap, checked copyin/out,
+  memfd EOF SIGBUS/truncate/regrowth/seals, futex wake, timerfd/epoll and signalfd.
+- Namespace: rooted relative/absolute links, link-before-`..` semantics,
+  `O_NOFOLLOW`, inline/block-backed links, loops, dirfds after rename,
+  mkdirat/symlinkat/readlinkat/linkat/renameat/fchdir, and root-escape rejection.
+- Threads: real CLONE_VM, distinct TIDs/shared PID, TLS, shared mmap/FD/cwd,
+  clear-child-tid joins, local/group signal queues via signalfd, leader exit
+  before its worker, and worker-initiated exit_group.
+
+The native suite also exercises VM ownership/reclamation, namespace walking,
+mapping-table split capacity, event/FD lifetime, signal masks and robust futex
+owner-death behavior:
+
+```sh
+cargo test --manifest-path tests/native-performance/Cargo.toml -- --test-threads=1
+```
+
+Validated with one and four QEMU CPUs: all three fixtures, the existing UNIX
+socket and eventfd/epoll fixtures, Neovim headless startup, and interactive
+edit/save/quit followed by independent BusyBox readback. The native suite passes
+877 tests (7 timing tests ignored); all 25 xtask tests pass. Release builds for
+x86_64 and AArch64 checks for Alter, POSIX, ext2 and Alpha pass. A9N sources and
+the kernel IPC fastpath are unchanged. The raw guest fixtures are x86_64-only.
+
 ## UNIX domain socket regression
 
 Build the freestanding fixture, then install it in a fresh image:

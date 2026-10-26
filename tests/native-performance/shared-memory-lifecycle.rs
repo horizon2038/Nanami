@@ -14,6 +14,7 @@ const PROCESS_FRAME_TOTAL_PAGES: usize = 1 << 19;
 struct Machine {
     frames: BTreeMap<usize, usize>,
     maps: BTreeMap<(usize, usize), usize>,
+    permissions: BTreeMap<(usize, usize), usize>,
     live: BTreeMap<usize, usize>,
     zeroed: BTreeSet<usize>,
     next_page: usize,
@@ -81,6 +82,19 @@ mod arch {
     }
     pub mod address_space {
         use super::*;
+        pub fn map(
+            space: usize,
+            frame: usize,
+            va: usize,
+            attributes: a9n_abi::capability_call::address_space::Attribute,
+        ) -> Result<(), CapabilityError> {
+            machine(|m| {
+                operation(m)?;
+                assert!(m.maps.insert((space, va), frame).is_none());
+                m.permissions.insert((space, va), attributes.bits());
+                Ok(())
+            })
+        }
         pub fn unmap(space: usize, frame: usize, va: usize) -> Result<(), CapabilityError> {
             machine(|m| {
                 if m.fail_unmap {
@@ -89,6 +103,7 @@ mod arch {
                 if let Some(mapped) = m.maps.remove(&(space, va)) {
                     assert_eq!(mapped, frame);
                 }
+                m.permissions.remove(&(space, va));
                 Ok(())
             })
         }
@@ -153,6 +168,7 @@ impl Memory {
     }
 }
 
+#[derive(Clone, Copy)]
 struct OsRequestEvent {
     identifier: usize,
     arg0: usize,
@@ -166,6 +182,24 @@ struct Alpha {
     copy_window: memory_copy::CopyWindow,
 }
 impl Alpha {
+    fn process_frame_for_page(
+        &mut self,
+        pid: Word,
+        va: Word,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
+        self.processes
+            .vm_space_mut(pid)
+            .and_then(|vm| vm.find_frame(va))
+            .ok_or(CapabilityError::InvalidArgument)
+    }
+    fn map_process_heap_pages_at(
+        &mut self,
+        _: Word,
+        _: Word,
+        _: Word,
+    ) -> Result<(Word, Word), CapabilityError> {
+        Err(CapabilityError::InvalidArgument)
+    }
     fn map_alpha_temporary_frame(
         &mut self,
         frame: usize,
@@ -211,6 +245,8 @@ mod memory_copy;
 
 #[path = "../../nanami/src/nanami_core/alpha/shared_memory.rs"]
 mod implementation;
+#[path = "../../nanami/src/nanami_core/alpha/mapping_protection.rs"]
+mod mapping_protection;
 
 fn alpha() -> Alpha {
     machine(|m| {
@@ -239,6 +275,126 @@ fn create(alpha: &mut Alpha, pages: usize) -> Result<(usize, usize), CapabilityE
         arg2: 0,
         arg3: 0,
     })
+}
+
+#[test]
+fn owned_memory_can_be_shared_at_supervised_addresses_and_reclaimed_in_either_order() {
+    let mut alpha = alpha();
+    let (owned, peer) = alpha
+        .handle_shared_memory_request(OsRequestEvent {
+            identifier: 1,
+            arg0: 0,
+            arg1: PAGE_SIZE,
+            arg2: 0,
+            arg3: 0,
+        })
+        .unwrap();
+    assert_eq!(peer, 0);
+    let entry = alpha.processes.find_entry_by_pid(2).unwrap();
+    alpha
+        .processes
+        .install_process(
+            2,
+            1,
+            entry.root_slot,
+            entry.root_node,
+            entry.pcb,
+            entry.address_space,
+            entry.os_port,
+            entry.os_port_identifier,
+            entry.affinity,
+            entry.next_frame_slot,
+            entry.user_heap_next_va,
+            entry.user_heap_limit_va,
+        )
+        .unwrap();
+    alpha.processes.ensure_vm_space_for_pid(2).unwrap();
+    let (_, alias) = alpha
+        .handle_mapping_share_request(OsRequestEvent {
+            identifier: 1,
+            arg0: 2,
+            arg1: owned,
+            arg2: PAGE_SIZE,
+            arg3: 0x1_0000_0000,
+        })
+        .unwrap();
+    assert_eq!(alias, 0x1_0000_0000);
+    release(&mut alpha, 1, owned, 1).unwrap();
+    assert_eq!(machine(|m| m.freed), 0);
+    release(&mut alpha, 2, alias, 1).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn hardware_protection_retains_frame_and_allocation_across_prot_none() {
+    let mut alpha = alpha();
+    let (caller, peer) = create(&mut alpha, 1).unwrap();
+    let entry = alpha.processes.find_entry_by_pid(1).unwrap();
+    let original = alpha.processes.vm_space_mut(1).unwrap().find_frame(caller);
+    for permissions in [0, 1, 3, 7, 0] {
+        alpha
+            .handle_mapping_protect_request(OsRequestEvent {
+                identifier: 1,
+                arg0: 1,
+                arg1: caller,
+                arg2: PAGE_SIZE,
+                arg3: permissions,
+            })
+            .unwrap();
+        let vm = alpha.processes.vm_space_mut(1).unwrap();
+        assert_eq!(vm.find_frame(caller), original);
+        assert_eq!(vm.permissions(caller), permissions);
+        assert_eq!(
+            machine(|m| m.maps.contains_key(&(entry.address_space, caller))),
+            permissions != 0
+        );
+        if permissions != 0 {
+            assert_eq!(
+                machine(|m| m.permissions[&(entry.address_space, caller)]),
+                permissions
+            );
+        }
+        assert_eq!(machine(|m| m.freed), 0);
+    }
+    release(&mut alpha, 1, caller, 1).unwrap();
+    release(&mut alpha, 2, peer, 1).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn failed_permission_map_rolls_back_and_foreign_supervisors_are_denied() {
+    let mut alpha = alpha();
+    let (caller, peer) = create(&mut alpha, 2).unwrap();
+    let mut request = OsRequestEvent {
+        identifier: 2,
+        arg0: 1,
+        arg1: caller,
+        arg2: 2 * PAGE_SIZE,
+        arg3: 1,
+    };
+    assert_eq!(
+        alpha.handle_mapping_protect_request(request),
+        Err(CapabilityError::PermissionDenied)
+    );
+    request.identifier = 1;
+    machine(|m| m.fail_at = Some(m.operation + 2));
+    assert_eq!(
+        alpha.handle_mapping_protect_request(request),
+        Err(CapabilityError::IllegalOperation)
+    );
+    for page in 0..2 {
+        assert_eq!(
+            alpha
+                .processes
+                .vm_space_mut(1)
+                .unwrap()
+                .permissions(caller + page * PAGE_SIZE),
+            7
+        );
+    }
+    release(&mut alpha, 1, caller, 2).unwrap();
+    release(&mut alpha, 2, peer, 2).unwrap();
+    assert_empty();
 }
 
 fn release(alpha: &mut Alpha, pid: usize, va: usize, pages: usize) -> Result<(), CapabilityError> {

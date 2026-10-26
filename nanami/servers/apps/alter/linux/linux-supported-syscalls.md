@@ -14,12 +14,19 @@ not imply complete Linux semantics for every flag or edge case.
 `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `mkdir`, `mkdirat`,
 `mknod`, `mknodat`, `rmdir`, `unlink`, `unlinkat`, `rename`, `renameat`,
 `link`, `linkat`, `chown`, `lchown`, `fchown`, `fchownat`, `utimes`,
-`futimesat`, and `utimensat`.
+`futimesat`, `utimensat`, `symlink`, `symlinkat`, and `fchdir`.
 
 Positioned regular-file I/O does not change the open-file description's offset,
 including descriptors shared through `dup`/`fork`. `newfstatat` supports
-`AT_EMPTY_PATH`, including `AT_FDCWD`; other relative-dirfd operations remain
-partial. `O_APPEND` is applied on each POSIX write (also on `pwrite64`, matching
+`AT_EMPTY_PATH`, including `AT_FDCWD`. Path operations resolve relative dirfds
+through their actual VFS directory inode, including after a directory rename.
+The rooted walker expands relative/absolute symlinks before interpreting `..`,
+limits expansion to 40 links, and keeps absolute link targets inside the guest
+root. `lstat`, `readlinkat`, `AT_SYMLINK_NOFOLLOW`, and `O_NOFOLLOW` distinguish
+the link from its target. Both inline and block-backed ext2 links are supported.
+Alter's current pathname/cwd buffer limit is 127 bytes; VFS link targets may
+contain up to 4096 bytes. Traversal from disk symlinks into personality-owned
+virtual mounts is not yet supported. `O_APPEND` is applied on each POSIX write (also on `pwrite64`, matching
 Linux), and `F_GETFL`/`F_SETFL` share append/nonblocking state across duplicates.
 
 The guest root merges its real VFS directory with virtual mountpoints, suppressing
@@ -39,7 +46,8 @@ types and output devices return an error rather than fabricated success.
 
 `dup`, `dup2`, `dup3`, `pipe`, `pipe2`, `fcntl`, `ioctl`, `poll`, `ppoll`,
 `select`, `pselect6`, `eventfd`, `eventfd2`, `epoll_create`, `epoll_create1`,
-`epoll_ctl`, `epoll_wait`, and `epoll_pwait`. Legacy entry points are provided
+`epoll_ctl`, `epoll_wait`, `epoll_pwait`, `timerfd_create`, `timerfd_settime`,
+`timerfd_gettime`, `signalfd`, and `signalfd4`. Legacy entry points are provided
 where the architecture has them.
 
 Event counters support semaphore mode, nonblocking I/O, shared dup/fork state,
@@ -47,9 +55,19 @@ and blocking read/write through the existing readiness waiters. Epoll supports
 level-triggered and one-shot watches, packed architecture-specific user data,
 timeouts, and final-close cleanup. Registrations follow the open description
 rather than a reused descriptor number. Edge-triggered/exclusive watches,
-nested epoll, and nonempty temporary signal masks are explicitly rejected.
+nested epoll are explicitly rejected. `ppoll`, `pselect6`, and `epoll_pwait`
+temporarily install the supplied signal mask while parked and restore it on
+completion or signal delivery.
 Interest sets are bounded by the 64-descriptor guest limit; Alter holds at most
-256 counter/epoll objects in total and allocates their storage only on use.
+256 counter/timer/signal/memory/epoll objects in total and allocates storage only on use.
+
+Timer descriptors count missed periodic expirations, support relative and
+absolute realtime/monotonic/boottime deadlines, and integrate with the same
+one-shot timer and readiness queue used by blocking I/O. Signal descriptors
+return Linux 128-byte `signalfd_siginfo` records from the reading task's pending
+signals (including its thread group's pending queue). Both descriptor types
+share nonblocking state through dup/fork/SCM_RIGHTS. Guest clock-setting is not
+implemented, so realtime clock-change cancellation has no producer.
 
 `pipe2` accepts `O_CLOEXEC | O_NONBLOCK`. `FIONBIO` shares the `F_SETFL`
 nonblocking implementation, including anonymous pipes used by libuv; each pipe
@@ -116,23 +134,35 @@ silently treated as successful operations.
 
 This supplies the stream and FD-passing transport used by the
 [Wayland wire protocol](https://wayland.freedesktop.org/docs/book/Protocol.html).
-It does not add file-backed shared mappings, memfd, DRM, or a compositor; those
-are separate compatibility requirements. A9N and its IPC fastpath are unchanged.
+Memfd and shared-anonymous mappings provide the shared buffers used with this
+transport. DRM, ordinary-file shared page caching, and a compositor remain
+separate requirements. A9N and its IPC fastpath are unchanged.
 
 ## Memory
 
-`mmap`, `mprotect`, `munmap`, `mremap`, `madvise`, and `brk`.
+`mmap`, `mprotect`, `munmap`, `mremap`, `madvise`, `brk`, and `memfd_create`.
 
 Regular-file `MAP_PRIVATE` copies the file without disturbing its offset and
 zero-fills the final partial page. `MAP_FIXED` replaces overlapping mappings;
-`munmap` accepts holes. File-backed `MAP_SHARED` and file-backed `PROT_NONE`
-are explicitly rejected. File mappings are eager copies, not a demand-paged
-page cache, and pages wholly past EOF do not yet deliver Linux `SIGBUS`.
-Hardware enforcement of `mprotect` permissions and preservation of data across
-`PROT_NONE` transitions remain incomplete; this is not a security isolation
-boundary equivalent to Linux VM protection.
+`munmap` accepts holes. Ordinary VFS file-backed `MAP_SHARED` and initial
+file-backed `PROT_NONE` are explicitly rejected: those mappings remain eager
+private copies, not a shared page cache.
 
-VMA metadata supports up to 128 tracked ranges per process. The table is
+Memfd supports sparse read/write, positioned I/O, seek, truncate, basic sealing,
+`MAP_PRIVATE` and real `MAP_SHARED`. Shared anonymous mappings use the same
+reclaimable backing. Shared aliases reference the same physical pages, including
+after fork or `SCM_RIGHTS`; closing a descriptor does not discard live mappings.
+Truncation removes pages past EOF from all shared aliases; access past a memfd's
+EOF raises `SIGBUS`, and regrowth exposes zeroed data. This EOF handling does not
+extend to ordinary VFS file mappings.
+
+`mprotect` changes hardware R/W/X attributes through Alpha. `PROT_NONE` removes
+the leaf mapping while retaining its backing, so restoring access, fork and
+remap preserve data. Sparse fork copies visit backed pages instead of scanning
+every page in a large reservation. Supervisor image/debug copies remain
+privileged; checked Linux copyin/copyout refuses inaccessible guest buffers.
+
+VMA metadata supports up to 128 tracked ranges per address space. The table is
 allocated lazily and released on process removal, rather than increasing
 Alter's startup stack or every process snapshot with an inline array.
 
@@ -149,11 +179,22 @@ Alter alone does not change an already-created filesystem image.
 
 `clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `getpid`,
 `getppid`, `gettid`, `set_tid_address`, `set_robust_list`, `setpgid`,
-`getpgid`, and `kill`.
+`getpgid`, `get_robust_list`, and `kill`.
 
-Process operations are translated onto Alpha's process primitives and the
-POSIX service. Thread-like `clone` combinations and signal behavior remain
-partial.
+`CLONE_VM` creates a suspended raw A9N task referencing the existing AddressSpace,
+then installs its registers, stack, TLS and TID pointers before resuming it.
+`CLONE_FILES`, `CLONE_FS`, `CLONE_SIGHAND`, `CLONE_THREAD`, `CLONE_SETTLS`,
+parent/child TID writes and child-clear-tid are supported on this path.
+Threads share VMA/FD/cwd/disposition state as requested, but retain independent
+signal masks, targeted pending signals and alternate stacks. `getpid` returns
+the thread group ID; `gettid` returns the native task ID. `exit` drops one task;
+`exit_group` stops the other group members. Threads are not individual wait4
+children. VM/frame arenas outlive the original task until their last user is reaped.
+
+Exec of a still-shared VM, or from a non-owner raw task, is rejected instead of
+revoking an address space used by another task. `clone3`, vfork-style VM sharing,
+and namespace-creation clone flags are not implemented. `CLONE_SYSVSEM` is
+accepted for libc thread creation; there is no System V semaphore backend.
 
 ### Dynamic executables
 
@@ -196,8 +237,18 @@ park/resume path with `nanosleep`. Known clocks without a sleep backend return
 Successful waits leave `remain` untouched. Signal interruption and clock-setting
 semantics remain bounded by the existing signal/clock implementation.
 
-Several signal and synchronization calls currently provide compatibility
-behavior rather than a complete Linux signal/thread implementation.
+Futex `WAIT`, `WAKE`, `WAIT_BITSET` and `WAKE_BITSET` use real parked waiters,
+bitsets and deadlines. Private keys identify the address space, while shared
+memfd keys identify the backing object plus offset, not an alias VA. Exit clears
+child TIDs and wakes joiners. Robust-list cleanup atomically sets `OWNER_DIED`
+only for locks held by the exiting TID and wakes their waiters. PI/requeue
+operations remain unsupported; relative timed waits interrupted by a signal
+return `EINTR` (no `restart_syscall` restart block).
+
+Thread groups share process-directed pending signals and interval timers.
+`tgkill` targets an individual task; signalfd can consume eligible thread-local
+and group-pending records. Full Linux credentials, scheduling and FPU signal
+frames are outside this personality's current scope.
 
 ## Identity and System Information
 
@@ -210,9 +261,9 @@ behavior rather than a complete Linux signal/thread implementation.
 `rseq` currently returns `ENOSYS`. Unknown syscall numbers also return
 `ENOSYS` and are logged when syscall tracing is enabled.
 
-General filesystem symlinks, arbitrary-length `truncate`/`ftruncate`, complete
-signals/threads, and full Linux file-permission semantics are still missing.
-Packaging a distro rootfs does not imply those facilities are supported.
+Full Linux file-permission/credential semantics, shared ordinary-file page
+caching, PI futexes and all clone/exec combinations are not implemented.
+Packaging a distro rootfs does not imply arbitrary-distribution compatibility.
 
 The dispatch implementation in
 `../shared/src/personality/linux.rs` is the canonical source of truth.

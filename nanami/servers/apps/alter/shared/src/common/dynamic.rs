@@ -188,6 +188,16 @@ pub fn track(
         if !runtime.add_mapping(pid, base, (end & !(PAGE - 1)) - base, prot) {
             return false;
         }
+        if nanami_runtime::request_process_mapping_protect(
+            pid,
+            base,
+            (end & !(PAGE - 1)) - base,
+            prot,
+        )
+        .is_err()
+        {
+            return false;
+        }
     }
     interpreter
         .map(|image| runtime.add_mapping(pid, image.base, image.size, 7))

@@ -4,10 +4,9 @@ use super::{
     sys_framebuffer_write, sys_netlink_send, sys_pipe_read, sys_pipe_write, sys_socket_recv,
     sys_socket_send, sys_terminal_read, sys_terminal_read_now, sys_terminal_write,
     sys_virtual_read, sys_virtual_write, terminal_bounded_len, terminal_id_for_pid, vectored,
-    write_target_memory_from, EmulationAction, LinuxFileKind, LinuxSyscallContext, Runtime, Word,
-    ALTER_IO_OFFSET, EAGAIN, EBADF, EFAULT, EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESPIPE,
-    ESRCH, LINUX_IOV_MAX, LINUX_O_ACCMODE, LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_WRONLY,
-    LINUX_SOCK_NONBLOCK,
+    EmulationAction, LinuxFileKind, LinuxSyscallContext, Runtime, Word, ALTER_IO_OFFSET, EAGAIN,
+    EBADF, EFAULT, EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESPIPE, ESRCH, LINUX_IOV_MAX,
+    LINUX_O_ACCMODE, LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_WRONLY, LINUX_SOCK_NONBLOCK,
 };
 
 pub(super) fn sys_read(
@@ -24,13 +23,26 @@ pub(super) fn sys_read(
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
         LinuxFileKind::SocketUnix => {
-            return super::unix_message::io(runtime, pid, file, LinuxSyscallContext {
-                number: super::SYS_READ,
-                args: [fd, user_buffer, len, 0, 0, 0],
-                ..LinuxSyscallContext::EMPTY
-            });
+            return super::unix_message::io(
+                runtime,
+                pid,
+                file,
+                LinuxSyscallContext {
+                    number: super::SYS_READ,
+                    args: [fd, user_buffer, len, 0, 0, 0],
+                    ..LinuxSyscallContext::EMPTY
+                },
+            );
         }
-        LinuxFileKind::EventFd => return super::eventfd::read(runtime, pid, file, user_buffer, len),
+        LinuxFileKind::EventFd => {
+            return super::eventfd::read(runtime, pid, file, user_buffer, len)
+        }
+        LinuxFileKind::MemoryFile => {
+            return super::memfd::io(runtime, pid, file, user_buffer, len, None, false)
+        }
+        LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => {
+            return super::fd_events::read(runtime, pid, file, user_buffer, len)
+        }
         LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_read(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeRead => {
@@ -69,7 +81,7 @@ pub(super) fn sys_read(
         if bytes == 0 {
             break;
         }
-        write_target_memory_from(pid, user_buffer + done, source, bytes)?;
+        super::copyout_from(runtime, pid, user_buffer + done, source, bytes)?;
         done += bytes;
     }
     Ok(done)
@@ -87,6 +99,9 @@ pub(super) fn sys_positioned_io(
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     if file.kind == LinuxFileKind::VirtualDirectory {
         return Err(EISDIR);
+    }
+    if file.kind == LinuxFileKind::MemoryFile {
+        return super::memfd::io(runtime, pid, file, buffer, len, Some(offset), write);
     }
     if file.kind != LinuxFileKind::Posix {
         return Err(ESPIPE);
@@ -118,13 +133,13 @@ pub(super) fn sys_positioned_io(
             return if done != 0 { Ok(done) } else { Err(EIO) };
         }
         let result = if write {
-            nanami_runtime::request_process_memory_read(
+            nanami_runtime::request_process_memory_read_checked(
                 pid,
                 buffer + done,
                 runtime.posix_write_buffer().0,
                 chunk,
             )
-            .map_err(map_request_error)
+            .map_err(|_| EFAULT)
             .and_then(|_| {
                 runtime
                     .write_posix(file.posix_fd, 0, chunk, Some(offset + done))
@@ -139,7 +154,7 @@ pub(super) fn sys_positioned_io(
                         return Err(EIO);
                     }
                     if bytes != 0 {
-                        write_target_memory_from(pid, buffer + done, source, bytes)?;
+                        super::copyout_from(runtime, pid, buffer + done, source, bytes)?;
                     }
                     Ok(bytes)
                 })
@@ -236,13 +251,24 @@ pub(super) fn sys_write(
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
         LinuxFileKind::SocketUnix => {
-            return super::unix_message::io(runtime, pid, file, LinuxSyscallContext {
-                number: super::SYS_WRITE,
-                args: [fd, user_buffer, len, 0, 0, 0],
-                ..LinuxSyscallContext::EMPTY
-            });
+            return super::unix_message::io(
+                runtime,
+                pid,
+                file,
+                LinuxSyscallContext {
+                    number: super::SYS_WRITE,
+                    args: [fd, user_buffer, len, 0, 0, 0],
+                    ..LinuxSyscallContext::EMPTY
+                },
+            );
         }
-        LinuxFileKind::EventFd => return super::eventfd::write(runtime, pid, file, user_buffer, len),
+        LinuxFileKind::EventFd => {
+            return super::eventfd::write(runtime, pid, file, user_buffer, len)
+        }
+        LinuxFileKind::MemoryFile => {
+            return super::memfd::io(runtime, pid, file, user_buffer, len, None, true)
+        }
+        LinuxFileKind::TimerFd | LinuxFileKind::SignalFd => return Err(EINVAL),
         LinuxFileKind::Epoll => return Err(EINVAL),
         LinuxFileKind::Terminal => return sys_terminal_write(runtime, pid, user_buffer, len),
         LinuxFileKind::PipeWrite => {
@@ -276,8 +302,13 @@ pub(super) fn sys_write(
         if chunk == 0 {
             return Err(EIO);
         }
-        nanami_runtime::request_process_memory_read(pid, user_buffer + done, destination, chunk)
-            .map_err(map_request_error)?;
+        nanami_runtime::request_process_memory_read_checked(
+            pid,
+            user_buffer + done,
+            destination,
+            chunk,
+        )
+        .map_err(|_| EFAULT)?;
         let written = runtime
             .write_posix(file.posix_fd, 0, chunk, None)
             .map_err(map_request_error)?;
@@ -318,8 +349,13 @@ pub(super) fn sys_writev(
                 iovecs,
                 capacity,
                 |source, offset, len| {
-                    nanami_runtime::request_process_memory_read(pid, source, destination + offset, len)
-                        .map_err(map_request_error)
+                    nanami_runtime::request_process_memory_read_checked(
+                        pid,
+                        source,
+                        destination + offset,
+                        len,
+                    )
+                    .map_err(|_| EFAULT)
                 },
                 |len| {
                     runtime
@@ -335,13 +371,13 @@ pub(super) fn sys_writev(
                 iovecs,
                 capacity,
                 |source, offset, len| {
-                    nanami_runtime::request_process_memory_read(
+                    nanami_runtime::request_process_memory_read_checked(
                         pid,
                         source,
                         runtime.terminal_shm + offset,
                         len,
                     )
-                    .map_err(map_request_error)
+                    .map_err(|_| EFAULT)
                 },
                 |len| {
                     let written = nanami_client::terminal::terminal_write_output(

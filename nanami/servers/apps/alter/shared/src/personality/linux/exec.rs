@@ -24,6 +24,15 @@ pub(super) fn sys_execve(
     argv_ptr: Word,
     envp_ptr: Word,
 ) -> Result<(), ExecError> {
+    let process = runtime.managed_process(pid).ok_or(ESRCH)?;
+    if process.pid != process.vm_group
+        || runtime
+            .managed
+            .iter()
+            .any(|other| other.pid != 0 && other.pid != pid && other.vm_group == process.vm_group)
+    {
+        return Err(ExecError::Errno(super::EOPNOTSUPP));
+    }
     let len = resolve_path(runtime, pid, path_ptr).map_err(|errno| {
         log_execve_stage_error(runtime, pid, "resolve-path", 0, errno);
         errno
@@ -97,6 +106,8 @@ pub(super) fn sys_execve(
         return Err(ExecError::Errno(errno));
     }
     close_cloexec_files(runtime, pid);
+    runtime.tasks.remove(pid);
+    super::memfd::forget_process(runtime, pid);
     if !runtime.reset_process_runtime_for_exec(pid) {
         return Err(ExecError::ImageReplaced);
     }

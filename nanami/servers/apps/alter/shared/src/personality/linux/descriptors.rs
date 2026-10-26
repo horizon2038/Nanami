@@ -1,12 +1,11 @@
 use super::{
-    cleanup_graphics_for_process, close_socket_file, is_at_fdcwd, map_path_request_error,
-    map_request_error, map_word, open_virtual_path, path_is_absolute, posix, read_c_string,
-    release_pipe_file, resolve_current_shm_path, resolve_path, translate_guest_path_for_vfs,
-    virtual_node_stat, LinuxFile, LinuxFileKind, Runtime, Word, EBADF, EINVAL, EMFILE, ENOSYS,
-    ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX, LINUX_F_DUPFD, LINUX_F_DUPFD_CLOEXEC,
-    LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD, LINUX_F_SETFL, LINUX_O_APPEND, LINUX_O_CLOEXEC,
-    LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_DSYNC, LINUX_O_LARGEFILE, LINUX_O_NONBLOCK,
-    LINUX_O_SYNC, LINUX_O_TRUNC, LINUX_SOCK_NONBLOCK,
+    cleanup_graphics_for_process, close_socket_file, map_path_request_error, map_request_error,
+    map_word, open_virtual_path, posix, read_c_string, release_pipe_file,
+    translate_guest_path_for_vfs, virtual_node_stat, LinuxFile, LinuxFileKind, Runtime, Word,
+    EBADF, EINVAL, EMFILE, ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX, LINUX_F_DUPFD,
+    LINUX_F_DUPFD_CLOEXEC, LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD, LINUX_F_SETFL,
+    LINUX_O_APPEND, LINUX_O_CLOEXEC, LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_DSYNC,
+    LINUX_O_LARGEFILE, LINUX_O_NONBLOCK, LINUX_O_SYNC, LINUX_O_TRUNC, LINUX_SOCK_NONBLOCK,
 };
 
 pub(super) fn sys_open(
@@ -15,7 +14,17 @@ pub(super) fn sys_open(
     path_ptr: Word,
     linux_flags: Word,
 ) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
+    let raw_len = read_c_string(runtime, pid, path_ptr)?;
+    let len = super::resolve_at(
+        runtime,
+        pid,
+        super::LINUX_AT_FDCWD,
+        raw_len,
+        linux_flags & super::LINUX_O_NOFOLLOW == 0,
+    )?;
+    if linux_flags & super::LINUX_O_NOFOLLOW != 0 {
+        check_no_follow(runtime, pid, len)?;
+    }
     open_current_path(runtime, pid, len, linux_flags)
 }
 
@@ -72,11 +81,30 @@ pub(super) fn sys_openat(
     linux_flags: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
+    let len = super::resolve_at(
+        runtime,
+        pid,
+        dirfd,
+        raw_len,
+        linux_flags & super::LINUX_O_NOFOLLOW == 0,
+    )?;
+    if linux_flags & super::LINUX_O_NOFOLLOW != 0 {
+        check_no_follow(runtime, pid, len)?;
     }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
     open_current_path(runtime, pid, len, linux_flags)
+}
+
+fn check_no_follow(runtime: &mut Runtime, pid: Word, bytes: Word) -> Result<(), i32> {
+    let path =
+        unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, bytes) }.to_vec();
+    let stat = super::stat_current_path(runtime, pid, bytes);
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), runtime.posix_shm as *mut u8, bytes);
+    }
+    if stat.is_ok_and(|stat| stat.2 == posix::POSIX_FILE_TYPE_SYMLINK) {
+        return Err(super::ELOOP);
+    }
+    Ok(())
 }
 
 pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
@@ -167,6 +195,9 @@ pub(super) fn sys_lseek(
     whence: Word,
 ) -> Result<Word, i32> {
     let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::MemoryFile {
+        return super::memfd::seek(runtime, file, offset, whence);
+    }
     if file.is_root_directory() {
         if whence > posix::POSIX_SEEK_CUR {
             return Err(EINVAL);
@@ -178,7 +209,14 @@ pub(super) fn sys_lseek(
             whence,
         ));
     }
-    if matches!(file.kind, LinuxFileKind::EventFd | LinuxFileKind::Epoll | LinuxFileKind::SocketUnix) {
+    if matches!(
+        file.kind,
+        LinuxFileKind::EventFd
+            | LinuxFileKind::TimerFd
+            | LinuxFileKind::SignalFd
+            | LinuxFileKind::Epoll
+            | LinuxFileKind::SocketUnix
+    ) {
         return Err(ESPIPE);
     }
     if file.kind == LinuxFileKind::PipeRead
@@ -228,6 +266,23 @@ pub(super) fn sys_fcntl(
     command: Word,
     argument: Word,
 ) -> Result<Word, i32> {
+    const F_ADD_SEALS: Word = 1033;
+    const F_GET_SEALS: Word = 1034;
+    if command == F_ADD_SEALS || command == F_GET_SEALS {
+        let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+        if file.kind != LinuxFileKind::MemoryFile {
+            return Err(EINVAL);
+        }
+        return super::memfd::seals(
+            runtime,
+            file,
+            if command == F_ADD_SEALS {
+                Some(argument)
+            } else {
+                None
+            },
+        );
+    }
     match command {
         LINUX_F_DUPFD | LINUX_F_DUPFD_CLOEXEC => {
             let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
@@ -256,6 +311,9 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_GETFL => {
             let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind == LinuxFileKind::MemoryFile {
+                return super::memfd::status_flags(runtime, file, None);
+            }
             if file.kind == LinuxFileKind::SocketUnix {
                 let nonblocking = if super::unix::nonblocking(runtime, file) {
                     LINUX_O_NONBLOCK
@@ -264,7 +322,10 @@ pub(super) fn sys_fcntl(
                 };
                 return Ok(super::LINUX_O_RDWR | nonblocking);
             }
-            if file.kind == LinuxFileKind::EventFd {
+            if matches!(
+                file.kind,
+                LinuxFileKind::EventFd | LinuxFileKind::TimerFd | LinuxFileKind::SignalFd
+            ) {
                 let nonblocking = if super::eventfd::nonblocking(runtime, file) {
                     LINUX_O_NONBLOCK
                 } else {
@@ -303,18 +364,20 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_SETFL => {
             let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if file.kind == LinuxFileKind::MemoryFile {
+                super::memfd::status_flags(runtime, file, Some(argument))?;
+                return Ok(0);
+            }
             if file.kind == LinuxFileKind::SocketUnix {
                 let socket = runtime.unix_sockets.get_mut(file.resource).ok_or(EBADF)?;
                 socket.nonblocking = argument & LINUX_O_NONBLOCK != 0;
                 return Ok(0);
             }
-            if file.kind == LinuxFileKind::EventFd {
-                let Some(crate::state::poll_objects::Object::Counter(counter)) =
-                    runtime.poll_objects.get_mut(file.resource)
-                else {
-                    return Err(EBADF);
-                };
-                counter.nonblocking = argument & LINUX_O_NONBLOCK != 0;
+            if matches!(
+                file.kind,
+                LinuxFileKind::EventFd | LinuxFileKind::TimerFd | LinuxFileKind::SignalFd
+            ) {
+                super::eventfd::set_nonblocking(runtime, file, argument & LINUX_O_NONBLOCK != 0)?;
                 return Ok(0);
             }
             if file.kind == LinuxFileKind::Posix {
@@ -325,18 +388,23 @@ pub(super) fn sys_fcntl(
                 )
                 .map_err(map_request_error);
             }
-            if matches!(file.kind, LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite) {
+            if matches!(
+                file.kind,
+                LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite
+            ) {
                 // dup/fork share each pipe end's open-file status. The read
                 // and write ends remain independent descriptions.
                 for process in &mut runtime.managed {
-                    for alias in &mut process.files {
+                    for alias in process.files.iter_mut() {
                         if alias.kind == file.kind && alias.posix_fd == file.posix_fd {
-                            alias.flags = (alias.flags & !LINUX_O_NONBLOCK)
-                                | (argument & LINUX_O_NONBLOCK);
+                            alias.flags =
+                                (alias.flags & !LINUX_O_NONBLOCK) | (argument & LINUX_O_NONBLOCK);
                         }
                     }
                 }
-                runtime.unix_sockets.update_flags(file, LINUX_O_NONBLOCK, argument);
+                runtime
+                    .unix_sockets
+                    .update_flags(file, LINUX_O_NONBLOCK, argument);
                 return Ok(0);
             }
             file.flags = (file.flags & LINUX_FD_CLOEXEC) | (argument & LINUX_SOCK_NONBLOCK);
@@ -392,7 +460,10 @@ pub(super) fn linux_file_kind_name(kind: LinuxFileKind) -> &'static str {
         LinuxFileKind::EvdevKeyboard => "evdev-keyboard",
         LinuxFileKind::EvdevMouse => "evdev-mouse",
         LinuxFileKind::Framebuffer => "framebuffer",
+        LinuxFileKind::MemoryFile => "memfd",
         LinuxFileKind::EventFd => "eventfd",
+        LinuxFileKind::TimerFd => "timerfd",
+        LinuxFileKind::SignalFd => "signalfd",
         LinuxFileKind::Epoll => "epoll",
     }
 }
@@ -410,7 +481,12 @@ pub(super) fn duplicate_linux_file(
             })
         }
         LinuxFileKind::Empty => Err(EBADF),
-        LinuxFileKind::EventFd | LinuxFileKind::Epoll | LinuxFileKind::SocketUnix => Ok(file),
+        LinuxFileKind::EventFd
+        | LinuxFileKind::TimerFd
+        | LinuxFileKind::SignalFd
+        | LinuxFileKind::MemoryFile
+        | LinuxFileKind::Epoll
+        | LinuxFileKind::SocketUnix => Ok(file),
         LinuxFileKind::Terminal
         | LinuxFileKind::VirtualDirectory
         | LinuxFileKind::VirtualFile
@@ -487,7 +563,11 @@ pub(super) fn release_file_description(runtime: &mut Runtime, file: LinuxFile) {
     }
     match file.kind {
         LinuxFileKind::SocketUnix => super::unix::collect(runtime),
-        LinuxFileKind::EventFd | LinuxFileKind::Epoll => super::eventfd::release(runtime, file),
+        LinuxFileKind::MemoryFile => super::memfd::collect(runtime, file.resource),
+        LinuxFileKind::EventFd
+        | LinuxFileKind::TimerFd
+        | LinuxFileKind::SignalFd
+        | LinuxFileKind::Epoll => super::eventfd::release(runtime, file),
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => release_pipe_file(runtime, file),
         LinuxFileKind::SocketUdp
         | LinuxFileKind::SocketTcp
@@ -510,15 +590,20 @@ pub fn close_process_files(runtime: &mut Runtime, pid: Word) {
 }
 
 pub fn close_process_files_checked(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    super::futex::exit(runtime, pid);
     let mut first_error = None;
     let mut fd = 0usize;
-    while fd < LINUX_FD_MAX {
+    let shared_files = runtime.files_shared_with_live_task(pid);
+    while !shared_files && fd < LINUX_FD_MAX {
         if let Err(error) = close_linux_fd(runtime, pid, fd as Word) {
             first_error.get_or_insert(error);
         }
         fd += 1;
     }
-    cleanup_graphics_for_process(runtime, pid);
+    if !runtime.has_live_threads(pid) {
+        cleanup_graphics_for_process(runtime, pid);
+    }
+    super::memfd::forget_process(runtime, pid);
     first_error.map_or(Ok(()), Err)
 }
 

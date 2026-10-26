@@ -18,6 +18,40 @@ pub enum Delivery {
 }
 
 pub fn queue(runtime: &mut Runtime, pid: Word, info: Info) -> Result<(), i32> {
+    queue_to(runtime, pid, info, false)
+}
+
+pub fn queue_group(runtime: &mut Runtime, pid: Word, info: Info) -> Result<(), i32> {
+    let group = runtime.thread_group(pid);
+    let target = runtime
+        .managed
+        .iter()
+        .find(|process| process.pid != 0 && !process.exited && process.tgid == group)
+        .map(|process| process.pid)
+        .ok_or(ESRCH)?;
+    if signals::stop_signal(info.signal()) || info.signal() == signals::SIGCONT {
+        let targets: alloc::vec::Vec<_> = runtime
+            .managed
+            .iter()
+            .filter(|process| process.pid != 0 && !process.exited && process.tgid == group)
+            .map(|process| process.pid)
+            .collect();
+        // Default job-control actions affect every task, not just one recipient.
+        if runtime
+            .managed_process(target)
+            .and_then(|process| process.signals())
+            .is_none_or(|signals| signals.action(info.signal()).handler == signals::SIG_DFL)
+        {
+            for tid in targets {
+                queue_to(runtime, tid, info, false)?;
+            }
+            return Ok(());
+        }
+    }
+    queue_to(runtime, target, info, true)
+}
+
+fn queue_to(runtime: &mut Runtime, pid: Word, info: Info, group: bool) -> Result<(), i32> {
     let signal = info.signal();
     if signal == 0 || signal > 64 {
         return Err(EINVAL);
@@ -38,12 +72,10 @@ pub fn queue(runtime: &mut Runtime, pid: Word, info: Info) -> Result<(), i32> {
         }
     }
     let state = process.signals_mut();
-    let action = state.actions[signal - 1];
+    let action = state.action(signal);
     // Stop/continue cancellation applies even when the signal itself is ignored.
     if signal == signals::SIGCONT {
-        state
-            .pending
-            .retain(|info| !signals::stop_signal(info.signal()));
+        state.discard_stops();
     } else if signals::stop_signal(signal) {
         state.discard(signals::SIGCONT);
     }
@@ -54,10 +86,18 @@ pub fn queue(runtime: &mut Runtime, pid: Word, info: Info) -> Result<(), i32> {
             && state
                 .wait_mask
                 .is_none_or(|mask| mask & signals::bit(signal) == 0));
-    if !ignored && !state.enqueue(info) {
+    let accepted = if ignored {
+        true
+    } else if group {
+        state.enqueue_group(info)
+    } else {
+        state.enqueue(info)
+    };
+    if !accepted {
         return Err(EAGAIN);
     }
     runtime.signals_pending = true;
+    runtime.readiness_changes |= crate::state::readiness::READY_OBJECT;
     Ok(())
 }
 
@@ -142,7 +182,7 @@ fn enter_handler(
             -(EINTR as isize),
             OsPersonality::Linux,
         );
-        if action.flags & SA_RESTART != 0 && restartable(context.number) {
+        if action.flags & SA_RESTART != 0 && restartable(context) {
             signal_frame::restart(registers, context);
         } else if context.number == SYS_NANOSLEEP || context.number == SYS_CLOCK_NANOSLEEP {
             sleep_remainder(runtime, pid, context)?;
@@ -172,7 +212,7 @@ fn enter_handler(
         state.blocked |= signals::bit(info.signal());
     }
     if action.flags & SA_RESETHAND != 0 {
-        state.actions[info.signal() - 1] = Action::default();
+        state.set_action(info.signal(), Action::default());
     }
     if stack.flags & SS_AUTODISARM != 0 {
         state.altstack = AltStack::DISABLED;
@@ -181,9 +221,14 @@ fn enter_handler(
     Ok(())
 }
 
-fn restartable(number: Word) -> bool {
+fn restartable(context: LinuxSyscallContext) -> bool {
+    if context.number == SYS_FUTEX {
+        // An absolute WAIT_BITSET can be replayed without extending its timeout.
+        // Relative timed WAIT would require a restart-block deadline instead.
+        return context.args[3] == 0 || context.args[1] & 0x7f == 9;
+    }
     matches!(
-        number,
+        context.number,
         SYS_READ
             | SYS_READV
             | SYS_WRITE
@@ -278,7 +323,7 @@ pub fn deliver(
             };
         };
         let signal = info.signal();
-        let action = state.actions[signal - 1];
+        let action = state.action(signal);
         if signal == signals::SIGKILL {
             state.exit_signal = signal;
             return Delivery::Terminate(signal);
@@ -439,12 +484,13 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
         process.pid != 0
             && !process.exited
             && process.signals().is_some_and(|state| {
-                !state.pending.is_empty()
+                state.has_pending()
                     || state.child_notify
                     || (!state.stopped && state.stopped_context.is_some())
             })
     });
     if continued {
+        super::futex::pump(runtime);
         // Readiness may have arrived while a process was stopped. Recheck once,
         // and re-arm expired sleep/poll deadlines instead of losing their wakeup.
         super::wake_terminal_readers(runtime);
@@ -481,6 +527,7 @@ pub fn terminate(runtime: &mut Runtime, pid: Word, signal: Word) {
     {
         return;
     }
+    super::threads::exit_peers(runtime, pid, 128 + signal);
     if nanami_runtime::request_process_kill(pid, signal).is_err() {
         return;
     }
@@ -496,6 +543,35 @@ pub fn terminate(runtime: &mut Runtime, pid: Word, signal: Word) {
 }
 
 pub fn notify_child(runtime: &mut Runtime, child: Word, code: i32, status: Word) {
+    let Some(snapshot) = runtime.managed_process(child).copied() else {
+        return;
+    };
+    if snapshot.pid != snapshot.tgid {
+        // Threads are not wait4 children and do not independently generate SIGCHLD.
+        if snapshot.exited && nanami_runtime::request_process_reap(child).is_ok() {
+            runtime.remove_process(child);
+        }
+        if let Some(leader) = runtime.managed_process(snapshot.tgid).copied() {
+            if leader.exited && !runtime.has_live_threads(leader.pid) {
+                crate::notify_terminal_process_exit(runtime, leader.pid, leader.exit_status);
+                let signal = leader.signals().map_or(0, |signals| signals.exit_signal);
+                notify_child(
+                    runtime,
+                    leader.pid,
+                    if signal == 0 { 1 } else { 2 },
+                    if signal == 0 {
+                        leader.exit_status
+                    } else {
+                        signal
+                    },
+                );
+            }
+        }
+        return;
+    }
+    if snapshot.exited && runtime.has_live_threads(child) {
+        return;
+    }
     let Some(process) = runtime.managed_process_mut(child) else {
         return;
     };
@@ -507,9 +583,7 @@ pub fn notify_child(runtime: &mut Runtime, child: Word, code: i32, status: Word)
     let action = runtime
         .managed_process(parent)
         .and_then(|process| process.signals())
-        .map_or(Action::default(), |state| {
-            state.actions[signals::SIGCHLD - 1]
-        });
+        .map_or(Action::default(), |state| state.action(signals::SIGCHLD));
     if runtime
         .managed_process(parent)
         .is_some_and(|process| process.signal_waiting && process.signal_context.number == SYS_VFORK)
@@ -543,5 +617,5 @@ pub fn notify_child(runtime: &mut Runtime, child: Word, code: i32, status: Word)
     if code >= 5 && action.flags & signals::SA_NOCLDSTOP != 0 {
         return;
     }
-    let _ = queue(runtime, parent, Info::child(child, code, status));
+    let _ = queue_group(runtime, parent, Info::child(child, code, status));
 }

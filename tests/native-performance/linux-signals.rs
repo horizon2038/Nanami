@@ -32,6 +32,40 @@ fn masks_cannot_block_kill_or_stop() {
 }
 
 #[test]
+fn threads_share_dispositions_group_pending_and_timer_but_not_masks_or_targeted_signals() {
+    let mut leader = Signals::new();
+    leader.blocked = bit(10);
+    leader.altstack = AltStack {
+        sp: 0x1000,
+        flags: 0,
+        size: 8192,
+    };
+    let mut thread = leader.clone_task(true, true);
+    assert_eq!(thread.altstack, AltStack::DISABLED);
+    thread.blocked = bit(12);
+    thread.set_action(
+        10,
+        Action {
+            handler: 0x4000,
+            ..Action::default()
+        },
+    );
+    assert_eq!(leader.action(10).handler, 0x4000);
+    thread.timer.set(Timer {
+        deadline: Some(55),
+        interval: 10,
+    });
+    assert_eq!(leader.timer.get().deadline, Some(55));
+    leader.enqueue_group(Info::new(10, 0, 123));
+    assert!(leader.next().is_none());
+    assert_eq!(thread.next(), Some(Info::new(10, 0, 123)));
+    assert_eq!(leader.pending_mask(), 0);
+    leader.enqueue(Info::new(12, -6, 7));
+    assert!(thread.next().is_none());
+    assert_eq!(leader.next(), Some(Info::new(12, -6, 7)));
+}
+
+#[test]
 fn standard_signals_coalesce_but_realtime_preserves_fifo_and_priority() {
     let mut state = Signals::new();
     assert!(state.enqueue(Info::new(10, 0, 1)));
@@ -85,33 +119,39 @@ fn queue_is_bounded_but_kill_and_stop_cannot_be_starved() {
 #[test]
 fn fork_copies_dispositions_and_mask_not_pending_timers_or_stop_state() {
     let mut parent = Signals::new();
-    parent.actions[9] = Action {
+    parent.actions.borrow_mut()[9] = Action {
         handler: 0x1234,
         flags: SA_RESTART,
         ..Action::default()
     };
     parent.blocked = bit(10);
     parent.enqueue(Info::new(12, 0, 0));
-    parent.timer_deadline = Some(20);
+    parent.timer.set(Timer {
+        deadline: Some(20),
+        interval: 0,
+    });
     parent.stopped = true;
     let mut child = parent.fork();
     assert_eq!(child.actions, parent.actions);
     assert_eq!(child.blocked, parent.blocked);
     assert!(child.pending.is_empty());
     assert!(!child.stopped);
-    assert!(child.timer_deadline.is_none());
-    child.actions[9].handler = 0x5678;
-    assert_eq!(parent.actions[9].handler, 0x1234);
+    assert!(child.timer.get().deadline.is_none());
+    child.actions.borrow_mut()[9].handler = 0x5678;
+    assert_eq!(parent.action(10).handler, 0x1234);
 }
 
 #[test]
 fn exec_preserves_ignored_actions_pending_signals_mask_and_real_timer() {
     let mut state = Signals::new();
-    state.actions[9].handler = 0x1234;
-    state.actions[11].handler = SIG_IGN;
+    state.actions.borrow_mut()[9].handler = 0x1234;
+    state.actions.borrow_mut()[11].handler = SIG_IGN;
     state.blocked = bit(10);
     state.enqueue(Info::new(10, 0, 0));
-    state.timer_deadline = Some(100);
+    state.timer.set(Timer {
+        deadline: Some(100),
+        interval: 0,
+    });
     state.trampoline = 0x1000;
     state.altstack = AltStack {
         sp: 0x1000,
@@ -119,11 +159,11 @@ fn exec_preserves_ignored_actions_pending_signals_mask_and_real_timer() {
         size: 8192,
     };
     state.exec();
-    assert_eq!(state.actions[9].handler, SIG_DFL);
-    assert_eq!(state.actions[11].handler, SIG_IGN);
+    assert_eq!(state.action(10).handler, SIG_DFL);
+    assert_eq!(state.action(12).handler, SIG_IGN);
     assert_eq!(state.pending_mask(), bit(10));
     assert_eq!(state.blocked, bit(10));
-    assert_eq!(state.timer_deadline, Some(100));
+    assert_eq!(state.timer.get().deadline, Some(100));
     assert_eq!(state.trampoline, 0);
     assert_eq!(state.altstack, AltStack::DISABLED);
 }

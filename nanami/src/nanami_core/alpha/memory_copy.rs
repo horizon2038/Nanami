@@ -36,6 +36,7 @@ impl Alpha {
         frame: CapabilityDescriptor,
         pinned_va: Option<usize>,
     ) -> Result<usize, CapabilityError> {
+        let pid = self.processes.memory_owner_pid(pid);
         if let Some(index) =
             self.copy_window.mappings.iter().position(|entry| {
                 entry.is_some_and(|m| m.ready && m.pid == pid && m.frame == frame)
@@ -86,6 +87,7 @@ impl Alpha {
         &mut self,
         pid: usize,
     ) -> Result<(), CapabilityError> {
+        let pid = self.processes.memory_owner_pid(pid);
         for index in 0..COPY_WINDOW_PAGES {
             if self.copy_window.mappings[index].is_some_and(|m| m.pid == pid) {
                 self.unmap_process_copy_slot(index)?;

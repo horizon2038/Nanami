@@ -4,6 +4,7 @@ mod boot_trace;
 mod control_requests;
 mod domain_manifest;
 mod domains;
+mod mapping_protection;
 mod memory_copy;
 mod memory_requests;
 mod mmio;
@@ -14,6 +15,7 @@ mod service_events;
 mod service_requests;
 mod shared_memory;
 mod support;
+mod threads;
 mod version_info;
 
 #[cfg(target_arch = "x86_64")]
@@ -673,6 +675,9 @@ impl Alpha {
             OS_REQUEST_MAPPING_RELEASE => {
                 response_from_status_result(self.handle_mapping_release_request(request))
             }
+            nanami_uapi::os::OS_REQUEST_PROCESS_MEMORY_COMPARE_EXCHANGE => {
+                response_from_detail_result(self.handle_process_compare_exchange(request))
+            }
             OS_REQUEST_SHARED_FRAMEBUFFER_CREATE => {
                 response_from_details_result(self.handle_shared_framebuffer_request(request))
             }
@@ -700,6 +705,9 @@ impl Alpha {
             },
             OS_REQUEST_PROCESS_SPAWN => {
                 response_from_detail_result(self.handle_process_spawn_request(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_THREAD_CREATE => {
+                response_from_detail_result(self.handle_thread_create(request))
             }
             OS_REQUEST_PROCESS_SPAWN_MEMORY => {
                 response_from_detail_result(self.handle_process_spawn_memory_request(request))
@@ -767,6 +775,9 @@ impl Alpha {
             }
             OS_REQUEST_NOTIFICATION_PORT_COPY => {
                 response_from_status_result(self.handle_notification_port_copy_request(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_MAPPING_PROTECT => {
+                response_from_status_result(self.handle_mapping_protect_request(request))
             }
             _ => {
                 warn!(

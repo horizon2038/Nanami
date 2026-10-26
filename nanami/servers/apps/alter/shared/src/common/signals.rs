@@ -1,5 +1,7 @@
 //! Linux signal state. Runtime owns the lazy allocation; PCB metadata copies do not.
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 
 pub const NSIG: usize = 64;
 pub const SIGKILL: usize = 9;
@@ -97,9 +99,10 @@ impl Info {
 
 #[derive(Clone)]
 pub struct Signals {
-    pub actions: [Action; NSIG],
+    pub actions: Rc<RefCell<[Action; NSIG]>>,
     pub blocked: u64,
     pub pending: Vec<Info>,
+    group_pending: Rc<RefCell<Vec<Info>>>,
     pub altstack: AltStack,
     pub suspend_mask: Option<u64>,
     pub wait_mask: Option<u64>,
@@ -110,16 +113,22 @@ pub struct Signals {
     pub child_notify: bool,
     pub exit_signal: usize,
     pub trampoline: usize,
-    pub timer_deadline: Option<usize>,
-    pub timer_interval: usize,
+    pub timer: Rc<Cell<Timer>>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Timer {
+    pub deadline: Option<usize>,
+    pub interval: usize,
 }
 
 impl Signals {
     pub fn new() -> Self {
         Self {
-            actions: [Action::default(); NSIG],
+            actions: Rc::new(RefCell::new([Action::default(); NSIG])),
             blocked: 0,
             pending: Vec::new(),
+            group_pending: Rc::new(RefCell::new(Vec::new())),
             altstack: AltStack::DISABLED,
             suspend_mask: None,
             wait_mask: None,
@@ -129,14 +138,13 @@ impl Signals {
             child_notify: false,
             exit_signal: 0,
             trampoline: 0,
-            timer_deadline: None,
-            timer_interval: 0,
+            timer: Rc::new(Cell::new(Timer::default())),
         }
     }
 
     pub fn fork(&self) -> Self {
         Self {
-            actions: self.actions,
+            actions: Rc::new(RefCell::new(*self.actions.borrow())),
             blocked: self.blocked,
             altstack: self.altstack,
             trampoline: self.trampoline,
@@ -145,7 +153,10 @@ impl Signals {
     }
 
     pub fn exec(&mut self) {
-        for action in &mut self.actions {
+        // exec unshares dispositions before resetting caught handlers.
+        let actions = *self.actions.borrow();
+        self.actions = Rc::new(RefCell::new(actions));
+        for action in self.actions.borrow_mut().iter_mut() {
             if action.handler != SIG_IGN {
                 *action = Action::default();
             }
@@ -159,42 +170,112 @@ impl Signals {
     pub fn pending_mask(&self) -> u64 {
         self.pending
             .iter()
+            .chain(self.group_pending.borrow().iter())
             .fold(0, |mask, info| mask | bit(info.signal()))
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty() || !self.group_pending.borrow().is_empty()
     }
 
     pub fn discard(&mut self, signal: usize) {
         self.pending.retain(|info| info.signal() != signal);
+        self.group_pending
+            .borrow_mut()
+            .retain(|info| info.signal() != signal);
+    }
+
+    pub fn action(&self, signal: usize) -> Action {
+        self.actions.borrow()[signal - 1]
+    }
+
+    pub fn set_action(&mut self, signal: usize, action: Action) {
+        self.actions.borrow_mut()[signal - 1] = action;
+    }
+
+    pub fn clone_task(&self, shared_handlers: bool, thread: bool) -> Self {
+        let mut child = self.fork();
+        child.altstack = AltStack::DISABLED;
+        if shared_handlers {
+            child.actions = self.actions.clone();
+        }
+        if thread {
+            child.group_pending = self.group_pending.clone();
+            child.timer = self.timer.clone();
+        }
+        child
+    }
+
+    pub fn discard_stops(&mut self) {
+        self.pending.retain(|info| !stop_signal(info.signal()));
+        self.group_pending
+            .borrow_mut()
+            .retain(|info| !stop_signal(info.signal()));
+    }
+
+    pub fn enqueue_group(&mut self, info: Info) -> bool {
+        Self::enqueue_to(&mut self.group_pending.borrow_mut(), info)
     }
 
     pub fn enqueue(&mut self, info: Info) -> bool {
         let signal = info.signal();
         if signal == SIGCONT {
-            self.pending.retain(|info| !stop_signal(info.signal()));
+            self.discard_stops();
         } else if stop_signal(signal) {
             self.discard(SIGCONT);
         }
-        if signal < 32 && self.pending.iter().any(|queued| queued.signal() == signal) {
+        Self::enqueue_to(&mut self.pending, info)
+    }
+
+    fn enqueue_to(pending: &mut Vec<Info>, info: Info) -> bool {
+        let signal = info.signal();
+        if signal < 32 && pending.iter().any(|queued| queued.signal() == signal) {
             return true;
         }
         // Standard signals have at most one record per number. Reserve their
         // finite headroom rather than dropping an already queued realtime signal
         // when SIGSTOP/SIGALRM arrives at a full realtime queue.
-        if signal >= 32 && self.pending.len() >= PENDING_LIMIT {
+        if signal >= 32 && pending.len() >= PENDING_LIMIT {
             return false;
         }
-        self.pending.push(info);
+        pending.push(info);
         true
     }
 
     pub fn take_matching(&mut self, mask: u64) -> Option<Info> {
-        let index = self
+        self.take_matching_record(mask).map(|(info, _)| info)
+    }
+
+    pub fn restore_pending(&mut self, info: Info, group: bool) {
+        if group {
+            self.group_pending.borrow_mut().insert(0, info);
+        } else {
+            self.pending.insert(0, info);
+        }
+    }
+
+    pub fn take_matching_record(&mut self, mask: u64) -> Option<(Info, bool)> {
+        let local = self
             .pending
             .iter()
             .enumerate()
             .filter(|(_, info)| mask & bit(info.signal()) != 0)
             .min_by_key(|(_, info)| info.signal())
-            .map(|(index, _)| index)?;
-        Some(self.pending.remove(index))
+            .map(|(index, info)| (index, info.signal()));
+        let group = self
+            .group_pending
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| mask & bit(info.signal()) != 0)
+            .min_by_key(|(_, info)| info.signal())
+            .map(|(index, info)| (index, info.signal()));
+        if let Some((index, signal)) = local {
+            if group.is_none_or(|(_, group_signal)| signal <= group_signal) {
+                return Some((self.pending.remove(index), false));
+            }
+        }
+        group.map(|(index, _)| (self.group_pending.borrow_mut().remove(index), true))
     }
 
     pub fn next(&mut self) -> Option<Info> {

@@ -15,7 +15,23 @@ pub(super) fn sys_fork(
     context: LinuxSyscallContext,
 ) -> Result<Word, i32> {
     if context.number == SYS_CLONE && (context.args[0] & LINUX_CLONE_VM) != 0 {
-        return Err(ENOSYS);
+        return super::threads::clone_vm(runtime, parent_pid, context);
+    }
+    if context.number == SYS_CLONE && context.args[0] & (0x800 | 0x10000) != 0 {
+        return Err(EINVAL);
+    }
+    if context.number == SYS_CLONE {
+        let allowed = 0xff
+            | LINUX_CLONE_PARENT_SETTID
+            | LINUX_CLONE_CHILD_SETTID
+            | LINUX_CLONE_SETTLS
+            | 0x0020_0000;
+        if context.args[0] & !allowed != 0 {
+            return Err(ENOSYS);
+        }
+        if context.args[0] & 0xff != LINUX_SIGCHLD {
+            return Err(EINVAL);
+        }
     }
     let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let image_name =
@@ -86,21 +102,6 @@ pub(super) fn sys_fork(
         return Err(error);
     }
     if let Err(error) = fork_step(
-        "clone tids",
-        write_clone_tid_pointers(
-            runtime,
-            parent_pid,
-            child_pid,
-            clone_options.parent_tid,
-            clone_options.child_tid,
-            clone_options.write_parent_tid,
-            clone_options.write_child_tid,
-        ),
-    ) {
-        discard_spawned_child(child_pid);
-        return Err(error);
-    }
-    if let Err(error) = fork_step(
         "clone registers",
         match clone_registers_for_fork(
             parent.pcb,
@@ -141,6 +142,19 @@ pub(super) fn sys_fork(
         discard_spawned_child(child_pid);
         return Err(ENOMEM);
     }
+    if let Err(error) = write_clone_tid_pointers(
+        runtime,
+        parent_pid,
+        child_pid,
+        clone_options.parent_tid,
+        clone_options.child_tid,
+        clone_options.write_parent_tid,
+        clone_options.write_child_tid,
+    ) {
+        discard_spawned_child(child_pid);
+        runtime.remove_process(child_pid);
+        return Err(error);
+    }
     if let Err(error) = fork_step(
         "clone files",
         inherit_linux_files(runtime, parent_pid, child_pid),
@@ -161,11 +175,31 @@ pub(super) fn sys_fork(
                 child_pid,
                 ENOMEM
             );
+            super::close_process_files(runtime, child_pid);
             discard_spawned_child(child_pid);
             runtime.remove_process(child_pid);
             return Err(ENOMEM);
         }
+        if mapping.base != 0 && mapping.prot != LINUX_PROT_NONE {
+            if let Err(error) = nanami_runtime::request_process_mapping_protect(
+                child_pid,
+                mapping.base,
+                mapping.size,
+                mapping.prot,
+            ) {
+                super::close_process_files(runtime, child_pid);
+                discard_spawned_child(child_pid);
+                runtime.remove_process(child_pid);
+                return Err(map_request_error(error));
+            }
+        }
         i += 1;
+    }
+    if let Err(error) = super::memfd::inherit(runtime, parent_pid, child_pid) {
+        super::close_process_files(runtime, child_pid);
+        discard_spawned_child(child_pid);
+        runtime.remove_process(child_pid);
+        return Err(error);
     }
     {
         let Some(child) = runtime.managed_process_mut(child_pid) else {
@@ -185,8 +219,18 @@ pub(super) fn sys_fork(
         child.terminal_canonical = parent.terminal_canonical;
         child.terminal_echo = parent.terminal_echo;
         child.terminal_termios = parent.terminal_termios;
+        child.parent_pid = parent.tgid;
     }
     runtime.inherit_signals(parent_pid, child_pid);
+    if context.number == SYS_CLONE && context.args[0] & 0x0020_0000 != 0 {
+        let Some(task) = runtime.tasks.ensure(child_pid) else {
+            super::close_process_files(runtime, child_pid);
+            discard_spawned_child(child_pid);
+            runtime.remove_process(child_pid);
+            return Err(ENOMEM);
+        };
+        task.clear_tid = clone_options.child_tid;
+    }
     if cfg!(debug_assertions) {
         if let Ok(read_back_fs_base) = read_register_value(child_pcb, REG_FS_BASE) {
             if read_back_fs_base != child_fs_base {
@@ -204,6 +248,8 @@ pub(super) fn sys_fork(
         "resume child",
         a9n_abi::arch::process_control_block::resume(child_pcb).map_err(|_| EIO),
     ) {
+        let _ = a9n_abi::arch::process_control_block::suspend(child_pcb);
+        super::close_process_files(runtime, child_pid);
         discard_spawned_child(child_pid);
         runtime.remove_process(child_pid);
         return Err(error);
@@ -293,10 +339,10 @@ pub(super) fn write_clone_tid_pointers(
     write_parent_tid: bool,
     write_child_tid: bool,
 ) -> Result<(), i32> {
-    if write_parent_tid && parent_tid != 0 {
+    if write_parent_tid {
         write_guest_u32(runtime, parent_pid, parent_tid, child_pid as u32)?;
     }
-    if write_child_tid && child_tid != 0 {
+    if write_child_tid {
         write_guest_u32(runtime, child_pid, child_tid, child_pid as u32)?;
     }
     Ok(())
@@ -396,6 +442,13 @@ pub(super) fn clone_process_mappings(
                 continue;
             }
             if mapping.prot == LINUX_PROT_NONE {
+                nanami_runtime::request_process_memory_clone(
+                    parent_pid,
+                    child_pid,
+                    mapping.base,
+                    mapping.size,
+                )
+                .map_err(map_request_error)?;
                 i += 1;
                 continue;
             }

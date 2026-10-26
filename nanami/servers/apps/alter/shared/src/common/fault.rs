@@ -231,6 +231,7 @@ fn synchronous_signal(runtime: &mut Runtime, fault: &FaultEvent) -> FaultAction 
         .unwrap();
     let pid = process.pid;
     let signal = match fault.reason {
+        1 | 2 if crate::linux::bus_fault(runtime, pid, fault.kernel_call_number) => 7,
         1 | 2 => 11,
         3 => 4,
         4 => 8,
@@ -238,8 +239,7 @@ fn synchronous_signal(runtime: &mut Runtime, fault: &FaultEvent) -> FaultAction 
     };
     let state = runtime.managed_process_mut(pid).unwrap().signals_mut();
     // Synchronous faults cannot be left pending forever behind a blocked/ignored action.
-    if state.blocked & crate::common::signals::bit(signal) != 0
-        || state.actions[signal - 1].handler == 1
+    if state.blocked & crate::common::signals::bit(signal) != 0 || state.action(signal).handler == 1
     {
         state.exit_signal = signal;
         return FaultAction::Terminate {
@@ -252,7 +252,12 @@ fn synchronous_signal(runtime: &mut Runtime, fault: &FaultEvent) -> FaultAction 
     } else {
         fault.program_counter
     };
-    let info = crate::common::signals::Info::fault(signal, 1, address);
+    let code = if signal == 7 || (signal == 11 && runtime.mapping_at(pid, address).is_some()) {
+        2
+    } else {
+        1
+    };
+    let info = crate::common::signals::Info::fault(signal, code, address);
     let _ = crate::linux::signals_runtime::queue(runtime, pid, info);
     let Ok(mut registers) = crate::process::read_hardware_context(process.pcb) else {
         return FaultAction::Terminate {

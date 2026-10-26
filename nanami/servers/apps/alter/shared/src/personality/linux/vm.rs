@@ -1,16 +1,15 @@
 use super::{
     align_up_word, copy_same_process_range, honoka, map_request_error, posix,
     present_graphics_session, sys_framebuffer_mmap, write_target_memory_from, LinuxFile,
-    LinuxFileKind, Runtime, Word, EACCES, EBADF, EINVAL, EIO, ENODEV, ENOMEM,
-    EOPNOTSUPP, ESRCH, LINUX_MADV_COLD, LINUX_MADV_DODUMP, LINUX_MADV_DONTDUMP,
-    LINUX_MADV_DONTNEED, LINUX_MADV_FREE, LINUX_MADV_HUGEPAGE, LINUX_MADV_MERGEABLE,
-    LINUX_MADV_NOHUGEPAGE, LINUX_MADV_NORMAL, LINUX_MADV_PAGEOUT, LINUX_MADV_POPULATE_READ,
-    LINUX_MADV_POPULATE_WRITE, LINUX_MADV_RANDOM, LINUX_MADV_SEQUENTIAL, LINUX_MADV_UNMERGEABLE,
-    LINUX_MADV_WILLNEED, LINUX_MAP_ANONYMOUS, LINUX_MAP_FIXED, LINUX_MREMAP_FIXED,
-    LINUX_MREMAP_MAYMOVE, LINUX_MREMAP_SUPPORTED_FLAGS, LINUX_O_ACCMODE, LINUX_O_WRONLY,
-    LINUX_PAGE_SIZE, LINUX_PROT_ALL, LINUX_PROT_NONE, LINUX_PROT_READ, LINUX_PROT_WRITE,
-    LINUX_STACK_BYTES, LINUX_STACK_GUARD_BYTES, LINUX_STACK_TOP, LINUX_VIRTUAL_RESERVATION_BASE,
-    LINUX_VIRTUAL_RESERVATION_LIMIT,
+    LinuxFileKind, Runtime, Word, EACCES, EBADF, EINVAL, EIO, ENODEV, ENOMEM, EOPNOTSUPP, ESRCH,
+    LINUX_MADV_COLD, LINUX_MADV_DODUMP, LINUX_MADV_DONTDUMP, LINUX_MADV_DONTNEED, LINUX_MADV_FREE,
+    LINUX_MADV_HUGEPAGE, LINUX_MADV_MERGEABLE, LINUX_MADV_NOHUGEPAGE, LINUX_MADV_NORMAL,
+    LINUX_MADV_PAGEOUT, LINUX_MADV_POPULATE_READ, LINUX_MADV_POPULATE_WRITE, LINUX_MADV_RANDOM,
+    LINUX_MADV_SEQUENTIAL, LINUX_MADV_UNMERGEABLE, LINUX_MADV_WILLNEED, LINUX_MAP_ANONYMOUS,
+    LINUX_MAP_FIXED, LINUX_MREMAP_FIXED, LINUX_MREMAP_MAYMOVE, LINUX_MREMAP_SUPPORTED_FLAGS,
+    LINUX_O_ACCMODE, LINUX_O_WRONLY, LINUX_PAGE_SIZE, LINUX_PROT_ALL, LINUX_PROT_NONE,
+    LINUX_PROT_READ, LINUX_PROT_WRITE, LINUX_STACK_BYTES, LINUX_STACK_GUARD_BYTES, LINUX_STACK_TOP,
+    LINUX_VIRTUAL_RESERVATION_BASE, LINUX_VIRTUAL_RESERVATION_LIMIT,
 };
 
 pub(super) fn sys_brk(runtime: &mut Runtime, pid: Word, requested: Word) -> Result<Word, i32> {
@@ -25,6 +24,7 @@ pub(super) fn sys_brk(runtime: &mut Runtime, pid: Word, requested: Word) -> Resu
         };
         process.program_break = base;
         process.mapped_break = base + mapped;
+        runtime.sync_program_break(pid);
     }
     let current = runtime
         .managed_process(pid)
@@ -53,6 +53,7 @@ pub(super) fn sys_brk(runtime: &mut Runtime, pid: Word, requested: Word) -> Resu
         return Err(ESRCH);
     };
     process.program_break = requested;
+    runtime.sync_program_break(pid);
     Ok(requested)
 }
 
@@ -78,6 +79,16 @@ pub(super) fn sys_mmap(
     if (flags & LINUX_MAP_ANONYMOUS) == 0 {
         let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
         return match file.kind {
+            LinuxFileKind::MemoryFile => super::memfd::map(
+                runtime,
+                pid,
+                requested_addr,
+                len,
+                _prot,
+                flags,
+                file,
+                offset,
+            ),
             LinuxFileKind::Framebuffer => {
                 if requested_addr != 0 && (flags & LINUX_MAP_FIXED) != 0 {
                     return Err(EINVAL);
@@ -96,6 +107,9 @@ pub(super) fn sys_mmap(
             ),
             _ => Err(ENODEV),
         };
+    }
+    if flags & 3 == 1 {
+        return super::memfd::map_anonymous(runtime, pid, requested_addr, len, _prot, flags);
     }
     if requested_addr != 0 && (flags & LINUX_MAP_FIXED) != 0 {
         let fixed_base = requested_addr & !(LINUX_PAGE_SIZE - 1);
@@ -132,8 +146,10 @@ pub(super) fn sys_mmap(
             })?;
         if base != fixed_base || granted < mapped || !runtime.add_mapping(pid, base, granted, _prot)
         {
+            let _ = nanami_runtime::request_process_mapping_release(pid, base, granted);
             return Err(ENOMEM);
         }
+        set_hardware_protection(pid, base, granted, _prot)?;
         return Ok(requested_addr);
     }
     if _prot == LINUX_PROT_NONE {
@@ -227,7 +243,7 @@ pub(super) fn sys_munmap(
     addr: Word,
     len: Word,
 ) -> Result<Word, i32> {
-    if addr == 0 || len == 0 || (addr & (LINUX_PAGE_SIZE - 1)) != 0 {
+    if (addr & (LINUX_PAGE_SIZE - 1)) != 0 {
         return Err(EINVAL);
     }
     let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
@@ -241,13 +257,15 @@ pub(super) fn sys_munmap(
         let _ = present_graphics_session(runtime, index as Word + 1, pid);
     }
     let end = addr.checked_add(mapped).ok_or(EINVAL)?;
+    if !runtime.can_remove_mapping(pid, addr, mapped) {
+        return Err(ENOMEM);
+    }
+    super::memfd::unmap(runtime, pid, addr, mapped)?;
     let mut cursor = addr;
     while let Some(mapping) = runtime.next_mapping(pid, cursor, end) {
         let start = cursor.max(mapping.base);
         let next = end.min(mapping.base.checked_add(mapping.size).ok_or(EINVAL)?);
-        if mapping.prot != LINUX_PROT_NONE {
-            release_present_mapping_pages(runtime, pid, start, next - start)?;
-        }
+        release_present_mapping_pages(runtime, pid, start, next - start)?;
         if !runtime.remove_mapping(pid, start, next - start) {
             return Err(ENOMEM);
         }
@@ -311,6 +329,9 @@ pub(super) fn sys_mprotect(
     if (prot & !LINUX_PROT_ALL) != 0 {
         return Err(EINVAL);
     }
+    if len == 0 {
+        return Ok(0);
+    }
     let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
     if !runtime.has_mapping(pid, addr, mapped) {
         return Err(ENOMEM);
@@ -319,11 +340,10 @@ pub(super) fn sys_mprotect(
     if old_prot == prot {
         return Ok(0);
     }
-    if prot == LINUX_PROT_NONE {
-        release_present_mapping_pages(runtime, pid, addr, mapped)?;
-    } else {
-        ensure_present_mapping_pages(runtime, pid, addr, mapped)?;
+    if !runtime.can_protect_mapping(pid, addr, mapped) {
+        return Err(ENOMEM);
     }
+    super::memfd::protect(runtime, pid, addr, mapped, prot)?;
     if !runtime.protect_mapping(pid, addr, mapped, prot) {
         return Err(ENOMEM);
     }
@@ -425,37 +445,16 @@ pub(super) fn release_present_mapping_pages(
     while cursor < end {
         let mapping = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
         let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
-        if mapping.prot != LINUX_PROT_NONE {
-            nanami_runtime::request_process_mapping_release(pid, cursor, next - cursor)
-                .map_err(map_request_error)?;
-        }
+        nanami_runtime::request_process_mapping_release_sparse(pid, cursor, next - cursor)
+            .map_err(map_request_error)?;
         cursor = next;
     }
     Ok(())
 }
 
-pub(super) fn ensure_present_mapping_pages(
-    runtime: &Runtime,
-    pid: Word,
-    base: Word,
-    size: Word,
-) -> Result<(), i32> {
-    let mut cursor = base;
-    let end = base.checked_add(size).ok_or(ENOMEM)?;
-    while cursor < end {
-        let mapping = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
-        let next = end.min(mapping.base.checked_add(mapping.size).ok_or(ENOMEM)?);
-        if mapping.prot == LINUX_PROT_NONE {
-            let (mapped_base, mapped) =
-                nanami_runtime::request_process_map_anonymous_at(pid, cursor, next - cursor)
-                    .map_err(map_request_error)?;
-            if mapped_base != cursor || mapped < next - cursor {
-                return Err(ENOMEM);
-            }
-        }
-        cursor = next;
-    }
-    Ok(())
+fn set_hardware_protection(pid: Word, base: Word, size: Word, prot: Word) -> Result<(), i32> {
+    nanami_runtime::request_process_mapping_protect(pid, base, size, prot)
+        .map_err(map_request_error)
 }
 
 pub(super) fn sys_mremap(
@@ -481,29 +480,37 @@ pub(super) fn sys_mremap(
         return Err(EINVAL);
     }
 
-    let old_mapped = align_up_word(old_size, LINUX_PAGE_SIZE);
-    let new_mapped = align_up_word(new_size, LINUX_PAGE_SIZE);
+    let old_mapped =
+        old_size.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
+    let new_mapped =
+        new_size.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
     let prot = runtime
         .mapping_prot(pid, old_addr, old_mapped)
         .ok_or(EINVAL)?;
 
-    if new_mapped == old_mapped {
+    if new_mapped == old_mapped && flags & LINUX_MREMAP_FIXED == 0 {
         return Ok(old_addr);
     }
-    if new_mapped < old_mapped {
+    if new_mapped < old_mapped && flags & LINUX_MREMAP_FIXED == 0 {
         sys_munmap(runtime, pid, old_addr + new_mapped, old_mapped - new_mapped)?;
         return Ok(old_addr);
     }
 
     let old_end = old_addr.checked_add(old_mapped).ok_or(ENOMEM)?;
-    let extra = new_mapped - old_mapped;
-    if (flags & LINUX_MREMAP_FIXED) == 0 {
+    if let Some(target) = super::memfd::remap(
+        runtime, pid, old_addr, old_mapped, new_mapped, flags, new_addr, prot,
+    )? {
+        return Ok(target);
+    }
+    let extra = new_mapped.saturating_sub(old_mapped);
+    if (flags & LINUX_MREMAP_FIXED) == 0 && extra != 0 {
         if let Ok((base, granted)) =
             nanami_runtime::request_process_map_anonymous_at(pid, old_end, extra)
                 .map_err(map_request_error)
         {
             if base == old_end && granted >= extra && runtime.add_mapping(pid, base, granted, prot)
             {
+                set_hardware_protection(pid, base, granted, prot)?;
                 return Ok(old_addr);
             }
         }
@@ -536,13 +543,16 @@ pub(super) fn sys_mremap(
             0,
         )?
     };
-    copy_same_process_range(
+    if let Err(errno) = copy_same_process_range(
         runtime,
         pid,
         old_addr,
         target,
         ::core::cmp::min(old_mapped, new_mapped),
-    )?;
+    ) {
+        let _ = sys_munmap(runtime, pid, target, new_mapped);
+        return Err(errno);
+    }
     sys_munmap(runtime, pid, old_addr, old_mapped)?;
     Ok(target)
 }
@@ -560,6 +570,10 @@ pub(super) fn map_anonymous_tracked(
             .map_err(map_request_error)?;
         return Err(ENOMEM);
     }
+    if let Err(errno) = set_hardware_protection(pid, base, mapped, prot) {
+        let _ = sys_munmap(runtime, pid, base, mapped);
+        return Err(errno);
+    }
     Ok((base, mapped))
 }
 
@@ -575,5 +589,11 @@ pub(super) fn register_linux_stack_mappings(runtime: &mut Runtime, pid: Word) ->
         LINUX_STACK_TOP,
         LINUX_STACK_GUARD_BYTES,
         LINUX_PROT_NONE,
+    ) && set_hardware_protection(
+        pid,
+        stack_base,
+        LINUX_STACK_BYTES,
+        LINUX_PROT_READ | LINUX_PROT_WRITE,
     )
+    .is_ok()
 }

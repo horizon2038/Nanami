@@ -46,6 +46,9 @@ enum LinuxFileKind {
     SocketIcmp,
     SocketNetlink,
     EventFd,
+    TimerFd,
+    SignalFd,
+    MemoryFile,
     Epoll,
     VirtualDirectory,
     VirtualFile,
@@ -106,6 +109,9 @@ struct Runtime {
     signals: Vec<Word>,
 }
 impl Runtime {
+    fn thread_group(&self, pid: Word) -> Word {
+        pid
+    }
     fn new() -> Self {
         FS.with(|fs| fs.borrow_mut().clear());
         let mut scratch = vec![0; 65536].into_boxed_slice();

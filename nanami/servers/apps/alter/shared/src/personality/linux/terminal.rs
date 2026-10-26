@@ -39,13 +39,13 @@ pub(super) fn sys_terminal_read_now(
     };
     if let Some(bytes) = bytes {
         if bytes != 0 {
-            nanami_runtime::request_process_memory_write(
+            nanami_runtime::request_process_memory_write_checked(
                 pid,
                 user_buffer,
                 runtime.terminal_shm,
                 bytes,
             )
-            .map_err(map_request_error)?;
+            .map_err(|_| super::EFAULT)?;
         }
         return Ok(Some(bytes));
     }
@@ -110,8 +110,7 @@ pub(super) fn terminal_readable(runtime: &mut Runtime, pid: Word) -> Result<bool
             .terminal_line_ready)
     } else {
         // A zero-length service read reports queued bytes without consuming.
-        super::terminal_signals::read_terminal_input(runtime, pid, 0)
-            .map(|bytes| bytes != 0)
+        super::terminal_signals::read_terminal_input(runtime, pid, 0).map(|bytes| bytes != 0)
     }
 }
 
@@ -218,13 +217,13 @@ pub(super) fn sys_terminal_write(
     let mut done = 0;
     while done < len {
         let chunk = terminal_bounded_len(runtime, len - done)?;
-        nanami_runtime::request_process_memory_read(
+        nanami_runtime::request_process_memory_read_checked(
             pid,
             user_buffer + done,
             runtime.terminal_shm,
             chunk,
         )
-        .map_err(map_request_error)?;
+        .map_err(|_| super::EFAULT)?;
         let written = nanami_client::terminal::terminal_write_output(
             runtime.terminal_port,
             terminal_id,
@@ -258,9 +257,7 @@ pub(super) fn sys_ioctl(
             return Err(EFAULT);
         }
         read_target_memory(runtime, pid, argument, 4)?;
-        let enabled = unsafe {
-            core::ptr::read_unaligned(runtime.posix_shm as *const i32) != 0
-        };
+        let enabled = unsafe { core::ptr::read_unaligned(runtime.posix_shm as *const i32) != 0 };
         let mut flags = super::sys_fcntl(runtime, pid, fd, super::LINUX_F_GETFL, 0)?;
         if enabled {
             flags |= super::LINUX_O_NONBLOCK;
@@ -406,7 +403,8 @@ pub(super) fn write_linux_termios(base: Word, canonical: bool, echo: bool) {
         write_u32(base, LINUX_ICRNL | LINUX_IXON);
         write_u32(base + 4, LINUX_OPOST | LINUX_ONLCR);
         write_u32(base + 8, LINUX_CREAD | LINUX_CS8);
-        let mut lflag = LINUX_ISIG | super::LINUX_ECHOCTL | LINUX_ECHOE | LINUX_ECHOK | LINUX_IEXTEN;
+        let mut lflag =
+            LINUX_ISIG | super::LINUX_ECHOCTL | LINUX_ECHOE | LINUX_ECHOK | LINUX_IEXTEN;
         if canonical {
             lflag |= LINUX_ICANON;
         }

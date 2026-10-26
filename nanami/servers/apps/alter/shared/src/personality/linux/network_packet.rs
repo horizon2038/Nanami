@@ -1,7 +1,7 @@
 use super::{
-    map_network_error, map_request_error, net, read_shm_u32, read_target_memory,
-    write_target_memory, write_u16, write_u32, write_u8, Runtime, Word, EFAULT, EMSGSIZE,
-    LINUX_AF_INET, LINUX_IPV4_HEADER_LEN, LINUX_SOCKADDR_IN_LEN,
+    map_network_error, net, read_shm_u32, read_target_memory, write_target_memory, write_u16,
+    write_u32, write_u8, Runtime, Word, EFAULT, EMSGSIZE, LINUX_AF_INET, LINUX_IPV4_HEADER_LEN,
+    LINUX_SOCKADDR_IN_LEN,
 };
 
 pub(super) fn align_up_usize(value: usize, alignment: usize) -> usize {
@@ -54,8 +54,8 @@ pub(super) fn read_target_memory_to_network(
     if len > runtime.network_shm_size {
         return Err(EMSGSIZE);
     }
-    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.network_shm, len)
-        .map_err(map_request_error)
+    nanami_runtime::request_process_memory_read_checked(pid, user_ptr, runtime.network_shm, len)
+        .map_err(|_| EFAULT)
 }
 
 pub(super) fn network_ipv4(runtime: &Runtime) -> Result<u32, i32> {

@@ -1,11 +1,11 @@
 use super::{
-    align_up_word, arch, ensure_graphics_session, graphics_enabled, graphics_session, is_at_fdcwd, is_linux_virtual_path,
-    map_path_request_error, map_request_error, path_is_absolute, posix, read_c_string,
-    resolve_current_shm_path, resolve_path, translate_guest_path_for_vfs, virtual_fs,
-    write_target_memory, write_u16, write_u32, write_u64, LinuxFile, LinuxFileKind, Runtime,
-    VirtualNode, Word, EBADF, EFAULT, EINVAL, ENOENT, ENOSYS, EOPNOTSUPP, ESRCH,
-    LINUX_AT_EMPTY_PATH, LINUX_STATX_BASIC_STATS, LINUX_STATX_SIZE, LINUX_S_IFIFO, LINUX_S_IFSOCK,
-    POSIX_FILE_TYPE_PIPE, POSIX_FILE_TYPE_SOCKET, STAT_SIZE,
+    align_up_word, arch, ensure_graphics_session, graphics_enabled, graphics_session, is_at_fdcwd,
+    is_linux_virtual_path, map_path_request_error, map_request_error, posix, read_c_string,
+    resolve_path, translate_guest_path_for_vfs, virtual_fs, write_target_memory, write_u16,
+    write_u32, write_u64, LinuxFile, LinuxFileKind, Runtime, VirtualNode, Word, EBADF, EFAULT,
+    EINVAL, ENOENT, EOPNOTSUPP, ESRCH, LINUX_AT_EMPTY_PATH, LINUX_STATX_BASIC_STATS,
+    LINUX_STATX_SIZE, LINUX_S_IFIFO, LINUX_S_IFSOCK, POSIX_FILE_TYPE_PIPE, POSIX_FILE_TYPE_SOCKET,
+    STAT_SIZE,
 };
 
 pub(super) fn sys_stat(
@@ -15,6 +15,18 @@ pub(super) fn sys_stat(
     stat_ptr: Word,
 ) -> Result<Word, i32> {
     let len = resolve_path(runtime, pid, path_ptr)?;
+    let stat = stat_current_path(runtime, pid, len)?;
+    write_linux_stat(runtime, pid, stat_ptr, stat)?;
+    Ok(0)
+}
+
+pub(super) fn sys_lstat(
+    runtime: &mut Runtime,
+    pid: Word,
+    path_ptr: Word,
+    stat_ptr: Word,
+) -> Result<Word, i32> {
+    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
     let stat = stat_current_path(runtime, pid, len)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
@@ -44,10 +56,8 @@ pub(super) fn sys_newfstatat(
         unsafe {
             *(runtime.posix_shm as *mut u8) = b'.';
         }
-    } else if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(EOPNOTSUPP);
     }
-    let len = resolve_current_shm_path(runtime, pid, raw_len.max(1))?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len.max(1), flags & 0x100 == 0)?;
     let stat = stat_current_path(runtime, pid, len)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
@@ -75,10 +85,7 @@ pub(super) fn sys_fchownat(
     if raw_len == 0 && (flags & LINUX_AT_EMPTY_PATH) != 0 {
         return sys_fchown(runtime, pid, dirfd);
     }
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(ENOSYS);
-    }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
     let _ = stat_current_path(runtime, pid, len)?;
     Ok(0)
 }
@@ -108,6 +115,13 @@ pub(super) fn sys_statx(
             LinuxFileKind::Posix => {
                 posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?
             }
+            LinuxFileKind::MemoryFile => (
+                file.resource,
+                super::memfd::size(runtime, file)?,
+                posix::POSIX_FILE_TYPE_REGULAR,
+                0,
+                0,
+            ),
             LinuxFileKind::SocketUdp
             | LinuxFileKind::SocketTcp
             | LinuxFileKind::SocketTcpListener
@@ -120,15 +134,15 @@ pub(super) fn sys_statx(
             | LinuxFileKind::EvdevMouse
             | LinuxFileKind::Framebuffer => virtual_node_stat(runtime, pid, file)?,
             LinuxFileKind::Empty => return Err(EBADF),
-            LinuxFileKind::EventFd | LinuxFileKind::Epoll => return Err(EOPNOTSUPP),
+            LinuxFileKind::EventFd
+            | LinuxFileKind::TimerFd
+            | LinuxFileKind::SignalFd
+            | LinuxFileKind::Epoll => return Err(EOPNOTSUPP),
         };
         write_linux_statx(runtime, pid, statx_ptr, stat)?;
         return Ok(0);
     }
-    if !path_is_absolute(runtime.posix_shm, raw_len) && !is_at_fdcwd(dirfd) {
-        return Err(EINVAL);
-    }
-    let len = resolve_current_shm_path(runtime, pid, raw_len)?;
+    let len = super::resolve_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
     let stat = stat_current_path(runtime, pid, len)?;
     write_linux_statx(runtime, pid, statx_ptr, stat)?;
     Ok(0)
@@ -153,7 +167,9 @@ pub(super) fn stat_current_path(
     let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
     match (posix::posix_stat(runtime.posix_port, 0, vfs_len), fallback) {
         (
-            Err(nanami_runtime::RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)),
+            Err(nanami_runtime::RequestError::Status(
+                nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR,
+            )),
             Some(node),
         ) => virtual_node_stat_from_node(runtime, pid, node),
         (result, _) => result.map_err(map_path_request_error),
@@ -167,8 +183,24 @@ pub(super) fn sys_fstat(
     stat_ptr: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if file.kind == LinuxFileKind::MemoryFile {
+        let stat = (
+            file.resource,
+            super::memfd::size(runtime, file)?,
+            posix::POSIX_FILE_TYPE_REGULAR,
+            0,
+            0,
+        );
+        write_linux_stat(runtime, pid, stat_ptr, stat)?;
+        return Ok(0);
+    }
     if file.kind == LinuxFileKind::SocketUnix {
-        write_linux_stat(runtime, pid, stat_ptr, (file.resource, 0, POSIX_FILE_TYPE_SOCKET, 0, 0))?;
+        write_linux_stat(
+            runtime,
+            pid,
+            stat_ptr,
+            (file.resource, 0, POSIX_FILE_TYPE_SOCKET, 0, 0),
+        )?;
         return Ok(0);
     }
     if file.kind == LinuxFileKind::Terminal {
@@ -184,14 +216,16 @@ pub(super) fn sys_fstat(
         write_linux_pipe_stat(runtime, pid, stat_ptr)?;
         return Ok(0);
     }
-    if !file.is_root_directory() && matches!(
-        file.kind,
-        LinuxFileKind::VirtualDirectory
-            | LinuxFileKind::VirtualFile
-            | LinuxFileKind::EvdevKeyboard
-            | LinuxFileKind::EvdevMouse
-            | LinuxFileKind::Framebuffer
-    ) {
+    if !file.is_root_directory()
+        && matches!(
+            file.kind,
+            LinuxFileKind::VirtualDirectory
+                | LinuxFileKind::VirtualFile
+                | LinuxFileKind::EvdevKeyboard
+                | LinuxFileKind::EvdevMouse
+                | LinuxFileKind::Framebuffer
+        )
+    {
         let stat = virtual_node_stat(runtime, pid, file)?;
         write_linux_stat(runtime, pid, stat_ptr, stat)?;
         return Ok(0);
@@ -236,7 +270,11 @@ pub(super) fn virtual_node_stat_from_node(
             .managed_process(pid)
             .map(|process| (process.image_name_len as Word, 0, 0))
             .ok_or(ESRCH)?,
-        VirtualNode::ResolvConf => (super::resolver::read_resolv_conf(runtime, &mut [0; 64])?, 0, 0),
+        VirtualNode::ResolvConf => (
+            super::resolver::read_resolv_conf(runtime, &mut [0; 64])?,
+            0,
+            0,
+        ),
         _ => (
             virtual_fs::static_file(node)
                 .map(|bytes| bytes.len() as Word)
@@ -323,6 +361,7 @@ pub(super) fn linux_mode_for_kind(kind: Word) -> Word {
         posix::POSIX_FILE_TYPE_BLOCK_DEVICE => 0o060000 | 0o666,
         POSIX_FILE_TYPE_PIPE => LINUX_S_IFIFO | 0o600,
         POSIX_FILE_TYPE_SOCKET => LINUX_S_IFSOCK | 0o600,
+        posix::POSIX_FILE_TYPE_SYMLINK => 0o120000 | 0o777,
         _ => 0o100000 | 0o644,
     }
 }

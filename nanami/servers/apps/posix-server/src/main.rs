@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 
+use nanami_client::posix::*;
 use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
 use nanami_runtime::{self, RequestError, Word};
-use nanami_client::posix::*;
 
 mod control;
 use control::*;
@@ -16,6 +16,7 @@ use io::*;
 
 mod environment;
 mod fd;
+mod namespace;
 mod path;
 pub(crate) mod process;
 mod state;
@@ -75,10 +76,12 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                     Err(e) => return Err(log_error("[posix-server] reply_receive failed: ", e)),
                 }
             }
-            ReplyAction::DropReply => match nanami_runtime::ipc::service_receive_event(service_port) {
-                Ok(e) => e,
-                Err(e) => return Err(log_error("[posix-server] receive failed: ", e)),
-            },
+            ReplyAction::DropReply => {
+                match nanami_runtime::ipc::service_receive_event(service_port) {
+                    Ok(e) => e,
+                    Err(e) => return Err(log_error("[posix-server] receive failed: ", e)),
+                }
+            }
         };
 
         match event {
@@ -151,6 +154,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_STAT => handle_stat(runtime, request),
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
         POSIX_REQUEST_CREATE_SOCKET_NODE => handle_create_socket_node(runtime, request),
+        POSIX_REQUEST_PATH => namespace::handle(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
         POSIX_REQUEST_LINK => handle_link(runtime, request),
         POSIX_REQUEST_RENAME => handle_rename(runtime, request),

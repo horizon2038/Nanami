@@ -1,5 +1,6 @@
 //! Open-file-description state shared by dup and fork, allocated only on use.
 use super::{LinuxFile, Word};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 pub const OBJECT_LIMIT: usize = 256;
@@ -10,6 +11,62 @@ pub struct EventCounter {
     pub value: u64,
     pub semaphore: bool,
     pub nonblocking: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct Timer {
+    pub clock: Word,
+    pub deadline: Option<Word>,
+    pub interval: Word,
+    pub expirations: u64,
+    pub nonblocking: bool,
+}
+
+impl Timer {
+    pub fn expire(&mut self, now: Word) {
+        let Some(deadline) = self.deadline.filter(|deadline| *deadline <= now) else {
+            return;
+        };
+        let count = if self.interval == 0 {
+            1
+        } else {
+            (now - deadline) / self.interval + 1
+        };
+        self.expirations = self.expirations.saturating_add(count as u64);
+        self.deadline = if self.interval == 0 {
+            None
+        } else {
+            deadline
+                .checked_add(count.saturating_mul(self.interval))
+                .filter(|next| *next > now)
+        };
+    }
+}
+
+pub struct SignalFd {
+    pub mask: u64,
+    pub nonblocking: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct MemoryMapping {
+    pub pid: Word,
+    pub base: Word,
+    pub bytes: Word,
+    pub offset: Word,
+    pub prot: Word,
+    pub shared: bool,
+}
+
+pub struct MemoryFile {
+    pub anonymous: bool,
+    /// Page index -> owned server mapping. Aliases reference the same RAM.
+    pub pages: BTreeMap<Word, Word>,
+    pub size: Word,
+    pub offset: Word,
+    pub status_flags: Word,
+    pub seals: Word,
+    pub maps: Vec<MemoryMapping>,
 }
 
 #[derive(Clone, Copy)]
@@ -29,6 +86,9 @@ pub struct Epoll {
 
 pub enum Object {
     Counter(EventCounter),
+    Timer(Timer),
+    Signals(SignalFd),
+    Memory(MemoryFile),
     Epoll(Epoll),
 }
 
@@ -49,6 +109,24 @@ impl Objects {
         self.entries.is_empty()
     }
 
+    pub fn timer_deadline(&self) -> Option<Word> {
+        self.entries
+            .iter()
+            .filter_map(|(_, object)| match object {
+                Object::Timer(timer) => timer.deadline,
+                _ => None,
+            })
+            .min()
+    }
+
+    pub fn expire_timers(&mut self, now: Word) {
+        for (_, object) in &mut self.entries {
+            if let Object::Timer(timer) = object {
+                timer.expire(now);
+            }
+        }
+    }
+
     pub fn insert(&mut self, object: Object) -> Option<Word> {
         if self.entries.len() == OBJECT_LIMIT || self.next_id == Word::MAX {
             return None;
@@ -65,6 +143,10 @@ impl Objects {
             .iter()
             .find(|(key, _)| *key == id)
             .map(|(_, object)| object)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Word, &Object)> {
+        self.entries.iter().map(|(id, object)| (*id, object))
     }
 
     pub fn get_mut(&mut self, id: Word) -> Option<&mut Object> {

@@ -59,8 +59,11 @@ pub(super) fn read_target_memory(
     if len == 0 {
         return Ok(());
     }
-    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, len)
-        .map_err(map_request_error)
+    if !runtime.memory_access_allowed(pid, user_ptr, len, 1) {
+        return Err(EFAULT);
+    }
+    nanami_runtime::request_process_memory_read_checked(pid, user_ptr, runtime.posix_shm, len)
+        .map_err(|_| EFAULT)
 }
 
 pub(super) fn write_target_memory(
@@ -69,7 +72,24 @@ pub(super) fn write_target_memory(
     user_ptr: Word,
     len: Word,
 ) -> Result<(), i32> {
-    write_target_memory_from(pid, user_ptr, runtime.posix_shm, len)
+    copyout_from(runtime, pid, user_ptr, runtime.posix_shm, len)
+}
+
+pub(super) fn copyout_from(
+    runtime: &Runtime,
+    pid: Word,
+    user_ptr: Word,
+    source: Word,
+    len: Word,
+) -> Result<(), i32> {
+    if !runtime.memory_access_allowed(pid, user_ptr, len, 2) {
+        return Err(EFAULT);
+    }
+    if len == 0 {
+        return Ok(());
+    }
+    nanami_runtime::request_process_memory_write_checked(pid, user_ptr, source, len)
+        .map_err(|_| EFAULT)
 }
 
 pub(super) fn write_target_memory_from(
@@ -81,7 +101,8 @@ pub(super) fn write_target_memory_from(
     if len == 0 {
         return Ok(());
     }
-    nanami_runtime::request_process_memory_write(pid, user_ptr, source, len).map_err(map_request_error)
+    nanami_runtime::request_process_memory_write(pid, user_ptr, source, len)
+        .map_err(map_request_error)
 }
 
 pub(super) fn write_u32_to_target(

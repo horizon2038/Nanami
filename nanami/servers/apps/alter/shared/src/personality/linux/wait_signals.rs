@@ -58,7 +58,12 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
     let Some(child) = runtime.managed_process(child_pid) else {
         return;
     };
-    let Some(parent) = runtime.managed_process(child.parent_pid) else {
+    let Some(parent) = runtime.managed.iter().find(|parent| {
+        parent.pid != 0
+            && parent.tgid == child.parent_pid
+            && parent.signal_waiting
+            && !parent.signal_stopped()
+    }) else {
         return;
     };
     if !parent.signal_waiting || parent.signal_stopped() {

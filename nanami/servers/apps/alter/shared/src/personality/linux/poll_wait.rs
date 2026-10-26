@@ -10,10 +10,40 @@ pub(super) fn sys_poll_action(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> EmulationAction {
+    let mask = match super::poll_timeout::temporary_signal_mask(runtime, pid, context) {
+        Ok(mask) => mask,
+        Err(errno) => return EmulationAction::Return(-(errno as isize)),
+    };
+    if let Some(mask) = mask {
+        let Some(process) = runtime.managed_process_mut(pid) else {
+            return EmulationAction::Return(-(ESRCH as isize));
+        };
+        let state = process.signals_mut();
+        state.suspend_mask = Some(state.blocked);
+        state.blocked = mask;
+    }
     match start_wait(runtime, pid, context) {
-        Ok(Some(value)) => EmulationAction::Return(value as isize),
+        Ok(Some(value)) => {
+            restore_signal_mask(runtime, pid);
+            EmulationAction::Return(value as isize)
+        }
         Ok(None) => EmulationAction::Park,
-        Err(errno) => EmulationAction::Return(-(errno as isize)),
+        Err(errno) => {
+            restore_signal_mask(runtime, pid);
+            EmulationAction::Return(-(errno as isize))
+        }
+    }
+}
+
+fn restore_signal_mask(runtime: &mut Runtime, pid: Word) {
+    if let Some(process) = runtime.managed_process_mut(pid) {
+        if process
+            .signals()
+            .is_some_and(|state| state.suspend_mask.is_some())
+        {
+            let state = process.signals_mut();
+            state.blocked = state.suspend_mask.take().unwrap();
+        }
     }
 }
 
@@ -110,6 +140,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
             Err(errno) => -(errno as isize),
         };
         runtime.managed[index].readiness_wait = None;
+        restore_signal_mask(runtime, pid);
         completed = true;
         record_syscall_result(runtime, pid, wait.context.number, value);
         if crate::process::write_personality_syscall_return(pcb, wait.context, value, personality)

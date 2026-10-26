@@ -1,3 +1,5 @@
+#[path = "linux/threads.rs"]
+mod threads;
 #[path = "linux/vectored.rs"]
 mod vectored;
 
@@ -46,24 +48,34 @@ use network_packet::*;
 #[path = "linux/terminal.rs"]
 mod terminal;
 use terminal::*;
-#[path = "linux/terminal_signals.rs"]
-mod terminal_signals;
 #[path = "linux/job_control.rs"]
 mod job_control;
+#[path = "linux/terminal_signals.rs"]
+mod terminal_signals;
 
 #[path = "linux/pipe.rs"]
 mod pipe;
 use pipe::*;
-#[path = "linux/pipe_wait.rs"]
-mod pipe_wait;
 #[path = "linux/eventfd.rs"]
 mod eventfd;
+#[path = "linux/fd_events.rs"]
+mod fd_events;
+#[path = "linux/futex.rs"]
+mod futex;
+#[path = "linux/memfd.rs"]
+mod memfd;
+#[path = "linux/namespace.rs"]
+mod namespace;
+use namespace::*;
+#[path = "linux/pipe_wait.rs"]
+mod pipe_wait;
+pub(crate) use memfd::bus_fault;
+#[path = "linux/epoll.rs"]
+mod epoll;
 #[path = "linux/unix.rs"]
 mod unix;
 #[path = "linux/unix_message.rs"]
 mod unix_message;
-#[path = "linux/epoll.rs"]
-mod epoll;
 
 #[path = "linux/filesystem.rs"]
 mod filesystem;
@@ -338,6 +350,7 @@ pub fn dispatch_syscall(
         SYS_FTRUNCATE => {
             truncate::sys_ftruncate(runtime, native_pid, context.args[0], context.args[1])
         }
+        SYS_MEMFD_CREATE => memfd::create(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP => sys_dup(runtime, native_pid, context.args[0]),
         SYS_DUP2 => sys_dup2(runtime, native_pid, context.args[0], context.args[1]),
         SYS_DUP3 => sys_dup3(
@@ -349,6 +362,32 @@ pub fn dispatch_syscall(
         ),
         SYS_PIPE => sys_pipe(runtime, native_pid, context.args[0], 0),
         SYS_PIPE2 => sys_pipe(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_TIMERFD_CREATE => {
+            fd_events::timer_create(runtime, native_pid, context.args[0], context.args[1])
+        }
+        SYS_TIMERFD_SETTIME => fd_events::timer_set(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+        ),
+        SYS_TIMERFD_GETTIME => {
+            fd_events::timer_get(runtime, native_pid, context.args[0], context.args[1])
+        }
+        SYS_SIGNALFD | SYS_SIGNALFD4 => fd_events::signal_create(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            if context.number == SYS_SIGNALFD {
+                0
+            } else {
+                context.args[3]
+            },
+        ),
         SYS_EVENTFD | SYS_EVENTFD2 => eventfd::create(
             runtime,
             native_pid,
@@ -483,9 +522,26 @@ pub fn dispatch_syscall(
             trace_syscall_action(runtime, native_pid, context, action);
             return action;
         }
-        SYS_STAT | SYS_LSTAT => sys_stat(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_STAT => sys_stat(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_LSTAT => sys_lstat(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_SYMLINK => namespace::symlink(
+            runtime,
+            native_pid,
+            context.args[0],
+            LINUX_AT_FDCWD,
+            context.args[1],
+        ),
+        SYS_FCHDIR => namespace::fchdir(runtime, native_pid, context.args[0]),
+        SYS_SYMLINKAT => namespace::symlink(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
         SYS_FSTAT => sys_fstat(runtime, native_pid, context.args[0], context.args[1]),
-        SYS_CHOWN | SYS_LCHOWN => sys_chown(runtime, native_pid, context.args[0]),
+        SYS_CHOWN => sys_chown(runtime, native_pid, context.args[0]),
+        SYS_LCHOWN => sys_fchownat(runtime, native_pid, LINUX_AT_FDCWD, context.args[0], 0x100),
         SYS_FCHOWN => sys_fchown(runtime, native_pid, context.args[0]),
         SYS_FCHOWNAT => sys_fchownat(
             runtime,
@@ -621,7 +677,7 @@ pub fn dispatch_syscall(
             trace_syscall_action(runtime, native_pid, context, action);
             return action;
         }
-        SYS_GETPID => Ok(native_pid),
+        SYS_GETPID => Ok(runtime.thread_group(native_pid)),
         SYS_CLONE | SYS_FORK => sys_fork(runtime, native_pid, context),
         SYS_VFORK => {
             let action = sys_vfork(runtime, native_pid, context);
@@ -669,6 +725,9 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_EXIT | SYS_EXIT_GROUP => {
+            if context.number == SYS_EXIT_GROUP {
+                threads::exit_peers(runtime, native_pid, context.args[0]);
+            }
             let action = EmulationAction::Exit(context.args[0]);
             let last = runtime
                 .managed_process(native_pid)
@@ -819,18 +878,33 @@ pub fn dispatch_syscall(
             context.args[1],
             context.args[2],
         ),
-        SYS_SET_TID_ADDRESS => Ok(0),
+        SYS_SET_TID_ADDRESS => futex::set_tid(runtime, native_pid, context.args[0]),
         SYS_CLOCK_GETTIME => {
             sys_clock_gettime(runtime, native_pid, context.args[0], context.args[1])
         }
         SYS_CLOCK_GETRES => sys_clock_getres(runtime, native_pid, context.args[0], context.args[1]),
         SYS_UTIMES => sys_utime_path(runtime, native_pid, context.args[0]),
-        SYS_FUTIMESAT => sys_utime_path(runtime, native_pid, context.args[1]),
-        SYS_UTIMENSAT => sys_utime_path(runtime, native_pid, context.args[1]),
-        SYS_SET_ROBUST_LIST => Ok(0),
+        SYS_FUTIMESAT => sys_utime_at(runtime, native_pid, context.args[0], context.args[1], 0),
+        SYS_UTIMENSAT => sys_utime_at(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[3],
+        ),
+        SYS_SET_ROBUST_LIST => {
+            futex::set_robust(runtime, native_pid, context.args[0], context.args[1])
+        }
+        SYS_GET_ROBUST_LIST => futex::get_robust(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
         SYS_GETRANDOM => sys_getrandom(runtime, native_pid, context.args[0], context.args[1]),
         SYS_GETRLIMIT | SYS_PRLIMIT64 => sys_getrlimit(runtime, native_pid, context),
-        SYS_FUTEX => Ok(0),
+        SYS_FUTEX => return futex::dispatch(runtime, native_pid, context),
         SYS_RSEQ => Err(ENOSYS),
         _ => {
             let action = EmulationAction::Unsupported(context.number);
@@ -868,4 +942,5 @@ pub use poll_wait::{
 };
 pub use terminal::wake_terminal_readers;
 pub use terminal_signals::handle_terminal_input;
+pub use threads::exit_peers as exit_thread_group;
 pub use wait_signals::wake_waiter_for_child;

@@ -17,8 +17,8 @@ Build jobs have read-only repository permissions; only the publication job gets
 For example, after committing the version and release changes:
 
 ```sh
-git tag -a v0.6.1 -F /path/to/release-notes.txt
-git push origin v0.6.1
+git tag -a v0.6.2 -F /path/to/release-notes.txt
+git push origin v0.6.2
 ```
 
 Use an English bullet list for `release-notes.txt`. Do not create a lightweight
@@ -41,7 +41,7 @@ checksums afterwards:
 
 ```sh
 sha256sum --check SHA256SUMS
-tar -xzf nanami-v0.6.1-x86_64-pc99.tar.gz -C /path/to/empty-directory
+tar -xzf nanami-v0.6.2-x86_64-pc99.tar.gz -C /path/to/empty-directory
 cd /path/to/empty-directory
 sha256sum --check SHA256SUMS
 ```

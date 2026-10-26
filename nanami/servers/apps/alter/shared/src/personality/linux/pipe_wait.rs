@@ -3,7 +3,7 @@ use super::{
     LinuxFileKind, LinuxSyscallContext, Runtime, Word, LINUX_FD_MAX, LINUX_O_NONBLOCK,
     LINUX_POLLIN, LINUX_POLLOUT, SYS_READ, SYS_READV, SYS_WRITE, SYS_WRITEV,
 };
-use crate::state::readiness::{PollFd, ReadinessWait, READY_OBJECT, READY_PIPE};
+use crate::state::readiness::{PollFd, ReadinessWait};
 
 pub(super) fn park(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContext) -> bool {
     let events = match context.number {
@@ -15,14 +15,21 @@ pub(super) fn park(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContex
     let Some(file) = runtime.linux_file(pid, fd) else {
         return false;
     };
-    let nonblocking = if file.kind == LinuxFileKind::EventFd {
+    let nonblocking = if matches!(
+        file.kind,
+        LinuxFileKind::EventFd | LinuxFileKind::TimerFd | LinuxFileKind::SignalFd
+    ) {
         super::eventfd::nonblocking(runtime, file)
     } else {
         file.flags & LINUX_O_NONBLOCK != 0
     };
     if !matches!(
         file.kind,
-        LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite | LinuxFileKind::EventFd
+        LinuxFileKind::PipeRead
+            | LinuxFileKind::PipeWrite
+            | LinuxFileKind::EventFd
+            | LinuxFileKind::TimerFd
+            | LinuxFileKind::SignalFd
     ) || nonblocking
     {
         return false;
@@ -40,11 +47,7 @@ pub(super) fn park(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContex
         context,
         entries,
         count: 1,
-        sources: if file.kind == LinuxFileKind::EventFd {
-            READY_OBJECT
-        } else {
-            READY_PIPE
-        },
+        sources: super::readiness::file_sources(file),
         deadline: None,
         select: false,
     });

@@ -1,6 +1,6 @@
 use super::{
-    graphics_enabled, map_request_error, personality, virtual_fs, Runtime, VirtualNode, Word,
-    EFAULT, EINVAL, ENAMETOOLONG, EROFS, ESRCH, LINUX_AT_FDCWD, LINUX_CWD_MAX, LINUX_PAGE_SIZE,
+    graphics_enabled, personality, virtual_fs, Runtime, VirtualNode, Word, EFAULT, EINVAL,
+    ENAMETOOLONG, EROFS, ESRCH, LINUX_AT_FDCWD, LINUX_CWD_MAX, LINUX_PAGE_SIZE,
 };
 
 pub(super) fn read_c_string(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Word, i32> {
@@ -14,13 +14,16 @@ pub(super) fn read_c_string(runtime: &mut Runtime, pid: Word, user_ptr: Word) ->
         let page_remaining = (LINUX_PAGE_SIZE - (source & (LINUX_PAGE_SIZE - 1))) as usize;
         // Most paths terminate near the start: avoid copying an entire page.
         let chunk = ::core::cmp::min(max - copied, page_remaining).min(128.max(copied));
-        nanami_runtime::request_process_memory_read(
+        if !runtime.memory_access_allowed(pid, source, chunk, 1) {
+            return Err(EFAULT);
+        }
+        nanami_runtime::request_process_memory_read_checked(
             pid,
             source,
             runtime.posix_shm + copied as Word,
             chunk as Word,
         )
-        .map_err(map_request_error)?;
+        .map_err(|_| EFAULT)?;
 
         let end = copied + chunk;
         while copied < end {
@@ -200,6 +203,14 @@ pub(super) fn guest_root_for_process(runtime: &Runtime, pid: Word) -> Result<&[u
 }
 
 pub(super) fn resolve_current_shm_path(
+    runtime: &mut Runtime,
+    pid: Word,
+    input_len: Word,
+) -> Result<Word, i32> {
+    super::namespace::resolve_at(runtime, pid, LINUX_AT_FDCWD, input_len, true)
+}
+
+pub(super) fn resolve_lexical_shm_path(
     runtime: &mut Runtime,
     pid: Word,
     input_len: Word,

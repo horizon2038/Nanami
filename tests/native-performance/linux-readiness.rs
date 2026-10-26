@@ -16,12 +16,22 @@ pub use std::println;
 type Word = usize;
 struct UnixSocketMock;
 impl UnixSocketMock {
-    fn references(&self, _: LinuxFile) -> bool { false }
+    fn references(&self, _: LinuxFile) -> bool {
+        false
+    }
 }
 mod unix {
     use super::*;
-    pub(super) fn retry(_: &mut Runtime, _: Word, _: LinuxSyscallContext) -> Option<Result<Word, i32>> { None }
-    pub(super) fn readiness(_: &Runtime, _: Word) -> Result<i16, i32> { Ok(0) }
+    pub(super) fn retry(
+        _: &mut Runtime,
+        _: Word,
+        _: LinuxSyscallContext,
+    ) -> Option<Result<Word, i32>> {
+        None
+    }
+    pub(super) fn readiness(_: &Runtime, _: Word) -> Result<i16, i32> {
+        Ok(0)
+    }
 }
 const EFAULT: i32 = 14;
 const EINVAL: i32 = 22;
@@ -34,6 +44,8 @@ const SYS_WRITE: usize = 1;
 const SYS_READV: usize = 19;
 const SYS_WRITEV: usize = 20;
 const LINUX_O_NONBLOCK: usize = 0x800;
+const LINUX_O_APPEND: usize = 0x400;
+const LINUX_O_RDWR: usize = 2;
 const EOPNOTSUPP: i32 = 95;
 const LINUX_FD_MAX: usize = 64;
 const LINUX_PIPE_BYTES: usize = 4096;
@@ -65,13 +77,48 @@ const ENOSPC: i32 = 28;
 const ENOENT: i32 = 2;
 const EEXIST: i32 = 17;
 const EPERM: i32 = 1;
+const ENOSYS: i32 = 38;
+const ETIMEDOUT: i32 = 110;
+const SYS_FUTEX: Word = 202;
+const EBUSY: i32 = 16;
+const EACCES: i32 = 13;
+const LINUX_PAGE_SIZE: Word = 4096;
+const LINUX_PROT_NONE: Word = 0;
+const LINUX_PROT_WRITE: Word = 2;
+const LINUX_MAP_FIXED: Word = 16;
+const LINUX_MAP_ANONYMOUS: Word = 32;
+const LINUX_MREMAP_MAYMOVE: Word = 1;
+const LINUX_MREMAP_FIXED: Word = 2;
+const ALTER_PROCESS_MAPPING_MAX: usize = 128;
+
+#[derive(Clone, Copy)]
+pub struct ProcessMapping {
+    base: Word,
+    size: Word,
+    prot: Word,
+}
+impl ProcessMapping {
+    const EMPTY: Self = Self {
+        base: 0,
+        size: 0,
+        prot: 0,
+    };
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/mapping_table.rs"]
+mod mapping_table;
+use mapping_table::MappingTable;
+impl Default for MappingTable {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
 
 #[derive(Default, Clone, Copy)]
 struct LinuxSyscallContext {
     number: Word,
     args: [Word; 6],
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum EmulationAction {
     Return(isize),
     Park,
@@ -81,9 +128,12 @@ pub mod readiness_state;
 pub mod state {
     pub use crate::poll_objects;
     pub use crate::readiness_state as readiness;
+    pub use crate::task_sync;
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/poll_objects.rs"]
 pub mod poll_objects;
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/task_sync.rs"]
+pub mod task_sync;
 use readiness_state::*;
 #[derive(Clone, Copy, PartialEq)]
 enum LinuxFileKind {
@@ -104,6 +154,9 @@ enum LinuxFileKind {
     Framebuffer,
     Empty,
     EventFd,
+    TimerFd,
+    SignalFd,
+    MemoryFile,
     Epoll,
 }
 #[derive(Clone, Copy)]
@@ -131,6 +184,11 @@ struct Pipe {
 }
 #[derive(Default)]
 struct Process {
+    vm_group: Word,
+    signal_waiting: bool,
+    signal_context: LinuxSyscallContext,
+    mappings: MappingTable,
+    signals: Option<signal_state::Signals>,
     pid: Word,
     pcb: Word,
     personality: Word,
@@ -139,7 +197,24 @@ struct Process {
     files: Vec<LinuxFile>,
     terminal_id: Word,
 }
+type ManagedProcess = Process;
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/mappings.rs"]
+mod mappings;
+#[path = "../../nanami/servers/apps/alter/shared/src/common/signals.rs"]
+pub mod signal_state;
+mod common {
+    pub use crate::signal_state as signals;
+}
+impl Process {
+    fn signals(&self) -> Option<&signal_state::Signals> {
+        self.signals.as_ref()
+    }
+    fn signals_mut(&mut self) -> &mut signal_state::Signals {
+        self.signals.get_or_insert_with(signal_state::Signals::new)
+    }
+}
 struct Runtime {
+    tasks: task_sync::Tasks,
     unix_sockets: UnixSocketMock,
     io_calls: usize,
     io_result: Result<Word, i32>,
@@ -162,11 +237,32 @@ struct Runtime {
     readiness_changes: Word,
     clock_error: bool,
     alarm_error: bool,
+    realtime_anchor: Option<(Word, Word)>,
     copy_error: bool,
     posix_shm_size: Word,
     poll_objects: poll_objects::Objects,
 }
 impl Runtime {
+    fn vm_group(&self, pid: Word) -> Word {
+        self.managed_process(pid).map_or(pid, |process| {
+            if process.vm_group == 0 {
+                pid
+            } else {
+                process.vm_group
+            }
+        })
+    }
+    fn park_signal_waiter(&mut self, pid: Word, _: Word, context: LinuxSyscallContext) -> bool {
+        let Some(process) = self.managed_process_mut(pid) else {
+            return false;
+        };
+        process.signal_waiting = true;
+        process.signal_context = context;
+        true
+    }
+    fn managed_process(&self, pid: Word) -> Option<&Process> {
+        self.managed.iter().find(|process| process.pid == pid)
+    }
     fn is_signal_stopped(&self, _: Word) -> bool {
         false
     }
@@ -225,14 +321,15 @@ fn terminal_readable(r: &mut Runtime, _: Word) -> Result<bool, i32> {
 fn socket_readiness(r: &mut Runtime, _: Word, _: Word, _: LinuxFile) -> Result<i16, i32> {
     Ok(r.network_ready)
 }
-fn read_target_memory(r: &mut Runtime, _: Word, ptr: Word, bytes: Word) -> Result<(), i32> {
+fn read_target_memory(r: &mut Runtime, pid: Word, ptr: Word, bytes: Word) -> Result<(), i32> {
     if ptr == 0 && bytes != 0 {
         return Err(EFAULT);
     }
     r.reads += usize::from(bytes != 0);
     if bytes != 0 {
         unsafe {
-            std::ptr::copy_nonoverlapping(ptr as *const u8, r.posix_shm as *mut u8, bytes);
+            let source = alias_pointer(pid, ptr, bytes).unwrap_or(ptr);
+            std::ptr::copy_nonoverlapping(source as *const u8, r.posix_shm as *mut u8, bytes);
         }
     }
     Ok(())
@@ -277,6 +374,7 @@ fn record_syscall_result(_: &mut Runtime, _: Word, _: Word, _: isize) {}
 thread_local! { static RETURNS: std::cell::RefCell<Vec<(Word,isize)>> = const { std::cell::RefCell::new(Vec::new()) }; }
 mod process {
     use super::*;
+    pub type HardwareContext = [usize; 35];
     pub fn write_personality_syscall_return(
         pcb: Word,
         _: LinuxSyscallContext,
@@ -310,6 +408,286 @@ use poll_wait::*;
 mod epoll;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/eventfd.rs"]
 mod eventfd;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/fd_events.rs"]
+mod fd_events;
+mod realtime {
+    use super::*;
+    pub(super) fn realtime(runtime: &mut Runtime) -> Result<(Word, Word), i32> {
+        Ok(runtime.realtime_anchor.unwrap_or((0, 0)))
+    }
+}
+fn read_shm_u64(runtime: &Runtime, offset: Word) -> Word {
+    unsafe { ((runtime.posix_shm + offset) as *const Word).read_unaligned() }
+}
+fn write_guest_u64(runtime: &mut Runtime, pid: Word, ptr: Word, value: Word) -> Result<(), i32> {
+    unsafe {
+        write_u64(runtime.posix_shm, value);
+    }
+    write_target_memory(runtime, pid, ptr, 8)
+}
+fn write_target_memory_from(
+    _: Word,
+    destination: Word,
+    source: Word,
+    bytes: Word,
+) -> Result<(), i32> {
+    if destination == 0 {
+        return Err(EFAULT);
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes);
+    }
+    Ok(())
+}
+fn copyout_from(
+    _: &Runtime,
+    pid: Word,
+    destination: Word,
+    source: Word,
+    bytes: Word,
+) -> Result<(), i32> {
+    write_target_memory_from(pid, destination, source, bytes)
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/futex.rs"]
+mod futex;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/memfd.rs"]
+mod memfd;
+fn record_action_result(_: &mut Runtime, _: Word, _: Word, _: EmulationAction) {}
+fn read_shm_u32(runtime: &Runtime, offset: Word) -> u32 {
+    unsafe { ((runtime.posix_shm + offset) as *const u32).read_unaligned() }
+}
+fn write_guest_u32(_: &mut Runtime, pid: Word, ptr: Word, value: u32) -> Result<(), i32> {
+    let destination = alias_pointer(pid, ptr, 4).unwrap_or(ptr);
+    if destination == 0 {
+        return Err(EFAULT);
+    }
+    unsafe {
+        (destination as *mut u32).write_unaligned(value);
+    }
+    Ok(())
+}
+mod clocks {
+    use super::*;
+    pub(super) fn sleep_deadline(
+        runtime: &mut Runtime,
+        pid: Word,
+        ptr: Word,
+        _: Word,
+        absolute: bool,
+    ) -> Result<Option<Word>, i32> {
+        read_target_memory(runtime, pid, ptr, 16)?;
+        let seconds = read_shm_u64(runtime, 0);
+        let nanos = read_shm_u64(runtime, 8);
+        if nanos >= 1_000_000_000 {
+            return Err(EINVAL);
+        }
+        let ticks = seconds * runtime.monotonic_tick_hz
+            + (nanos * runtime.monotonic_tick_hz).div_ceil(1_000_000_000);
+        Ok(Some(if absolute {
+            ticks
+        } else {
+            runtime.monotonic_ticks + ticks
+        }))
+    }
+}
+fn alias_pointer(pid: Word, pointer: Word, bytes: Word) -> Option<Word> {
+    ALIASES.with(|aliases| {
+        aliases
+            .borrow()
+            .iter()
+            .find_map(|(&(owner, base), (ram, _))| {
+                if owner == pid
+                    && pointer >= base
+                    && pointer
+                        .checked_add(bytes)
+                        .is_some_and(|end| end <= base + ram.len())
+                {
+                    Some(ram.as_ptr() as Word + pointer - base)
+                } else {
+                    None
+                }
+            })
+    })
+}
+type Ram = std::rc::Rc<Box<[u8]>>;
+thread_local! {
+    static OWNED: std::cell::RefCell<std::collections::BTreeMap<Word, Ram>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static ALIASES: std::cell::RefCell<std::collections::BTreeMap<(Word, Word), (Ram, Word)>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+#[derive(Debug)]
+pub struct RequestError;
+fn map_request_error(_: RequestError) -> i32 {
+    EIO
+}
+pub fn request_memory_create(bytes: Word) -> Result<Word, RequestError> {
+    let ram = std::rc::Rc::new(vec![0u8; bytes].into_boxed_slice());
+    let address = ram.as_ptr() as Word;
+    OWNED.with(|owned| owned.borrow_mut().insert(address, ram));
+    Ok(address)
+}
+
+pub fn request_process_memory_compare_exchange_u32(
+    pid: Word,
+    address: Word,
+    expected: u32,
+    desired: u32,
+) -> Result<u32, RequestError> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    let pointer = alias_pointer(pid, address, 4).unwrap_or(address);
+    let atomic = unsafe { &*(pointer as *const AtomicU32) };
+    Ok(
+        match atomic.compare_exchange(expected, desired, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(previous) | Err(previous) => previous,
+        },
+    )
+}
+pub fn request_mapping_share_at(
+    pid: Word,
+    source: Word,
+    _: Word,
+    target: Word,
+) -> Result<Word, RequestError> {
+    let ram = OWNED.with(|owned| owned.borrow().get(&source).unwrap().clone());
+    ALIASES.with(|aliases| {
+        assert!(aliases
+            .borrow_mut()
+            .insert((pid, target), (ram, 7))
+            .is_none())
+    });
+    Ok(target)
+}
+pub fn request_mapping_release(address: Word, _: Word) -> Result<(), RequestError> {
+    OWNED.with(|owned| {
+        owned.borrow_mut().remove(&address);
+    });
+    Ok(())
+}
+pub fn request_process_mapping_release_sparse(
+    pid: Word,
+    base: Word,
+    bytes: Word,
+) -> Result<(), RequestError> {
+    ALIASES.with(|aliases| {
+        aliases
+            .borrow_mut()
+            .retain(|&(owner, va), _| owner != pid || va < base || va >= base + bytes);
+    });
+    Ok(())
+}
+pub fn request_process_mapping_protect(
+    pid: Word,
+    base: Word,
+    bytes: Word,
+    prot: Word,
+) -> Result<(), RequestError> {
+    ALIASES.with(|aliases| {
+        for va in (base..base + bytes).step_by(LINUX_PAGE_SIZE) {
+            aliases
+                .borrow_mut()
+                .get_mut(&(pid, va))
+                .ok_or(RequestError)?
+                .1 = prot;
+        }
+        Ok(())
+    })
+}
+pub fn request_process_map_anonymous_at(
+    pid: Word,
+    base: Word,
+    bytes: Word,
+) -> Result<(Word, Word), RequestError> {
+    for va in (base..base + bytes).step_by(LINUX_PAGE_SIZE) {
+        let source = request_memory_create(LINUX_PAGE_SIZE)?;
+        request_mapping_share_at(pid, source, LINUX_PAGE_SIZE, va)?;
+        request_mapping_release(source, LINUX_PAGE_SIZE)?;
+    }
+    Ok((base, bytes))
+}
+pub fn request_process_memory_clone(
+    parent: Word,
+    child: Word,
+    base: Word,
+    bytes: Word,
+) -> Result<(), RequestError> {
+    ALIASES.with(|aliases| {
+        let aliases = aliases.borrow();
+        let source = aliases.get(&(parent, base)).ok_or(RequestError)?.0.as_ptr();
+        let destination = aliases.get(&(child, base)).ok_or(RequestError)?.0.as_ptr();
+        unsafe {
+            std::ptr::copy_nonoverlapping(source, destination as *mut u8, bytes);
+        }
+        Ok(())
+    })
+}
+fn read_c_string(runtime: &mut Runtime, pid: Word, pointer: Word) -> Result<Word, i32> {
+    let len = unsafe {
+        std::ffi::CStr::from_ptr(pointer as *const i8)
+            .to_bytes()
+            .len()
+    };
+    read_target_memory(runtime, pid, pointer, len)?;
+    Ok(len)
+}
+fn align_up_word(value: Word, alignment: Word) -> Word {
+    value.div_ceil(alignment) * alignment
+}
+fn copy_same_process_range(
+    _: &mut Runtime,
+    pid: Word,
+    source: Word,
+    target: Word,
+    bytes: Word,
+) -> Result<(), i32> {
+    for offset in (0..bytes).step_by(LINUX_PAGE_SIZE) {
+        let source = alias_pointer(pid, source + offset, LINUX_PAGE_SIZE).ok_or(EFAULT)?;
+        let target = alias_pointer(pid, target + offset, LINUX_PAGE_SIZE).ok_or(EFAULT)?;
+        unsafe {
+            std::ptr::copy_nonoverlapping(source as *const u8, target as *mut u8, LINUX_PAGE_SIZE);
+        }
+    }
+    Ok(())
+}
+fn reserve_none_mapping(
+    runtime: &mut Runtime,
+    pid: Word,
+    bytes: Word,
+) -> Result<(Word, Word), i32> {
+    let base = runtime
+        .managed_process(pid)
+        .unwrap()
+        .mappings
+        .iter()
+        .filter(|mapping| mapping.base != 0)
+        .map(|mapping| mapping.base + mapping.size)
+        .max()
+        .unwrap_or(0x80000000);
+    assert!(runtime.add_mapping(pid, base, bytes, 0));
+    Ok((base, bytes))
+}
+fn sys_mmap(
+    runtime: &mut Runtime,
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    prot: Word,
+    _: Word,
+    _: Word,
+    _: Word,
+) -> Result<Word, i32> {
+    assert!(runtime.add_mapping(pid, address, bytes, prot));
+    Ok(address)
+}
+fn sys_munmap(runtime: &mut Runtime, pid: Word, address: Word, bytes: Word) -> Result<Word, i32> {
+    memfd::unmap(runtime, pid, address, bytes)?;
+    assert!(runtime.remove_mapping(pid, address, bytes));
+    Ok(0)
+}
+fn split_ticks(ticks: Word, hz: Word) -> (Word, Word) {
+    (
+        ticks / hz,
+        ((ticks % hz) as u128 * 1_000_000_000 / hz as u128) as Word,
+    )
+}
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/pipe_wait.rs"]
 mod pipe_wait;
 
@@ -327,6 +705,7 @@ fn runtime() -> Runtime {
     RETURNS.with(|v| v.borrow_mut().clear());
     let mut scratch = vec![0; 4096].into_boxed_slice();
     Runtime {
+        tasks: task_sync::Tasks::new(),
         unix_sockets: UnixSocketMock,
         io_calls: 0,
         io_result: Ok(0),
@@ -381,6 +760,7 @@ fn runtime() -> Runtime {
         readiness_changes: 0,
         clock_error: false,
         alarm_error: false,
+        realtime_anchor: Some((0, 0)),
     }
 }
 
@@ -584,7 +964,7 @@ fn alarm_failure_rolls_back_wait_and_invalid_arguments_do_not_park() {
     );
 }
 #[test]
-fn ppoll_timespec_validation_remaining_time_and_mask_rejection() {
+fn ppoll_timespec_validation_remaining_time_and_temporary_mask() {
     let mut r = runtime();
     let mut ts = [0i64, 25_000_000];
     let mut mask = 0u64;
@@ -614,11 +994,14 @@ fn ppoll_timespec_validation_remaining_time_and_mask_rejection() {
         EmulationAction::Return(-22)
     );
     mask = 1;
+    ts = [0, 1];
+    std::hint::black_box(&mut ts);
     std::hint::black_box(mask);
-    assert_eq!(
-        sys_poll_action(&mut r, 1, ctx),
-        EmulationAction::Return(-95)
-    );
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    assert_eq!(r.managed[0].signals().unwrap().blocked, 1);
+    r.monotonic_ticks += 1;
+    wake_readiness_waiters(&mut r, READY_TIMER);
+    assert_eq!(r.managed[0].signals().unwrap().blocked, 0);
     ctx.args[4] = 16;
     assert_eq!(
         sys_poll_action(&mut r, 1, ctx),
@@ -859,4 +1242,278 @@ fn final_close_removes_registration_and_ids_cannot_alias_recycled_fds() {
     let mut output = [0u8; TEST_EVENT_BYTES];
     let ctx = epoll_context(ep, &mut output, 0);
     assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
+}
+
+#[test]
+fn timerfd_periodic_expirations_epoll_and_failed_read_preserve_count() {
+    let mut r = runtime();
+    let fd = fd_events::timer_create(&mut r, 1, 1, LINUX_O_NONBLOCK).unwrap();
+    let input = [0usize, 10_000_000, 0, 20_000_000];
+    fd_events::timer_set(&mut r, 1, fd, 0, input.as_ptr() as Word, 0).unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(&mut r, ep, fd, 1, 1, 123).unwrap();
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, -1);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    r.monotonic_ticks = 145;
+    wake_readiness_waiters(&mut r, READY_TIMER);
+    assert!(r.managed[0].readiness_wait.is_none());
+    let file = r.linux_file(1, fd).unwrap();
+    assert_eq!(fd_events::read(&mut r, 1, file, 0, 8), Err(EFAULT));
+    let mut count = 0u64;
+    assert_eq!(
+        fd_events::read(&mut r, 1, file, &mut count as *mut _ as Word, 8),
+        Ok(8)
+    );
+    assert_eq!(count, 3);
+    assert_eq!(
+        fd_events::read(&mut r, 1, file, &mut count as *mut _ as Word, 8),
+        Err(EAGAIN)
+    );
+    assert_eq!(r.poll_objects.timer_deadline(), Some(150));
+}
+
+#[test]
+fn signalfd_consumes_pending_records_and_reports_poll_readability() {
+    let mut r = runtime();
+    let mask = 1u64 << 9;
+    let fd =
+        fd_events::signal_create(&mut r, 1, Word::MAX, &mask as *const _ as Word, 8, 0).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    let state = r.managed[0].signals_mut();
+    state.blocked = mask;
+    state.enqueue(signal_state::Info::new(10, -6, 777));
+    assert_ne!(
+        fd_events::readiness(&mut r, 1, file).unwrap() & LINUX_POLLIN,
+        0
+    );
+    assert_eq!(fd_events::read(&mut r, 1, file, 0, 128), Err(EFAULT));
+    let mut record = [0u8; 128];
+    assert_eq!(
+        fd_events::read(&mut r, 1, file, record.as_mut_ptr() as Word, 128),
+        Ok(128)
+    );
+    assert_eq!(&record[..4], &10u32.to_le_bytes());
+    assert_eq!(&record[12..16], &777u32.to_le_bytes());
+    assert_eq!(fd_events::readiness(&mut r, 1, file), Ok(0));
+    assert_eq!(r.managed[0].signals().unwrap().blocked, mask);
+}
+
+#[test]
+fn memfd_io_shares_offsets_but_positioned_io_does_not_move_them() {
+    let mut r = runtime();
+    let fd = memfd::create(&mut r, 1, c"memory".as_ptr() as Word, 3).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    assert_eq!(file.flags & LINUX_FD_CLOEXEC, LINUX_FD_CLOEXEC);
+    let data = *b"shared";
+    assert_eq!(
+        memfd::io(
+            &mut r,
+            1,
+            file,
+            data.as_ptr() as Word,
+            data.len(),
+            None,
+            true
+        ),
+        Ok(6)
+    );
+    assert_eq!(memfd::size(&r, file), Ok(6));
+    assert_eq!(memfd::seek(&mut r, file, 0, 0), Ok(0));
+    let duplicate = r.allocate_linux_file(1, file, 0).unwrap();
+    let mut output = [0u8; 6];
+    assert_eq!(
+        memfd::io(&mut r, 1, file, output.as_mut_ptr() as Word, 3, None, false),
+        Ok(3)
+    );
+    let alias = r.linux_file(1, duplicate).unwrap();
+    assert_eq!(
+        memfd::io(
+            &mut r,
+            1,
+            alias,
+            output.as_mut_ptr() as Word + 3,
+            3,
+            None,
+            false
+        ),
+        Ok(3)
+    );
+    assert_eq!(&output, b"shared");
+    assert_eq!(
+        memfd::io(
+            &mut r,
+            1,
+            file,
+            output.as_mut_ptr() as Word,
+            6,
+            Some(0),
+            false
+        ),
+        Ok(6)
+    );
+    assert_eq!(memfd::seek(&mut r, file, 0, 1), Ok(6));
+    memfd::seals(&mut r, file, Some(2 | 4 | 8)).unwrap();
+    assert_eq!(memfd::truncate(&mut r, file, 0), Err(EPERM));
+    assert_eq!(
+        memfd::io(&mut r, 1, file, data.as_ptr() as Word, 1, Some(0), true),
+        Err(EPERM)
+    );
+}
+
+#[test]
+fn memfd_shared_aliases_survive_close_protection_and_truncate_then_regrow() {
+    let mut r = runtime();
+    r.managed[1].pid = 2;
+    let fd = memfd::create(&mut r, 1, c"buffer".as_ptr() as Word, 2).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    memfd::truncate(&mut r, file, 8192).unwrap();
+    let first = memfd::map(&mut r, 1, 0, 8192, 3, 1, file, 0).unwrap();
+    let second = memfd::map(&mut r, 2, 0, 8192, 3, 1, file, 0).unwrap();
+    ALIASES.with(|aliases| {
+        let aliases = aliases.borrow();
+        let a = &aliases[&(1, first)].0;
+        let b = &aliases[&(2, second)].0;
+        assert!(
+            std::rc::Rc::ptr_eq(a, b),
+            "MAP_SHARED must reference identical backing"
+        );
+        unsafe {
+            (a.as_ptr() as *mut u8).write(42);
+        }
+        assert_eq!(b[0], 42);
+    });
+    memfd::protect(&r, 1, first, 4096, 0).unwrap();
+    memfd::protect(&r, 1, first, 4096, 3).unwrap();
+    ALIASES.with(|aliases| assert_eq!(aliases.borrow()[&(1, first)].0[0], 42));
+    assert_eq!(memfd::seals(&mut r, file, Some(8)), Err(EBUSY));
+    memfd::truncate(&mut r, file, 17).unwrap();
+    assert!(memfd::bus_fault(&r, 1, first + 4096));
+    assert!(memfd::bus_fault(&r, 2, second + 4096));
+    memfd::truncate(&mut r, file, 8192).unwrap();
+    assert!(!memfd::bus_fault(&r, 1, first + 4096));
+    r.files[fd] = LinuxFile::EMPTY;
+    r.managed[0].files[fd] = LinuxFile::EMPTY;
+    memfd::collect(&mut r, file.resource);
+    assert!(r.poll_objects.get(file.resource).is_some());
+    sys_munmap(&mut r, 1, first, 8192).unwrap();
+    assert!(r.poll_objects.get(file.resource).is_some());
+    sys_munmap(&mut r, 2, second, 8192).unwrap();
+    assert!(r.poll_objects.get(file.resource).is_none());
+}
+
+#[test]
+fn a_read_only_shared_memfd_mapping_still_prevents_a_new_write_seal() {
+    let mut r = runtime();
+    let fd = memfd::create(&mut r, 1, c"sealed".as_ptr() as Word, 2).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    memfd::truncate(&mut r, file, 4096).unwrap();
+    let base = memfd::map(&mut r, 1, 0, 4096, 1, 1, file, 0).unwrap();
+    assert_eq!(memfd::seals(&mut r, file, Some(8)), Err(EBUSY));
+    sys_munmap(&mut r, 1, base, 4096).unwrap();
+    memfd::seals(&mut r, file, Some(8)).unwrap();
+    let base = memfd::map(&mut r, 1, 0, 4096, 1, 1, file, 0).unwrap();
+    assert_eq!(memfd::seals(&mut r, file, Some(8)), Ok(0));
+    assert_eq!(memfd::protect(&r, 1, base, 4096, 3), Err(EACCES));
+}
+
+#[test]
+fn futex_shared_alias_keys_wake_the_waiter_not_just_the_same_virtual_address() {
+    let mut r = runtime();
+    r.managed[1].pid = 2;
+    r.managed[1].pcb = 102;
+    let fd = memfd::create(&mut r, 1, c"futex".as_ptr() as Word, 0).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    memfd::truncate(&mut r, file, 4096).unwrap();
+    let first = memfd::map(&mut r, 1, 0, 4096, 3, 1, file, 0).unwrap();
+    let second = memfd::map(&mut r, 2, 0x80010000, 4096, 3, 1 | LINUX_MAP_FIXED, file, 0).unwrap();
+    write_guest_u32(&mut r, 1, first, 42).unwrap();
+    let wait = LinuxSyscallContext {
+        number: SYS_FUTEX,
+        args: [first, 0, 41, 0, 0, 0],
+    };
+    assert_eq!(
+        futex::dispatch(&mut r, 1, wait),
+        EmulationAction::Return(-(EAGAIN as isize))
+    );
+    let wait = LinuxSyscallContext {
+        args: [first, 0, 42, 0, 0, 0],
+        ..wait
+    };
+    assert_eq!(futex::dispatch(&mut r, 1, wait), EmulationAction::Park);
+    let wake = LinuxSyscallContext {
+        number: SYS_FUTEX,
+        args: [second, 1 | 128, 1, 0, 0, 0],
+    };
+    assert_eq!(futex::dispatch(&mut r, 2, wake), EmulationAction::Return(0));
+    assert!(r.managed[0].signal_waiting);
+    let wake = LinuxSyscallContext {
+        args: [second, 1, 1, 0, 0, 0],
+        ..wake
+    };
+    assert_eq!(futex::dispatch(&mut r, 2, wake), EmulationAction::Return(1));
+    assert!(!r.managed[0].signal_waiting);
+    RETURNS.with(|returns| assert_eq!(*returns.borrow(), [(101, 0)]));
+}
+
+#[test]
+fn futex_timeout_and_exit_clear_tid_use_real_wait_queue() {
+    let mut r = runtime();
+    let value = 7u32;
+    let timeout = [0usize, 1_000_000];
+    let context = LinuxSyscallContext {
+        number: SYS_FUTEX,
+        args: [
+            &value as *const _ as Word,
+            128,
+            7,
+            timeout.as_ptr() as Word,
+            0,
+            0,
+        ],
+    };
+    assert_eq!(futex::dispatch(&mut r, 1, context), EmulationAction::Park);
+    assert_eq!(futex::next_deadline(&r), Some(101));
+    r.monotonic_ticks = 101;
+    futex::pump(&mut r);
+    assert!(!r.managed[0].signal_waiting);
+    RETURNS.with(|returns| assert_eq!(*returns.borrow(), [(101, -(ETIMEDOUT as isize))]));
+    let mut tid = 1u32;
+    assert_eq!(futex::set_tid(&mut r, 1, &mut tid as *mut _ as Word), Ok(1));
+    futex::exit(&mut r, 1);
+    assert_eq!(tid, 0);
+    assert!(r.tasks.get(1).is_none());
+}
+
+#[test]
+fn robust_mutex_owner_death_is_atomic_and_does_not_overwrite_other_owners() {
+    let mut r = runtime();
+    let mut head = [0usize; 3];
+    let mut node = [head.as_mut_ptr() as Word, (1u32 | (1 << 31)) as Word];
+    head[0] = node.as_mut_ptr() as Word;
+    head[1] = 8;
+    assert_eq!(
+        futex::set_robust(&mut r, 1, head.as_mut_ptr() as Word, 23),
+        Err(EINVAL)
+    );
+    assert_eq!(
+        futex::set_robust(&mut r, 1, head.as_mut_ptr() as Word, 24),
+        Ok(0)
+    );
+    let (mut pointer, mut length) = (0usize, 0usize);
+    futex::get_robust(
+        &mut r,
+        1,
+        0,
+        &mut pointer as *mut _ as Word,
+        &mut length as *mut _ as Word,
+    )
+    .unwrap();
+    assert_eq!((pointer, length), (head.as_ptr() as Word, 24));
+    futex::exit(&mut r, 1);
+    assert_eq!(node[1], (1u32 << 30 | 1u32 << 31) as Word);
+    node[1] = 2;
+    futex::set_robust(&mut r, 1, head.as_mut_ptr() as Word, 24).unwrap();
+    futex::exit(&mut r, 1);
+    assert_eq!(node[1], 2);
 }

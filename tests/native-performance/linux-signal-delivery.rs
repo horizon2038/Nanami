@@ -13,6 +13,9 @@ mod common {
     pub(crate) use crate::signals;
 }
 mod state {
+    pub mod pty {
+        pub const TERMINAL_TAG: usize = 1 << (usize::BITS - 1);
+    }
     pub mod readiness {
         pub const READY_OBJECT: usize = 32;
     }

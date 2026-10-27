@@ -34,6 +34,8 @@ pub enum VirtualNode {
     ProcNetArp,
     ResolvConf,
     Hosts,
+    DevPtmx,
+    DevPts,
 }
 
 impl VirtualNode {
@@ -72,6 +74,8 @@ impl VirtualNode {
             27 => Some(Self::ProcNetArp),
             28 => Some(Self::ResolvConf),
             29 => Some(Self::Hosts),
+            30 => Some(Self::DevPtmx),
+            31 => Some(Self::DevPts),
             _ => None,
         }
     }
@@ -82,6 +86,7 @@ impl VirtualNode {
             Self::Root
                 | Self::Dev
                 | Self::DevInput
+                | Self::DevPts
                 | Self::Proc
                 | Self::ProcSelf
                 | Self::Sys
@@ -124,6 +129,8 @@ pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
     match path {
         b"/" => Some(VirtualNode::Root),
         b"/dev" => Some(VirtualNode::Dev),
+        b"/dev/ptmx" | b"/dev/pts/ptmx" => Some(VirtualNode::DevPtmx),
+        b"/dev/pts" => Some(VirtualNode::DevPts),
         b"/dev/input" => Some(VirtualNode::DevInput),
         b"/dev/null" => Some(VirtualNode::DevNull),
         b"/dev/zero" => Some(VirtualNode::DevZero),
@@ -174,7 +181,9 @@ pub fn directory_entry(
                 name: b"tty",
                 node: VirtualNode::DevTty,
             },
-            4 if graphics_enabled => DirectoryEntry {
+            4 => DirectoryEntry { name: b"ptmx", node: VirtualNode::DevPtmx },
+            5 => DirectoryEntry { name: b"pts", node: VirtualNode::DevPts },
+            6 if graphics_enabled => DirectoryEntry {
                 name: b"fb0",
                 node: VirtualNode::DevFramebuffer,
             },

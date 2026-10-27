@@ -73,6 +73,8 @@ mod namespace;
 use namespace::*;
 #[path = "linux/pipe_wait.rs"]
 mod pipe_wait;
+#[path = "linux/pty.rs"]
+mod pty;
 pub(crate) use memfd::bus_fault;
 #[path = "linux/epoll.rs"]
 mod epoll;
@@ -258,7 +260,7 @@ pub fn dispatch_syscall(
         trace_syscall_action(runtime, native_pid, context, action);
         return action;
     }
-    let result = match context.number {
+    let mut result = match context.number {
         SYS_READ => {
             let mut action = sys_read_action(
                 runtime,
@@ -268,10 +270,15 @@ pub fn dispatch_syscall(
                 context.args[2],
                 context,
             );
-            if matches!(action, EmulationAction::Return(value) if value == -(EAGAIN as isize))
-                && pipe_wait::park(runtime, native_pid, context)
-            {
-                action = EmulationAction::Park;
+            if matches!(action, EmulationAction::Return(value) if value == -(EAGAIN as isize)) {
+                action = match pty::park(runtime, native_pid, context) {
+                    Ok(true) => EmulationAction::Park,
+                    Err(errno) => EmulationAction::Return(-(errno as isize)),
+                    Ok(false) if pipe_wait::park(runtime, native_pid, context) => {
+                        EmulationAction::Park
+                    }
+                    Ok(false) => action,
+                };
             }
             record_action_result(runtime, native_pid, context.number, action);
             trace_critical_action(runtime, native_pid, context, action);
@@ -950,6 +957,13 @@ pub fn dispatch_syscall(
         }
     };
 
+    if result == Err(EAGAIN) {
+        match pty::park(runtime, native_pid, context) {
+            Ok(true) => return EmulationAction::Park,
+            Err(errno) => result = Err(errno),
+            Ok(false) => {}
+        }
+    }
     if result == Err(EAGAIN)
         && (pipe_wait::park(runtime, native_pid, context)
             || flock::park(runtime, native_pid, context))

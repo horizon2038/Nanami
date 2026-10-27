@@ -23,6 +23,22 @@ mod flock {
         Err(EAGAIN)
     }
 }
+// This harness isolates generic readiness. The actual PTY line discipline is
+// tested in linux-pty; complete syscall integration runs in the QEMU fixture.
+mod pty {
+    use super::*;
+    pub(super) fn readiness(_: &Runtime, _: LinuxFile) -> Result<i16, i32> {
+        Ok(0)
+    }
+    pub(super) fn update_deadline(_: &Runtime, _: Word, _: &mut ReadinessWait) {}
+    pub(super) fn retry(
+        _: &mut Runtime,
+        _: Word,
+        _: LinuxSyscallContext,
+    ) -> Option<Result<Word, i32>> {
+        None
+    }
+}
 #[path = "linux-uring.rs"]
 mod uring_tests;
 use uring_tests::*;
@@ -153,6 +169,8 @@ pub mod task_sync;
 use readiness_state::*;
 #[derive(Clone, Copy, PartialEq)]
 enum LinuxFileKind {
+    PtyMaster,
+    PtySlave,
     SocketUnix,
     Terminal,
     Posix,
@@ -234,6 +252,7 @@ struct Runtime {
     tasks: task_sync::Tasks,
     unix_sockets: UnixSocketMock,
     io_calls: usize,
+    drain_pipe_on_read: bool,
     io_result: Result<Word, i32>,
     posix_shm: Word,
     scratch: Box<[u8]>,
@@ -709,8 +728,13 @@ fn split_ticks(ticks: Word, hz: Word) -> (Word, Word) {
 mod pipe_wait;
 
 // Guest-memory I/O is mocked; parking and wake dispatch are production code.
-fn simulated_io(runtime: &mut Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<Word, i32> {
+fn simulated_io(runtime: &mut Runtime, _: Word, fd: Word, _: Word, _: Word) -> Result<Word, i32> {
     runtime.io_calls += 1;
+    if runtime.drain_pipe_on_read && runtime.files[fd].kind == LinuxFileKind::PipeRead {
+        runtime.drain_pipe_on_read = false;
+        runtime.pipe.len = 0;
+        runtime.readiness_changes |= READY_PIPE;
+    }
     runtime.io_result
 }
 use self::simulated_io as sys_read;
@@ -725,6 +749,7 @@ fn runtime() -> Runtime {
         tasks: task_sync::Tasks::new(),
         unix_sockets: UnixSocketMock,
         io_calls: 0,
+        drain_pipe_on_read: false,
         io_result: Ok(0),
         copy_error: false,
         posix_shm_size: 4096,
@@ -958,6 +983,30 @@ fn ready_at_park_boundary_and_pipe_changes_wake_once() {
     handle_readiness_changes(&mut r);
     handle_readiness_changes(&mut r);
     RETURNS.with(|v| assert_eq!(&*v.borrow(), &[(101, 1)]));
+    assert_eq!(r.readiness_changes, 0);
+}
+#[test]
+fn completion_propagates_to_an_earlier_waiter_before_next_receive() {
+    let mut r = runtime();
+    r.managed[1].pid = 2;
+    r.managed[1].pcb = 102;
+    let writer = LinuxSyscallContext {
+        number: SYS_WRITE,
+        args: [5, 4096, 8, 0, 0, 0],
+    };
+    let reader = LinuxSyscallContext {
+        number: SYS_READ,
+        args: [4, 8192, 8, 0, 0, 0],
+    };
+    assert!(pipe_wait::park(&mut r, 1, writer));
+    assert!(pipe_wait::park(&mut r, 2, reader));
+    r.pipe.len = LINUX_PIPE_BYTES;
+    r.io_result = Ok(8);
+    r.drain_pipe_on_read = true;
+    r.readiness_changes = READY_PIPE;
+    handle_readiness_changes(&mut r);
+    assert!(r.managed.iter().all(|p| p.readiness_wait.is_none()));
+    RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(102, 8), (101, 8)]));
     assert_eq!(r.readiness_changes, 0);
 }
 #[test]

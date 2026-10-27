@@ -34,6 +34,8 @@ enum EmulationAction {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum LinuxFileKind {
+    PtyMaster,
+    PtySlave,
     Empty,
     Posix,
     Terminal,

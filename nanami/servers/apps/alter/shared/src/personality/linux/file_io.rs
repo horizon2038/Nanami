@@ -1,12 +1,12 @@
 use super::{
-    ensure_standard_terminal_fd, map_request_error, network_result_action, pump_input_events,
-    read_linux_iovecs, result_to_linux_return, sys_evdev_read, sys_framebuffer_read,
-    sys_framebuffer_write, sys_netlink_send, sys_pipe_read, sys_pipe_write, sys_socket_recv,
-    sys_socket_send, sys_terminal_read, sys_terminal_read_now, sys_terminal_write,
-    sys_virtual_read, sys_virtual_write, terminal_bounded_len, terminal_id_for_pid, vectored,
-    EmulationAction, LinuxFileKind, LinuxSyscallContext, Runtime, Word, ALTER_IO_OFFSET, EAGAIN,
-    EBADF, EFAULT, EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESPIPE, ESRCH, LINUX_IOV_MAX,
-    LINUX_O_ACCMODE, LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_WRONLY, LINUX_SOCK_NONBLOCK,
+    map_request_error, network_result_action, pump_input_events, read_linux_iovecs,
+    result_to_linux_return, sys_evdev_read, sys_framebuffer_read, sys_framebuffer_write,
+    sys_netlink_send, sys_pipe_read, sys_pipe_write, sys_socket_recv, sys_socket_send,
+    sys_terminal_read, sys_terminal_read_now, sys_terminal_write, sys_virtual_read,
+    sys_virtual_write, terminal_bounded_len, terminal_id_for_pid, vectored, EmulationAction,
+    LinuxFileKind, LinuxSyscallContext, Runtime, Word, ALTER_IO_OFFSET, EAGAIN, EBADF, EFAULT,
+    EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESPIPE, ESRCH, LINUX_IOV_MAX, LINUX_O_ACCMODE,
+    LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_WRONLY, LINUX_SOCK_NONBLOCK,
 };
 
 pub(super) fn sys_read(
@@ -19,9 +19,11 @@ pub(super) fn sys_read(
     if user_buffer == 0 && len != 0 {
         return Err(EFAULT);
     }
-    ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => {
+            return super::pty::read(runtime, pid, file, user_buffer, len)
+        }
         LinuxFileKind::SocketUnix => {
             return super::unix_message::io(
                 runtime,
@@ -185,7 +187,6 @@ pub(super) fn sys_read_action(
     if user_buffer == 0 && len != 0 {
         return EmulationAction::Return(-(EFAULT as isize));
     }
-    ensure_standard_terminal_fd(runtime, pid, fd);
     let Some(file) = runtime.linux_file(pid, fd) else {
         return EmulationAction::Return(-(EBADF as isize));
     };
@@ -247,9 +248,11 @@ pub(super) fn sys_write(
     if user_buffer == 0 && len != 0 {
         return Err(EFAULT);
     }
-    ensure_standard_terminal_fd(runtime, pid, fd);
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     match file.kind {
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => {
+            return super::pty::write(runtime, pid, file, user_buffer, len)
+        }
         LinuxFileKind::SocketUnix => {
             return super::unix_message::io(
                 runtime,
@@ -334,7 +337,6 @@ pub(super) fn sys_writev(
     // Datagram, pipe and device writes retain their individual-write semantics.
     // Only byte streams can share one service write across iovec boundaries.
     if lens[..iov_count as usize].iter().any(|&len| len != 0) {
-        ensure_standard_terminal_fd(runtime, pid, fd);
         let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
         let iovecs = bases[..iov_count as usize]
             .iter()
@@ -429,6 +431,10 @@ pub(super) fn sys_readv(
     let mut bases = [0 as Word; LINUX_IOV_MAX as usize];
     let mut lens = [0 as Word; LINUX_IOV_MAX as usize];
     read_linux_iovecs(runtime, pid, iov_ptr, iov_count, &mut bases, &mut lens)?;
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if super::pty::is_pty(file) {
+        return super::pty::readv(runtime, pid, file, &bases[..iov_count], &lens[..iov_count]);
+    }
 
     let mut total = 0 as Word;
     let mut i = 0usize;

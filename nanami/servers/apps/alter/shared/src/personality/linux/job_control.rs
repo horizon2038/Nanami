@@ -22,6 +22,17 @@ pub(super) fn terminal_ioctl(
     request: Word,
     argument: Word,
 ) -> Option<Result<Word, i32>> {
+    let id = runtime.managed_process(pid)?.terminal_id;
+    terminal_ioctl_for_id(runtime, pid, id, request, argument)
+}
+
+pub(super) fn terminal_ioctl_for_id(
+    runtime: &mut Runtime,
+    pid: Word,
+    id: Word,
+    request: Word,
+    argument: Word,
+) -> Option<Result<Word, i32>> {
     if !matches!(
         request,
         LINUX_TIOCGPGRP | LINUX_TIOCSPGRP | LINUX_TIOCGSID | LINUX_TIOCSCTTY | LINUX_TIOCNOTTY
@@ -29,7 +40,6 @@ pub(super) fn terminal_ioctl(
         return None;
     }
     Some((|| {
-        let id = runtime.managed_process(pid).ok_or(ESRCH)?.terminal_id;
         match request {
             LINUX_TIOCSCTTY => {
                 if argument > 1 {

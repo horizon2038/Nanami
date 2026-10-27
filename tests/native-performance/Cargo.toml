@@ -8,6 +8,10 @@ publish = false
 path = "heap-tests.rs"
 
 [[test]]
+name = "linux-pty"
+path = "linux-pty.rs"
+
+[[test]]
 name = "intel-graphics"
 path = "intel-graphics.rs"
 

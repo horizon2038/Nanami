@@ -321,6 +321,16 @@ records survive ordinary Alter zombie cleanup until Negoto deletes them.
 Deletion closes resources before native reaping and retains failed records
 for retry. CLI exit does not destroy a container.
 
+Alter/Linux also owns Unix98 PTY pairs for `/dev/ptmx` and `/dev/pts/N`.
+PTY buffers, line discipline, termios, window size and shared FD descriptions
+stay inside Alter; no new Kernel API, Alpha RPC or terminal-service session is
+needed. Prepared rootfs contexts isolate slave path lookup. A PTY controlling
+terminal has a separate internal identity from the native GUI terminal; native
+keyboard notifications never drain a nested PTY's input. Read/write completion,
+hangup and packet events feed the existing readiness queue; VMIN/VTIME deadlines
+share its one-shot alarm. Readiness changes produced by completing another
+waiter are propagated before the server blocks in receive again.
+
 Alter owns session/process-group identity and controlling-terminal association;
 these are not added to Alpha or A9N. `TIOCGPGRP`/`TIOCSPGRP`/`TIOCGSID` read and
 update actual foreground-group/session state. Fork inherits group membership,

@@ -1,12 +1,12 @@
 use super::{
     map_request_error, personality, read_target_memory, sys_evdev_ioctl, sys_framebuffer_ioctl,
-    write_target_memory, write_u16, write_u32, write_u8, LinuxFile, LinuxFileKind,
-    LinuxSyscallContext, Runtime, Word, EAGAIN, EBADF, EFAULT, EIO, ENOTTY, ESRCH, LINUX_CREAD,
-    LINUX_CS8, LINUX_ECHO, LINUX_ECHOE, LINUX_ECHOK, LINUX_ICANON, LINUX_ICRNL, LINUX_IEXTEN,
-    LINUX_ISIG, LINUX_IXON, LINUX_ONLCR, LINUX_OPOST, LINUX_TCGETS, LINUX_TCSETS, LINUX_TCSETSF,
-    LINUX_TCSETSW, LINUX_TERMINAL_LINE_MAX, LINUX_TERMIOS_BYTES, LINUX_TIOCGWINSZ, LINUX_VEOF,
-    LINUX_VEOL, LINUX_VERASE, LINUX_VINTR, LINUX_VKILL, LINUX_VMIN, LINUX_VQUIT, LINUX_VSTART,
-    LINUX_VSTOP, LINUX_VSUSP, LINUX_VTIME,
+    write_target_memory, write_u16, write_u32, write_u8, LinuxFileKind, LinuxSyscallContext,
+    Runtime, Word, EAGAIN, EBADF, EFAULT, EIO, ENOTTY, ESRCH, LINUX_CREAD, LINUX_CS8, LINUX_ECHO,
+    LINUX_ECHOE, LINUX_ECHOK, LINUX_ICANON, LINUX_ICRNL, LINUX_IEXTEN, LINUX_ISIG, LINUX_IXON,
+    LINUX_ONLCR, LINUX_OPOST, LINUX_TCGETS, LINUX_TCSETS, LINUX_TCSETSF, LINUX_TCSETSW,
+    LINUX_TERMINAL_LINE_MAX, LINUX_TERMIOS_BYTES, LINUX_TIOCGWINSZ, LINUX_VEOF, LINUX_VEOL,
+    LINUX_VERASE, LINUX_VINTR, LINUX_VKILL, LINUX_VMIN, LINUX_VQUIT, LINUX_VSTART, LINUX_VSTOP,
+    LINUX_VSUSP, LINUX_VTIME,
 };
 
 pub(super) fn sys_terminal_read(
@@ -249,6 +249,9 @@ pub(super) fn sys_ioctl(
     request: Word,
     argument: Word,
 ) -> Result<Word, i32> {
+    // Linux takes an unsigned int command. Musl can sign-extend ioctl numbers
+    // with bit 31 set when placing its int parameter in a syscall register.
+    let request = request as u32 as Word;
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
     // FIONBIO changes the open-file status, not tty attributes. libuv also
     // uses it on anonymous pipes before starting a child/RPC channel.
@@ -267,6 +270,9 @@ pub(super) fn sys_ioctl(
         return super::sys_fcntl(runtime, pid, fd, super::LINUX_F_SETFL, flags);
     }
     match file.kind {
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => {
+            return super::pty::ioctl(runtime, pid, file, request, argument)
+        }
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
             return sys_evdev_ioctl(runtime, pid, file, request, argument);
         }
@@ -497,24 +503,5 @@ pub fn wake_terminal_readers(runtime: &mut Runtime) {
             );
         }
         index += 1;
-    }
-}
-
-pub(super) fn ensure_standard_terminal_fd(runtime: &mut Runtime, pid: Word, fd: Word) {
-    if fd > 2 || runtime.linux_file(pid, fd).is_some() {
-        return;
-    }
-    let Some(terminal_id) = runtime.terminal_id(pid) else {
-        return;
-    };
-    if terminal_id == 0 {
-        return;
-    }
-    if runtime.set_linux_file(pid, fd, LinuxFile::terminal()) {
-        nanami_runtime::println!(
-            "[alter/linux] restored terminal stdio pid={} fd={}",
-            pid,
-            fd
-        );
     }
 }

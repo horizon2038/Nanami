@@ -221,6 +221,8 @@ pub(super) fn sys_lseek(
             | LinuxFileKind::Epoll
             | LinuxFileKind::IoUring
             | LinuxFileKind::SocketUnix
+            | LinuxFileKind::PtyMaster
+            | LinuxFileKind::PtySlave
     ) {
         return Err(ESPIPE);
     }
@@ -316,6 +318,9 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_GETFL => {
             let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if super::pty::is_pty(file) {
+                return super::pty::flags(runtime, file, None);
+            }
             if file.kind == LinuxFileKind::MemoryFile {
                 return super::memfd::status_flags(runtime, file, None);
             }
@@ -369,6 +374,10 @@ pub(super) fn sys_fcntl(
         }
         LINUX_F_SETFL => {
             let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+            if super::pty::is_pty(file) {
+                super::pty::flags(runtime, file, Some(argument))?;
+                return Ok(0);
+            }
             if file.kind == LinuxFileKind::MemoryFile {
                 super::memfd::status_flags(runtime, file, Some(argument))?;
                 return Ok(0);
@@ -452,6 +461,8 @@ pub(super) fn linux_file_kind_name(kind: LinuxFileKind) -> &'static str {
         LinuxFileKind::Empty => "empty",
         LinuxFileKind::Posix => "posix",
         LinuxFileKind::Terminal => "terminal",
+        LinuxFileKind::PtyMaster => "pty-master",
+        LinuxFileKind::PtySlave => "pty-slave",
         LinuxFileKind::PipeRead => "pipe-read",
         LinuxFileKind::PipeWrite => "pipe-write",
         LinuxFileKind::SocketUdp => "socket-udp",
@@ -488,6 +499,8 @@ pub(super) fn duplicate_linux_file(
         }
         LinuxFileKind::Empty => Err(EBADF),
         LinuxFileKind::EventFd
+        | LinuxFileKind::PtyMaster
+        | LinuxFileKind::PtySlave
         | LinuxFileKind::TimerFd
         | LinuxFileKind::SignalFd
         | LinuxFileKind::MemoryFile
@@ -570,6 +583,7 @@ pub(super) fn release_file_description(runtime: &mut Runtime, file: LinuxFile) {
     }
     match file.kind {
         LinuxFileKind::SocketUnix => super::unix::collect(runtime),
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => super::pty::collect(runtime, file),
         LinuxFileKind::MemoryFile => super::memfd::collect(runtime, file.resource),
         LinuxFileKind::IoUring => super::io_uring::release(runtime, file),
         LinuxFileKind::EventFd
@@ -598,6 +612,7 @@ pub fn close_process_files(runtime: &mut Runtime, pid: Word) {
 }
 
 pub fn close_process_files_checked(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    super::pty::session_exit(runtime, pid);
     super::futex::exit(runtime, pid);
     let mut first_error = None;
     let mut fd = 0usize;

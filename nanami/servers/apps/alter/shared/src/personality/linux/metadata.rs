@@ -112,6 +112,11 @@ pub(super) fn sys_statx(
             )
             .map_err(map_request_error)?,
             LinuxFileKind::Terminal => (0, 0, posix::POSIX_FILE_TYPE_CHAR_DEVICE, 5, 0),
+            LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => super::pty::stat(
+                runtime,
+                file.resource,
+                file.kind == LinuxFileKind::PtyMaster,
+            )?,
             LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => {
                 (0, 0, POSIX_FILE_TYPE_PIPE, 0, 0)
             }
@@ -162,6 +167,10 @@ pub(super) fn stat_current_path(
 ) -> Result<(Word, Word, Word, Word, Word), i32> {
     let path =
         unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
+    if super::pty::number(path).is_some() {
+        let id = super::pty::path_id(runtime, pid, path)?;
+        return super::pty::stat(runtime, id, false);
+    }
     if let Some(node) = virtual_fs::lookup(path, graphics_enabled(runtime, pid)) {
         if node != VirtualNode::Root {
             return virtual_node_stat_from_node(runtime, pid, node);
@@ -198,6 +207,15 @@ pub(super) fn sys_fstat(
     stat_ptr: Word,
 ) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if super::pty::is_pty(file) {
+        let stat = super::pty::stat(
+            runtime,
+            file.resource,
+            file.kind == LinuxFileKind::PtyMaster,
+        )?;
+        write_linux_stat(runtime, pid, stat_ptr, stat)?;
+        return Ok(0);
+    }
     if file.kind == LinuxFileKind::MemoryFile {
         let stat = (
             file.resource,
@@ -280,6 +298,7 @@ pub(super) fn virtual_node_stat_from_node(
         VirtualNode::DevNull => (0, 1, 3),
         VirtualNode::DevZero => (0, 1, 5),
         VirtualNode::DevTty => (0, 5, 0),
+        VirtualNode::DevPtmx => (0, 5, 2),
         VirtualNode::DevKeyboard => (0, 13, 64),
         VirtualNode::DevMouse => (0, 13, 65),
         VirtualNode::DevFramebuffer => {

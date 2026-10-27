@@ -1,5 +1,41 @@
 # Alter/Linux dynamic-loader regression
 
+## Unix98 PTYs and Neovim :terminal
+
+`pty.c` checks master/slave allocation and locking, signed ioctl commands,
+canonical/raw input and zero-length reads, shared flags, readv record boundaries,
+poll/epoll, VMIN/VTIME, blocked-reader wakeup, EOF/EIO, Ctrl-C, SIGWINCH,
+controlling terminals, SIGTTIN with O_NONBLOCK, foreground-group recovery,
+output-drain waits, full-queue backpressure and ownership of queued SCM_RIGHTS
+descriptions. It also writes a Lua integration test into the guest's
+`/tmp/nvim-pty.lua`.
+
+```sh
+clang --target=x86_64-unknown-linux-gnu -fuse-ld=lld -nostdlib -static \
+  -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-sse2 \
+  -mno-red-zone -O2 -Wall -Wextra -Werror -Wl,-e,_start,--image-base=0x400000 \
+  tests/alter-linux/pty.c tests/alter-linux/signals-x86_64.S -o out/nanami-pty
+# Prepare the matching Neovim runtime overlay as described below, then use
+# new image paths so existing guest data is preserved.
+cargo xtask build --no-linux-bins --linux-bin out/nanami-pty \
+  --linux-bin bin/nvim --linux-bin bin/busybox \
+  --linux-rootfs-dir out/nvim-runtime-overlay --size-mib 128 \
+  --rootfs out/pty-rootfs.img --output-image out/pty.img
+python3 tests/alter-linux/qemu-smoke.py --image out/pty.img \
+  --nvim-pty --nvim-editor --nvim-colors --diagnostics --smp 4
+```
+
+Repeat with `--smp 1`. `--nvim-pty` runs the fixture, launches unmodified Neovim
+headless with a real `:terminal /bin/busybox sh -i`, and checks actual terminal
+buffer output, Ctrl-C of a foreground sleep, resize to 91x27 and shell exit.
+An independent BusyBox reads the result marker. With `--nvim-editor`, a visible
+PTY shell is also opened, exercised and closed before returning to the original
+edited file; screenshots are retained as `nvim-pty-visible.png`. The optional
+color checks exercise the visible GUI too. BusyBox-containing rootfs builds
+now add `/bin/sh` and `/usr/bin/sh` aliases if absent; Neovim uses its configured
+shell even when a `:terminal` command names BusyBox explicitly. Recompiling
+Alter alone does not update old rootfs images.
+
 ## Neovim colors
 
 Shell and Alter default to `TERM=nanami-256color` and `COLORTERM=truecolor`.

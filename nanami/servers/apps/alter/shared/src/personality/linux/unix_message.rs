@@ -178,6 +178,8 @@ fn rights(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Vec<Lin
                 && !matches!(
                     file.kind,
                     LinuxFileKind::PipeRead
+                        | LinuxFileKind::PtyMaster
+                        | LinuxFileKind::PtySlave
                         | LinuxFileKind::PipeWrite
                         | LinuxFileKind::SocketUnix
                         | LinuxFileKind::EventFd

@@ -178,6 +178,7 @@ pub fn create(root: &Path, args: &Common) -> Result<PathBuf> {
             args,
         )?;
     }
+    install_busybox_shell(&mut builder)?;
     if args.dry_run {
         eprintln!(
             "[dry-run] generate ext2 {} ({} MiB); no output written",
@@ -197,6 +198,21 @@ fn add_guest(builder: &mut ImageBuilder, guest: &str, name: &str, data: Vec<u8>)
         .add_file(&path, 0o755, data)
         .with_context(|| format!("guest payload {path}"))?;
     builder.add_hard_link(&format!("/alter/{guest}/usr/bin/{name}"), &path)?;
+    Ok(())
+}
+
+fn install_busybox_shell(builder: &mut ImageBuilder) -> Result<()> {
+    // :terminal and system() use /bin/sh, even when the command being launched
+    // names BusyBox explicitly. Reuse its inode, without replacing a real shell
+    // supplied as a payload or in the rootfs overlay.
+    let busybox = "/alter/linux/bin/busybox";
+    if builder.contains(busybox) {
+        for shell in ["/alter/linux/bin/sh", "/alter/linux/usr/bin/sh"] {
+            if !builder.contains(shell) {
+                builder.add_hard_link(shell, busybox)?;
+            }
+        }
+    }
     Ok(())
 }
 fn overlay_tree(builder: &mut ImageBuilder, host: &Path, guest: &str, args: &Common) -> Result<()> {
@@ -343,5 +359,34 @@ mod tests {
         args.linux_rootfs_dir = Some("overlay".into());
         assert!(create(root.path(), &args).is_err());
         assert!(!root.path().join("fixture.img").exists());
+    }
+
+    #[test]
+    fn busybox_supplies_sh_without_replacing_explicit_shells() {
+        let mut builder = ImageBuilder::new(2 * 1024 * 1024).unwrap();
+        for path in [
+            "/alter",
+            "/alter/linux",
+            "/alter/linux/bin",
+            "/alter/linux/usr",
+            "/alter/linux/usr/bin",
+        ] {
+            builder.add_directory(path, 0o755).unwrap();
+        }
+        install_busybox_shell(&mut builder).unwrap();
+        assert!(!builder.contains("/alter/linux/bin/sh"));
+        builder
+            .add_file("/alter/linux/bin/busybox", 0o755, b"busybox".to_vec())
+            .unwrap();
+        builder
+            .add_file("/alter/linux/bin/sh", 0o755, b"explicit-shell".to_vec())
+            .unwrap();
+        install_busybox_shell(&mut builder).unwrap();
+        install_busybox_shell(&mut builder).unwrap();
+        assert!(builder.contains("/alter/linux/usr/bin/sh"));
+        let image = builder.build().unwrap();
+        assert!(image
+            .windows(b"explicit-shell".len())
+            .any(|w| w == b"explicit-shell"));
     }
 }

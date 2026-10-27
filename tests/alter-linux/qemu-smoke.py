@@ -26,6 +26,8 @@ parser.add_argument("--nvim-editor", action="store_true",
                     help="edit/save/quit in untraced Neovim, then verify the file with BusyBox")
 parser.add_argument("--nvim-colors", action="store_true",
                     help="with --nvim-editor, verify automatic RGB and indexed-color pixels")
+parser.add_argument("--nvim-pty", action="store_true",
+                    help="run the PTY fixture, then Neovim :terminal with BusyBox, Ctrl-C, resize and exit")
 parser.add_argument("--diagnostics", action="store_true", help="send explicit Alter traces to serial (-t -d)")
 parser.add_argument("--native-info", action="store_true",
                     help="also capture pci-info, its numeric/verbose modes and net-info for visual inspection")
@@ -185,7 +187,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
 
         def type_keys(text):
             keys = {" ": "spc", "/": "slash", "-": "minus", ".": "dot", "\n": "ret",
-                    ":": "shift-semicolon", "=": "equal", "#": "shift-3"}
+                    ":": "shift-semicolon", "=": "equal", "#": "shift-3", "!": "shift-1"}
             for character in text:
                 key = keys.get(character, character)
                 if character.isascii() and character.isupper():
@@ -198,10 +200,18 @@ with (logs / "qemu.log").open("w") as diagnostics:
 
         programs = args.program
         if programs is None:
-            if args.nvim_editor:
+            if args.nvim_pty:
+                programs = []
+            elif args.nvim_editor:
                 programs = ["nvim --headless -u /dev/null -i NONE -c q"]
             else:
                 programs = ["linux-syscall-smoke", "glibc-true", "glibc-regression"]
+        if args.nvim_pty:
+            if "nanami-pty" not in programs:
+                programs = ["nanami-pty", *programs]
+            programs = [*programs,
+                        "nvim --headless -u /dev/null -i NONE -l /tmp/nvim-pty.lua",
+                        "busybox grep -x nvim-pty-ok /tmp/nvim-pty-ok"]
         for index, program in enumerate(programs):
             # Match against the same decoded/newline-normalized text used below.
             # Byte offsets drift with CRLF or UTF-8 serial output.
@@ -254,6 +264,20 @@ with (logs / "qemu.log").open("w") as diagnostics:
             send("sendkey esc 50")
             time.sleep(0.5)
             send(f"screendump {logs / 'nvim-edited.png'} -f png")
+            if args.nvim_pty:
+                type_keys(":w\n")
+                type_keys(":terminal /bin/busybox sh -i\n")
+                time.sleep(3)
+                send("sendkey i 50")
+                type_keys("echo ui-pty-visible\n")
+                time.sleep(1)
+                send(f"screendump {logs / 'nvim-pty-visible.png'} -f png")
+                type_keys("exit\n")
+                time.sleep(2)
+                send("sendkey ctrl-backslash 50")
+                send("sendkey ctrl-n 50")
+                type_keys(":bdelete!\n")
+                time.sleep(1)
             if args.nvim_colors:
                 for label, commands, color in [
                     ("rgb", ["hi Normal guifg=#12ab34 guibg=#253647"], bytes((37, 54, 71))),

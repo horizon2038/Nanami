@@ -9,7 +9,6 @@ pub(super) fn sys_sendfile(
     offset_ptr: Word,
     count: Word,
 ) -> Result<Word, i32> {
-    ensure_standard_terminal_fd(runtime, pid, out_fd);
     let input = runtime.linux_file(pid, in_fd).ok_or(EBADF)?;
     let output = runtime.linux_file(pid, out_fd).ok_or(EBADF)?;
     if input.kind != LinuxFileKind::Posix {

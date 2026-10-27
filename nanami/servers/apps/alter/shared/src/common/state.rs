@@ -19,6 +19,8 @@ mod mappings;
 pub use mapping_table::MappingTable;
 #[path = "state/poll_objects.rs"]
 pub mod poll_objects;
+#[path = "state/pty.rs"]
+pub mod pty;
 #[path = "state/processes.rs"]
 mod processes;
 #[path = "state/readiness.rs"]
@@ -63,6 +65,8 @@ pub enum LinuxFileKind {
     Empty,
     Posix,
     Terminal,
+    PtyMaster,
+    PtySlave,
     PipeRead,
     PipeWrite,
     SocketUdp,
@@ -486,6 +490,7 @@ impl GraphicsSession {
 }
 
 pub struct Runtime {
+    pub ptys: pty::Ptys,
     pub terminal_controls: [TerminalControl; ALTER_MANAGED_PROCESS_MAX],
     pub clients: [clients::ClientMemory; ALTER_MANAGED_PROCESS_MAX],
     pub internal_shm: Word,
@@ -560,6 +565,7 @@ impl Runtime {
     ) -> Self {
         Self {
             terminal_controls: [TerminalControl::EMPTY; ALTER_MANAGED_PROCESS_MAX],
+            ptys: pty::Ptys::new(),
             clients: [clients::ClientMemory::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             internal_shm: 0,
             internal_shm_size: 0,

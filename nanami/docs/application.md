@@ -402,6 +402,17 @@ SIGQUIT and SIGTSTP for the terminal's foreground process group in its controlli
 session. `ISIG` off and disabled control characters leave the input unchanged;
 `NOFLSH` preserves queued input and partial canonical lines.
 
+Alter/Linux supplies Unix98 PTYs independently of these native terminal
+sessions. With BusyBox and Neovim packaged into a freshly built Linux rootfs,
+launch Neovim normally and run `:terminal /bin/busybox sh -i`. The nested shell
+has its own termios, process group, Ctrl-C handling and window size. Leave
+Terminal-mode with `Ctrl-\ Ctrl-N`; `exit` ends the shell. The builder adds
+`sh` aliases for BusyBox only if an explicit shell is absent. Existing images
+need an explicit rootfs rebuild to acquire those aliases. See the
+[syscall reference](../servers/apps/alter/linux/linux-supported-syscalls.md#unix98-pseudoterminals)
+for supported operations and limits. Negoto's OCI console allocation remains
+a separate interface; this does not enable its `terminal: true` profile.
+
 Use these services instead of embedding application-specific launch logic in a
 GUI client or Alpha.
 

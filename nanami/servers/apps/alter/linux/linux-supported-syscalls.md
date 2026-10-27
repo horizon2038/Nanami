@@ -225,6 +225,46 @@ Rebuild an existing rootfs explicitly to install the new entry: recompiling
 Alter alone does not change an existing filesystem image. Use a separate rootfs
 path to preserve guest data; `--rebuild-rootfs` replaces that image's contents.
 
+### Unix98 pseudoterminals
+
+`/dev/ptmx` allocates a master with a locked `/dev/pts/N` slave. The personality
+provides `TIOCGPTN`, `TIOCSPTLCK`, `TIOCGPTLCK` and `TIOCGPTPEER`, including
+sign-extended libc ioctl commands. Numeric slave paths and directory entries
+are local to the prepared rootfs execution context. `/dev/tty` opens the task's
+actual controlling PTY; the launcher's GUI terminal remains independent.
+
+PTY open descriptions share status flags through dup/fork/SCM_RIGHTS, while
+CLOEXEC remains per descriptor. Termios, window size, input/output queues and
+foreground group belong to the pair. Canonical input supports record boundaries,
+partial reads, erase/kill/word erase, quoting and one-shot VEOF. Raw reads support
+all four VMIN/VTIME combinations. Common input/output translations, echo,
+software flow control, flushes, packet mode and input/output queue queries are
+implemented. TCSETSW/TCSETSF and tcdrain wait for queued output to drain without
+blocking Alter's server loop. Unsupported requests return an error.
+
+Blocking I/O, poll/select and level-triggered epoll use the existing readiness
+and one-shot timer machinery; there is no periodic PTY polling or additional
+service RPC. Ctrl-C/quit/suspend target the PTY's foreground group; changing
+window size sends SIGWINCH only when the value changes. Background reads and
+terminal-setting operations enforce SIGTTIN/SIGTTOU, with blocked/ignored
+signal and orphaned-group handling. TOSTOP also applies to background writes.
+
+Final master close removes the slave pathname, sends SIGHUP/SIGCONT, detaches
+the controlling terminal, and wakes readers/writers. Queued slave input drains
+before EOF; writes to a hung-up slave fail with EIO. After the last slave closes,
+the master drains pending output and then reports EIO/POLLHUP. Ancillary queues
+keep passed descriptions alive until received or discarded. Storage is bounded
+to 32 live pairs, 32 KiB per direction and a 4096-byte canonical line, allocated
+only for opened PTYs. Line editing is byte-oriented; legacy BSD PTYs, TIOCSTI,
+alternative line disciplines and hardware serial/modem controls are not emulated.
+
+Static Neovim's `:terminal /bin/busybox sh -i` uses this path unchanged. When
+BusyBox is packaged, xtask supplies `/bin/sh` and `/usr/bin/sh` hard-link aliases
+only where no explicit shell exists; it does not copy the binary again or
+replace shells provided by payloads/overlays. Existing images need an explicit
+rootfs rebuild to acquire these aliases. This does not change Negoto's separate
+OCI console-socket/PTY allocation policy.
+
 ## Processes and Execution
 
 `clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `getpid`,

@@ -98,6 +98,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
     let timer = sources & READY_TIMER != 0;
     let mut clock_sampled = timer;
     let mut completed = false;
+    let mut deadline_changed = false;
     for index in 0..runtime.managed.len() {
         let process = &runtime.managed[index];
         let Some(wait) = process.readiness_wait.as_ref() else {
@@ -115,7 +116,17 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
         }
         let (pid, pcb, personality) = (process.pid, process.pcb, process.personality);
         let mut wait = *wait;
+        let previous_deadline = wait.deadline;
+        super::pty::update_deadline(runtime, pid, &mut wait);
+        deadline_changed |= previous_deadline != wait.deadline;
+        runtime.managed[index].readiness_wait = Some(wait);
         let result = scan_readiness(runtime, pid, &mut wait).and_then(|ready| {
+            if let Some(result) = super::pty::retry(runtime, pid, wait.context) {
+                return match result {
+                    Err(EAGAIN) => Ok(None),
+                    result => result.map(Some),
+                };
+            }
             if wait.context.number == super::SYS_IO_URING_ENTER {
                 return match super::io_uring::retry(runtime, pid, wait.context) {
                     Err(EAGAIN) => {
@@ -172,7 +183,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
             let _ = a9n_abi::arch::process_control_block::resume(pcb);
         }
     }
-    if completed && !timer {
+    if (completed || deadline_changed) && !timer {
         if let Err(errno) = arm_clock_timer(runtime) {
             nanami_runtime::println!("[alter/linux] poll alarm failed errno={}", errno);
         }
@@ -180,8 +191,15 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
 }
 
 pub fn handle_readiness_changes(runtime: &mut Runtime) {
-    let sources = ::core::mem::take(&mut runtime.readiness_changes);
-    if sources != 0 {
+    // Completing a reader can free a buffer for a writer already scanned in
+    // this pass. Propagate that change before blocking in receive again.
+    // Each successful I/O removes one waiter; bound passes by the task count
+    // as a safeguard against a provider reporting changes without progress.
+    for _ in 0..=runtime.managed.len() {
+        let sources = ::core::mem::take(&mut runtime.readiness_changes);
+        if sources == 0 {
+            break;
+        }
         wake_readiness_waiters(runtime, sources);
     }
 }

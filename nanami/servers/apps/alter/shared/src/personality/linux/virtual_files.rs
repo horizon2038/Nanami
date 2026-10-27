@@ -19,6 +19,9 @@ pub(super) fn sys_virtual_getdents(
     if !directory.is_directory() {
         return Err(ENOTDIR);
     }
+    if directory == VirtualNode::DevPts {
+        return super::pty::getdents(runtime, pid, fd, user_buffer, count);
+    }
     let graphics = graphics_enabled(runtime, pid);
     let mut out = 0usize;
     let mut index = file.offset as usize;
@@ -197,6 +200,10 @@ pub(super) fn open_virtual_path(
         .ok_or(ESRCH)?;
     let path =
         unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
+    if super::pty::number(path).is_some() {
+        let id = super::pty::path_id(runtime, pid, path)?;
+        return super::pty::open_slave(runtime, pid, id, linux_flags).map(Some);
+    }
     let Some(node) = virtual_fs::lookup(path, graphics_enabled) else {
         return if is_linux_virtual_path(runtime.posix_shm, len) {
             Err(ENOENT)
@@ -252,12 +259,25 @@ pub(super) fn open_virtual_node(
             file.posix_fd = backing;
             file
         }
+        VirtualNode::DevPtmx => return super::pty::open_master(runtime, pid, linux_flags),
         VirtualNode::DevTty => {
             let process = runtime.managed_process(pid).ok_or(ESRCH)?;
             if process.job.controlling_terminal == 0 {
                 return Err(super::ENXIO);
             }
-            LinuxFile::terminal()
+            let id = process.job.controlling_terminal;
+            if id & crate::state::pty::TERMINAL_TAG != 0 {
+                return super::pty::open_slave(
+                    runtime,
+                    pid,
+                    id & !crate::state::pty::TERMINAL_TAG,
+                    linux_flags,
+                );
+            }
+            LinuxFile {
+                flags: fd_flags,
+                ..LinuxFile::terminal()
+            }
         }
         VirtualNode::DevNull | VirtualNode::DevZero => {
             LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)

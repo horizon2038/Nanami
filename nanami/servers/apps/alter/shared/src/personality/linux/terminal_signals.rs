@@ -88,7 +88,7 @@ pub fn handle_terminal_input(runtime: &mut Runtime) {
     // controlling terminal once, even when none of its programs calls read().
     for index in 0..runtime.terminal_controls.len() {
         let control = runtime.terminal_controls[index];
-        if control.id == 0 {
+        if control.id == 0 || control.id & crate::state::pty::TERMINAL_TAG != 0 {
             continue;
         }
         let pid = runtime

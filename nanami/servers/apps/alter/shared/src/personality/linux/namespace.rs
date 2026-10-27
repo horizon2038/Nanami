@@ -103,6 +103,7 @@ fn virtual_directory(node: VirtualNode) -> Option<&'static [u8]> {
         VirtualNode::Root => Some(b"/"),
         VirtualNode::Dev => Some(b"/dev"),
         VirtualNode::DevInput => Some(b"/dev/input"),
+        VirtualNode::DevPts => Some(b"/dev/pts"),
         VirtualNode::Proc => Some(b"/proc"),
         VirtualNode::ProcSelf => Some(b"/proc/self"),
         VirtualNode::ProcNet => Some(b"/proc/net"),

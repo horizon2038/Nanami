@@ -9,6 +9,7 @@ use crate::state::readiness::*;
 pub(super) fn file_sources(file: LinuxFile) -> Word {
     match file.kind {
         LinuxFileKind::Terminal => READY_TERMINAL,
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => READY_PTY,
         LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
         LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
         LinuxFileKind::IoUring => READY_OBJECT,
@@ -81,6 +82,7 @@ pub(super) fn fd_readiness(
     let read = LINUX_POLLIN | LINUX_POLLRDNORM;
     let write = LINUX_POLLOUT | LINUX_POLLWRNORM;
     Ok(match file.kind {
+        LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => super::pty::readiness(runtime, file)?,
         LinuxFileKind::SocketUnix => super::unix::readiness(runtime, file.resource)?,
         LinuxFileKind::EventFd => super::eventfd::readiness(runtime, file),
         LinuxFileKind::IoUring => super::io_uring::readiness(runtime, file.resource)?,

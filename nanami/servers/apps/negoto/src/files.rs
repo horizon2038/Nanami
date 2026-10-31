@@ -28,6 +28,10 @@ impl Files {
         let len = self.path(path)?;
         vfs::vfs_stat(self.port, 0, len).map_err(|e| format!("{path}: {e}"))
     }
+    pub fn remove(&self, path: &str) -> Result<(), alloc::string::String> {
+        let len = self.path(path)?;
+        vfs::vfs_remove(self.port, 0, len).map_err(|e| format!("remove {path}: {e}"))
+    }
     pub fn read(&self, path: &str) -> Result<Vec<u8>, alloc::string::String> {
         let (_, len, kind) = self.stat(path)?;
         if kind != vfs::VFS_FILE_TYPE_REGULAR || len > negoto_oci::CONFIG_MAX_BYTES {

@@ -5,40 +5,16 @@ impl Runtime {
         if fd as usize >= LINUX_FD_MAX {
             return None;
         }
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let process = &self.managed[i];
-            if process.pid == pid && process.pcb != 0 {
-                let file = process.files[fd as usize];
-                return if file.is_open() { Some(file) } else { None };
-            }
-            i += 1;
-        }
-        None
+        let file = self.managed_process(pid)?.files[fd as usize];
+        file.is_open().then_some(file)
     }
 
     pub fn terminal_id(&self, pid: Word) -> Option<Word> {
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let process = &self.managed[i];
-            if process.pid == pid && process.pcb != 0 {
-                return Some(process.terminal_id);
-            }
-            i += 1;
-        }
-        None
+        Some(self.managed_process(pid)?.terminal_id)
     }
 
     pub fn terminal_canonical(&self, pid: Word) -> Option<bool> {
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let process = &self.managed[i];
-            if process.pid == pid && process.pcb != 0 {
-                return Some(process.terminal_canonical);
-            }
-            i += 1;
-        }
-        None
+        Some(self.managed_process(pid)?.terminal_canonical)
     }
 
     pub fn set_linux_file(&mut self, pid: Word, fd: Word, file: LinuxFile) -> bool {

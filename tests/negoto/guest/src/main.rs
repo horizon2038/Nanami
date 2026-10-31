@@ -10,6 +10,11 @@ use nanami_runtime::{ipc, Word, OS_RESPONSE_OK};
 use serde_json::{json, Value};
 #[path = "../../../../nanami/servers/apps/negoto/src/files.rs"]
 mod files;
+mod frame_capture;
+mod process_perf;
+mod framebuffer {
+    pub use crate::frame_capture::Rect;
+}
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -119,6 +124,9 @@ impl Console {
         );
     }
     fn expect(&self, needle: &[u8], timer: Word) {
+        self.collect_until(needle, timer);
+    }
+    fn collect_until(&self, needle: &[u8], timer: Word) -> Vec<u8> {
         let mut output = Vec::new();
         for _ in 0..2000 {
             let count = terminal::terminal_read_output(self.port, self.id, 0, self.bytes).unwrap();
@@ -136,7 +144,7 @@ impl Console {
                 "unexpected terminal output volume"
             );
             if output.windows(needle.len()).any(|window| window == needle) {
-                return;
+                return output;
             }
             timer::timer_service_sleep_milliseconds(timer, 10).unwrap();
         }
@@ -201,6 +209,53 @@ fn main() -> nanami_runtime::NanamiResult {
     assert_eq!(status, OS_RESPONSE_OK);
     let client = Client { port, shm, bytes };
     let files = files::Files::connect().unwrap();
+    if matches!(
+        nanami_runtime::process_arg(1),
+        Some(b"--tinycore" | b"--tinycore-desktop" | b"--tinycore-apps" | b"--tinycore-perf" | b"--tinycore-process-perf")
+    ) {
+        let desktop = nanami_runtime::process_arg(1) == Some(b"--tinycore-desktop");
+        let applications = nanami_runtime::process_arg(1) == Some(b"--tinycore-apps");
+        if nanami_runtime::process_arg(1) == Some(b"--tinycore-process-perf") {
+            process_perf::benchmark(&client, timer);
+        } else if applications {
+            tinycore_applications(&client, &files, timer);
+        } else if nanami_runtime::process_arg(1) == Some(b"--tinycore-perf") {
+            frame_capture::benchmark(timer);
+            let native = NativeExec::connect();
+            let console = Console::connect();
+            let pid = native.spawn_cli(
+                &[
+                    "run",
+                    "--bundle",
+                    "/alter/linux/nanami-desktop-performance",
+                    "tc-performance",
+                ],
+                Some(console.id),
+            );
+            let output = console.collect_until(b"DESKTOP-PERFORMANCE-PASS", timer);
+            native.wait(pid, timer);
+            nanami_runtime::println!(
+                "TINYCORE-PERFORMANCE-PASS {}",
+                String::from_utf8_lossy(&output)
+            );
+        } else if desktop {
+            tinycore_desktop(&client, &files, timer);
+        } else {
+            tinycore(&client, &files, timer);
+        }
+        let (status, _, _) =
+            nanami_runtime::call_service_port(port, NEGOTO_REQUEST_DETACH, 0, 0, 0, 0, 1)?;
+        assert_eq!(status, OS_RESPONSE_OK);
+        nanami_runtime::request_mapping_release(shm, bytes)?;
+        if applications {
+            nanami_runtime::println!("TINYCORE-APPLICATIONS-PASS windows=true cleanup=true");
+        } else if desktop {
+            nanami_runtime::println!("TINYCORE-DESKTOP-PASS x11=true input=true cleanup=true");
+        } else {
+            nanami_runtime::println!("TINYCORE-SMOKE-PASS init=true dynamic=true interactive=true");
+        }
+        return Ok(());
+    }
     let marker = "/alter/linux/bundles/busybox/rootfs/work/result";
     assert!(files.stat(marker).is_err(), "fixture is not fresh");
     assert!(client.command("start", "missing").is_err());
@@ -270,7 +325,9 @@ fn main() -> nanami_runtime::NanamiResult {
     );
     client.command("delete", "signal-abi").unwrap();
     nanami_runtime::println!("NEGOTO-SIGNAL-ABI-PASS masks=true nested=true altstack=true realtime=true faults=true stop=true wait=true timers=true restart=true");
-    nanami_runtime::println!("NEGOTO-ASYNC-SIGNALS-PASS busy-timer=true busy-stop-continue=true gprs=true");
+    nanami_runtime::println!(
+        "NEGOTO-ASYNC-SIGNALS-PASS busy-timer=true busy-stop-continue=true gprs=true"
+    );
 
     for _ in 0..20 {
         client.create("box", "true").unwrap();
@@ -325,5 +382,460 @@ fn main() -> nanami_runtime::NanamiResult {
     nanami_runtime::request_mapping_release(shm, bytes)?;
     nanami_runtime::println!("NEGOTO-SMOKE-PASS reuse=20 cleanup=true");
     Ok(())
+}
+
+fn tinycore_applications(client: &Client, files: &files::Files, timer: Word) {
+    let native = NativeExec::connect();
+    let console = Console::connect();
+    let root = "/alter/linux/tinycore/rootfs/tmp/";
+    for name in [
+        "desktop-ready",
+        "desktop-apps-ok",
+        "desktop-apps-step",
+        "desktop-apps-failed",
+        "pointer-probe.log",
+        "desktop-exit",
+    ] {
+        let path = format!("{root}{name}");
+        if files.stat(&path).is_ok() {
+            files.remove(&path).unwrap();
+        }
+    }
+    let pid = native.spawn_cli(
+        &[
+            "run",
+            "--bundle",
+            "/alter/linux/tinycore-desktop",
+            "tc-applications",
+        ],
+        Some(console.id),
+    );
+    let mut ready = false;
+    for _ in 0..1200 {
+        if files.stat(&format!("{root}desktop-ready")).is_ok() {
+            ready = true;
+            break;
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    if !ready {
+        let count =
+            terminal::terminal_read_output(console.port, console.id, 0, console.bytes).unwrap();
+        let bytes = unsafe { core::slice::from_raw_parts(console.shm as *const u8, count) };
+        nanami_runtime::println!(
+            "[tinycore.apps] startup: {}",
+            String::from_utf8_lossy(bytes)
+        );
+        panic!("application-test desktop did not start");
+    }
+    nanami_runtime::println!("TINYCORE-APPLICATIONS-READY");
+    let mut previous = Vec::new();
+    let mut previous_pointer = Vec::new();
+    let mut complete = false;
+    for turn in 0..6000 {
+        if let Ok(pointer) = files.read(&format!("{root}pointer-probe.log")) {
+            if pointer != previous_pointer {
+                if let Some(line) = pointer
+                    .split(|byte| *byte == b'\n')
+                    .rev()
+                    .find(|line| !line.is_empty())
+                {
+                    nanami_runtime::println!("{}", String::from_utf8_lossy(line));
+                }
+                previous_pointer = pointer;
+            }
+        }
+        if let Ok(application) = files.read(&format!("{root}desktop-apps-failed")) {
+            let name = String::from_utf8_lossy(&application);
+            for suffix in ["log", "tree"] {
+                if let Ok(bytes) =
+                    files.read(&format!("{root}desktop-apps/{}.{}", name.trim(), suffix))
+                {
+                    nanami_runtime::println!(
+                        "[tinycore.apps] {}.{}: {}",
+                        name.trim(),
+                        suffix,
+                        String::from_utf8_lossy(&bytes)
+                    );
+                }
+            }
+            panic!("GUI application failed: {}", name.trim());
+        }
+        if let Ok(step) = files.read(&format!("{root}desktop-apps-step")) {
+            if step != previous {
+                nanami_runtime::println!(
+                    "TINYCORE-APP-WINDOW {}",
+                    String::from_utf8_lossy(&step).trim()
+                );
+                previous = step;
+            }
+        }
+        if files
+            .read(&format!("{root}desktop-apps-ok"))
+            .is_ok_and(|bytes| bytes == b"desktop-apps-ok\n")
+        {
+            complete = true;
+            break;
+        }
+        if turn % 100 == 99 {
+            if let Ok(current) = files.read(&format!("{root}desktop-apps-current")) {
+                let name = String::from_utf8_lossy(&current);
+                if let Ok(bytes) = files.read(&format!("{root}desktop-apps/{}.log", name.trim())) {
+                    if !bytes.is_empty() {
+                        nanami_runtime::println!(
+                            "[tinycore.apps] {}: {}",
+                            name.trim(),
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+            let count =
+                terminal::terminal_read_output(console.port, console.id, 0, console.bytes).unwrap();
+            if count != 0 {
+                let bytes = unsafe { core::slice::from_raw_parts(console.shm as *const u8, count) };
+                nanami_runtime::println!("[tinycore.apps] {}", String::from_utf8_lossy(bytes));
+            }
+        }
+        // Do not let this higher-priority observer saturate VFS/Alpha while
+        // the lower-priority GUI clients are loading fonts and libraries.
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(complete, "GUI application smoke test did not complete");
+    nanami_runtime::println!("TINYCORE-APPLICATIONS-VERIFIED");
+    let mut exited = false;
+    for _ in 0..1200 {
+        if files.stat(&format!("{root}desktop-exit")).is_ok() {
+            exited = true;
+            break;
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(exited, "application-test desktop did not exit");
+    native.wait(pid, timer);
+    assert!(client.command("state", "tc-applications").is_err());
+}
+
+fn tinycore_desktop(client: &Client, files: &files::Files, timer: Word) {
+    let native = NativeExec::connect();
+    let console = Console::connect();
+    let syscalls = native.spawn_cli(
+        &[
+            "run",
+            "--bundle",
+            "/alter/linux/nanami-desktop-syscalls",
+            "tc-syscalls",
+        ],
+        Some(console.id),
+    );
+    console.expect(b"DESKTOP-SYSCALLS-PASS", timer);
+    native.wait(syscalls, timer);
+    assert!(client.command("state", "tc-syscalls").is_err());
+    nanami_runtime::println!("TINYCORE-DESKTOP-SYSCALLS-PASS");
+    let namespace = native.spawn_cli(
+        &[
+            "run",
+            "--bundle",
+            "/alter/linux/nanami-namespace",
+            "tc-namespace",
+        ],
+        Some(console.id),
+    );
+    console.expect(b"NAMESPACE-PASS", timer);
+    native.wait(namespace, timer);
+    assert!(client.command("state", "tc-namespace").is_err());
+    nanami_runtime::println!("TINYCORE-NAMESPACE-PASS");
+    let mapping = native.spawn_cli(
+        &[
+            "run",
+            "--bundle",
+            "/alter/linux/nanami-file-mapping",
+            "tc-mapping",
+        ],
+        Some(console.id),
+    );
+    console.expect(b"FILE-MAPPING-PASS", timer);
+    native.wait(mapping, timer);
+    assert!(client.command("state", "tc-mapping").is_err());
+    nanami_runtime::println!("TINYCORE-FILE-MAPPING-PASS");
+    for cycle in 1..=2 {
+        tinycore_desktop_session(client, files, timer, &native, &console, cycle);
+    }
+}
+
+fn tinycore_desktop_session(
+    client: &Client,
+    files: &files::Files,
+    timer: Word,
+    native: &NativeExec,
+    console: &Console,
+    cycle: usize,
+) {
+    let root = "/alter/linux/tinycore/rootfs/tmp/";
+    // Never accept the preceding session's markers as evidence of a restart.
+    for name in [
+        "desktop-ready",
+        "desktop-input-ok",
+        "desktop-launch-ok",
+        "desktop-info-ok",
+        "desktop-exit",
+    ] {
+        let path = format!("{root}{name}");
+        if files.stat(&path).is_ok() {
+            files.remove(&path).unwrap();
+        }
+    }
+    let pid = native.spawn_cli(
+        &[
+            "run",
+            "--bundle",
+            "/alter/linux/tinycore-desktop",
+            "tc-desktop",
+        ],
+        Some(console.id),
+    );
+    let mut ready = false;
+    // Keep the higher-priority observer from starving the GUI's cold-start
+    // work with continual VFS/exec RPCs. All markers still require readback.
+    for turn in 0..1200 {
+        if files.stat(&format!("{root}desktop-ready")).is_ok() {
+            ready = true;
+            break;
+        }
+        if turn % 100 == 99 {
+            let count =
+                terminal::terminal_read_output(console.port, console.id, 0, console.bytes).unwrap();
+            if count != 0 {
+                let bytes = unsafe { core::slice::from_raw_parts(console.shm as *const u8, count) };
+                nanami_runtime::println!(
+                    "[tinycore.gui] console: {}",
+                    String::from_utf8_lossy(bytes)
+                );
+            }
+            for name in [
+                "Xfbdev.log",
+                "waitforX.log",
+                "flwm.log",
+                "wbar.log",
+                "aterm.log",
+            ] {
+                if let Ok(bytes) = files.read(&format!("{root}{name}")) {
+                    if !bytes.is_empty() {
+                        nanami_runtime::println!(
+                            "[tinycore.gui] {}: {}",
+                            name,
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+            let (exited, status) = exec::exec_process_status(native.port, pid).unwrap();
+            assert!(
+                !exited,
+                "desktop CLI exited before startup: status={status}"
+            );
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(ready, "X server did not accept a real X11 client");
+    nanami_runtime::println!("TINYCORE-DESKTOP-READY cycle={}", cycle);
+    let mut input = false;
+    for _ in 0..1200 {
+        if files
+            .read(&format!("{root}desktop-input-ok"))
+            .is_ok_and(|bytes| bytes == b"desktop-input-ok\n")
+        {
+            input = true;
+            break;
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(input, "X terminal did not execute the keyboard command");
+    nanami_runtime::println!("TINYCORE-DESKTOP-INPUT-PASS cycle={}", cycle);
+    let mut launched = false;
+    for _ in 0..1200 {
+        let (exited, _) = exec::exec_process_status(native.port, pid).unwrap();
+        assert!(!exited, "closing the initial terminal ended the desktop");
+        if files
+            .read(&format!("{root}desktop-launch-ok"))
+            .is_ok_and(|bytes| bytes == b"desktop-launch-ok\n")
+        {
+            launched = true;
+            break;
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(
+        launched,
+        "dock Terminal action did not execute a new X client"
+    );
+    nanami_runtime::println!("TINYCORE-DESKTOP-LAUNCH-PASS cycle={}", cycle);
+    let mut information = false;
+    for _ in 0..1200 {
+        if files
+            .read(&format!("{root}desktop-info-ok"))
+            .is_ok_and(|bytes| bytes == b"desktop-info-ok\n")
+        {
+            information = true;
+            break;
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(
+        information,
+        "information launcher did not execute its X terminal command"
+    );
+    nanami_runtime::println!("TINYCORE-DESKTOP-INFO-PASS cycle={}", cycle);
+    let mut exit_requested = false;
+    for turn in 0..1200 {
+        if files.stat(&format!("{root}desktop-exit")).is_ok() {
+            exit_requested = true;
+            break;
+        }
+        if turn % 100 == 99 {
+            for name in ["wbar.log", "editor.log"] {
+                if let Ok(bytes) = files.read(&format!("{root}{name}")) {
+                    if !bytes.is_empty() {
+                        nanami_runtime::println!(
+                            "[tinycore.gui] {}: {}",
+                            name,
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+        }
+        timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
+    }
+    assert!(
+        exit_requested,
+        "dock Exit action did not request session shutdown"
+    );
+    native.wait(pid, timer);
+    assert!(client.command("state", "tc-desktop").is_err());
+    assert!(
+        files
+            .read(&format!("{root}desktop-info-ok"))
+            .is_ok_and(|bytes| bytes == b"desktop-info-ok\n"),
+        "information launcher did not execute its X terminal command"
+    );
+    nanami_runtime::println!("TINYCORE-DESKTOP-SESSION-PASS cycle={}", cycle);
+}
+
+fn tinycore(client: &Client, files: &files::Files, timer: Word) {
+    let native = NativeExec::connect();
+    let console = Console::connect();
+    let config = "/alter/linux/tinycore-smoke/config.json";
+    let original = files.read(config).unwrap();
+    assert_eq!(original.first(), Some(&b'{'));
+    for (bundle, marker) in [
+        ("/alter/linux/nanami-chmod", b"CHMOD-PASS".as_slice()),
+        ("/alter/linux/nanami-chmod-readonly", b"CHMOD-READONLY-PASS"),
+        ("/alter/linux/nanami-procfs", b"PROCFS-PASS"),
+        (
+            "/alter/linux/nanami-desktop-syscalls",
+            b"DESKTOP-SYSCALLS-PASS",
+        ),
+    ] {
+        let pid = native.spawn_cli(
+            &["run", "--bundle", bundle, "tc-permissions"],
+            Some(console.id),
+        );
+        console.expect(marker, timer);
+        native.wait(pid, timer);
+        assert!(client.command("state", "tc-permissions").is_err());
+        assert_eq!(
+            files.read(config).unwrap(),
+            original,
+            "chmod fixture changed an unrelated bundle"
+        );
+    }
+    nanami_runtime::println!(
+        "TINYCORE-CHMOD-PASS mode=true aliases=true unlinked=true readonly=true"
+    );
+    let marker = "/alter/linux/tinycore/rootfs/tmp/tinycore-init-ok";
+    assert!(files.stat(marker).is_err(), "fixture is not fresh");
+    let pid = native.spawn_cli(
+        &["run", "--bundle", "/alter/linux/tinycore-smoke", "tc-smoke"],
+        Some(console.id),
+    );
+    console.expect(b"tinycore-init-ok", timer);
+    native.wait(pid, timer);
+    assert_eq!(files.read(marker).unwrap(), b"tinycore-init-ok\n");
+    assert!(client.command("state", "tc-smoke").is_err());
+    nanami_runtime::println!("TINYCORE-INIT-PASS root=true symlinks=true pipe=true fork=true");
+
+    let pid = native.spawn_cli(
+        &["run", "--bundle", "/alter/linux/tinycore", "tc-console"],
+        Some(console.id),
+    );
+    console.expect(b"tinycore:/# ", timer);
+    console.send(b"ls && ls . && printf 'tinycore-''ls-cwd-ok\\n'\n");
+    console.expect(b"tinycore-ls-cwd-ok", timer);
+    console.send(
+        b"ls / && ls /bin && cd /tmp && ls . && cd / && printf 'tinycore-''ls-paths-ok\\n'\n",
+    );
+    console.expect(b"tinycore-ls-paths-ok", timer);
+    console.send(b"sleep 100 & p=$!; ps > /tmp/procfs-ps; ps -T > /tmp/procfs-threads 2>/tmp/procfs-thread-error; printf '%s\\n' $? > /tmp/procfs-thread-status; cat /tmp/procfs-ps; grep 'sleep 100' /tmp/procfs-ps && kill $p && wait $p; printf 'tinycore-''ps-ok\\n'\n");
+    console.expect(b"tinycore-ps-ok", timer);
+    let listing = files
+        .read("/alter/linux/tinycore/rootfs/tmp/procfs-ps")
+        .unwrap();
+    assert!(
+        listing.windows(9).any(|bytes| bytes == b"sleep 100"),
+        "BusyBox ps omitted its sleeping child"
+    );
+    assert!(
+        listing.windows(3).any(|bytes| bytes == b"PID"),
+        "BusyBox ps did not print a table"
+    );
+    let threads = files
+        .read("/alter/linux/tinycore/rootfs/tmp/procfs-threads")
+        .unwrap();
+    let status = files
+        .read("/alter/linux/tinycore/rootfs/tmp/procfs-thread-status")
+        .unwrap();
+    if status == b"0\n" {
+        assert!(
+            threads.windows(9).any(|bytes| bytes == b"sleep 100"),
+            "BusyBox ps -T omitted the child"
+        );
+    } else {
+        let error = files
+            .read("/alter/linux/tinycore/rootfs/tmp/procfs-thread-error")
+            .unwrap();
+        let error = core::str::from_utf8(&error).unwrap();
+        nanami_runtime::println!("TINYCORE-PS-T-OPTION: {}", error);
+        assert!(
+            error.contains("invalid option") || error.contains("unrecognized option"),
+            "ps -T failed for a reason other than a disabled BusyBox option"
+        );
+    }
+    // Emit the independently read file, not terminal input echo.
+    nanami_runtime::println!(
+        "TINYCORE-PS-OUTPUT\n{}",
+        core::str::from_utf8(&listing).unwrap()
+    );
+    nanami_runtime::println!(
+        "TINYCORE-PS-PASS numeric-pids=true args=true openat=true fork=true reap=true"
+    );
+    // Split expected strings so terminal input echo cannot satisfy the check.
+    console.send(b"printf 'tinycore-''interactive-ok\\n'\n");
+    console.expect(b"tinycore-interactive-ok", timer);
+    console.send(b"cat /etc/os-release\n");
+    console.expect(b"VERSION_ID=17.1", timer);
+    console.send(b"/bin/busybox sleep 0.05 & fg; printf 'tinycore-''fg-ok\\n'\n");
+    console.expect(b"tinycore-fg-ok", timer);
+    console.send(b"/bin/busybox sleep 100\n");
+    timer::timer_service_sleep_milliseconds(timer, 300).unwrap();
+    console.send(b"\x03");
+    console.send(b"printf 'tinycore-''ctrl-c-ok\\n'\n");
+    console.expect(b"tinycore-ctrl-c-ok", timer);
+    console.send(b"exit\n");
+    native.wait(pid, timer);
+    assert!(client.command("state", "tc-console").is_err());
+    nanami_runtime::println!(
+        "TINYCORE-CONSOLE-PASS release=true job-control=true ctrl-c=true exit=true"
+    );
 }
 nanami_runtime::nanami_entry!(main);

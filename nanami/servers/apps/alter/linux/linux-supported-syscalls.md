@@ -9,17 +9,37 @@ not imply complete Linux semantics for every flag or edge case.
 
 ## File and Directory I/O
 
+Path-based stat/lstat/newfstatat/statx and access/faccessat collect inode, size,
+mode and type in the rooted pathname-resolution request. They do not issue a
+second POSIX stat and repeat the filesystem walk. Missing final components
+retain their canonical name for the hosts/resolver fallback, also without a
+second disk request. Virtual /dev, /proc and /sys retain personality-local
+metadata. This is a per-request snapshot, not a cross-syscall pathname cache;
+chmod, rename and inode-based dirfd semantics remain live.
+
 `read`, `write`, `readv`, `writev`, `pread64`, `pwrite64`, `sendfile`, `open`, `openat`, `creat`, `close`, `lseek`,
 `getdents64`, `stat`, `lstat`, `fstat`, `newfstatat`, `statx`, `access`,
 `faccessat`, `faccessat2`, `readlink`, `readlinkat`, `mkdir`, `mkdirat`,
 `mknod`, `mknodat`, `rmdir`, `unlink`, `unlinkat`, `rename`, `renameat`,
 `link`, `linkat`, `chown`, `lchown`, `fchown`, `fchownat`, `utimes`,
-`futimesat`, `utimensat`, `symlink`, `symlinkat`, and `fchdir`.
+`futimesat`, `utimensat`, `symlink`, `symlinkat`, `fchdir`, `chmod`, `fchmod`,
+`fchmodat`, and `fchmodat2`.
+
+`statfs` and `fstatfs` report the filesystem behind the pathname/open description,
+including procfs, sysfs, devpts, RAM files, pipes, sockets and anonymous-inode
+descriptors. Real ext2 files/directories query live cached superblock counters
+through POSIX/VFS in one request per service, including pending writeback changes.
+The 64-bit Linux statfs layout is 120 bytes. Synthetic filesystems report zero
+capacity counters rather than inventing available memory or disk space.
 
 Positioned regular-file I/O does not change the open-file description's offset,
 including descriptors shared through `dup`/`fork`. `newfstatat` supports
 `AT_EMPTY_PATH`, including `AT_FDCWD`. Path operations resolve relative dirfds
 through their actual VFS directory inode, including after a directory rename.
+`AT_FDCWD` is interpreted as a Linux signed 32-bit `int`, accepting both
+zero-extended libc arguments and sign-extended raw syscall arguments.
+Private OCI roots overlay `/dev`, `/proc` and `/sys`, not the legacy
+personality's `/temp` alias. Ordinary rootfs entries remain visible.
 The rooted walker expands relative/absolute symlinks before interpreting `..`,
 limits expansion to 40 links, and keeps absolute link targets inside the guest
 root. `lstat`, `readlinkat`, `AT_SYMLINK_NOFOLLOW`, and `O_NOFOLLOW` distinguish
@@ -53,6 +73,20 @@ UNIX socket creation; symlinks retain mode `0777`. POSIX/VFS forward explicit
 creation permissions to ext2, including mode zero, and stat/fstat/statx report
 the actual persisted mode. Existing files are not chmodded by `O_CREAT`.
 
+`chmod` follows symlinks; `fchmod` updates the actual open inode, including
+read-only descriptors, dup/hard-link aliases and unlinked-but-open files.
+`fchmodat` uses the Linux **three-argument syscall** ABI; only `fchmodat2`
+reads flags. Relative dirfds remain inode-based after rename. `fchmodat2`
+supports `AT_EMPTY_PATH` and `AT_SYMLINK_NOFOLLOW`; changing a symlink's own
+mode returns `EOPNOTSUPP`. Mode bits `07777` are persisted without applying
+umask or changing file type, reported by stat/fstat/statx and flushed by the
+existing ext2 writeback/fsync path. Open-inode/handle caches update immediately.
+Readonly execution contexts return `EROFS`, invalid FDs/flags return
+`EBADF`/`EINVAL`, and personality-owned virtual mounts are not chmodded.
+Personality-local FD types return `EOPNOTSUPP`. The current root-only identity
+model remains: storing setuid/setgid/sticky metadata does not add multi-user
+DAC enforcement, setuid exec identity changes or inode ctime maintenance.
+
 `flock` supports shared/exclusive locks, unlock, nonblocking contention and
 blocking waits interrupted by signals (including `SA_RESTART`). Locks are
 advisory, keyed by inode and owned by POSIX open-file descriptions: dup, fork
@@ -60,6 +94,17 @@ and transferred descriptions share the lock until unlock or final close.
 Release notifications wake Alter waiters without polling or blocking POSIX's
 server loop. This backend covers POSIX-backed regular files and directories;
 personality-local descriptor kinds currently return `EOPNOTSUPP`.
+
+### File-cache advice
+
+`fadvise64` (x86_64 221 / AArch64 223) accepts NORMAL, RANDOM, SEQUENTIAL,
+WILLNEED, DONTNEED and NOREUSE. These are advisory no-ops with the current
+cache policy, not synchronous reads, writeback, or mandatory eviction. File
+contents, offsets and shared file-page leases remain unchanged. Invalid FDs
+and POSIX O_PATH files return `EBADF`, pipes return `ESPIPE`, and negative
+lengths or unknown advice return `EINVAL`. FD/advice follow the Linux int ABI;
+the range remains 64-bit, with zero length, signed offsets and overflow-safe
+hint acceptance following [Linux's generic implementation](https://github.com/torvalds/linux/blob/v6.12/mm/fadvise.c).
 
 ### io_uring
 
@@ -187,9 +232,16 @@ separate requirements. A9N and its IPC fastpath are unchanged.
 
 Regular-file `MAP_PRIVATE` copies the file without disturbing its offset and
 zero-fills the final partial page. `MAP_FIXED` replaces overlapping mappings;
-`munmap` accepts holes. Ordinary VFS file-backed `MAP_SHARED` and initial
-file-backed `PROT_NONE` are explicitly rejected: those mappings remain eager
-private copies, not a shared page cache.
+`munmap` accepts holes. Ordinary regular-file **read-only `MAP_SHARED`** uses
+VFS-owned shared pages, not private copies. Mappings remain valid after FD close,
+unlink and fork; native/POSIX writes within the file update existing aliases.
+The hidden FD and VFS page leases survive until the last guest alias is removed.
+`msync` forwards file synchronization to POSIX/VFS, including persistence errors.
+The final partial page is zero-filled and `mprotect(PROT_WRITE)` is denied.
+Writable shared file mappings and initial ranges extending beyond EOF return
+`EOPNOTSUPP`. Size changes while read-page leases exist return `EBUSY`, before
+any mutation; unmap and retry. File-backed `MAP_PRIVATE|PROT_NONE` remains
+unsupported. Ordinary-file truncate/SIGBUS invalidation is not claimed.
 
 Memfd supports sparse read/write, positioned I/O, seek, truncate, basic sealing,
 `MAP_PRIVATE` and real `MAP_SHARED`. Shared anonymous mappings use the same
@@ -267,7 +319,31 @@ OCI console-socket/PTY allocation policy.
 
 ## Processes and Execution
 
-`clone`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `getpid`,
+### Process inspection
+
+The personality-owned `/proc` enumerates numeric thread-group directories from
+Alter's managed process table, limited to the caller's execution context. It
+provides `stat` (the 52-field Linux layout), `status`, `cmdline`, `comm`, `statm`,
+`exe` readlink and `task/<tid>` views, plus `/proc/uptime`. `/proc/self` selects
+the calling thread group. Directory FDs retain their selected PID across fork;
+`openat`, metadata lookup, short reads, EOF and directory-cookie seeking use the
+same process-backed objects. Reaped subjects disappear rather than exposing
+another execution context.
+
+BusyBox `ps` can enumerate these views. Thread-aware builds can use the `task`
+directories; the availability of `ps -T` also depends on BusyBox's build options.
+Command lines retain NUL separators and are read from the guest argument vector
+installed at launch or exec; fork inherits that vector. State, parent/group/session IDs, terminal,
+thread count and virtual mapping size come from Alter state. Start time is
+sampled from the monotonic timer at task creation and preserved across exec.
+PIDs are not renumbered into Linux PID namespaces. CPU time, fault counters,
+resident-page accounting and aggregate idle time are not exported by A9N: their required
+numeric fields are zero, not fabricated usage measurements. `VmRSS` is omitted
+from `status` for the same reason.
+
+### Task lifecycle
+
+`clone`, `clone3`, `fork`, `vfork`, `execve`, `wait4`, `exit`, `exit_group`, `getpid`,
 `getppid`, `gettid`, `set_tid_address`, `set_robust_list`, `setpgid`,
 `getpgid`, `get_robust_list`, and `kill`.
 
@@ -282,9 +358,48 @@ the thread group ID; `gettid` returns the native task ID. `exit` drops one task;
 children. VM/frame arenas outlive the original task until their last user is reaped.
 
 Exec of a still-shared VM, or from a non-owner raw task, is rejected instead of
-revoking an address space used by another task. `clone3`, vfork-style VM sharing,
-and namespace-creation clone flags are not implemented. `CLONE_SYSVSEM` is
+revoking an address space used by another task. `clone3` decodes the extensible
+64/80/88-byte clone_args ABI, checks unknown trailing bytes, translates stack
+base/size and architecture-specific TLS/TID arguments, and uses the same real
+fork/shared-VM implementation. Shared-VM vfork+exec, pidfds, set_tid selection,
+cgroup and namespace creation are not provided; unsupported clone features
+retain `ENOSYS` so existing libc fallback paths remain available. No private
+copy is advertised as a shared-VM vfork. `CLONE_SYSVSEM` is
 accepted for libc thread creation; there is no System V semaphore backend.
+
+### Task identity and control
+
+`setresuid` and `setresgid` accept the current root identity (0) and the Linux
+32-bit unchanged sentinel (-1), in any combination. A nonzero identity returns
+`EOPNOTSUPP`: POSIX/OCI still use root-only credentials and do not implement
+multi-user DAC. A reported successful privilege drop would be misleading.
+
+`prctl` implements PR_SET_NAME/PR_GET_NAME with a separate 16-byte per-task
+comm, including truncation, NUL padding, fork inheritance and exec reset.
+Procfs stat/status/comm reflect this name without changing executable identity.
+PR_SET_NO_NEW_PRIVS/PR_GET_NO_NEW_PRIVS store an irreversible flag inherited
+across fork/clone/exec; the current exec path never grants setuid/file capabilities.
+PR_GET_SECCOMP reports zero; installing filters and other prctl options return
+errors rather than accepting unenforced security settings.
+
+### System V shared memory
+
+`shmget`, `shmat`, `shmdt` and `shmctl` provide execution-context-scoped shared
+RAM, including IPC_PRIVATE, keyed lookup/IPC_CREAT/IPC_EXCL, IPC_STAT, IPC_SET
+of root-owned permission metadata and IPC_RMID. Segments start zero-filled;
+multiple attachments and fork aliases refer to the same backing pages.
+IPC_RMID removes the key immediately and retains attached pages until the last
+detach. Partial munmap preserves attachment identity, and shmdt removes only
+the remaining segment pieces, not replacement VMAs. Exec/exit detach mappings;
+the last task leaving a context reclaims its remaining segments.
+
+SHM_RDONLY prevents later mprotect from adding write access; SHM_RND and SHM_EXEC
+are recognized. Explicit attachment addresses must be free and within Alter's
+tracked reservation range (0x100000000..0x400000000000). SHM_REMAP, huge pages,
+locking, SHM_INFO/SHM_STAT and mremap of attachments are rejected. Limits are
+32 MiB per segment, 64 MiB per context and the existing 256-object server budget.
+This supports X11 MIT-SHM without changing the Kernel or copying pixel buffers
+between private guest snapshots.
 
 ### Dynamic executables
 
@@ -344,7 +459,35 @@ frames are outside this personality's current scope.
 
 `uname`, `getcwd`, `chdir`, `getuid`, `geteuid`, `getgid`, `getegid`,
 `getresuid`, `getresgid`, `arch_prctl`, `getrandom`, `getrlimit`, and
-`prlimit64`.
+`prlimit64`, and `sysinfo`.
+
+`sysinfo` (x86_64 99 / AArch64 179) writes the 112-byte Linux 64-bit layout,
+including zeroed padding. Uptime uses the live monotonic boot clock, rounded
+up to seconds as in Linux. Total/free RAM come from Alpha's physical-memory
+accounting, with `mem_unit=1`, consistent with `/proc/meminfo`. The process
+count is Alpha's live native process/thread count (including native services),
+bounded to the ABI's 16-bit field; it is not a PID-namespace or container quota
+report. Swap and separate high-memory zones are absent. Load averages and
+shared/buffer RAM subdivisions have no accounting provider and are returned
+as zero, not synthesized from live-process count or used RAM. Invalid,
+read-only and partially unwritable destinations return `EFAULT` through the
+existing checked guest copyout; the syscall does not touch host devices.
+Layout and rounding follow the [Linux sysinfo ABI](https://github.com/torvalds/linux/blob/v6.12/include/uapi/linux/sysinfo.h)
+and [implementation](https://github.com/torvalds/linux/blob/v6.12/kernel/sys.c).
+
+`RLIMIT_NOFILE` reports the actual 64-descriptor table and `RLIMIT_STACK`
+reports the mapped stack size, not infinity. `prlimit64` validates the resource
+and target; an unchanged limit may be supplied, while resource-policy changes
+return `EOPNOTSUPP` instead of claiming enforcement.
+
+With an explicit graphics grant, `/dev/tty0`, `/dev/tty1` and `/dev/console`
+provide one window-local Linux VT (`VT_*`, `KDGETMODE`/`KDSETMODE`,
+`KDGKBMODE`/`KDSKBMODE`, `KDGKBENT`, LEDs and termios). Mediumraw keycodes use
+a US console map. `/dev/input/mice`/`psaux`/`mouse` provide PS/2 byte packets,
+command acknowledgements and wheel negotiation. `poll`/`select` report queued
+input and command-reply readiness. These are not host hardware devices.
+Forked X11 clients share the context leader's graphics session. Linux VT
+switching and writable ordinary-file shared mmap are not implemented.
 
 ## Explicitly Unsupported
 

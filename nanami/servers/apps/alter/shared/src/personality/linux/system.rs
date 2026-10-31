@@ -89,17 +89,45 @@ pub(super) fn sys_getrlimit(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> Result<Word, i32> {
-    let out = if context.number == SYS_PRLIMIT64 {
-        context.args[3]
+    const RLIMIT_STACK: Word = 3;
+    const RLIMIT_NOFILE: Word = 7;
+    const RLIMIT_COUNT: Word = 16;
+    let (resource, update, out) = if context.number == SYS_PRLIMIT64 {
+        if context.args[0] != 0 && context.args[0] != pid {
+            return Err(ESRCH);
+        }
+        (context.args[1], context.args[2], context.args[3])
     } else {
-        context.args[1]
+        if context.args[1] == 0 {
+            return Err(EFAULT);
+        }
+        (context.args[0], 0, context.args[1])
     };
+    if resource >= RLIMIT_COUNT {
+        return Err(EINVAL);
+    }
+    // These are actual Alter limits, not RLIM_INFINITY. In particular libc's
+    // getdtablesize() returns int; infinity becomes -1 and Xtrans then rejects
+    // every successfully created socket as outside its descriptor table.
+    let limit = match resource {
+        RLIMIT_STACK => super::LINUX_STACK_BYTES,
+        RLIMIT_NOFILE => crate::state::LINUX_FD_MAX as Word,
+        _ => Word::MAX,
+    };
+    if update != 0 {
+        super::read_target_memory(runtime, pid, update, 16)?;
+        if super::read_shm_u64(runtime, 0) != limit || super::read_shm_u64(runtime, 8) != limit {
+            // Resource-policy updates are not implemented. Do not pretend a
+            // lower limit is enforced (or a higher fixed capacity available).
+            return Err(super::EOPNOTSUPP);
+        }
+    }
     if out == 0 {
-        return Err(EFAULT);
+        return Ok(0);
     }
     unsafe {
-        write_u64(runtime.posix_shm, Word::MAX);
-        write_u64(runtime.posix_shm + 8, Word::MAX);
+        write_u64(runtime.posix_shm, limit);
+        write_u64(runtime.posix_shm + 8, limit);
     }
     write_target_memory(runtime, pid, out, 16)?;
     Ok(0)

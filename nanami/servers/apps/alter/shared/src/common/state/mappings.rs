@@ -43,7 +43,8 @@ impl Runtime {
                     return false;
                 };
                 if ranges_touch_or_overlap(base, end, mapping.base, mapping_end) {
-                    process.mappings[i] = ProcessMapping::EMPTY;
+                    process.mappings.remove(i);
+                    continue;
                 }
             }
             i += 1;
@@ -75,25 +76,17 @@ impl Runtime {
                 if ranges_touch_or_overlap(new_base, new_end, mapping.base, mapping_end) {
                     new_base = ::core::cmp::min(new_base, mapping.base);
                     new_end = ::core::cmp::max(new_end, mapping_end);
-                    process.mappings[i] = ProcessMapping::EMPTY;
+                    process.mappings.remove(i);
+                    continue;
                 }
             }
             i += 1;
         }
-        i = 0;
-        while i < process.mappings.len() {
-            let mapping = process.mappings[i];
-            if mapping.base == 0 {
-                process.mappings[i] = ProcessMapping {
-                    base: new_base,
-                    size: new_end - new_base,
-                    prot,
-                };
-                return true;
-            }
-            i += 1;
-        }
-        false
+        process.mappings.push(ProcessMapping {
+            base: new_base,
+            size: new_end - new_base,
+            prot,
+        })
     }
 
     pub fn remove_mapping(&mut self, pid: Word, base: Word, size: Word) -> bool {
@@ -230,7 +223,7 @@ impl Runtime {
                 required += usize::from(mapping_end > end);
             }
         }
-        required <= process.mappings.len()
+        required <= process.mappings.capacity()
     }
 
     /// Reserve enough metadata space before changing hardware permissions.
@@ -256,7 +249,7 @@ impl Runtime {
                 required += usize::from(mapping_end > end);
             }
         }
-        required <= process.mappings.len()
+        required <= process.mappings.capacity()
     }
 
     pub fn has_mapping(&self, pid: Word, base: Word, size: Word) -> bool {
@@ -315,7 +308,7 @@ fn remove_mapping_fragment(process: &mut ManagedProcess, base: Word, size: Word)
                 if left_size != 0 && right_size != 0 && free_mapping_slots(process) == 0 {
                     return false;
                 }
-                process.mappings[i] = ProcessMapping::EMPTY;
+                process.mappings.remove(i);
 
                 if left_size != 0
                     && !insert_mapping_fragment(
@@ -350,27 +343,11 @@ fn remove_mapping_fragment(process: &mut ManagedProcess, base: Word, size: Word)
 }
 
 fn free_mapping_slots(process: &ManagedProcess) -> usize {
-    let mut count = 0usize;
-    let mut i = 0usize;
-    while i < process.mappings.len() {
-        if process.mappings[i].base == 0 {
-            count += 1;
-        }
-        i += 1;
-    }
-    count
+    process.mappings.capacity() - process.mappings.len()
 }
 
 fn insert_mapping_fragment(process: &mut ManagedProcess, mapping: ProcessMapping) -> bool {
-    let mut i = 0usize;
-    while i < process.mappings.len() {
-        if process.mappings[i].base == 0 {
-            process.mappings[i] = mapping;
-            return true;
-        }
-        i += 1;
-    }
-    false
+    process.mappings.push(mapping)
 }
 
 fn ranges_touch_or_overlap(a_start: Word, a_end: Word, b_start: Word, b_end: Word) -> bool {

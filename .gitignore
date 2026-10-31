@@ -13,3 +13,4 @@
 *.cpio
 **/bin/*
 /untracked-files/
+__pycache__/

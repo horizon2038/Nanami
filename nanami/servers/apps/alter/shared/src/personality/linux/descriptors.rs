@@ -1,11 +1,12 @@
 use super::{
     cleanup_graphics_for_process, close_socket_file, map_path_request_error, map_request_error,
     map_word, open_virtual_path, posix, read_c_string, release_pipe_file,
-    translate_guest_path_for_vfs, virtual_node_stat, LinuxFile, LinuxFileKind, Runtime, Word,
-    EBADF, EINVAL, EMFILE, ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX, LINUX_F_DUPFD,
-    LINUX_F_DUPFD_CLOEXEC, LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD, LINUX_F_SETFL,
-    LINUX_O_APPEND, LINUX_O_CLOEXEC, LINUX_O_CREAT, LINUX_O_DIRECTORY, LINUX_O_DSYNC,
-    LINUX_O_LARGEFILE, LINUX_O_NONBLOCK, LINUX_O_SYNC, LINUX_O_TRUNC, LINUX_SOCK_NONBLOCK,
+    translate_guest_path_for_vfs, virtual_node_stat, LinuxFile, LinuxFileKind, Runtime,
+    VirtualNode, Word, EBADF, EINVAL, EMFILE, ESPIPE, ESRCH, LINUX_FD_CLOEXEC, LINUX_FD_MAX,
+    LINUX_F_DUPFD, LINUX_F_DUPFD_CLOEXEC, LINUX_F_GETFD, LINUX_F_GETFL, LINUX_F_SETFD,
+    LINUX_F_SETFL, LINUX_O_APPEND, LINUX_O_CLOEXEC, LINUX_O_CREAT, LINUX_O_DIRECTORY,
+    LINUX_O_DSYNC, LINUX_O_LARGEFILE, LINUX_O_NONBLOCK, LINUX_O_SYNC, LINUX_O_TRUNC,
+    LINUX_SOCK_NONBLOCK,
 };
 
 pub(super) fn sys_open(
@@ -113,7 +114,7 @@ fn check_no_follow(runtime: &mut Runtime, pid: Word, bytes: Word) -> Result<(), 
 
 pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
     let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    if fd <= 2 {
+    if fd <= 2 && super::process_trace_enabled(runtime, pid) {
         nanami_runtime::println!(
             "[alter/linux] close stdio pid={} fd={} kind={}",
             pid,
@@ -149,7 +150,7 @@ pub(super) fn sys_dup2(
     let mut new_file = duplicate_linux_file(runtime, file)?;
     new_file.flags &= !LINUX_FD_CLOEXEC;
     if runtime.set_linux_file(pid, new_fd, new_file) {
-        if new_fd <= 2 {
+        if new_fd <= 2 && super::process_trace_enabled(runtime, pid) {
             nanami_runtime::println!(
                 "[alter/linux] dup2 stdio pid={} old_fd={} new_fd={} kind={}",
                 pid,
@@ -241,6 +242,27 @@ pub(super) fn sys_lseek(
             0 => offset,
             1 => file.offset.checked_add(offset).ok_or(EINVAL)?,
             2 => end.checked_add(offset).ok_or(EINVAL)?,
+            _ => return Err(EINVAL),
+        };
+        file.offset = next;
+        if !runtime.set_linux_file(pid, fd, file) {
+            return Err(EBADF);
+        }
+        return Ok(next);
+    }
+    if file.kind == LinuxFileKind::VirtualDirectory
+        && matches!(
+            super::procfs::node(file.resource),
+            Some(VirtualNode::Proc | VirtualNode::ProcProcess | VirtualNode::ProcTask)
+        )
+    {
+        super::procfs::validate(runtime, pid, file.resource)?;
+        let next = match whence {
+            0 if (offset as isize) >= 0 => offset,
+            1 => file
+                .offset
+                .checked_add_signed(offset as isize)
+                .ok_or(EINVAL)?,
             _ => return Err(EINVAL),
         };
         file.offset = next;
@@ -626,7 +648,9 @@ pub fn close_process_files_checked(runtime: &mut Runtime, pid: Word) -> Result<(
     if !runtime.has_live_threads(pid) {
         cleanup_graphics_for_process(runtime, pid);
     }
+    super::sysv_shm::leaving_vm(runtime, pid);
     super::memfd::forget_process(runtime, pid);
+    super::sysv_shm::context_exit(runtime, pid);
     first_error.map_or(Ok(()), Err)
 }
 

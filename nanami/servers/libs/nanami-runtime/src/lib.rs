@@ -600,6 +600,62 @@ pub fn request_process_thread_create(
     Ok(pid)
 }
 
+/// Snapshot the current VM, without opening or loading its executable again.
+/// The new PCB remains suspended until its supervisor installs the registers.
+pub fn request_process_fork(
+    source_pid: Word,
+    pcb_destination_slot: Word,
+    priority: Word,
+) -> Result<Word, RequestError> {
+    let (status, pid, _) = call_os_port(
+        OS_REQUEST_PROCESS_FORK,
+        source_pid,
+        pcb_destination_slot,
+        priority,
+        0,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(pid)
+}
+
+/// Allocate initialized private pages at a fixed address. The source prefix is
+/// copied directly by Alpha; only the remaining bytes are zeroed.
+pub fn request_process_map_initialized_at(
+    target_pid: Word,
+    base: Word,
+    mapped_bytes: Word,
+    source: Word,
+    source_bytes: Word,
+) -> Result<(), RequestError> {
+    if base == 0
+        || mapped_bytes == 0
+        || (base | mapped_bytes) & 4095 != 0
+        || source_bytes > mapped_bytes
+        || (source_bytes != 0 && source == 0)
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let initializer = [source, source_bytes];
+    let (status, address, bytes) = call_os_port(
+        OS_REQUEST_PROCESS_MAP_ANONYMOUS,
+        target_pid,
+        mapped_bytes,
+        base,
+        initializer.as_ptr() as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if address != base || bytes != mapped_bytes {
+        return Err(RequestError::InvalidArgument);
+    }
+    Ok(())
+}
+
 pub fn request_process_spawn_memory_suspended(
     image_vaddr: Word,
     size_bytes: Word,

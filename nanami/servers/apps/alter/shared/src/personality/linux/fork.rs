@@ -1,12 +1,8 @@
 use super::{
-    align_down_word, align_up_word, arch, clone_registers_for_fork, copy_present_process_range,
-    inherit_linux_files, map_request_error, read_register_value, read_shm_u16, read_shm_u32,
-    read_shm_u64, read_shm_u8, spawn_fork_child, write_guest_u32, EmulationAction,
-    LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM, ENOSYS, ESRCH,
-    LINUX_CLONE_CHILD_SETTID, LINUX_CLONE_PARENT_SETTID, LINUX_CLONE_SETTLS, LINUX_CLONE_VM,
-    LINUX_ELF_HEADER_BYTES, LINUX_IMAGE_BASE, LINUX_MAX_LOAD_SEGMENTS, LINUX_PAGE_SIZE, LINUX_PF_W,
-    LINUX_PROT_NONE, LINUX_PT_LOAD, LINUX_SIGCHLD, LINUX_STACK_BYTES, LINUX_STACK_GUARD_BYTES,
-    LINUX_STACK_TOP, REG_FS_BASE, SYS_CLONE,
+    arch, clone_registers_for_fork, inherit_linux_files, map_request_error, read_register_value,
+    write_guest_u32, EmulationAction, LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM,
+    ENOSYS, ESRCH, LINUX_CLONE_CHILD_SETTID, LINUX_CLONE_PARENT_SETTID, LINUX_CLONE_SETTLS,
+    LINUX_CLONE_VM, LINUX_SIGCHLD, REG_FS_BASE, SYS_CLONE,
 };
 
 pub(super) fn sys_fork(
@@ -36,7 +32,6 @@ pub(super) fn sys_fork(
     let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let image_name =
         ::core::str::from_utf8(&parent.image_name[..parent.image_name_len]).map_err(|_| EINVAL)?;
-    let personality = parent.personality;
     let clone_options = clone_options(context);
     let current_fs_base = read_register_value(parent.pcb, REG_FS_BASE).unwrap_or(parent.fs_base);
     if current_fs_base != parent.fs_base {
@@ -50,20 +45,9 @@ pub(super) fn sys_fork(
     };
 
     let pcb_slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
-    let mut host_image = [0; crate::abi::ALTER_PATH_MAX];
-    let fork_image = if parent.rootfs.root_len != 0 {
-        let len = parent
-            .rootfs
-            .host_path(
-                &parent.rootfs.executable[..parent.rootfs.executable_len],
-                &mut host_image,
-            )
-            .ok_or(EINVAL)?;
-        &host_image[..len]
-    } else {
-        image_name.as_bytes()
-    };
-    let child_pid = match spawn_fork_child(runtime, fork_image, pcb_slot, personality) {
+    let child_pid = match nanami_runtime::request_process_fork(parent_pid, pcb_slot, 4)
+        .map_err(map_request_error)
+    {
         Ok(pid) => pid,
         Err(errno) => {
             nanami_runtime::println!(
@@ -77,30 +61,6 @@ pub(super) fn sys_fork(
     };
     let child_pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
 
-    let image_ranges = match fork_step(
-        "clone image",
-        clone_process_image(runtime, parent_pid, child_pid),
-    ) {
-        Ok(ranges) => ranges,
-        Err(error) => {
-            discard_spawned_child(child_pid);
-            return Err(error);
-        }
-    };
-    if let Err(error) = fork_step(
-        "clone mappings",
-        clone_process_mappings(runtime, parent_pid, child_pid, &image_ranges),
-    ) {
-        discard_spawned_child(child_pid);
-        return Err(error);
-    }
-    if let Err(error) = fork_step(
-        "clone stack",
-        clone_process_stack(runtime, parent_pid, child_pid),
-    ) {
-        discard_spawned_child(child_pid);
-        return Err(error);
-    }
     if let Err(error) = fork_step(
         "clone registers",
         match clone_registers_for_fork(
@@ -180,19 +140,6 @@ pub(super) fn sys_fork(
             runtime.remove_process(child_pid);
             return Err(ENOMEM);
         }
-        if mapping.base != 0 && mapping.prot != LINUX_PROT_NONE {
-            if let Err(error) = nanami_runtime::request_process_mapping_protect(
-                child_pid,
-                mapping.base,
-                mapping.size,
-                mapping.prot,
-            ) {
-                super::close_process_files(runtime, child_pid);
-                discard_spawned_child(child_pid);
-                runtime.remove_process(child_pid);
-                return Err(map_request_error(error));
-            }
-        }
         i += 1;
     }
     if let Err(error) = super::memfd::inherit(runtime, parent_pid, child_pid) {
@@ -222,6 +169,7 @@ pub(super) fn sys_fork(
         child.parent_pid = parent.tgid;
     }
     runtime.inherit_signals(parent_pid, child_pid);
+    super::sysv_shm::inherited(runtime, child_pid);
     if context.number == SYS_CLONE && context.args[0] & 0x0020_0000 != 0 {
         let Some(task) = runtime.tasks.ensure(child_pid) else {
             super::close_process_files(runtime, child_pid);
@@ -346,164 +294,4 @@ pub(super) fn write_clone_tid_pointers(
         write_guest_u32(runtime, child_pid, child_tid, child_pid as u32)?;
     }
     Ok(())
-}
-
-pub(super) fn clone_process_image(
-    runtime: &mut Runtime,
-    parent_pid: Word,
-    child_pid: Word,
-) -> Result<[(Word, Word); LINUX_MAX_LOAD_SEGMENTS], i32> {
-    nanami_runtime::request_process_memory_read(
-        parent_pid,
-        LINUX_IMAGE_BASE,
-        runtime.posix_shm,
-        LINUX_ELF_HEADER_BYTES,
-    )
-    .map_err(map_request_error)?;
-    if read_shm_u8(runtime, 0) != 0x7f
-        || read_shm_u8(runtime, 1) != b'E'
-        || read_shm_u8(runtime, 2) != b'L'
-        || read_shm_u8(runtime, 3) != b'F'
-    {
-        return Err(EINVAL);
-    }
-
-    let phoff = read_shm_u64(runtime, 32) as Word;
-    let phentsize = read_shm_u16(runtime, 54) as Word;
-    let phnum = read_shm_u16(runtime, 56) as Word;
-    if phentsize < 56 || phnum == 0 {
-        return Err(EINVAL);
-    }
-    let elf_type = read_shm_u16(runtime, 16);
-    let load_bias = if elf_type == 3 { LINUX_IMAGE_BASE } else { 0 };
-
-    let table_bytes = phentsize.checked_mul(phnum).ok_or(EINVAL)?;
-    if table_bytes > runtime.posix_shm_size {
-        return Err(EINVAL);
-    }
-    nanami_runtime::request_process_memory_read(
-        parent_pid,
-        LINUX_IMAGE_BASE + phoff,
-        runtime.posix_shm,
-        table_bytes,
-    )
-    .map_err(map_request_error)?;
-
-    let mut ranges = [(0, 0); LINUX_MAX_LOAD_SEGMENTS];
-    let mut writable = [false; LINUX_MAX_LOAD_SEGMENTS];
-    let mut range_count = 0usize;
-    let mut i = 0;
-    while i < phnum {
-        let base = i * phentsize;
-        if read_shm_u32(runtime, base as usize) == LINUX_PT_LOAD {
-            let vaddr = read_shm_u64(runtime, (base + 16) as usize) + load_bias;
-            let memsz = read_shm_u64(runtime, (base + 40) as usize);
-            let start = align_down_word(vaddr, LINUX_PAGE_SIZE);
-            let end = align_up_word(vaddr.saturating_add(memsz), LINUX_PAGE_SIZE);
-            if range_count == ranges.len() {
-                return Err(EINVAL);
-            }
-            ranges[range_count] = (start, end.saturating_sub(start));
-            writable[range_count] = (read_shm_u32(runtime, (base + 4) as usize) & LINUX_PF_W) != 0;
-            range_count += 1;
-        }
-        i += 1;
-    }
-    let mut range_index = 0usize;
-    while range_index < range_count {
-        let (start, size) = ranges[range_index];
-        if writable[range_index] {
-            copy_present_process_range(runtime, parent_pid, child_pid, start, size)?;
-        }
-        range_index += 1;
-    }
-    Ok(ranges)
-}
-
-pub(super) fn clone_process_mappings(
-    runtime: &mut Runtime,
-    parent_pid: Word,
-    child_pid: Word,
-    image_ranges: &[(Word, Word); LINUX_MAX_LOAD_SEGMENTS],
-) -> Result<(), i32> {
-    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
-    let mut i = 0usize;
-    while i < parent.mappings.len() {
-        let mapping = parent.mappings[i];
-        if mapping.base != 0 {
-            if is_initial_stack_mapping(mapping.base, mapping.size) {
-                i += 1;
-                continue;
-            }
-            // Alpha already loaded the executable; clone_process_image copied
-            // its mutable segments. RELRO can split those tracked ranges.
-            if crate::elf::ranges_cover(image_ranges, mapping.base, mapping.size) {
-                i += 1;
-                continue;
-            }
-            if mapping.prot == LINUX_PROT_NONE {
-                nanami_runtime::request_process_memory_clone(
-                    parent_pid,
-                    child_pid,
-                    mapping.base,
-                    mapping.size,
-                )
-                .map_err(map_request_error)?;
-                i += 1;
-                continue;
-            }
-            let (base, mapped) =
-                nanami_runtime::request_process_map_anonymous_at(child_pid, mapping.base, mapping.size)
-                    .map_err(|error| {
-                        let errno = map_request_error(error);
-                        nanami_runtime::println!(
-                            "[alter/linux] fork map clone failed parent={} child={} base={:#x} size={:#x} errno={}",
-                            parent_pid,
-                            child_pid,
-                            mapping.base,
-                            mapping.size,
-                            errno
-                        );
-                        errno
-                    })?;
-            if base != mapping.base || mapped < mapping.size {
-                nanami_runtime::println!(
-                    "[alter/linux] fork map clone mismatch parent={} child={} want=[{:#x}..{:#x}) got=[{:#x}..{:#x})",
-                    parent_pid,
-                    child_pid,
-                    mapping.base,
-                    mapping.base + mapping.size,
-                    base,
-                    base + mapped
-                );
-                return Err(ENOMEM);
-            }
-            copy_present_process_range(runtime, parent_pid, child_pid, mapping.base, mapping.size)?;
-        }
-        i += 1;
-    }
-    Ok(())
-}
-
-pub(super) fn is_initial_stack_mapping(base: Word, size: Word) -> bool {
-    let Some(end) = base.checked_add(size) else {
-        return false;
-    };
-    let stack_base = LINUX_STACK_TOP - LINUX_STACK_BYTES;
-    let stack_end = LINUX_STACK_TOP + LINUX_STACK_GUARD_BYTES;
-    base < stack_end && stack_base < end
-}
-
-pub(super) fn clone_process_stack(
-    runtime: &mut Runtime,
-    parent_pid: Word,
-    child_pid: Word,
-) -> Result<(), i32> {
-    copy_present_process_range(
-        runtime,
-        parent_pid,
-        child_pid,
-        LINUX_STACK_TOP - LINUX_STACK_BYTES,
-        LINUX_STACK_BYTES,
-    )
 }

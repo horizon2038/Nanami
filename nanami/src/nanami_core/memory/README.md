@@ -60,6 +60,39 @@ This removes the physical-range table's RAM-size ceiling. It does not remove
 independent OS resource limits such as Alpha's heap size or the process/page-table
 capability pools.
 
+Process frame-node metadata can outgrow the primary 2-MiB object arena when a
+GUI loads many fonts/libraries. Half of that primary arena remains reserved for
+root/PCB/exec objects; frame nodes beyond its inline budget use lazily allocated
+2-MiB Generic arenas. Their number follows frame-node demand, not installed RAM
+or a larger reservation for every small process. Arena Generics are held in the
+existing capability directory, reset on reap and reused with the same root slot.
+The last CLONE_VM peer must release the VM before its owner's metadata resets.
+Failed-spawn cleanup also waits for successful arena reset before recycling its
+root slot. Cached metadata backing is retained for reuse, not returned as free
+anonymous RAM. Kernel APIs, Slot layout and IPC paths are unchanged.
+
+## Page-table lifetime
+
+`page_tables.rs` tracks every dynamically created table by its address-space
+descriptor, including all intermediate levels and incomplete mapping attempts.
+Each backing page has a retained, page-sized Generic. After the stopped process's
+address space is destroyed, revoking these Generics removes the table capabilities
+and resets their allocation watermarks. Both slots and backing pages are reused;
+the pool's 1024-table limit counts permanent/bootstrap and unreclaimed tables,
+not cumulative allocations since boot. A second capability node holds the Generic
+owners (64 KiB); backing RAM does not grow on every restart.
+
+Normal reap, failed-spawn cleanup and address-space replacement during exec
+release their tables. Exec first replaces the stopped PCB's old address-space
+alias. Failed revocation retains ownership and never publishes that page as free.
+CLONE_VM peers keep the owner's address space alive until the last peer is reaped.
+Pre-heap Alpha tables remain permanent and do not allocate ownership metadata.
+
+Alpha's serialized ELF loading/zeroing operations map and unmap one fixed scratch
+page. Scratch VAs no longer advance with PID, frame slot or image size: those VAs
+used to leave Alpha's intermediate tables behind even after process teardown.
+The IPC copy window remains separate and retains its existing invalidation rules.
+
 ## Tests
 
 Run the production implementation with checked syscall mocks:
@@ -77,6 +110,11 @@ USB/AHCI QEMU boot tests exercise those integration paths.
 
 The test resource descriptors use a non-init node and reversed leaf slots.
 Additional reserved-prefix tests cover more than the root's initial reservation.
+Page-table tests cover 2,000 address-space lifetimes without consuming additional
+backing RAM, exhaustion/recovery, live-address-space isolation, failed conversion
+and revoke quarantine, and permanent bootstrap tables. The Tiny Core desktop
+QEMU test also exits/restarts the same container twice in one boot and executes
+commands from the Terminal and Information launchers in each session.
 
 ## Child Alpha partitions
 

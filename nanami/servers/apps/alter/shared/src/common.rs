@@ -4,10 +4,14 @@ pub mod abi;
 pub mod arch;
 #[path = "common/context.rs"]
 pub mod context;
+#[path = "common/console.rs"]
+pub mod console;
 #[path = "common/dynamic.rs"]
 pub mod dynamic;
 #[path = "common/elf.rs"]
 pub mod elf;
+#[path = "common/image_cache.rs"]
+pub mod image_cache;
 #[path = "common/fault.rs"]
 pub mod fault;
 #[path = "common/framebuffer_size.rs"]

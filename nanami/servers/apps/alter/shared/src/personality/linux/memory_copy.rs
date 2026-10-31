@@ -1,55 +1,5 @@
-use super::{map_request_error, Runtime, Word, LINUX_DIRECT_COPY_CHUNK, LINUX_PAGE_SIZE};
+use super::{map_request_error, Runtime, Word, LINUX_PAGE_SIZE};
 
-pub(super) fn copy_present_process_range(
-    runtime: &mut Runtime,
-    src_pid: Word,
-    dst_pid: Word,
-    base: Word,
-    size: Word,
-) -> Result<(), i32> {
-    let mut done = 0;
-    while done < size {
-        let chunk = ::core::cmp::min(LINUX_DIRECT_COPY_CHUNK, size - done);
-        let src = base + done;
-        if nanami_runtime::request_process_memory_clone(src_pid, dst_pid, src, chunk).is_err() {
-            copy_present_process_range_via_shm(runtime, src_pid, dst_pid, src, chunk)?;
-        }
-        done += chunk;
-    }
-    Ok(())
-}
-
-pub(super) fn copy_present_process_range_via_shm(
-    runtime: &mut Runtime,
-    src_pid: Word,
-    dst_pid: Word,
-    base: Word,
-    size: Word,
-) -> Result<(), i32> {
-    let mut done = 0;
-    while done < size {
-        let chunk = ::core::cmp::min(fork_copy_chunk(runtime), size - done);
-        let src = base + done;
-        if nanami_runtime::request_process_memory_read(src_pid, src, runtime.posix_shm, chunk).is_ok() {
-            if let Err(error) =
-                nanami_runtime::request_process_memory_write(dst_pid, src, runtime.posix_shm, chunk)
-            {
-                let errno = map_request_error(error);
-                nanami_runtime::println!(
-                    "[alter/linux] fork copy failed src_pid={} dst_pid={} va=0x{:x} bytes=0x{:x} errno={}",
-                    src_pid,
-                    dst_pid,
-                    src,
-                    chunk,
-                    errno
-                );
-                return Err(errno);
-            }
-        }
-        done += chunk;
-    }
-    Ok(())
-}
 
 pub(super) fn copy_same_process_range(
     runtime: &mut Runtime,

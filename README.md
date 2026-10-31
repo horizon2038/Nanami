@@ -333,7 +333,11 @@ is `bin/`; `LINUX_BIN_DIR` is also accepted. Basenames are used and a trailing
 `.elf` is removed. Duplicate names, host links and special files are errors.
 Use repeatable `--linux-bin` / `--freebsd-bin` for extra files,
 `--no-linux-bins` to omit the default directory, and `--linux-rootfs-dir`
-for an additional tree under `/alter/linux`.
+for an additional tree under `/alter/linux`. Overlay symlinks are stored as
+guest symlinks without following host targets; special files remain rejected.
+See [Tiny Core on Alter/Linux](thirdparty/tinycore/README.md) for a pinned
+distribution rootfs, a console profile and an optional Xfbdev/FLWM/aterm desktop
+running inside Honoka.
 
 Linux binaries are installed under `/alter/linux/bin`; FreeBSD binaries are
 installed under `/alter/freebsd/bin`. Alter/Linux selects x86_64 or AArch64

@@ -13,6 +13,8 @@ use block_io::*;
 
 mod block_allocation;
 use block_allocation::*;
+mod block_bitmap;
+use block_bitmap::{alloc_block, free_block};
 
 mod file_io;
 use file_io::*;
@@ -21,6 +23,8 @@ use directory::{parse_directory_entry, read_directory};
 mod namespace;
 mod path_walk;
 mod truncate;
+mod mapped_pages;
+mod file_versions;
 
 use core::cmp::min;
 use core::ptr;
@@ -124,6 +128,7 @@ impl FileHandle {
 #[derive(Clone, Copy)]
 struct Ext2Superblock {
     inodes_count: u32,
+    first_data_block: u32,
     blocks_per_group: u32,
     inodes_per_group: u32,
     inode_size: usize,
@@ -222,6 +227,8 @@ struct Ext2Runtime {
     dentry_cache: [CachedDentry; EXT2_DENTRY_CACHE_ENTRIES],
     dentry_cache_next: usize,
     directory_cursors: directory::Cursors,
+    mapped_pages: mapped_pages::Pages,
+    file_versions: file_versions::Versions,
 }
 
 #[panic_handler]
@@ -254,6 +261,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         block_count: block_count as usize,
         superblock: Ext2Superblock {
             inodes_count: 0,
+            first_data_block: 0,
             blocks_per_group: 0,
             inodes_per_group: 0,
             inode_size: 0,
@@ -275,6 +283,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         dentry_cache: [CachedDentry::EMPTY; EXT2_DENTRY_CACHE_ENTRIES],
         dentry_cache_next: 0,
         directory_cursors: directory::Cursors::new(),
+        mapped_pages: mapped_pages::Pages::new(),
+        file_versions: file_versions::Versions::new(),
     };
     mount_ext2(&mut runtime).map_err(|e| log_error("[ext2-server] mount failed: ", e))?;
     writeback::initialize(&mut runtime)
@@ -390,6 +400,9 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 }
 
 fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    if request.code == nanami_client::vfs::VFS_REQUEST_FCHMOD {
+        return namespace::handle_fchmod(request, runtime);
+    }
     if matches!(
         request.code,
         nanami_client::vfs::VFS_REQUEST_OPEN_COMPOUND
@@ -408,6 +421,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
     }
     match request.code {
         nanami_client::vfs::VFS_REQUEST_PATH => namespace::handle(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_MAP_READ_PAGE | nanami_client::vfs::VFS_REQUEST_UNMAP_READ_PAGE => mapped_pages::handle(request, runtime),
         nanami_client::vfs::VFS_REQUEST_FREEZE | nanami_client::vfs::VFS_REQUEST_THAW => {
             writeback::handle_freeze(request, runtime)
         }
@@ -423,6 +437,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         nanami_client::vfs::VFS_REQUEST_CLOSE => handle_close(request, runtime),
         nanami_client::vfs::VFS_REQUEST_READ_DIR => handle_read_dir(request, runtime),
         nanami_client::vfs::VFS_REQUEST_FSTAT => handle_fstat(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_FSTATFS => handle_fstatfs(request, runtime),
         nanami_client::vfs::VFS_REQUEST_CREATE => handle_create(request, runtime, false),
         nanami_client::vfs::VFS_REQUEST_MKDIR => handle_create(request, runtime, true),
         nanami_client::vfs::VFS_REQUEST_WRITE => handle_write_file(request, runtime),
@@ -637,11 +652,61 @@ fn handle_fstat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wo
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let file = runtime.handles[handle];
+    if request.arg1 & nanami_client::vfs::VFS_STAT_INCLUDE_VERSION != 0 {
+        if request.arg1 != nanami_client::vfs::VFS_STAT_INCLUDE_VERSION {
+            return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        }
+        let version = if file.mode & EXT2_S_IFMT == EXT2_S_IFREG
+            && !runtime.mapped_pages.pins(file.inode)
+        {
+            runtime.file_versions.get(file.inode)
+        } else {
+            0
+        };
+        return (
+            nanami_runtime::OS_RESPONSE_OK,
+            file.inode as Word | ((version as Word) << 32),
+            pack_stat(file.size as Word, file_kind(file.mode)),
+        );
+    }
     (
         nanami_runtime::OS_RESPONSE_OK,
         stat_inode(file.inode, file.mode, request.arg1),
         pack_stat(file.size as Word, file_kind(file.mode)),
     )
+}
+
+fn handle_fstatfs(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    use nanami_client::vfs::FilesystemStats;
+    let Some(session) = find_session(runtime, request.identifier)
+        .filter(|session| session.shm_size >= core::mem::size_of::<FilesystemStats>())
+    else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    if runtime.handles.get(request.arg0).is_none_or(|handle| !handle.active || handle.owner_pid != request.identifier) {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    }
+    if let Err(error) = read_block(runtime, 1) {
+        return (map_request_error_to_status(error), 0, 0);
+    }
+    // read_block consults the writeback cache: include unflushed allocations,
+    // rather than returning stale counters from the mount-time superblock.
+    let superblock = runtime.block_shm;
+    let stats = FilesystemStats {
+        kind: 0xef53,
+        block_size: runtime.block_size as u64,
+        blocks: r32(superblock + 4) as u64,
+        free_blocks: r32(superblock + 12) as u64,
+        available_blocks: r32(superblock + 12).saturating_sub(r32(superblock + 8)) as u64,
+        files: r32(superblock) as u64,
+        free_files: r32(superblock + 16) as u64,
+        fsid: unsafe { core::ptr::read_unaligned((superblock + 104) as *const u64) }
+            ^ unsafe { core::ptr::read_unaligned((superblock + 112) as *const u64) },
+        name_max: EXT2_NAME_LEN_MAX as u64,
+        flags: 0,
+    };
+    unsafe { core::ptr::write_unaligned(session.shm_local as *mut FilesystemStats, stats); }
+    (nanami_runtime::OS_RESPONSE_OK, 0, 0)
 }
 
 fn stat_inode(inode: u32, mode: u16, flags: Word) -> Word {
@@ -804,18 +869,25 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
     }
     let inodes_count = r32(p + 0);
     let blocks_count = r32(p + 4);
+    let first_data_block = r32(p + 20);
     let blocks_per_group = r32(p + 32);
     let inodes_per_group = r32(p + 40);
-    if blocks_per_group == 0 || inodes_per_group == 0 {
+    if blocks_per_group == 0
+        || inodes_per_group == 0
+        || first_data_block >= blocks_count
+        || blocks_count as usize > runtime.block_count
+        || first_data_block != u32::from(block_size == 1024)
+    {
         return Err(RequestError::Protocol);
     }
     let group_count =
-        ((blocks_count as usize) + (blocks_per_group as usize) - 1) / (blocks_per_group as usize);
+        ((blocks_count - first_data_block) as usize).div_ceil(blocks_per_group as usize);
     if group_count == 0 || group_count > EXT2_MAX_BLOCK_GROUPS {
         return Err(RequestError::Unsupported);
     }
     runtime.superblock = Ext2Superblock {
         inodes_count,
+        first_data_block,
         blocks_per_group,
         inodes_per_group,
         inode_size: r16(p + 88) as usize,
@@ -823,6 +895,7 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
     if runtime.superblock.inode_size == 0 {
         runtime.superblock.inode_size = 128;
     }
+    runtime.block_count = blocks_count as usize;
     let gd_block = if block_size == 1024 { 2 } else { 1 };
     read_block(runtime, gd_block)?;
     let gp = runtime.block_shm as usize;
@@ -830,7 +903,7 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
     let mut group = 0usize;
     while group < group_count {
         let off = gp + group * 32;
-        let start = group * blocks_per_group as usize;
+        let start = first_data_block as usize + group * blocks_per_group as usize;
         let remaining = runtime.block_count.saturating_sub(start);
         let count = min(remaining, blocks_per_group as usize);
         runtime.groups[group] = Ext2GroupDescriptor {
@@ -1015,6 +1088,8 @@ fn write_inode(
     inode_no: u32,
     inode: Ext2Inode,
 ) -> Result<(), RequestError> {
+    // Includes chmod, unlink and allocation/reuse, even on partial I/O failure.
+    runtime.file_versions.invalidate(inode_no);
     if inode_no == 0 || runtime.superblock.inodes_per_group == 0 {
         return Err(RequestError::InvalidArgument);
     }
@@ -1313,13 +1388,17 @@ fn remove_node(
         invalidate_cached_dentry(runtime, parent_inode, name, name_len);
         store_cached_dentry(runtime, parent_inode, name, name_len, None);
     }
-    let pinned_socket = (inode.mode & EXT2_S_IFMT) == EXT2_S_IFSOCK
-        && runtime
-            .handles
-            .iter()
-            .any(|handle| (handle.active || handle.close_pending) && handle.inode == inode_no);
-    if (inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR && (inode.links_count > 1 || pinned_socket) {
-        inode.links_count -= 1;
+    let pinned = runtime
+        .handles
+        .iter()
+        .any(|handle| (handle.active || handle.close_pending) && handle.inode == inode_no);
+    let directory = (inode.mode & EXT2_S_IFMT) == EXT2_S_IFDIR;
+    if (!directory && inode.links_count > 1) || pinned {
+        if directory {
+            inode.links_count = 0;
+        } else {
+            inode.links_count -= 1;
+        }
         write_inode(runtime, inode_no, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     } else {
         free_inode_blocks(runtime, inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
@@ -1330,7 +1409,10 @@ fn remove_node(
     Ok(())
 }
 
-fn release_socket_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<(), RequestError> {
+fn release_unlinked_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<(), RequestError> {
+    if runtime.mapped_pages.pins(inode_no) {
+        return Ok(());
+    }
     if runtime
         .handles
         .iter()
@@ -1766,43 +1848,6 @@ fn free_inode(runtime: &mut Ext2Runtime, inode: usize) -> Result<(), RequestErro
     invalidate_cached_inode(runtime, inode as u32);
     invalidate_cached_dentries_for_inode(runtime, inode as u32);
     adjust_free_count(runtime, group, true, 1)
-}
-
-fn alloc_block(runtime: &mut Ext2Runtime) -> Result<usize, RequestError> {
-    let blocks_per_group = runtime.superblock.blocks_per_group as usize;
-    let mut group = 0usize;
-    while group < runtime.group_count {
-        let limit = runtime.groups[group].block_count as usize;
-        if let Some(bit) = alloc_bitmap_bit(
-            runtime,
-            runtime.groups[group].block_bitmap_block as usize,
-            0,
-            limit,
-        )? {
-            adjust_free_count(runtime, group, false, -1)?;
-            return Ok(group * blocks_per_group + bit);
-        }
-        group += 1;
-    }
-    Err(RequestError::Unsupported)
-}
-
-fn free_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
-    if block >= runtime.block_count {
-        return Err(RequestError::InvalidArgument);
-    }
-    let blocks_per_group = runtime.superblock.blocks_per_group as usize;
-    let group = block / blocks_per_group;
-    if group >= runtime.group_count {
-        return Err(RequestError::InvalidArgument);
-    }
-    let bit = block - group * blocks_per_group;
-    clear_bitmap_bit(
-        runtime,
-        runtime.groups[group].block_bitmap_block as usize,
-        bit,
-    )?;
-    adjust_free_count(runtime, group, false, 1)
 }
 
 fn free_inode_blocks(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<(), RequestError> {

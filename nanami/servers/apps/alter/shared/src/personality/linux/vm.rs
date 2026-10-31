@@ -1,8 +1,8 @@
 use super::{
     align_up_word, copy_same_process_range, honoka, map_request_error, posix,
-    present_graphics_session, sys_framebuffer_mmap, write_target_memory_from, LinuxFile,
-    LinuxFileKind, Runtime, Word, EACCES, EBADF, EINVAL, EIO, ENODEV, ENOMEM, EOPNOTSUPP, ESRCH,
-    LINUX_MADV_COLD, LINUX_MADV_DODUMP, LINUX_MADV_DONTDUMP, LINUX_MADV_DONTNEED, LINUX_MADV_FREE,
+    present_graphics_session, sys_framebuffer_mmap, LinuxFile, LinuxFileKind, Runtime, Word,
+    EACCES, EBADF, EINVAL, ENODEV, ENOMEM, EOPNOTSUPP, ESRCH, LINUX_MADV_COLD,
+    LINUX_MADV_DODUMP, LINUX_MADV_DONTDUMP, LINUX_MADV_DONTNEED, LINUX_MADV_FREE,
     LINUX_MADV_HUGEPAGE, LINUX_MADV_MERGEABLE, LINUX_MADV_NOHUGEPAGE, LINUX_MADV_NORMAL,
     LINUX_MADV_PAGEOUT, LINUX_MADV_POPULATE_READ, LINUX_MADV_POPULATE_WRITE, LINUX_MADV_RANDOM,
     LINUX_MADV_SEQUENTIAL, LINUX_MADV_UNMERGEABLE, LINUX_MADV_WILLNEED, LINUX_MAP_ANONYMOUS,
@@ -197,16 +197,28 @@ pub(super) fn sys_file_mmap(
     if offset & (LINUX_PAGE_SIZE - 1) != 0 || offset > isize::MAX as Word {
         return Err(EINVAL);
     }
-    if flags & 3 != 2 || prot == LINUX_PROT_NONE {
+    if flags & 3 != 1 && flags & 3 != 2 {
         return Err(EOPNOTSUPP);
     }
     if file.resource & LINUX_O_ACCMODE == LINUX_O_WRONLY {
         return Err(EACCES);
     }
-    let (_, file_size, kind, _, _) =
-        posix::posix_fstat(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
+    let (identity, file_size, kind, _, _) = posix::posix_fstat_flags(
+        runtime.posix_port,
+        file.posix_fd,
+        posix::POSIX_STAT_INCLUDE_VERSION,
+    )
+    .map_err(map_request_error)?;
     if kind != posix::POSIX_FILE_TYPE_REGULAR {
         return Err(ENODEV);
+    }
+    if flags & 3 == 1 {
+        return super::memfd::map_read_file(
+            runtime, pid, addr, len, prot, flags, file, file_size, offset,
+        );
+    }
+    if prot == LINUX_PROT_NONE {
+        return Err(EOPNOTSUPP);
     }
     let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
     let base = sys_mmap(
@@ -214,30 +226,41 @@ pub(super) fn sys_file_mmap(
         pid,
         addr,
         mapped,
-        prot,
+        LINUX_PROT_NONE,
         flags | LINUX_MAP_ANONYMOUS,
         Word::MAX,
         0,
     )?;
     let result = (|| {
+        if !runtime.can_protect_mapping(pid, base, mapped) {
+            return Err(ENOMEM);
+        }
         let bytes = mapped.min(file_size.saturating_sub(offset));
-        let mut copied = 0;
-        while copied < bytes {
-            let chunk = (bytes - copied).min(runtime.posix_read_buffer_size());
-            if chunk == 0 {
-                return Err(EIO);
-            }
-            let (read, source) = runtime
-                .pread_posix(file.posix_fd, 0, chunk, offset + copied)
+        let mut initialized = false;
+        if bytes != 0 {
+            if let Some(source) = crate::loader::file_mapping_source(
+                runtime,
+                file.posix_fd,
+                identity,
+                file_size,
+                offset,
+                bytes,
+            )
+            .map_err(super::map_load_error)?
+            {
+                nanami_runtime::request_process_map_initialized_at(
+                    pid, base, mapped, source, bytes,
+                )
                 .map_err(map_request_error)?;
-            if read == 0 {
-                break;
+                initialized = true;
             }
-            if read > chunk {
-                return Err(EIO);
-            }
-            write_target_memory_from(pid, base + copied, source, read)?;
-            copied += read;
+        }
+        if !initialized {
+            super::file_mapping::initialize(runtime, pid, base, mapped, file, offset, bytes)?;
+        }
+        set_hardware_protection(pid, base, mapped, prot)?;
+        if !runtime.protect_mapping(pid, base, mapped, prot) {
+            return Err(ENOMEM);
         }
         Ok(base)
     })();
@@ -323,6 +346,7 @@ pub(super) fn sys_msync(
         }
         index += 1;
     }
+    super::memfd::sync_files(runtime, pid, addr, len)?;
     Ok(0)
 }
 

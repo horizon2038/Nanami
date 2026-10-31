@@ -6,11 +6,13 @@ pub use delegation::DelegationId;
 #[cfg(test)]
 pub use delegation::{DelegationInfo, DelegationState};
 mod frames;
+mod page_tables;
 mod sources;
 
 use directory::{CapabilityDirectory, NodePool};
 use frames::FrameRange;
 use nanami_uapi::alpha::{AlphaEnvironment, MemoryResource, ALPHA_RESOURCE_CAPACITY};
+use page_tables::PageTables;
 use sources::PhysicalSource;
 
 use crate::nanami_core::kernel_object::{self, KernelObjectKind};
@@ -46,6 +48,7 @@ const KERNEL_OBJECT_POOL_SLOT_CANDIDATES: [usize; 4] = [1028, 1029, 1030, 1031];
 const INITIAL_FRAME_LEAF_POOL_SLOT_CANDIDATES: [usize; 4] = [1040, 1041, 1042, 1043];
 const PHYSICAL_FRAME_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1100, 1101, 1102, 1103];
 const PAGE_TABLE_POOL_SLOT_CANDIDATES: [usize; 4] = [1200, 1201, 1202, 1203];
+const PAGE_TABLE_GENERIC_SLOT_CANDIDATES: [usize; 4] = [1204, 1205, 1206, 1207];
 const PROCESS_ARENA_DIRECTORY_SLOT_CANDIDATES: [usize; 4] = [1210, 1211, 1212, 1213];
 const INITIAL_GENERIC_CAPACITY: usize = ALPHA_RESOURCE_CAPACITY;
 
@@ -58,10 +61,10 @@ pub struct MemoryManager {
     bootstrap_frames: Option<FrameRange>,
     physical_frames: BTreeMap<usize, FrameRange>,
     physical_sources: BTreeMap<(usize, usize), PhysicalSource>,
-    page_table_pool_node: CapabilityDescriptor,
-    next_page_table_slot: usize,
+    page_tables: PageTables,
     process_arena_directory: CapabilityDescriptor,
     process_arenas_ready: [bool; PROCESS_ARENA_DIRECTORY_SLOTS],
+    process_frame_arenas: BTreeMap<(usize, usize), directory::Slot>,
     physical_allocator: Option<PhysicalAllocator>,
     initial_generics: [MemoryResource; INITIAL_GENERIC_CAPACITY],
     initial_generic_count: usize,
@@ -148,6 +151,13 @@ impl MemoryManager {
             &PAGE_TABLE_POOL_SLOT_CANDIDATES,
         )?;
         crate::info!("page-table pool node={:#018x}", page_table_pool_node);
+        let page_table_generics = create_root_node(
+            root_descriptor,
+            root_radix,
+            kernel_object_generic,
+            PAGE_TABLE_POOL_RADIX,
+            &PAGE_TABLE_GENERIC_SLOT_CANDIDATES,
+        )?;
         crate::info!("memory: create process arena directory");
         let process_arena_directory = create_root_node(
             root_descriptor,
@@ -167,10 +177,10 @@ impl MemoryManager {
             bootstrap_frames: None,
             physical_frames: BTreeMap::new(),
             physical_sources: BTreeMap::new(),
-            page_table_pool_node,
-            next_page_table_slot: 0,
+            page_tables: PageTables::new(page_table_pool_node, page_table_generics),
             process_arena_directory,
             process_arenas_ready: [false; PROCESS_ARENA_DIRECTORY_SLOTS],
+            process_frame_arenas: BTreeMap::new(),
             physical_allocator: None,
             initial_generics: environment.resources,
             initial_generic_count: resources.len(),
@@ -295,13 +305,21 @@ impl MemoryManager {
             return Err(CapabilityError::InvalidArgument);
         }
         if !self.process_arenas_ready[process_root_slot] {
-            arch::generic::convert(
-                self.kernel_object_generic,
-                CapabilityType::Generic,
-                PROCESS_ARENA_RADIX as Word,
-                1,
-                self.process_arena_directory,
-                process_root_slot as Word,
+            // Arenas are long-lived but reusable by root slot. Do not consume
+            // the fixed bootstrap pool for every concurrent process: refill
+            // from buddy-reserved, still-untyped RAM using the existing pool.
+            if !self
+                .node_pool
+                .can_allocate(1 << PROCESS_ARENA_RADIX, directory::REFILL_RESERVE_BYTES)
+            {
+                self.refill_metadata_pool()?;
+            }
+            self.node_pool.create_generic(
+                PROCESS_ARENA_RADIX,
+                directory::Slot {
+                    node: self.process_arena_directory,
+                    index: process_root_slot,
+                },
             )?;
             self.process_arenas_ready[process_root_slot] = true;
         }
@@ -330,7 +348,53 @@ impl MemoryManager {
         {
             return Ok(());
         }
-        arch::node::revoke(self.process_arena_directory, process_root_slot as Word)
+        arch::node::revoke(self.process_arena_directory, process_root_slot as Word)?;
+        for (_, slot) in self
+            .process_frame_arenas
+            .range((process_root_slot, 0)..=(process_root_slot, usize::MAX))
+        {
+            // The directory keeps the Generic owner; revoking resets its
+            // watermark and removes any surviving frame-node children.
+            arch::node::revoke(slot.node, slot.index as Word)?;
+        }
+        Ok(())
+    }
+
+    pub fn process_frame_arena(
+        &mut self,
+        root_slot: usize,
+        chunk: usize,
+        node_radix: usize,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
+        let primary = self.process_arena_descriptor(root_slot)?;
+        if node_radix >= PROCESS_ARENA_RADIX {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let node_bits = kernel_object::node_memory_size_bits(node_radix);
+        if node_bits >= PROCESS_ARENA_RADIX {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        // Keep half the primary arena for PCB/root/exec objects. Larger VMs
+        // acquire frame-node metadata lazily, without enlarging every process.
+        let inline_chunks = (1 << (PROCESS_ARENA_RADIX - 1)) >> node_bits;
+        if chunk < inline_chunks {
+            return Ok(primary);
+        }
+        let group = (chunk - inline_chunks) >> (PROCESS_ARENA_RADIX - node_bits);
+        if let Some(slot) = self.process_frame_arenas.get(&(root_slot, group)) {
+            return Ok(slot.descriptor());
+        }
+        if !self
+            .node_pool
+            .can_allocate(1 << PROCESS_ARENA_RADIX, directory::REFILL_RESERVE_BYTES)
+        {
+            self.refill_metadata_pool()?;
+        }
+        let slot = self.capability_directory.allocate(&mut self.node_pool)?;
+        self.node_pool.create_generic(PROCESS_ARENA_RADIX, slot)?;
+        let source = slot.descriptor();
+        self.process_frame_arenas.insert((root_slot, group), slot);
+        Ok(source)
     }
 
     pub fn initialize_physical_allocator(&mut self) -> Result<(), CapabilityError> {
@@ -462,27 +526,39 @@ impl MemoryManager {
         let mut copied = 0usize;
         while copied < count {
             let dst_slot = destination_base_slot + copied;
-            let frame_index = self.allocate_physical_any(PAGE_SIZE)?;
-            if let Err(e) = self.copy_alpha_frame_to_process_node(
-                frame_index,
+            let frame_index = self.allocate_process_frame(
                 destination_frame_node,
                 destination_frame_node_radix,
                 dst_slot,
-            ) {
-                crate::info!(
-                    "[frame.copy.err] pfn={:#x} dst_node={:#018x} dst_slot={:>6} err={:?}",
-                    frame_index,
-                    destination_frame_node,
-                    dst_slot,
-                    e
-                );
-                let _ = self.free_physical(frame_index * PAGE_SIZE, PAGE_SIZE);
-                return Err(e);
-            }
+            )?;
             allocated.push(frame_index);
             copied += 1;
         }
         Ok(allocated)
+    }
+
+    /// Demand faults and ELF construction need one page, not a temporary Vec.
+    pub fn allocate_process_frame(
+        &mut self,
+        destination_frame_node: CapabilityDescriptor,
+        destination_frame_node_radix: usize,
+        destination_slot: usize,
+    ) -> Result<usize, CapabilityError> {
+        if destination_slot >= (1usize << destination_frame_node_radix) {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let frame_index = self.allocate_physical_any(PAGE_SIZE)?;
+        if let Err(error) = self.copy_alpha_frame_to_process_node(
+            frame_index, destination_frame_node, destination_frame_node_radix, destination_slot,
+        ) {
+            crate::info!(
+                "[frame.copy.err] pfn={:#x} dst_node={:#018x} dst_slot={:>6} err={:?}",
+                frame_index, destination_frame_node, destination_slot, error
+            );
+            let _ = self.free_physical(frame_index * PAGE_SIZE, PAGE_SIZE);
+            return Err(error);
+        }
+        Ok(frame_index)
     }
 
     pub fn copy_alpha_frame_to_process_node(
@@ -596,13 +672,17 @@ impl MemoryManager {
                 return Err(CapabilityError::InvalidDepth);
             }
 
-            let page_table = self.alloc_page_table(depth)?;
+            let (page_table, slot) = self.page_tables.allocate(
+                self.kernel_object_generic,
+                address_space,
+                depth,
+                // Bootstrap tables are permanent: ownership metadata must
+                // not use the Alpha heap before it exists.
+                self.physical_allocator.is_some(),
+            )?;
             let attr = Attribute::ALL;
             match arch::address_space::map(address_space, page_table, virtual_address, attr) {
                 Ok(()) => {
-                    let slot = self
-                        .page_table_pool_slot_from_descriptor(page_table)
-                        .unwrap_or(0);
                     vm_space
                         .record_page_table(virtual_address, slot)
                         .map_err(|_| CapabilityError::InvalidArgument)?;
@@ -622,64 +702,10 @@ impl MemoryManager {
         }
     }
 
-    fn alloc_page_table(&mut self, depth: usize) -> Result<CapabilityDescriptor, CapabilityError> {
-        while self.next_page_table_slot < PAGE_TABLE_POOL_SLOTS {
-            let slot = self.next_page_table_slot;
-            self.next_page_table_slot += 1;
-
-            match arch::generic::convert(
-                self.kernel_object_generic,
-                CapabilityType::PageTable,
-                depth as Word,
-                1,
-                self.page_table_pool_node,
-                slot as Word,
-            ) {
-                Ok(()) => {
-                    return Ok(make_child_slot_descriptor(
-                        self.page_table_pool_node,
-                        PAGE_TABLE_POOL_RADIX,
-                        slot,
-                    ));
-                }
-                Err(CapabilityError::InvalidArgument) => {
-                    crate::info!(
-                        "[pt.alloc.warn] slot={:>3} depth={:>2} bootstrap={:#018x} dst_node={:#018x}",
-                        slot,
-                        depth,
-                        self.kernel_object_generic,
-                        self.page_table_pool_node
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    crate::info!(
-                        "[pt.alloc.err] slot={:>3} depth={:>2} bootstrap={:#018x} dst_node={:#018x} err={:?}",
-                        slot,
-                        depth,
-                        self.kernel_object_generic,
-                        self.page_table_pool_node,
-                        e
-                    );
-                    return Err(e);
-                }
-            }
-        }
-
-        Err(CapabilityError::InvalidArgument)
-    }
-
-    fn page_table_pool_slot_from_descriptor(
-        &self,
-        descriptor: CapabilityDescriptor,
-    ) -> Option<usize> {
-        let depth = crate::nanami_utils::descriptor::descriptor_depth(descriptor);
-        if depth < PAGE_TABLE_POOL_RADIX {
-            return None;
-        }
-        let shift = nun::WORD_BITS - depth;
-        let mask = (1usize << PAGE_TABLE_POOL_RADIX) - 1;
-        Some((descriptor >> shift) & mask)
+    /// The caller must first destroy the address space, after stopping every
+    /// task using it. Reclaiming a live table could corrupt another process.
+    pub fn release_page_tables(&mut self, address_space: CapabilityDescriptor) -> CapabilityResult {
+        self.page_tables.release(address_space)
     }
 }
 

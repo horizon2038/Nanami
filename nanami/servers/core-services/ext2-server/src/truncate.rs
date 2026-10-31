@@ -13,11 +13,20 @@ pub(super) fn resize_inode(
     if length == inode.size as usize {
         return Ok(());
     }
+    // A9N is unchanged: VFS cannot revoke VMAs supervised by Alter. Until
+    // resize invalidation is added, reject it explicitly rather than leave
+    // accessible stale pages (or silently change MAP_SHARED into snapshots).
+    if runtime.mapped_pages.pins(inode_no) {
+        return Err(RequestError::Status(
+            nanami_client::vfs::VFS_RESPONSE_MAPPING_BUSY,
+        ));
+    }
     // Like the read/write paths, support direct, single and double indirect blocks.
     if inode.block[EXT2_DOUBLE_INDIRECT_INDEX + 1] != 0 {
         return Err(RequestError::InvalidArgument);
     }
     let mut resized = *inode;
+    runtime.file_versions.invalidate(inode_no);
     let mut plan = PrunePlan::default();
     if length < inode.size as usize {
         let keep = length.div_ceil(runtime.block_size);

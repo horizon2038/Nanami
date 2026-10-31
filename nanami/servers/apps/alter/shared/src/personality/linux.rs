@@ -1,3 +1,11 @@
+#[path = "linux/clone3.rs"]
+mod clone3;
+#[path = "linux/prctl.rs"]
+mod prctl;
+#[path = "linux/statfs.rs"]
+mod statfs;
+#[path = "linux/sysv_shm.rs"]
+mod sysv_shm;
 #[path = "linux/threads.rs"]
 mod threads;
 #[path = "linux/vectored.rs"]
@@ -90,6 +98,8 @@ use filesystem::*;
 #[path = "linux/directory.rs"]
 mod directory;
 use directory::sys_getdents64;
+#[path = "linux/console.rs"]
+mod console;
 
 #[path = "linux/virtual_files.rs"]
 mod virtual_files;
@@ -98,6 +108,9 @@ use virtual_files::*;
 #[path = "linux/proc_net.rs"]
 mod proc_net;
 
+#[path = "linux/procfs.rs"]
+mod procfs;
+
 #[path = "linux/resolver.rs"]
 mod resolver;
 
@@ -105,9 +118,13 @@ mod resolver;
 mod descriptors;
 use descriptors::*;
 
+#[path = "linux/fadvise.rs"]
+mod fadvise;
 #[path = "linux/sync.rs"]
 mod sync;
 use sync::*;
+#[path = "linux/chmod.rs"]
+mod chmod;
 #[path = "linux/truncate.rs"]
 mod truncate;
 
@@ -134,6 +151,8 @@ use exec::*;
 mod metadata;
 use metadata::*;
 
+#[path = "linux/sysinfo.rs"]
+mod sysinfo;
 #[path = "linux/system.rs"]
 mod system;
 use system::*;
@@ -186,6 +205,8 @@ use tracing::*;
 
 #[path = "linux/memory_copy.rs"]
 mod memory_copy;
+#[path = "linux/file_mapping.rs"]
+mod file_mapping;
 use memory_copy::*;
 
 #[path = "linux/exec_strings.rs"]
@@ -219,7 +240,7 @@ use crate::abi::{
 use crate::arch::{self, PLATFORM, STAT_SIZE, UNAME_MACHINE};
 use crate::common::virtual_fs::{self, VirtualNode};
 use crate::elf::ElfMetadata;
-use crate::loader::{load_cached_fork_linux_elf_image, load_linux_elf_image, LoadError};
+use crate::loader::{load_linux_elf_image, LoadError};
 use crate::personality;
 use crate::process::{
     clone_registers_for_fork, read_register_value, write_exec_registers, write_register_value,
@@ -365,6 +386,14 @@ pub fn dispatch_syscall(
         ),
         SYS_CLOSE => sys_close(runtime, native_pid, context.args[0]),
         SYS_FLOCK => flock::lock(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_FADVISE64 => fadvise::advise(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            context.args[3],
+        ),
         SYS_FSYNC | SYS_FDATASYNC | SYS_SYNCFS => sys_fsync(runtime, native_pid, context.args[0]),
         SYS_SYNC => sys_sync(runtime),
         SYS_FTRUNCATE => {
@@ -577,6 +606,27 @@ pub fn dispatch_syscall(
             context.args[2],
         ),
         SYS_FSTAT => sys_fstat(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_CHMOD => chmod::fchmodat(
+            runtime,
+            native_pid,
+            LINUX_AT_FDCWD,
+            context.args[0],
+            context.args[1],
+            0,
+        ),
+        SYS_FCHMOD => chmod::fchmod(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_FCHMODAT | SYS_FCHMODAT2 => chmod::fchmodat(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+            if context.number == SYS_FCHMODAT2 {
+                context.args[3]
+            } else {
+                0
+            },
+        ),
         SYS_CHOWN => sys_chown(runtime, native_pid, context.args[0]),
         SYS_LCHOWN => sys_fchownat(runtime, native_pid, LINUX_AT_FDCWD, context.args[0], 0x100),
         SYS_FCHOWN => sys_fchown(runtime, native_pid, context.args[0]),
@@ -716,6 +766,33 @@ pub fn dispatch_syscall(
         }
         SYS_GETPID => Ok(runtime.thread_group(native_pid)),
         SYS_CLONE | SYS_FORK => sys_fork(runtime, native_pid, context),
+        SYS_CLONE3 => clone3::clone3(runtime, native_pid, context),
+        SYS_PRCTL => prctl::prctl(runtime, native_pid, context.args),
+        SYS_SETRESUID | SYS_SETRESGID => prctl::setresid(context.args),
+        SYS_SHMGET => sysv_shm::get(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
+        SYS_SHMAT => sysv_shm::attach(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
+        SYS_SHMCTL => sysv_shm::control(
+            runtime,
+            native_pid,
+            context.args[0],
+            context.args[1],
+            context.args[2],
+        ),
+        SYS_SHMDT => sysv_shm::detach(runtime, native_pid, context.args[0]),
+        SYS_FSTATFS => statfs::fstatfs(runtime, native_pid, context.args[0], context.args[1]),
+        SYS_STATFS => statfs::statfs(runtime, native_pid, context.args[0], context.args[1]),
         SYS_VFORK => {
             let action = sys_vfork(runtime, native_pid, context);
             record_action_result(runtime, native_pid, context.number, action);
@@ -784,6 +861,7 @@ pub fn dispatch_syscall(
             return action;
         }
         SYS_UNAME => sys_uname(runtime, native_pid, context.args[0]),
+        SYS_SYSINFO => sysinfo::sysinfo(runtime, native_pid, context.args[0]),
         SYS_GETCWD => sys_getcwd(runtime, native_pid, context.args[0], context.args[1]),
         SYS_CHDIR => sys_chdir(runtime, native_pid, context.args[0]),
         SYS_UMASK => runtime.set_umask(native_pid, context.args[0]).ok_or(ESRCH),

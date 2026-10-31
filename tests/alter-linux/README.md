@@ -1,5 +1,58 @@
 # Alter/Linux dynamic-loader regression
 
+## Permission changes and Tiny Core userspace
+
+`file-mapping.c` exercises ordinary-file read-only `MAP_SHARED` through the real
+VFS/Alpha path: two aliases, native backing coherence via pwrite, fork, FD close,
+unlink, partial unmap, final-page zero fill, mprotect write rejection, and final
+lease reclamation. Resizing a pinned file returns `EBUSY`, then succeeds after
+unmap. The Tiny Core `--desktop --with-tests` recipe includes this fixture and
+the desktop probe executes it before starting Xfbdev/wbar.
+
+The same fixture checks private file mmap through cached and over-2-MiB uncached
+paths, partial-EOF zero fill and MAP_FIXED replacement of dirty backing. It
+unlinks its own running executable inside the QEMU snapshot and then forks:
+the child must preserve modified read-only data and retained PROT_NONE backing,
+while private writes remain isolated. Only the parent emits the final PASS.
+Host tests `alpha-private-pages` execute the production page-construction code
+with poisoned backing and allocation/map failures; `linux-file-initialization`
+executes the production streaming path with arbitrary short reads and errors.
+
+`chmod.c` checks persistent permission and special bits, umask independence,
+file type preservation, already-open/duplicate/hard-link aliases, read-only FDs,
+dirfds after rename, symlink follow/nofollow, fchmodat's three-argument ABI,
+fchmodat2 empty paths, invalid addresses/FDs/flags and unlinked-inode lifetime
+across replacement-file creation. `-DCHMOD_READONLY` builds the same fixture's
+readonly-context checks. Existing ext2 writeback/fsync persists mode updates;
+an inode cannot be reused while an open handle still refers to it.
+Relative *at calls also cover zero-extended `AT_FDCWD` (`0xffffff9c`), as used
+by stock x86-64 glibc, alongside sign-extended raw callers. Directory regression
+checks run Tiny Core's stock BusyBox `ls`, `ls .`, `ls /` and `ls /bin`, including
+after `cd`; explicit-file `ls -l` alone does not cover `opendir`/`getdents64`.
+
+The [Tiny Core recipe](../../thirdparty/tinycore/README.md) builds both fixtures
+and checks them through real Negoto/Alter execution alongside the distribution's
+official dynamically linked BusyBox, console init profile and interactive shell:
+
+```sh
+python3 thirdparty/tinycore/build.py --image --with-tests
+python3 tests/negoto/qemu-smoke.py --tinycore --smp 1 \
+  --image thirdparty/tinycore/build/nanami-tinycore.img
+python3 tests/negoto/qemu-smoke.py --tinycore --smp 4 \
+  --image thirdparty/tinycore/build/nanami-tinycore.img
+```
+
+Use `--rebuild` only to intentionally discard that recipe's generated build
+directory, test images and saved guest data. No standard rootfs is overwritten.
+
+The desktop profile's `--with-tests` build also installs `desktop-apps.sh` as
+`/usr/local/bin/nanami-desktop-test`. Run it through BusyBox explicitly rather
+than relying on executable-script loading. The Negoto QEMU runner's
+`--tinycore-apps` mode launches the installed GUI programs, checks new viewable
+X11 application windows, retains screenshots and checks
+desktop Exit/context cleanup. See the recipe for the full command and pinned
+application list. Merely starting a PID is not counted as a working GUI.
+
 ## Unix98 PTYs and Neovim :terminal
 
 `pty.c` checks master/slave allocation and locking, signed ioctl commands,
@@ -687,3 +740,77 @@ python3 tests/alter-linux/qemu-smoke.py \
 The USB terminal smoke test also saves an explicitly named file from BusyBox vi,
 shortens an existing file, exits with `:x`, and checks both files byte-for-byte;
 see [USB tests](../usb/README.md#shell-terminal-and-gui-resize).
+
+## Process inspection
+
+`procfs.c` exercises numeric `/proc` directories, PID-relative `openat`, correct
+directory metadata, byte-sized reads and rewind, NUL-terminated command lines,
+`task/<tid>/stat`, an inherited `/proc/self` directory FD across fork, disappearance after wait4,
+and small-buffer directory enumeration. The Tiny Core `--with-tests` fixture
+runs it before stock BusyBox `ps`, checks a real sleeping child's arguments in
+the saved output, then terminates and reaps the child.
+
+## Tiny Core desktop ABI
+
+The related fbdev/UNIX-socket performance changes, allocation/copy counts and
+fixed-work QEMU benchmark are documented in
+[Tiny Core desktop performance](../native-performance/tinycore-desktop.md).
+
+`desktop-syscalls.c` and `desktop-syscalls-x86_64.S` exercise the real 64-bit
+Linux syscall ABI without libc or FPU: root-only setresuid/setresgid validation,
+prctl task names/procfs/no_new_privs, live ext2 fstatfs and virtual statfs,
+sysinfo layout/padding/canaries/live RAM/uptime and checked cross-page copyout,
+fadvise64's six hints, invalid FD/length/advice errors and pipe error precedence,
+clone3 structure versions/errors/fork/shared VM with a protected stack guard,
+and System V shared RAM aliases. Shared-memory cases include zero initialization,
+fork coherence, readonly protection, IPC_STAT layout/canaries, deferred RMID,
+partial unmap/replacement/detach and 270 object allocate/remove cycles.
+
+The Tiny Core `--with-tests` build includes the fixture and both console and
+desktop probes run it. Desktop verification subsequently uses the unmodified
+Xfbdev/GLib/FLWM/wbar/aterm packages, so a successful raw clone3 test alone cannot
+hide a pthread/guard-page incompatibility in real userspace.
+The desktop probe now performs two sessions in the same boot with the same
+container name, verifies fresh Terminal/Information commands in each, and reaps
+each session. The restart's Information check closes other interactive terminals
+first and waits for a guest-written marker before requesting desktop Exit.
+Before starting X it also runs the rooted `namespace.c` fixture, including
+renamed dirfds, symlink follow/nofollow, statx, fresh chmod modes, missing
+files, /proc metadata and a missing-hosts fallback through a symlink. The
+fixture restores any temporarily renamed hosts file before checking results.
+
+`desktop-performance.c` times three samples of 512 successful and 512 missing
+newfstatat calls against the same directory, followed by the existing AF_UNIX
+workload. It validates every return value, includes guest-memory copying and
+the entire emulated syscall path, and samples monotonic time only outside
+each fixed-work loop. It is not a whole-desktop FPS benchmark.
+
+The application probe also runs `desktop-pointer.c`, an integer-only X11
+client that connects to the real Xfbdev server and issues QueryPointer. The
+host checks three known window-local positions and a burst of 160 reversing
+USB mouse movements followed by a fresh sentinel position before launching
+the GUI applications. This checks the nested X pointer, not only Honoka's
+visible cursor. Native `linux-input`, `linux-console` and `honoka-motion` tests
+add evdev-ring overflow, stalled PS/2 readers, final button release and viewport
+clipping coverage.
+
+```sh
+python3 thirdparty/tinycore/build.py --desktop --image --with-tests --offline \
+  --output-dir thirdparty/tinycore/build-desktop-syscalls
+python3 tests/negoto/qemu-smoke.py \
+  --image thirdparty/tinycore/build-desktop-syscalls/nanami-tinycore.img \
+  --tinycore-desktop --normal-devices --smp 4 --timeout 240
+```
+
+Use a new output directory; rebuilding a disk replaces its guest data. The
+QEMU smoke runner uses a private snapshot and does not modify the input image.
+
+## Process creation and ELF snapshot cache
+
+`process-performance.c` measures complete fork/wait and fork/exec/wait loops;
+`exec-cache.c` executes small integer-only Linux ELFs, then changes their bytes,
+hardlinks, replaces their pathname and truncates them to check cache freshness.
+Both are included by the Tiny Core builder's `--with-tests` option. Run them
+together with `qemu-smoke.py --tinycore-process-perf` (also reports Alpha-only
+construction and Negoto create timings). See
+[the measurement notes](../native-performance/tinycore-desktop.md).

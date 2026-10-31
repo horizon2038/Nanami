@@ -13,6 +13,8 @@ use crate::input::InputEvent;
 use crate::motion_damage::MotionDamage;
 use crate::profile::Profile;
 
+#[path = "fbdev_damage.rs"]
+mod fbdev_damage;
 #[path = "resize.rs"]
 mod resize;
 #[path = "shell_icon.rs"]
@@ -68,6 +70,8 @@ struct Window {
     opacity: u8,
     damage_queue: Word,
     local_fb: Word,
+    /// Stable captured fbdev pixels; native damage-queue clients need no copy.
+    fbdev_capture: Word,
     fb_size: Word,
     fb_width: usize,
     fb_height: usize,
@@ -92,6 +96,7 @@ impl Window {
         opacity: nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
         damage_queue: 0,
         local_fb: 0,
+        fbdev_capture: 0,
         fb_size: 0,
         fb_width: 0,
         fb_height: 0,
@@ -366,6 +371,7 @@ impl Compositor {
             opacity: nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE,
             damage_queue: 0,
             local_fb: 0,
+            fbdev_capture: 0,
             fb_size: 0,
             fb_width: 0,
             fb_height: 0,
@@ -502,6 +508,13 @@ impl Compositor {
         self.windows[index].fb_width = width;
         self.windows[index].fb_height = height;
         self.clear_logical_framebuffer(self.windows[index].local_fb, pixel_bytes);
+        // Keep this outside the small compositor heap, and reclaim it with
+        // the fbdev attachment. If RAM is unavailable, retain full redraws.
+        let captured = nanami_runtime::request_memory_create(pixel_bytes).unwrap_or(0);
+        if captured != 0 {
+            self.clear_logical_framebuffer(captured, pixel_bytes);
+        }
+        self.windows[index].fbdev_capture = captured;
         self.mark_dirty(self.windows[index].rect());
         Ok((peer_vaddr, pixel_bytes))
     }
@@ -515,6 +528,10 @@ impl Compositor {
         let window = self.windows[index];
         if window.damage_queue != 0 || window.local_fb == 0 || window.fb_size == 0 {
             return Err(nanami_runtime::RequestError::InvalidArgument);
+        }
+        if window.fbdev_capture != 0 {
+            nanami_runtime::request_mapping_release(window.fbdev_capture, window.fb_size)?;
+            self.windows[index].fbdev_capture = 0;
         }
         nanami_runtime::request_mapping_release(window.local_fb, window.fb_size)?;
         self.windows[index].local_fb = 0;
@@ -1177,16 +1194,16 @@ impl Compositor {
     fn deliver_client_mouse_position(&self, index: usize) {
         let window = self.windows[index];
         let content = window.content_rect();
-        let local_x = clamp_i32(
-            self.cursor_x - content.x,
-            0,
-            content.width.saturating_sub(1),
-        );
-        let local_y = clamp_i32(
-            self.cursor_y - content.y,
-            0,
-            content.height.saturating_sub(1),
-        );
+        // Rendering crops a fixed backing framebuffer; it does not scale it
+        // when only the viewport is resized. Input must use that same extent.
+        let mut width = content.width;
+        let mut height = content.height;
+        if window.local_fb != 0 {
+            width = width.min(window.fb_width as i32);
+            height = height.min(window.fb_height as i32);
+        }
+        let local_x = clamp_i32(self.cursor_x - content.x, 0, width.saturating_sub(1));
+        let local_y = clamp_i32(self.cursor_y - content.y, 0, height.saturating_sub(1));
         let packed = nanami_client::input::pack_input_event(
             nanami_client::input::INPUT_EVENT_KIND_MOUSE_MOVE,
             0,
@@ -1295,6 +1312,9 @@ impl Compositor {
         }
 
         self.windows[index] = Window::EMPTY;
+        if window.fbdev_capture != 0 {
+            let _ = nanami_runtime::request_mapping_release(window.fbdev_capture, window.fb_size);
+        }
         if let Some((base, bytes)) = window.retired_fb {
             let _ = nanami_runtime::request_mapping_release(base, bytes);
         }
@@ -1338,7 +1358,29 @@ impl Compositor {
         }
         let content = window.content_rect();
         if window.damage_queue == 0 {
-            self.mark_dirty_coalesced(content);
+            if window.fbdev_capture == 0 {
+                self.mark_dirty_coalesced(content);
+                return;
+            }
+            // Only changed tiles are composed/presented. Reading the stable
+            // capture during rendering also closes the compare/draw race.
+            unsafe {
+                fbdev_damage::capture(
+                    window.local_fb,
+                    window.fbdev_capture,
+                    window.fb_width,
+                    window.fb_width.min(content.width.max(0) as usize),
+                    window.fb_height.min(content.height.max(0) as usize),
+                    |rect| {
+                        self.mark_dirty(Rect::new(
+                            content.x + rect.x,
+                            content.y + rect.y,
+                            rect.width,
+                            rect.height,
+                        ))
+                    },
+                );
+            }
             return;
         }
         let mut merged = Rect::EMPTY;
@@ -1988,7 +2030,11 @@ fn draw_window_content(framebuffer: &Framebuffer, window: Window, dirty: Rect) {
         area.y,
         area.width,
         area.height,
-        window.local_fb,
+        if window.fbdev_capture != 0 {
+            window.fbdev_capture
+        } else {
+            window.local_fb
+        },
         window.fb_size,
         window.fb_width,
         (area.x - content.x) as usize,

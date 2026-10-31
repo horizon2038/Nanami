@@ -9,7 +9,7 @@ const OUTPUT_OFFSET: Word = TARGET_OFFSET + 4096;
 
 fn copy_input(
     runtime: &Runtime,
-    session: Session,
+    session: &Session,
     offset: Word,
     bytes: Word,
     destination: Word,
@@ -39,7 +39,7 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
     let Some(index) = find_session(runtime, message.identifier) else {
         return invalid;
     };
-    let session = runtime.sessions[index];
+    let session = &runtime.sessions[index];
     if message
         .arg0
         .checked_add(core::mem::size_of::<PathRequest>())
@@ -125,6 +125,29 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
             }
             (nanami_runtime::OS_RESPONSE_OK, detail0, detail1)
         }
+        Err(PathError::Filesystem(error)) => (VFS_PATH_RESPONSE_ERROR, error, 0),
+        Err(PathError::Transport(error)) => (map_request_error_to_status(error), 0, 0),
+    }
+}
+
+pub(crate) fn handle_fchmod(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
+    let Some(session) = find_session(runtime, request.identifier) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some(file) = runtime.sessions[session]
+        .fds
+        .get(request.arg0)
+        .filter(|fd| fd.active)
+        .and_then(|fd| runtime.open_files.get(fd.open_file))
+        .filter(|file| file.active)
+    else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    if !matches!(file.kind, FdKind::Regular | FdKind::Directory) {
+        return (VFS_PATH_RESPONSE_ERROR, VFS_PATH_ERROR_UNSUPPORTED, 0);
+    }
+    match vfs_fchmod(runtime.vfs_port, file.vfs_handle, request.arg1) {
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
         Err(PathError::Filesystem(error)) => (VFS_PATH_RESPONSE_ERROR, error, 0),
         Err(PathError::Transport(error)) => (map_request_error_to_status(error), 0, 0),
     }

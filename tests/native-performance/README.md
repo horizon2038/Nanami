@@ -1,5 +1,17 @@
 # Native application heap performance
 
+The Tiny Core fbdev, AF_UNIX and repeated process-lookup follow-up is documented
+in [Tiny Core desktop performance](tinycore-desktop.md).
+
+The same notes cover process-creation measurements and the validated file
+snapshot cache. `alter-image-cache` runs the production loader with mocked
+service requests, including cache hits, mutable files, partial I/O, buffer reuse
+and mmap segment reuse. `ext2-file-versions` checks bounded token eviction and
+exhaustion; storage/truncate tests also compile the real invalidation hooks.
+`alpha-initialization-window` checks stable pool-frame mappings, bounded collision
+eviction, and MAP/UNMAP failure ownership. Real ELF updates and complete Linux
+fork/exec timings are tested by `qemu-smoke.py --tinycore-process-perf`.
+
 `nanami_runtime` now uses the no-std TLSF allocator from pinned `rlsf` 0.2.3.
 This affects native Rust applications/services, including the native Alter
 process. It does not replace a Linux guest's libc malloc, Alpha's allocator,
@@ -24,6 +36,11 @@ Negoto's rootfs-context/path and startup-argument regressions are in `negoto`;
 OCI configuration/lifecycle tests are in the root workspace's `negoto-oci`
 crate. `linux-readiness` covers blocking pipe reads/writes and EOF wakeups;
 `linux-pipe` checks circular I/O, atomic writes and copy-failure rollback.
+`linux-console` checks the production window-local mediumraw/keymap and PS/2
+codecs, including wheel negotiation, short reads, large movements and Linux
+mousedev response replacement. `linux-directory` checks that legacy raw console/mouse nodes
+require a graphics grant. See the [Tiny Core recipe](../../thirdparty/tinycore/README.md)
+for real Xfbdev/FLWM/aterm keyboard, mouse and lifecycle tests in QEMU.
 The [Negoto application guide](../../nanami/docs/application.md#negoto-oci-bundles)
 documents the unmodified BusyBox fixture and real QEMU lifecycle tests.
 `linux-job-control` exercises the production session/process-group model and
@@ -292,10 +309,16 @@ python3 tests/usb/qemu-hid.py --image out/software-optimized-terminal.img \
   chain. Active/deferred counts and exact (base page, page count) identity retain
   the previous rules; this does not add kernel alias enforcement or change
   physical-memory reclamation policy.
-- Alpha has a bump allocator, so the new indexes use recycled arena nodes and
-  backward-shift hash deletion, not drop/reallocate tree nodes. Metadata capacity
+- Alpha's indexes use recycled arena nodes and backward-shift hash deletion,
+  not drop/reallocate tree nodes. Metadata capacity
   grows geometrically with the high-water live set and is reused across churn;
   this is extra indexing metadata, not a claim of lower peak metadata usage.
+
+Alpha's fixed 32-MiB mapped heap also uses TLSF, replacing its no-op bump
+deallocation. `alpha-heap` includes the production allocator and tests repeated
+20-KiB fork-scratch reuse, alignment, realloc preservation/failure, concurrent
+live allocations and coalescing. The bootstrap heap mapping, Kernel APIs and
+IPC fastpath are unchanged.
 
 Regression coverage includes a saved pre-change terminal/directory oracle,
 6,000 mixed terminal operations, real-font pixel comparisons, directory mutation
@@ -330,6 +353,11 @@ and receiver-local capability installation. `service-bindings` distinguishes
 process-owned and domain-owned Sessions and retains per-import charges after
 close. `physical-memory` rejects allocation/mapping of partially occupied boot
 pages and checks that following free pages remain usable.
+It also mixes 100 process capability arenas with frame metadata, verifies
+buddy reservations exclude arena RAM from frame reuse, and checks root-slot
+recycling does not allocate new backing. `ext2-mapped-pages` covers VFS-owned
+read-page aliases, write coherence, EOF padding, ownership and retryable lease
+release; the real Linux mapping lifecycle is exercised by the Tiny Core GUI probe.
 
 `service-receiver` exercises the production sequential receiver, including
 uncertain replies, quiesce acknowledgement and a continuously queued 32-request
@@ -437,3 +465,26 @@ draw/undo/save/resize/close/reopen, followed by independent persisted-BMP decodi
 xtask passes 24 tests; the C++ registry/managed-client wire test passes
 AddressSanitizer/UBSan. These checks do not establish safe Cspace/backing or
 quota reuse; the pinned-Kernel requests remain separate acceptance gates.
+
+`linux-procfs` checks the production process-backed procfs implementation:
+execution-context isolation, numeric PID and thread views, stable directory
+cookies during process removal, Linux stat field positions and units, process
+states, short reads/EOF, live NUL-separated arguments and proc directory paths.
+
+`linux-task-control` tests production clone3 structure decoding, stack/TLS/TID
+translation for the host architecture, size/tail validation, prctl comm updates
+and copy faults, irreversible no_new_privs and root-only credential validation.
+`linux-sysv-shm` checks actual namespace/key/lifetime decisions: cross-context
+access rejection, deferred removal/key recreation, per-context limits including
+removed-but-attached segments, IPC_STAT ABI and last-context cleanup. VM IPC is
+mocked in these unit tests; the integer-only Tiny Core guest fixture separately
+tests real shared aliases, fork, guard pages, protection, partial unmap and
+reclamation on QEMU with one and four cores.
+
+The production `MemoryManager` tests also cover large GUI frame-node metadata:
+lazy overflow beyond the primary process arena, repeated root-slot reuse without
+additional backing allocation, isolation between processes and failed-revoke
+retry. This is reserved capability metadata, not anonymous RAM returned to the
+buddy allocator. The independent `--tinycore-apps` QEMU test validates the
+installed upstream applications' viewable X11 windows; see the
+[Tiny Core recipe](../../thirdparty/tinycore/README.md).

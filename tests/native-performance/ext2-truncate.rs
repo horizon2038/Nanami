@@ -1,6 +1,12 @@
 //! Production block-tree pruning with a small in-memory block device.
 #![allow(dead_code)]
 extern crate alloc;
+#[path = "../../nanami/servers/core-services/ext2-server/src/file_versions.rs"]
+mod file_versions;
+extern crate self as nanami_client;
+mod vfs {
+    pub const VFS_RESPONSE_MAPPING_BUSY: usize = 0x9118_0001;
+}
 use std::{cmp::min, collections::BTreeSet, ptr};
 const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
 const EXT2_SINGLE_INDIRECT_INDEX: usize = 12;
@@ -10,6 +16,8 @@ const BLOCK_SIZE: usize = 64;
 enum RequestError {
     InvalidArgument,
     Transport,
+    Unsupported,
+    Status(usize),
 }
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 struct Ext2Inode {
@@ -17,6 +25,8 @@ struct Ext2Inode {
     block: [u32; 15],
 }
 struct Ext2Runtime {
+    file_versions: file_versions::Versions,
+    mapped_pages: MappedPages,
     block_size: usize,
     block_shm: usize,
     scratch: Box<[u8; BLOCK_SIZE]>,
@@ -26,6 +36,12 @@ struct Ext2Runtime {
     inode_writes: usize,
     fail_inode: bool,
     fail_read: Option<usize>,
+}
+struct MappedPages(bool);
+impl MappedPages {
+    fn pins(&self, _: u32) -> bool {
+        self.0
+    }
 }
 #[path = "../../nanami/servers/core-services/ext2-server/src/truncate.rs"]
 mod production;
@@ -134,6 +150,8 @@ fn set(r: &mut Ext2Runtime, table: u32, index: usize, value: u32) {
 fn fixture(blocks: usize) -> (Ext2Runtime, Ext2Inode) {
     let mut scratch = Box::new([0; BLOCK_SIZE]);
     let mut r = Ext2Runtime {
+        file_versions: file_versions::Versions::new(),
+        mapped_pages: MappedPages(false),
         block_size: BLOCK_SIZE,
         block_shm: scratch.as_mut_ptr() as usize,
         scratch,
@@ -173,6 +191,24 @@ fn fixture(blocks: usize) -> (Ext2Runtime, Ext2Inode) {
     }
     r.committed = inode;
     (r, inode)
+}
+
+#[test]
+fn pinned_read_pages_reject_resize_before_metadata_or_block_mutation() {
+    let (mut runtime, mut inode) = fixture(3);
+    let before = inode;
+    runtime.mapped_pages.0 = true;
+    assert_eq!(
+        production::resize_inode(&mut runtime, 7, &mut inode, 0),
+        Err(RequestError::Status(vfs::VFS_RESPONSE_MAPPING_BUSY))
+    );
+    assert_eq!(inode, before);
+    assert_eq!(runtime.inode_writes, 0);
+    assert!(runtime.freed.is_empty());
+    assert_eq!(
+        production::resize_inode(&mut runtime, 7, &mut inode, before.size as usize),
+        Ok(())
+    );
 }
 
 #[test]

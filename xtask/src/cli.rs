@@ -94,7 +94,7 @@ pub struct Common {
     pub linux_bin: Vec<PathBuf>,
     #[arg(long)]
     pub freebsd_bin: Vec<PathBuf>,
-    /// Additional regular-file directory tree for /alter/linux; links are rejected.
+    /// Additional directory tree for /alter/linux; guest symlinks are preserved.
     #[arg(long, env = "LINUX_ROOTFS_DIR")]
     pub linux_rootfs_dir: Option<PathBuf>,
     /// Select rootfs apps by their installed name; repeatable.

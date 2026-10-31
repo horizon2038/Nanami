@@ -56,10 +56,29 @@ pub struct MemoryMapping {
     pub offset: Word,
     pub prot: Word,
     pub shared: bool,
+    /// Original shmat base; preserved when munmap splits an attachment.
+    pub attachment: Option<Word>,
+    pub readonly_attachment: bool,
+}
+
+pub struct SysvSegment {
+    pub scope: Word,
+    pub key: u32,
+    pub mode: u16,
+    pub creator: Word,
+    pub last_pid: Word,
+    pub created: Word,
+    pub attached: Word,
+    pub detached: Word,
+    pub removed: bool,
 }
 
 pub struct MemoryFile {
+    pub sysv: Option<SysvSegment>,
     pub anonymous: bool,
+    /// A retained POSIX FD for VFS-owned, read-only shared file pages. The FD
+    /// outlives every guest alias; normal memfd/anonymous RAM has no backing.
+    pub backing: Option<Word>,
     /// Page index -> owned server mapping. Aliases reference the same RAM.
     pub pages: BTreeMap<Word, Word>,
     pub size: Word,

@@ -1,47 +1,6 @@
 use super::*;
 
 impl Runtime {
-    pub fn cached_fork_image(&self, path: &[u8]) -> Option<CachedElfImage> {
-        self.fork_image_cache
-            .iter()
-            .flatten()
-            .find(|image| image.path_len == path.len() && image.path[..image.path_len] == *path)
-            .copied()
-    }
-
-    pub fn has_fork_image_cache_slot(&self) -> bool {
-        self.fork_image_cache.iter().any(Option::is_none)
-    }
-
-    pub fn cache_fork_image(
-        &mut self,
-        path: &[u8],
-        address: Word,
-        size: Word,
-        metadata: ElfMetadata,
-    ) -> bool {
-        if path.is_empty() || path.len() > ALTER_PATH_MAX {
-            return false;
-        }
-        let Some(slot) = self
-            .fork_image_cache
-            .iter_mut()
-            .find(|entry| entry.is_none())
-        else {
-            return false;
-        };
-        let mut cached_path = [0; ALTER_PATH_MAX];
-        cached_path[..path.len()].copy_from_slice(path);
-        *slot = Some(CachedElfImage {
-            path: cached_path,
-            path_len: path.len(),
-            address,
-            size,
-            metadata,
-        });
-        true
-    }
-
     pub fn install_managed_process(
         &mut self,
         pid: Word,
@@ -72,6 +31,35 @@ impl Runtime {
         let umask = self
             .managed_process(parent_pid)
             .map_or(0o022, |parent| parent.umask);
+        let mut comm = [0; 16];
+        comm[..image_name.len().min(15)].copy_from_slice(&image_name[..image_name.len().min(15)]);
+        if let Some(parent) = self.managed_process(parent_pid) {
+            comm = parent.comm;
+        }
+        let no_new_privs = self
+            .managed_process(parent_pid)
+            .is_some_and(|parent| parent.no_new_privs);
+        let (argument_vector, argument_count) =
+            self.managed_process(parent_pid).map_or((0, 0), |parent| {
+                (parent.argument_vector, parent.argument_count)
+            });
+        // Sample once at creation, not from a stale syscall clock cache.
+        // If the timer is unavailable, proc reports an unknown start time (0).
+        if self.timer_port == 0
+            && nanami_client::registry::connect_timer_service(crate::abi::SLOT_TIMER_SERVICE)
+                .is_ok()
+        {
+            self.timer_port =
+                nanami_runtime::ipc::process_slot_descriptor(crate::abi::SLOT_TIMER_SERVICE);
+        }
+        let started_at = if self.timer_port != 0 {
+            nanami_client::timer::timer_service_monotonic_ticks(self.timer_port)
+                .ok()
+                .filter(|(_, hz)| *hz != 0)
+                .map_or(0, |(ticks, hz)| (ticks as u128 * 100 / hz as u128) as Word)
+        } else {
+            0
+        };
         let (terminal_canonical, terminal_echo, terminal_termios) = self
             .managed
             .iter()
@@ -90,6 +78,9 @@ impl Runtime {
                     fs_group: pid,
                     umask,
                     parent_pid,
+                    argument_vector,
+                    argument_count,
+                    started_at,
                     job: ProcessJobControl::EMPTY,
                     owner_pid,
                     rootfs,
@@ -114,6 +105,8 @@ impl Runtime {
                     personality: OsPersonality::Linux,
                     image_name: stored_name,
                     image_name_len: image_name.len(),
+                    comm,
+                    no_new_privs,
                     cwd: root_cwd(),
                     cwd_len: 1,
                     files: FileTable::new(default_files(terminal_id)),
@@ -245,6 +238,9 @@ impl Runtime {
         process.image_name = [0; ALTER_IMAGE_NAME_MAX];
         process.image_name[..image_name.len()].copy_from_slice(image_name);
         process.image_name_len = image_name.len();
+        process.comm = [0; 16];
+        process.comm[..image_name.len().min(15)]
+            .copy_from_slice(&image_name[..image_name.len().min(15)]);
         true
     }
 
@@ -253,6 +249,8 @@ impl Runtime {
             return false;
         };
         process.program_break = 0;
+        process.argument_vector = 0;
+        process.argument_count = 0;
         process.job.executed = true;
         if process.signal_state != 0 {
             process.signals_mut().exec();
@@ -284,7 +282,7 @@ impl Runtime {
         process.sleep_deadline = 0;
         process.sleep_context = LinuxSyscallContext::EMPTY;
         process.readiness_wait = None;
-        process.mappings.fill(ProcessMapping::EMPTY);
+        process.mappings.clear();
         true
     }
 
@@ -388,19 +386,12 @@ impl Runtime {
 
     pub fn process_for_fault_identifier(&self, identifier: Word) -> Option<FaultProcess> {
         if identifier != 0 {
-            let mut i = 0usize;
-            while i < self.managed.len() {
-                let process = &self.managed[i];
-                if process.pid == identifier && process.pcb != 0 {
-                    return Some(FaultProcess {
-                        pid: process.pid,
-                        pcb: process.pcb,
-                        personality: process.personality,
-                    });
-                }
-                i += 1;
-            }
-            return None;
+            let process = self.managed_process(identifier)?;
+            return Some(FaultProcess {
+                pid: process.pid,
+                pcb: process.pcb,
+                personality: process.personality,
+            });
         }
         self.single_managed_fault_process()
     }
@@ -440,26 +431,17 @@ impl Runtime {
     }
 
     pub fn managed_process(&self, pid: Word) -> Option<&ManagedProcess> {
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let entry = &self.managed[i];
-            if entry.pid == pid && entry.pcb != 0 {
-                return Some(entry);
-            }
-            i += 1;
-        }
-        None
+        let index = self
+            .process_index
+            .find(&self.managed, pid, |p| (p.pcb != 0).then_some(p.pid))?;
+        self.managed.get(index)
     }
 
     pub fn managed_process_mut(&mut self, pid: Word) -> Option<&mut ManagedProcess> {
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            if self.managed[i].pid == pid && self.managed[i].pcb != 0 {
-                return Some(&mut self.managed[i]);
-            }
-            i += 1;
-        }
-        None
+        let index = self
+            .process_index
+            .find(&self.managed, pid, |p| (p.pcb != 0).then_some(p.pid))?;
+        self.managed.get_mut(index)
     }
 
     pub fn mark_process_exited(&mut self, pid: Word, status: Word) {

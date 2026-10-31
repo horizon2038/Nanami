@@ -16,6 +16,25 @@ use constants::*;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/arch/x86_64.rs"]
 mod numbers;
 use numbers::*;
+
+struct MeasuredAllocator;
+thread_local! { static MAX_ALLOCATION: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+unsafe impl std::alloc::GlobalAlloc for MeasuredAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        let pointer = std::alloc::System.alloc(layout);
+        let _ = MAX_ALLOCATION.try_with(|max| {
+            if let Some(previous) = max.get() {
+                max.set(Some(previous.max(layout.size())));
+            }
+        });
+        pointer
+    }
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        std::alloc::System.dealloc(pointer, layout);
+    }
+}
+#[global_allocator]
+static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
 #[derive(Clone, Copy)]
 struct LinuxSyscallContext {
     number: Word,
@@ -115,6 +134,8 @@ struct Runtime {
     bad_read: Word,
     bad_write: Word,
     released: Vec<LinuxFile>,
+    direct_input: std::cell::Cell<usize>,
+    direct_output: std::cell::Cell<usize>,
     signals: Vec<Word>,
 }
 impl Runtime {
@@ -145,6 +166,8 @@ impl Runtime {
             bad_read: Word::MAX,
             bad_write: Word::MAX,
             released: vec![],
+            direct_input: std::cell::Cell::new(0),
+            direct_output: std::cell::Cell::new(0),
             signals: vec![],
         }
     }
@@ -175,6 +198,15 @@ impl Runtime {
     }
 }
 fn read_target_memory(r: &Runtime, _: Word, pointer: Word, len: Word) -> Result<(), i32> {
+    copyin_into(r, 0, pointer, r.posix_shm, len)
+}
+fn copyin_into(
+    r: &Runtime,
+    _: Word,
+    pointer: Word,
+    destination: Word,
+    len: Word,
+) -> Result<(), i32> {
     if len == 0 {
         return Ok(());
     }
@@ -182,11 +214,17 @@ fn read_target_memory(r: &Runtime, _: Word, pointer: Word, len: Word) -> Result<
         return Err(EFAULT);
     }
     unsafe {
-        core::ptr::copy_nonoverlapping(pointer as *const u8, r.posix_shm as *mut u8, len);
+        core::ptr::copy_nonoverlapping(pointer as *const u8, destination as *mut u8, len);
+    }
+    if destination != r.posix_shm {
+        r.direct_input.set(r.direct_input.get() + 1);
     }
     Ok(())
 }
 fn write_target_memory(r: &Runtime, _: Word, pointer: Word, len: Word) -> Result<(), i32> {
+    copyout_from(r, 0, pointer, r.posix_shm, len)
+}
+fn copyout_from(r: &Runtime, _: Word, pointer: Word, source: Word, len: Word) -> Result<(), i32> {
     if len == 0 {
         return Ok(());
     }
@@ -194,7 +232,10 @@ fn write_target_memory(r: &Runtime, _: Word, pointer: Word, len: Word) -> Result
         return Err(EFAULT);
     }
     unsafe {
-        core::ptr::copy_nonoverlapping(r.posix_shm as *const u8, pointer as *mut u8, len);
+        core::ptr::copy_nonoverlapping(source as *const u8, pointer as *mut u8, len);
+    }
+    if source != r.posix_shm {
+        r.direct_output.set(r.direct_output.get() + 1);
     }
     Ok(())
 }
@@ -387,6 +428,25 @@ fn receive(r: &mut Runtime, fd: i32, bytes: &mut [u8]) -> EmulationAction {
         SYS_READ,
         [fd as Word, bytes.as_mut_ptr() as Word, bytes.len(), 0, 0, 0],
     )
+}
+
+#[test]
+fn small_payload_large_receive_buffer_avoids_full_capacity_allocation_and_staging() {
+    let mut r = Runtime::new();
+    let [a, b] = pair(&mut r, 1);
+    assert_eq!(send(&mut r, a, b"eight123"), EmulationAction::Return(8));
+    assert_eq!(r.direct_input.get(), 1);
+    let mut out = vec![0; 65536];
+    MAX_ALLOCATION.with(|max| max.set(Some(0)));
+    let result = receive(&mut r, b, &mut out);
+    let largest = MAX_ALLOCATION.with(|max| max.replace(None).unwrap());
+    assert_eq!(result, EmulationAction::Return(8));
+    assert_eq!(&out[..8], b"eight123");
+    assert_eq!(
+        largest, 8,
+        "receive should allocate queued bytes, not 64 KiB"
+    );
+    assert_eq!(r.direct_output.get(), 1);
 }
 
 #[test]

@@ -13,7 +13,22 @@ pub mod input {
     pub const INPUT_NOTIFICATION_IDENTIFIER: usize = 1 << 19;
 }
 pub mod posix {
+    pub fn posix_fsync(_: usize, _: usize) -> Result<(), super::RequestError> {
+        Ok(())
+    }
     pub const POSIX_NOTIFICATION_LOCK_CHANGE: usize = 1 << 21;
+    pub fn posix_dup(_: usize, _: usize) -> Result<usize, super::RequestError> {
+        Err(super::RequestError)
+    }
+    pub fn posix_close(_: usize, _: usize) -> Result<(), super::RequestError> {
+        Ok(())
+    }
+    pub fn posix_map_read_page(_: usize, _: usize, _: usize) -> Result<usize, super::RequestError> {
+        Err(super::RequestError)
+    }
+    pub fn posix_unmap_read_page(_: usize, _: usize, _: usize) -> Result<(), super::RequestError> {
+        Ok(())
+    }
 }
 const SYS_FLOCK: Word = 73;
 const SYS_IO_URING_ENTER: Word = 426;
@@ -37,6 +52,19 @@ mod pty {
         _: LinuxSyscallContext,
     ) -> Option<Result<Word, i32>> {
         None
+    }
+}
+// The window-local console codecs are tested separately in linux-console.
+mod console {
+    use super::*;
+    pub(super) fn device(_: LinuxFile) -> Option<()> {
+        None
+    }
+    pub(super) fn ready(_: &Runtime, _: LinuxFile) -> bool {
+        false
+    }
+    pub(super) fn writable(_: &Runtime, _: LinuxFile) -> bool {
+        false
     }
 }
 #[path = "linux-uring.rs"]
@@ -78,6 +106,8 @@ const SYS_WRITEV: usize = 20;
 const LINUX_O_NONBLOCK: usize = 0x800;
 const LINUX_O_APPEND: usize = 0x400;
 const LINUX_O_RDWR: usize = 2;
+const LINUX_O_ACCMODE: usize = 3;
+const LINUX_O_RDONLY: usize = 0;
 const EOPNOTSUPP: i32 = 95;
 const LINUX_FD_MAX: usize = 64;
 const LINUX_PIPE_BYTES: usize = 4096;
@@ -249,6 +279,7 @@ impl Process {
     }
 }
 struct Runtime {
+    posix_port: Word,
     tasks: task_sync::Tasks,
     unix_sockets: UnixSocketMock,
     io_calls: usize,
@@ -746,6 +777,7 @@ fn runtime() -> Runtime {
     RETURNS.with(|v| v.borrow_mut().clear());
     let mut scratch = vec![0; 4096].into_boxed_slice();
     Runtime {
+        posix_port: 0,
         tasks: task_sync::Tasks::new(),
         unix_sockets: UnixSocketMock,
         io_calls: 0,

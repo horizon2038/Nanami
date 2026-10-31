@@ -21,7 +21,10 @@ pub(super) fn sys_getdents64(
         // Keep the entire overlay cursor in the POSIX open-file description:
         // dup/fork must share it, and lseek(d_off) must resume the same stream.
         let position = seek(runtime, file, 0, posix::POSIX_SEEK_CUR)?;
-        let mounts = virtual_fs::ROOT_MOUNTS;
+        let private_root = runtime
+            .managed_process(pid)
+            .is_some_and(|process| process.rootfs.root_len != 0);
+        let mounts = virtual_fs::root_mounts(private_root);
         if position < mounts.len() {
             let mut index = position;
             let mut out = 0;
@@ -53,7 +56,7 @@ pub(super) fn sys_getdents64(
             position - mounts.len(),
             posix::POSIX_SEEK_SET,
         )?;
-        let result = read_backing(runtime, pid, file, user_buffer, count, mounts.len());
+        let result = read_backing(runtime, pid, file, user_buffer, count, mounts);
         // Restore the overlay cookie even on errors, never leaving a raw VFS
         // cursor visible to lseek or another descriptor sharing this file.
         let restored = seek(runtime, file, mounts.len(), posix::POSIX_SEEK_CUR);
@@ -65,7 +68,7 @@ pub(super) fn sys_getdents64(
     if file.kind != LinuxFileKind::Posix {
         return Err(ENOTDIR);
     }
-    read_backing(runtime, pid, file, user_buffer, count, 0)
+    read_backing(runtime, pid, file, user_buffer, count, &[])
 }
 
 fn seek(runtime: &Runtime, file: LinuxFile, offset: Word, whence: Word) -> Result<Word, i32> {
@@ -78,7 +81,7 @@ fn read_backing(
     file: LinuxFile,
     user_buffer: Word,
     count: Word,
-    cookie_bias: Word,
+    mounts: &[virtual_fs::DirectoryEntry],
 ) -> Result<Word, i32> {
     let source_offset = ALTER_IO_OFFSET as Word;
     let max_records = (runtime.posix_shm_size.saturating_sub(source_offset)
@@ -130,11 +133,7 @@ fn read_backing(
                         name_len,
                     )
                 };
-                if cookie_bias != 0
-                    && virtual_fs::ROOT_MOUNTS
-                        .iter()
-                        .any(|mount| mount.name == name)
-                {
+                if mounts.iter().any(|mount| mount.name == name) {
                     consumed += 1;
                     continue;
                 }
@@ -154,7 +153,7 @@ fn read_backing(
                 write_entry(
                     runtime.posix_shm + out,
                     inode,
-                    cookie_bias + start + consumed + 1,
+                    mounts.len() + start + consumed + 1,
                     dtype,
                     name,
                 );

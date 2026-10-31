@@ -38,7 +38,11 @@ struct ClientSession {
     shm_local: Word,
     shm_size: Word,
 }
+#[path = "../../../nanami/servers/core-services/ext2-server/src/file_versions.rs"]
+mod file_versions;
 struct Ext2Runtime {
+    file_versions: file_versions::Versions,
+    mapped_pages: MappedPages,
     block_port: Word,
     block_shm: Word,
     block_shm_size: Word,
@@ -52,6 +56,18 @@ struct Ext2Runtime {
     scratch: Box<[u8; BUFFER_SIZE]>,
     directory_invalidations: usize,
 }
+#[derive(Default)]
+struct MappedPages {
+    pinned: bool,
+    updates: RefCell<Vec<(u32, usize, Vec<u8>)>>,
+}
+impl MappedPages {
+    fn pins(&self, _: u32) -> bool { self.pinned }
+    unsafe fn update(&self, inode: u32, offset: usize, source: Word, bytes: usize) {
+        self.updates.borrow_mut().push((inode, offset,
+            std::slice::from_raw_parts(source as *const u8, bytes).to_vec()));
+    }
+}
 
 mod directory {
     pub(super) fn invalidate(runtime: &mut super::Ext2Runtime) {
@@ -60,7 +76,7 @@ mod directory {
 }
 
 mod file_io {
-    pub(super) fn reclaim_closed_sockets(runtime: &mut super::Ext2Runtime) -> Result<(), super::RequestError> {
+    pub(super) fn reclaim_closed_inodes(runtime: &mut super::Ext2Runtime) -> Result<(), super::RequestError> {
         assert!(runtime.frozen_by.is_none());
         Ok(())
     }
@@ -95,6 +111,7 @@ pub mod ipc {
 }
 use ipc::ServiceRequest;
 pub mod vfs {
+    pub const VFS_RESPONSE_MAPPING_BUSY: usize = 0x9118_0001;
     pub const VFS_REQUEST_FSYNC: usize = 0x9111;
     pub const VFS_REQUEST_SYNC: usize = 0x9112;
     pub const VFS_REQUEST_FREEZE: usize = 0x9114;
@@ -283,6 +300,8 @@ fn runtime(mapping: Vec<u32>) -> Ext2Runtime {
         }
     });
     Ext2Runtime {
+        file_versions: file_versions::Versions::new(),
+        mapped_pages: MappedPages::default(),
         block_port: 1,
         block_shm: scratch.as_mut_ptr() as usize,
         block_shm_size: BUFFER_SIZE,

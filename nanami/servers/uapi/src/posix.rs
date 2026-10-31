@@ -64,6 +64,15 @@ pub const POSIX_REQUEST_FTRUNCATE: Word = 0xa13a;
 pub const POSIX_REQUEST_CREATE_SOCKET_NODE: Word = 0xa13b;
 pub const POSIX_REQUEST_PATH: Word = 0xa13c;
 pub const POSIX_REQUEST_FLOCK: Word = 0xa13d;
+/// arg0: FD, arg1: permission/special mode bits; VFS path-error reply format.
+pub const POSIX_REQUEST_FCHMOD: Word = 0xa13e;
+/// arg0 FD, arg1 aligned file offset. MAP returns a backing-page alias in the
+/// authenticated mapper, which must expose only read-only application aliases.
+/// UNMAP releases the corresponding lease after those aliases are removed.
+pub const POSIX_REQUEST_MAP_READ_PAGE: Word = 0xa13f;
+pub const POSIX_REQUEST_UNMAP_READ_PAGE: Word = 0xa140;
+/// arg0: FD. Writes vfs::FilesystemStats at offset zero of client SHM.
+pub const POSIX_REQUEST_FSTATFS: Word = 0xa141;
 pub const POSIX_FLOCK_SHARED: Word = 1;
 pub const POSIX_FLOCK_EXCLUSIVE: Word = 2;
 pub const POSIX_FLOCK_UNLOCK: Word = 8;
@@ -72,6 +81,8 @@ pub const POSIX_NOTIFICATION_LOCK_CHANGE: Word = 1 << 21;
 pub const POSIX_MODE_PRESENT: Word = 1 << 16;
 /// STAT arg2 / FSTAT arg1: detail0 contains (mode << 32) | inode.
 pub const POSIX_STAT_INCLUDE_MODE: Word = 1;
+/// FSTAT only; forwards VFS content identity. Mutually exclusive with MODE.
+pub const POSIX_STAT_INCLUDE_VERSION: Word = 2;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;

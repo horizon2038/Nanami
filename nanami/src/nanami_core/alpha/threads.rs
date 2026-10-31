@@ -1,11 +1,19 @@
-//! Raw tasks share a VM, not capability roots or PCB ownership. The original
-//! frame arena remains alive until the last task using the VM has been reaped.
+//! Suspended raw tasks: shared VM for threads, private snapshot for fork.
+//! Roots and PCBs are independent; shared frame arenas outlive their last task.
 use super::*;
 
 impl Alpha {
     pub(super) fn handle_thread_create(
         &mut self,
         request: OsRequestEvent,
+    ) -> Result<Word, CapabilityError> {
+        self.handle_raw_task_create(request, true)
+    }
+
+    pub(super) fn handle_raw_task_create(
+        &mut self,
+        request: OsRequestEvent,
+        shared_vm: bool,
     ) -> Result<Word, CapabilityError> {
         let source = self
             .processes
@@ -28,15 +36,22 @@ impl Alpha {
         }
         self.validate_legacy_destination(caller.pid, slot)?;
         let (pid, root_slot) = self.processes.alloc_process_slot()?;
-        let result = self.create_shared_vm_task(pid, root_slot, source, caller, slot, request.arg2);
+        let result = self.create_raw_task(
+            pid,
+            root_slot,
+            source,
+            caller,
+            slot,
+            request.arg2,
+            shared_vm,
+        );
         if result.is_err() {
-            // No mapping belongs to this task: only its root and PCB are disposable.
             self.cleanup_failed_spawn(pid, root_slot);
         }
         result.map(|()| pid)
     }
 
-    fn create_shared_vm_task(
+    fn create_raw_task(
         &mut self,
         pid: Word,
         root_slot: usize,
@@ -44,6 +59,7 @@ impl Alpha {
         caller: crate::nanami_core::process::ProcessEntry,
         destination: usize,
         priority: Word,
+        shared_vm: bool,
     ) -> Result<(), CapabilityError> {
         let root = make_root_slot_descriptor(self.root.root_radix, root_slot);
         let generic = self.memory.ensure_process_arena(root_slot)?;
@@ -63,7 +79,40 @@ impl Alpha {
             root,
             PROCESS_SLOT_PCB,
         )?;
-        arch::node::copy(root, PROCESS_SLOT_ADDRESS_SPACE, source.address_space)?;
+        if shared_vm {
+            arch::node::copy(root, PROCESS_SLOT_ADDRESS_SPACE, source.address_space)?;
+        } else {
+            arch::generic::convert(
+                generic,
+                CapabilityType::AddressSpace,
+                0,
+                1,
+                root,
+                PROCESS_SLOT_ADDRESS_SPACE,
+            )?;
+            for slot in [
+                PROCESS_SLOT_L3_NODE,
+                PROCESS_SLOT_L2_NODE,
+                PROCESS_SLOT_L1_NODE,
+            ] {
+                arch::generic::convert(
+                    generic,
+                    CapabilityType::Node,
+                    PAGE_TABLE_NODE_RADIX,
+                    1,
+                    root,
+                    slot,
+                )?;
+            }
+            arch::generic::convert(
+                generic,
+                CapabilityType::Node,
+                PROCESS_FRAME_DIRECTORY_RADIX,
+                1,
+                root,
+                PROCESS_SLOT_FRAME_NODE,
+            )?;
+        }
         let resolver = make_child_slot_descriptor(
             caller.root_node,
             PROCESS_ROOT_RADIX,
@@ -95,6 +144,10 @@ impl Alpha {
             0,
         )?;
         let affinity = self.configure_process_affinity(pcb, None)?;
+        let memory = self
+            .processes
+            .memory_entry(source.pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         self.processes.install_process(
             pid,
             caller.pid,
@@ -106,14 +159,31 @@ impl Alpha {
             pid,
             affinity,
             0,
-            0,
-            0,
+            memory.user_heap_next_va,
+            memory.user_heap_limit_va,
         )?;
-        self.processes.share_address_space(pid, source.pid)?;
+        if shared_vm {
+            self.processes.share_address_space(pid, source.pid)?;
+        } else {
+            self.processes.ensure_vm_space_for_pid(pid)?;
+            // Walk only backed pages, including retained PROT_NONE backing.
+            // No ELF parsing, pathname lookup, initial stack or zero-fill pass.
+            self.clone_process_vm(source.pid, pid)?;
+        }
         let types = self.processes.root_types_mut(pid)?;
         *types = crate::nanami_core::process::RootSlotTypes::empty();
         types.other(PROCESS_SLOT_PCB);
         types.other(PROCESS_SLOT_ADDRESS_SPACE);
+        if !shared_vm {
+            for slot in [
+                PROCESS_SLOT_L3_NODE,
+                PROCESS_SLOT_L2_NODE,
+                PROCESS_SLOT_L1_NODE,
+                PROCESS_SLOT_FRAME_NODE,
+            ] {
+                types.other(slot);
+            }
+        }
         types.ipc(PROCESS_SLOT_FAULT_RESOLVER);
         self.processes
             .root_types_mut(caller.pid)?
@@ -123,6 +193,12 @@ impl Alpha {
         self.processes
             .root_types_mut(caller.pid)?
             .other(destination);
+        if !shared_vm {
+            crate::force_info!(
+                "[smp] process pid={:>3} image=fork-vm affinity={} priority={}",
+                pid, affinity, priority
+            );
+        }
         Ok(())
     }
 }

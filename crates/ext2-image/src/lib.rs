@@ -13,11 +13,13 @@ const INODES_PER_GROUP: usize = 1024;
 const INODE_SIZE: usize = 128;
 const DIR: u16 = 0x4000;
 const FILE: u16 = 0x8000;
+const SYMLINK: u16 = 0xa000;
 
 #[derive(Clone, Debug)]
 enum Contents {
     Directory,
     File(Vec<u8>),
+    Symlink(Vec<u8>),
 }
 
 #[derive(Clone, Debug)]
@@ -148,6 +150,22 @@ impl ImageBuilder {
         Ok(())
     }
 
+    /// Store the guest's link text verbatim; never resolve it on the build host.
+    pub fn add_symlink(&mut self, path: &str, target: &str) -> io::Result<()> {
+        if target.is_empty() || target.as_bytes().contains(&0) || target.len() > 4095 {
+            return Err(invalid("invalid symlink target"));
+        }
+        let (parent, name) = self.parent(path)?;
+        self.insert(
+            path,
+            parent,
+            name,
+            SYMLINK | 0o777,
+            Contents::Symlink(target.as_bytes().to_vec()),
+            1,
+        )
+    }
+
     fn parent(&self, path: &str) -> io::Result<(usize, String)> {
         if !path.starts_with('/') || path == "/" || path.ends_with('/') || self.contains(path) {
             return Err(invalid(format!("invalid or duplicate guest path: {path}")));
@@ -203,7 +221,7 @@ impl ImageBuilder {
         for node in &self.nodes {
             disk.use_inode(node.inode, matches!(node.contents, Contents::Directory))?;
             let data = match &node.contents {
-                Contents::File(data) => data.clone(),
+                Contents::File(data) | Contents::Symlink(data) => data.clone(),
                 Contents::Directory => directory_data(node, &self.nodes),
             };
             disk.write_node(node, &data)?;
@@ -223,7 +241,11 @@ fn directory_data(node: &Node, nodes: &[Node]) -> Vec<u8> {
         (
             name.as_str(),
             nodes[*i].inode,
-            if nodes[*i].mode & DIR != 0 { 2 } else { 1 },
+            match nodes[*i].mode & 0xf000 {
+                DIR => 2,
+                SYMLINK => 7,
+                _ => 1,
+            },
         )
     }));
     let mut result = vec![0; BLOCK_SIZE];
@@ -389,8 +411,11 @@ impl Disk {
         if data.len() > MAX_FILE_BYTES {
             return Err(invalid("inode exceeds double-indirect block mapping"));
         }
+        // ext2 fast symlinks occupy i_block directly, without allocated blocks.
+        let inline_link = matches!(node.contents, Contents::Symlink(_)) && data.len() < 60;
+        let block_data = if inline_link { &[][..] } else { data };
         let mut blocks = Vec::new();
-        for chunk in data.chunks(BLOCK_SIZE) {
+        for chunk in block_data.chunks(BLOCK_SIZE) {
             let block = self.alloc()?;
             let offset = block as usize * BLOCK_SIZE;
             self.bytes[offset..offset + chunk.len()].copy_from_slice(chunk);
@@ -424,8 +449,12 @@ impl Disk {
             offset + 28,
             ((blocks.len() + metadata) * 2) as u32,
         );
-        for (i, block) in pointers.into_iter().enumerate() {
-            put32(&mut self.bytes, offset + 40 + i * 4, block);
+        if inline_link {
+            self.bytes[offset + 40..offset + 40 + data.len()].copy_from_slice(data);
+        } else {
+            for (i, block) in pointers.into_iter().enumerate() {
+                put32(&mut self.bytes, offset + 40 + i * 4, block);
+            }
         }
         Ok(())
     }
@@ -571,6 +600,36 @@ mod tests {
         let bytes = builder.build().unwrap();
         assert_eq!(&inode(&bytes, 12)[26..28], &2u16.to_le_bytes());
         assert_eq!(u32_at(inode(&bytes, 12), 28), 0);
+    }
+    #[test]
+    fn symlinks_preserve_guest_targets_inline_and_in_blocks() {
+        let mut builder = ImageBuilder::new(2 * 1024 * 1024).unwrap();
+        builder.add_symlink("/sh", "/bin/busybox").unwrap();
+        let long = format!("../{}", "x".repeat(80));
+        builder.add_symlink("/long", &long).unwrap();
+        // The 60-byte boundary is block-backed, matching ext2-server's reader.
+        builder.add_symlink("/boundary", &"x".repeat(60)).unwrap();
+        assert!(builder.add_symlink("/empty", "").is_err());
+        assert!(builder.add_symlink("/nul", "a\0b").is_err());
+        assert!(builder.add_file("/sh/child", 0o644, vec![]).is_err());
+        let image = builder.build().unwrap();
+        let short = inode(&image, 11);
+        assert_eq!(
+            u16::from_le_bytes(short[..2].try_into().unwrap()),
+            SYMLINK | 0o777
+        );
+        assert_eq!(u32_at(short, 28), 0);
+        assert_eq!(&short[40..52], b"/bin/busybox");
+        assert_eq!(read_file(&image, 12), long.as_bytes());
+        assert_eq!(read_file(&image, 13), vec![b'x'; 60]);
+        let root = read_file(&image, 2);
+        let mut offset = 0;
+        let mut links = 0;
+        while offset < root.len() {
+            links += usize::from(root[offset + 7] == 7);
+            offset += u16::from_le_bytes(root[offset + 4..offset + 6].try_into().unwrap()) as usize;
+        }
+        assert_eq!(links, 3);
     }
     #[test]
     fn directories_may_span_multiple_blocks() {

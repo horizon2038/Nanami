@@ -107,14 +107,21 @@ pub(crate) fn handle_close(
         && runtime.handles[handle].owner_pid == request.identifier
     {
         let file = runtime.handles[handle];
-        if file.mode & EXT2_S_IFMT == EXT2_S_IFSOCK && runtime.frozen_by.is_some() {
+        if matches!(
+            file.mode & EXT2_S_IFMT,
+            EXT2_S_IFREG | EXT2_S_IFDIR | EXT2_S_IFSOCK
+        ) && runtime.frozen_by.is_some()
+        {
             runtime.handles[handle].active = false;
             runtime.handles[handle].close_pending = true;
             return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
         }
         runtime.handles[handle] = FileHandle::EMPTY;
-        if file.mode & EXT2_S_IFMT == EXT2_S_IFSOCK {
-            if let Err(error) = release_socket_inode(runtime, file.inode) {
+        if matches!(
+            file.mode & EXT2_S_IFMT,
+            EXT2_S_IFREG | EXT2_S_IFDIR | EXT2_S_IFSOCK
+        ) {
+            if let Err(error) = release_unlinked_inode(runtime, file.inode) {
                 runtime.handles[handle] = file;
                 return (map_request_error_to_status(error), 0, 0);
             }
@@ -124,12 +131,12 @@ pub(crate) fn handle_close(
     (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0)
 }
 
-pub(super) fn reclaim_closed_sockets(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
+pub(super) fn reclaim_closed_inodes(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
     for index in 0..runtime.handles.len() {
         let file = runtime.handles[index];
         if file.close_pending {
             runtime.handles[index] = FileHandle::EMPTY;
-            if let Err(error) = release_socket_inode(runtime, file.inode) {
+            if let Err(error) = release_unlinked_inode(runtime, file.inode) {
                 runtime.handles[index] = file;
                 return Err(error);
             }

@@ -1,0 +1,13 @@
+[OPTIONS]
+# This explicit Tiny Core port profile always runs as root in its private bundle.
+root_warn=0
+width=740
+height=460
+xpos=20
+ypos=20
+
+[SETTINGS]
+save_win_pos=1
+
+[PROGS]
+xterm=aterm -fn 9x15 -e /bin/busybox ash -i

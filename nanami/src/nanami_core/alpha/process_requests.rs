@@ -53,11 +53,14 @@ impl Alpha {
         }
 
         let frame_directory = process_frame_directory_descriptor(process_root);
-        let process_generic = self.process_arena_for_root(process_root)?;
+        let root_slot = self.process_root_slot(process_root)?;
         let mut chunk = start_slot / PROCESS_FRAME_CHUNK_PAGES;
         let last_chunk = (end_slot - 1) / PROCESS_FRAME_CHUNK_PAGES;
         while chunk <= last_chunk {
             if !self.processes.has_frame_chunk(pid, chunk) {
+                let process_generic =
+                    self.memory
+                        .process_frame_arena(root_slot, chunk, PROCESS_FRAME_NODE_RADIX)?;
                 arch::generic::convert(
                     process_generic,
                     CapabilityType::Node,
@@ -83,6 +86,14 @@ impl Alpha {
         &self,
         process_root: CapabilityDescriptor,
     ) -> Result<CapabilityDescriptor, CapabilityError> {
+        self.memory
+            .process_arena_descriptor(self.process_root_slot(process_root)?)
+    }
+
+    fn process_root_slot(
+        &self,
+        process_root: CapabilityDescriptor,
+    ) -> Result<usize, CapabilityError> {
         let payload_bits = nun::WORD_BITS - nun::BYTE_BITS;
         let slot_shift = payload_bits
             .checked_sub(self.root.root_radix)
@@ -92,38 +103,21 @@ impl Alpha {
         if make_root_slot_descriptor(self.root.root_radix, root_slot) != process_root {
             return Err(CapabilityError::InvalidArgument);
         }
-        self.memory.process_arena_descriptor(root_slot)
+        Ok(root_slot)
     }
 
-    pub(super) fn allocate_process_frames(
+    fn allocate_process_frame(
         &mut self,
         pid: usize,
         process_root: CapabilityDescriptor,
-        start_slot: usize,
-        page_count: usize,
-    ) -> Result<Vec<(usize, usize)>, CapabilityError> {
-        self.ensure_process_frame_chunks(pid, process_root, start_slot, page_count)?;
-        let mut allocated = Vec::with_capacity(page_count);
-        let mut done = 0usize;
-        while done < page_count {
-            let global_slot = start_slot + done;
-            let chunk = global_slot / PROCESS_FRAME_CHUNK_PAGES;
-            let chunk_offset = global_slot % PROCESS_FRAME_CHUNK_PAGES;
-            let chunk_remaining = PROCESS_FRAME_CHUNK_PAGES - chunk_offset;
-            let batch = chunk_remaining.min(page_count - done);
-            let allocated_pages = self.memory.allocate_process_frames(
-                process_frame_chunk_descriptor(process_root, chunk),
-                PROCESS_FRAME_NODE_RADIX,
-                chunk_offset,
-                batch,
-            )?;
-            for (offset, page) in allocated_pages.iter().enumerate() {
-                let slot = global_slot + offset;
-                allocated.push((slot, *page));
-            }
-            done += batch;
-        }
-        Ok(allocated)
+        slot: usize,
+    ) -> Result<usize, CapabilityError> {
+        self.ensure_process_frame_chunks(pid, process_root, slot, 1)?;
+        self.memory.allocate_process_frame(
+            process_frame_chunk_descriptor(process_root, slot / PROCESS_FRAME_CHUNK_PAGES),
+            PROCESS_FRAME_NODE_RADIX,
+            slot % PROCESS_FRAME_CHUNK_PAGES,
+        )
     }
 
     pub(super) fn spawn_process_from_elf(
@@ -330,7 +324,7 @@ impl Alpha {
             image_pages,
             USER_STACK_PAGES,
             ipc_buffer_va,
-            TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE
+            PROCESS_ZERO_TEMP_BASE
         );
 
         spawn_stage = "vm-tracking";
@@ -505,8 +499,32 @@ impl Alpha {
             );
             return;
         }
-        let _ = arch::node::revoke(self.root.root_descriptor, root_slot as Word);
-        let _ = arch::node::remove(self.root.root_descriptor, root_slot as Word);
+        let revoke = arch::node::revoke(self.root.root_descriptor, root_slot as Word);
+        let remove = arch::node::remove(self.root.root_descriptor, root_slot as Word);
+        if let Err(error) = revoke.and(remove) {
+            error!(
+                "[proc.err] failed spawn root retained pid={} err={:?}",
+                pid, error
+            );
+            return;
+        }
+        let root = make_root_slot_descriptor(self.root.root_radix, root_slot);
+        let address_space =
+            make_child_slot_descriptor(root, PROCESS_ROOT_RADIX, PROCESS_SLOT_ADDRESS_SPACE);
+        if let Err(error) = self.memory.release_page_tables(address_space) {
+            error!(
+                "[proc.err] failed spawn page tables retained pid={} err={:?}",
+                pid, error
+            );
+            return;
+        }
+        if let Err(error) = self.memory.reset_process_arena(root_slot) {
+            error!(
+                "[proc.err] failed spawn arena retained pid={} err={:?}",
+                pid, error
+            );
+            return;
+        }
 
         let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
         for allocation in physical_allocations.iter() {
@@ -523,7 +541,6 @@ impl Alpha {
         } else {
             self.processes.discard_process_artifacts(pid, root_slot);
         }
-        let _ = self.memory.reset_process_arena(root_slot);
     }
 
     pub(super) fn free_deferred_process_allocations(
@@ -604,11 +621,7 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?;
         let page_offset = (page_va - mapping.base_va) / PAGE_SIZE;
         let frame_slot = mapping.start_slot + page_offset;
-        let allocated = self.allocate_process_frames(pid, process_root, frame_slot, 1)?;
-        let base_page = allocated
-            .first()
-            .map(|(_, page)| *page)
-            .ok_or(CapabilityError::InvalidArgument)?;
+        let base_page = self.allocate_process_frame(pid, process_root, frame_slot)?;
         self.processes
             .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
 
@@ -621,17 +634,8 @@ impl Alpha {
             self.memory.map_frame(address_space, frame, page_va, vm)?;
         }
 
-        let temp_va = TEMP_MAP_BASE + pid * TEMP_MAP_STRIDE + frame_slot * PAGE_SIZE;
-        self.map_alpha_temporary_frame(frame, temp_va)?;
-
+        let temp_va = self.map_initialization_page(base_page)?;
         fill_lazy_page(mapping.kind, page_va, temp_va)?;
-        if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
-            error!(
-                "[proc.err] unmap lazy temp pid={:>3} va={:#018x} temp={:#018x} frame={:#018x} err={:?}",
-                pid, page_va, temp_va, frame, e
-            );
-            return Err(e);
-        }
         Ok(frame)
     }
 
@@ -1006,11 +1010,7 @@ impl Alpha {
         page_index: usize,
     ) -> Result<(), CapabilityError> {
         let frame_slot = page_index;
-        let allocated = self.allocate_process_frames(pid, process_root, frame_slot, 1)?;
-        let base_page = allocated
-            .first()
-            .map(|(_, page)| *page)
-            .ok_or(CapabilityError::InvalidArgument)?;
+        let base_page = self.allocate_process_frame(pid, process_root, frame_slot)?;
         self.processes
             .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
 
@@ -1024,16 +1024,8 @@ impl Alpha {
                 .map_frame_strict(address_space, frame, page_va, vm)?;
         }
 
-        let temp_va = PROCESS_ZERO_TEMP_BASE + page_index * PAGE_SIZE;
-        self.map_alpha_temporary_frame(frame, temp_va)?;
+        let temp_va = self.map_initialization_page(base_page)?;
         fill_lazy_page(kind, page_va, temp_va)?;
-        if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
-            error!(
-                "[proc.exec.err] unmap image temp pid={:>3} va={:#018x} temp={:#018x} frame={:#018x} err={:?}",
-                pid, page_va, temp_va, frame, e
-            );
-            return Err(e);
-        }
         Ok(())
     }
 
@@ -1066,7 +1058,10 @@ impl Alpha {
             0,
             0,
             0,
-        )
+        )?;
+        // Configuration has now dropped the stopped PCB's final alias of the
+        // old address space. New tables have not been installed yet.
+        self.memory.release_page_tables(target.address_space)
     }
 
     pub(super) fn drop_process_runtime_mappings(
@@ -1260,6 +1255,7 @@ impl Alpha {
         self.invalidate_process_copy_mappings(pid)?;
         arch::node::revoke(self.root.root_descriptor, entry.root_slot as Word)?;
         arch::node::remove(self.root.root_descriptor, entry.root_slot as Word)?;
+        self.memory.release_page_tables(entry.address_space)?;
         let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
         for allocation in physical_allocations.iter() {
             self.memory.free_physical(

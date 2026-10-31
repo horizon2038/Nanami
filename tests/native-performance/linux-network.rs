@@ -3,6 +3,7 @@
 extern crate self as nanami_runtime;
 extern crate self as nanami_client;
 type Word = usize;
+mod vfs { pub use nanami_uapi::vfs::VFS_RESPONSE_MAPPING_BUSY; }
 mod state {
     pub const LINUX_FD_MAX: usize = 64;
 }

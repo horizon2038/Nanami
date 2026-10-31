@@ -90,7 +90,7 @@ For the old monolithic timer source, extract `schedule_timer` through
 
 | Area | Finding / decision in this pass |
 | --- | --- |
-| Core physical allocator / heap | Physical allocation/reference bookkeeping still scans vectors. Alpha still uses a bump allocator with no-op deallocation, unlike native apps' TLSF. Replacement needs a separate bootstrap/reclamation test pass; it was not silently swapped. |
+| Core physical allocator / heap | Physical allocation/reference bookkeeping uses per-PID chains and exact-range indexes. Alpha's fixed mapped heap uses TLSF; allocation, release, realloc failure and concurrent reuse are covered by `alpha-heap` tests. Physical-memory reclamation is a separate mechanism. |
 | Communication / registry | Bounded service-name lookup is mainly connection/startup work, not the payload path; left intact. |
 | Driver-manager / system-manager / RTC | Preserve platform detection, boot-device matching, launch setup and stable RTC sampling; no discovery or privilege changes. |
 | AHCI / virtio-blk / RAM disk | Existing synchronous buffers benefit from ext2 batching. Client-buffer DMA would need a separate lifetime/isolation design. |

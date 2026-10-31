@@ -1,0 +1,7 @@
+/downloads/
+/build/
+/build-*/
+/.tinycore-*/
+/__pycache__/
+!/profile/usr/local/bin/nanami-desktop
+!/profile/usr/local/bin/nanami-app

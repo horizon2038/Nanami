@@ -1,71 +1,9 @@
 use super::{
-    align_down_word, align_up_word, load_cached_fork_linux_elf_image, map_request_error,
-    personality, read_shm_u16, read_shm_u32, read_shm_u64, read_shm_u8, ElfMetadata, LoadError,
-    OsPersonality, Runtime, Word, EINVAL, EIO, ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM,
-    FREEBSD_IMAGE_BASE, LINUX_ELF_HEADER_BYTES, LINUX_IMAGE_BASE, LINUX_PAGE_SIZE, LINUX_PT_LOAD,
-    LINUX_PT_TLS, NANAMI_IMAGE_BASE,
+    align_down_word, align_up_word, map_request_error, read_shm_u16, read_shm_u32, read_shm_u64,
+    read_shm_u8, ElfMetadata, LoadError, OsPersonality, Runtime, Word, EINVAL, EIO, ENAMETOOLONG,
+    ENOENT, ENOEXEC, ENOMEM, FREEBSD_IMAGE_BASE, LINUX_ELF_HEADER_BYTES, LINUX_IMAGE_BASE,
+    LINUX_PAGE_SIZE, LINUX_PT_LOAD, LINUX_PT_TLS, NANAMI_IMAGE_BASE,
 };
-
-pub(super) fn spawn_fork_child(
-    runtime: &mut Runtime,
-    image_name: &[u8],
-    pcb_slot: Word,
-    personality: OsPersonality,
-) -> Result<Word, i32> {
-    spawn_rootfs_fork_child(runtime, image_name, pcb_slot, personality)
-}
-
-pub(super) fn spawn_rootfs_fork_child(
-    runtime: &mut Runtime,
-    image_name: &[u8],
-    pcb_slot: Word,
-    personality: OsPersonality,
-) -> Result<Word, i32> {
-    let path_len = write_rootfs_image_path(runtime, image_name, personality)?;
-    let loaded =
-        load_cached_fork_linux_elf_image(runtime, 0, path_len as Word).map_err(map_load_error)?;
-    nanami_runtime::request_process_spawn_memory_fault_handler_suspended(
-        loaded.address,
-        loaded.size,
-        4,
-        pcb_slot,
-    )
-    .map_err(map_request_error)
-}
-
-pub(super) fn write_rootfs_image_path(
-    runtime: &mut Runtime,
-    image_name: &[u8],
-    personality: OsPersonality,
-) -> Result<usize, i32> {
-    let prefix = personality::bin_prefix(personality);
-    let prefix_len = if image_name.first() == Some(&b'/') {
-        0
-    } else {
-        prefix.len()
-    };
-    let len = prefix_len
-        .checked_add(image_name.len())
-        .ok_or(ENAMETOOLONG)?;
-    if len == 0 || len as Word > runtime.client_shm_size {
-        return Err(ENAMETOOLONG);
-    }
-    unsafe {
-        if prefix_len != 0 {
-            ::core::ptr::copy_nonoverlapping(
-                prefix.as_ptr(),
-                runtime.client_shm as *mut u8,
-                prefix_len,
-            );
-        }
-        ::core::ptr::copy_nonoverlapping(
-            image_name.as_ptr(),
-            (runtime.client_shm as usize + prefix_len) as *mut u8,
-            image_name.len(),
-        );
-    }
-    Ok(len)
-}
 
 pub(super) fn copy_current_path_to_client_shm(runtime: &mut Runtime, len: Word) -> Result<(), i32> {
     if len == 0 || len > runtime.client_shm_size || len > runtime.posix_shm_size {
@@ -96,6 +34,9 @@ pub(super) fn log_execve_load_error(
     path_len: Word,
     error: LoadError,
 ) {
+    if matches!(error, LoadError::NotFound) && !super::process_trace_enabled(runtime, pid) {
+        return;
+    }
     let path = unsafe {
         ::core::slice::from_raw_parts(
             runtime.client_shm as *const u8,

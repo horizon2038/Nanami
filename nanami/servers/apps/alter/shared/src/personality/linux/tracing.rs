@@ -187,7 +187,18 @@ pub(super) fn trace_critical_action(
 
 pub(super) fn syscall_arg_count(number: Word) -> usize {
     match number {
+        super::SYS_SETRESUID
+        | super::SYS_SETRESGID
+        | super::SYS_SHMGET
+        | super::SYS_SHMAT
+        | super::SYS_SHMCTL => return 3,
+        super::SYS_SHMDT => return 1,
+        super::SYS_STATFS | super::SYS_FSTATFS | super::SYS_CLONE3 => return 2,
+        super::SYS_PRCTL => return 5,
         super::SYS_UMASK => return 1,
+        super::SYS_CHMOD | super::SYS_FCHMOD => return 2,
+        super::SYS_FCHMODAT => return 3,
+        super::SYS_FCHMODAT2 => return 4,
         super::SYS_FLOCK | super::SYS_IO_URING_SETUP => return 2,
         super::SYS_IO_URING_REGISTER => return 4,
         super::SYS_IO_URING_ENTER => return 6,
@@ -277,7 +288,21 @@ pub(super) fn syscall_arg_count(number: Word) -> usize {
 
 pub(super) fn syscall_name(number: Word) -> &'static [u8] {
     match number {
+        super::SYS_SETRESUID => return b"setresuid",
+        super::SYS_SETRESGID => return b"setresgid",
+        super::SYS_SHMGET => return b"shmget",
+        super::SYS_SHMAT => return b"shmat",
+        super::SYS_SHMCTL => return b"shmctl",
+        super::SYS_SHMDT => return b"shmdt",
+        super::SYS_STATFS => return b"statfs",
+        super::SYS_FSTATFS => return b"fstatfs",
+        super::SYS_CLONE3 => return b"clone3",
+        super::SYS_PRCTL => return b"prctl",
         super::SYS_UMASK => return b"umask",
+        super::SYS_CHMOD => return b"chmod",
+        super::SYS_FCHMOD => return b"fchmod",
+        super::SYS_FCHMODAT => return b"fchmodat",
+        super::SYS_FCHMODAT2 => return b"fchmodat2",
         super::SYS_FLOCK => return b"flock",
         super::SYS_IO_URING_SETUP => return b"io_uring_setup",
         super::SYS_IO_URING_ENTER => return b"io_uring_enter",

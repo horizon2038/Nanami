@@ -98,113 +98,6 @@ impl Alpha {
         Ok((heap_base, mapped_size))
     }
 
-    pub(super) fn map_process_heap_pages(
-        &mut self,
-        pid: usize,
-        page_count: usize,
-    ) -> Result<usize, CapabilityError> {
-        if pid == 0 || page_count == 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let (root_node, address_space, heap_base, start_slot) = self
-            .processes
-            .reserve_process_heap(pid, page_count, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES)?;
-        let allocated_frames =
-            self.allocate_process_frames(pid, root_node, start_slot, page_count)?;
-        for (slot, page) in allocated_frames {
-            let va = heap_base + (slot - start_slot) * PAGE_SIZE;
-            self.processes
-                .register_physical_allocation(pid, va, slot, page, 1)?;
-        }
-        self.zero_process_frames(root_node, start_slot, page_count)?;
-
-        let memory = &mut self.memory;
-        let processes = &mut self.processes;
-        let vm = processes
-            .vm_space_mut(pid)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let mut i = 0usize;
-        while i < page_count {
-            let frame = process_frame_descriptor(root_node, start_slot + i);
-            let va = heap_base + i * PAGE_SIZE;
-            memory.map_frame(address_space, frame, va, vm)?;
-            i += 1;
-        }
-
-        Ok(heap_base)
-    }
-
-    pub(super) fn map_process_heap_pages_at(
-        &mut self,
-        pid: usize,
-        base_va: usize,
-        page_count: usize,
-    ) -> Result<usize, CapabilityError> {
-        if pid == 0 || base_va == 0 || page_count == 0 || (base_va & (PAGE_SIZE - 1)) != 0 {
-            return Err(CapabilityError::InvalidArgument);
-        }
-
-        let (root_node, address_space, start_slot) = self.processes.reserve_process_heap_at(
-            pid,
-            base_va,
-            page_count,
-            PAGE_SIZE,
-            PROCESS_FRAME_TOTAL_PAGES,
-        )?;
-        let reuse_allocation = self
-            .processes
-            .take_deferred_physical_allocation(pid, base_va, page_count);
-        let allocated_frames = if let Some(allocation) = reuse_allocation {
-            self.ensure_process_frame_chunks(pid, root_node, start_slot, page_count)?;
-            let mut frames = Vec::with_capacity(page_count);
-            let mut i = 0usize;
-            while i < page_count {
-                let frame_index = allocation.base_page + i;
-                self.memory
-                    .ensure_alpha_frame_at_physical_index(frame_index)?;
-                let source_frame = self
-                    .memory
-                    .physical_frame_descriptor_from_index(frame_index)
-                    .ok_or(CapabilityError::InvalidArgument)?;
-                arch::node::copy(
-                    process_frame_chunk_descriptor(
-                        root_node,
-                        (start_slot + i) / PROCESS_FRAME_CHUNK_PAGES,
-                    ),
-                    ((start_slot + i) % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                    source_frame,
-                )?;
-                frames.push((start_slot + i, frame_index));
-                i += 1;
-            }
-            frames
-        } else {
-            self.allocate_process_frames(pid, root_node, start_slot, page_count)?
-        };
-        for (slot, page) in allocated_frames {
-            let va = base_va + (slot - start_slot) * PAGE_SIZE;
-            self.processes
-                .register_physical_allocation(pid, va, slot, page, 1)?;
-        }
-        self.zero_process_frames(root_node, start_slot, page_count)?;
-
-        let memory = &mut self.memory;
-        let processes = &mut self.processes;
-        let vm = processes
-            .vm_space_mut(pid)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let mut i = 0usize;
-        while i < page_count {
-            let frame = process_frame_descriptor(root_node, start_slot + i);
-            let va = base_va + i * PAGE_SIZE;
-            memory.map_frame_strict(address_space, frame, va, vm)?;
-            i += 1;
-        }
-
-        Ok(base_va)
-    }
-
     pub(super) fn zero_process_frames(
         &mut self,
         process_root: CapabilityDescriptor,
@@ -214,7 +107,7 @@ impl Alpha {
         let mut i = 0usize;
         while i < page_count {
             let frame = process_frame_descriptor(process_root, start_slot + i);
-            let temp_va = PROCESS_ZERO_TEMP_BASE + i * PAGE_SIZE;
+            let temp_va = PROCESS_ZERO_TEMP_BASE;
             self.map_alpha_temporary_frame(frame, temp_va)?;
             unsafe {
                 ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
@@ -429,7 +322,7 @@ impl Alpha {
             let present = self
                 .processes
                 .vm_space_mut(target_pid)
-                .is_some_and(|vm| vm.permissions(va) != 0);
+                .is_some_and(|vm| vm.find_frame(va).is_some() && vm.permissions(va) != 0);
             if let Err(e) = if present {
                 arch::address_space::unmap(entry.address_space, frame, va)
             } else {
@@ -569,6 +462,19 @@ impl Alpha {
         self.clone_backed_memory(source_pid, base_va, destination_pid, base_va, size_bytes)
     }
 
+    pub(super) fn clone_process_vm(
+        &mut self,
+        source_pid: usize,
+        destination_pid: usize,
+    ) -> Result<(), CapabilityError> {
+        let pages = self
+            .processes
+            .vm_space_mut(source_pid)
+            .ok_or(CapabilityError::InvalidArgument)?
+            .backed_pages(0, usize::MAX);
+        self.clone_backed_pages(source_pid, 0, destination_pid, 0, pages)
+    }
+
     fn clone_backed_memory(
         &mut self,
         source_pid: usize,
@@ -591,16 +497,27 @@ impl Alpha {
             .vm_space_mut(source_pid)
             .ok_or(CapabilityError::InvalidArgument)?
             .backed_pages(base_va, end);
-        let destination = self
-            .processes
-            .memory_entry(destination_pid)
-            .ok_or(CapabilityError::InvalidArgument)?;
         if self.processes.memory_owner_pid(source_pid)
             == self.processes.memory_owner_pid(destination_pid)
             && target_va > base_va
         {
             pages.reverse();
         }
+        self.clone_backed_pages(source_pid, base_va, destination_pid, target_va, pages)
+    }
+
+    fn clone_backed_pages(
+        &mut self,
+        source_pid: usize,
+        base_va: usize,
+        destination_pid: usize,
+        target_va: usize,
+        pages: Vec<(usize, usize)>,
+    ) -> Result<(), CapabilityError> {
+        let destination = self
+            .processes
+            .memory_entry(destination_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
         // Sparse reservations stay sparse, including PROT_NONE. Work scales with
         // populated pages, not the size of a reserved virtual address range.
         for (va, permissions) in pages {
@@ -611,9 +528,19 @@ impl Alpha {
                 .and_then(|vm| vm.find_frame(target))
                 .is_none()
             {
-                self.map_process_heap_pages_at(destination_pid, target, 1)?;
+                self.map_process_initialized_pages(
+                    destination_pid,
+                    Some(target),
+                    1,
+                    Some(PageSource {
+                        pid: source_pid,
+                        address: va,
+                        bytes: PAGE_SIZE,
+                    }),
+                )?;
+            } else {
+                self.copy_process_memory(source_pid, va, destination_pid, target, PAGE_SIZE)?;
             }
-            self.copy_process_memory(source_pid, va, destination_pid, target, PAGE_SIZE)?;
             let frame = self.process_frame_for_page(destination_pid, target)?;
             self.protect_process_page(
                 destination_pid,
@@ -681,9 +608,29 @@ impl Alpha {
             return Err(CapabilityError::PermissionDenied);
         }
 
-        let mapped_size = align_up(size_bytes, PAGE_SIZE);
+        let mapped_size = size_bytes
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(CapabilityError::InvalidArgument)?
+            & !(PAGE_SIZE - 1);
         let page_count = mapped_size / PAGE_SIZE;
-        let base = if requested_base == 0 {
+        let base = if request.arg3 != 0 {
+            let descriptor = self.read_process_memory_into_static_buffer(
+                caller_pid,
+                request.arg3,
+                nanami_uapi::os::OS_MAP_INITIALIZER_WORDS * core::mem::size_of::<Word>(),
+            )?;
+            let source = unsafe { ptr::read_unaligned(descriptor.as_ptr() as *const [Word; 2]) };
+            self.map_process_initialized_pages(
+                target_pid,
+                (requested_base != 0).then_some(requested_base),
+                page_count,
+                Some(PageSource {
+                    pid: caller_pid,
+                    address: source[0],
+                    bytes: source[1],
+                }),
+            )?
+        } else if requested_base == 0 {
             self.map_process_heap_pages(target_pid, page_count)
                 .map_err(|e| {
                     info!(
@@ -813,8 +760,24 @@ impl Alpha {
                 return Err(CapabilityError::InvalidArgument);
             }
             let temp_va = PROCESS_COPY_TEMP_BASE + temp_offset;
-            let (src_frame, src_temp) =
-                self.map_process_page_into_alpha(source_pid, src_page, temp_va)?;
+            let src_frame = self.process_frame_for_page(source_pid, src_page)?;
+            let allocation = self
+                .processes
+                .find_active_physical_allocation_reference(source_pid, src_page, 1)
+                .filter(|allocation| {
+                    self.memory
+                        .physical_frame_descriptor_from_index(allocation.base_page)
+                        .is_some()
+                });
+            let (src_temp, temporary) = if let Some(allocation) = allocation {
+                // Ordinary ELF buffers are Alpha-owned RAM. Reuse that stable
+                // physical Frame mapping across spawns, not a disposable child
+                // alias. Foreign/shared pages retain the transient fallback.
+                (self.map_initialization_page(allocation.base_page)?, false)
+            } else {
+                self.map_alpha_temporary_frame(src_frame, temp_va)?;
+                (temp_va, true)
+            };
 
             unsafe {
                 ptr::copy_nonoverlapping(
@@ -824,12 +787,14 @@ impl Alpha {
                 );
             }
 
-            if let Err(e) = self.unmap_alpha_temporary_frame(src_frame, src_temp) {
-                info!(
-                    "[proc.copy.err] unmap spawn-memory temp={:#018x} frame={:#018x} err={:?}",
-                    src_temp, src_frame, e
-                );
-                return Err(e);
+            if temporary {
+                if let Err(e) = self.unmap_alpha_temporary_frame(src_frame, src_temp) {
+                    info!(
+                        "[proc.copy.err] unmap spawn-memory temp={:#018x} frame={:#018x} err={:?}",
+                        src_temp, src_frame, e
+                    );
+                    return Err(e);
+                }
             }
             copied += chunk;
         }

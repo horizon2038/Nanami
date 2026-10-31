@@ -1,0 +1,35 @@
+i: /usr/local/share/wbar/osxbarback.png
+c: wbar --bpress --pos bottom --isize 32 --idist 8 --dblclk 0 --noreload --zoomf 1.0 --jumpf 0
+t: /usr/local/lib/X11/fonts/TTF/luxisr/12
+
+i: /usr/local/share/pixmaps/aterm.png
+c: /bin/busybox sh /usr/local/bin/nanami-app terminal
+t: Terminal
+
+i: /usr/local/share/pixmaps/xfe.png
+c: /bin/busybox sh /usr/local/bin/nanami-app files > /tmp/xfe.log 2>&1
+t: Files
+
+i: /usr/local/share/pixmaps/editor.png
+c: /bin/busybox sh /usr/local/bin/nanami-app editor > /tmp/editor.log 2>&1
+t: Editor
+
+i: /usr/local/share/pixmaps/flpicsee.png
+c: /bin/busybox sh /usr/local/bin/nanami-app images > /tmp/flpicsee.log 2>&1
+t: Images
+
+i: /usr/local/share/pixmaps/mtpaint.png
+c: /bin/busybox sh /usr/local/bin/nanami-app paint > /tmp/mtpaint.log 2>&1
+t: Paint
+
+i: /usr/local/share/pixmaps/galculator.png
+c: /bin/busybox sh /usr/local/bin/nanami-app calculator > /tmp/galculator.log 2>&1
+t: Calculator
+
+i: /usr/local/share/pixmaps/core.png
+c: /bin/busybox sh /usr/local/bin/nanami-app information
+t: Tiny Core information
+
+i: /usr/local/share/pixmaps/exittc.png
+c: /bin/busybox sh /usr/local/bin/nanami-app exit
+t: Exit desktop

@@ -1,4 +1,4 @@
-//! Recycled metadata: Alpha's bump allocator does not reclaim dropped nodes.
+//! Recycled metadata keeps process/reference index churn and heap traffic bounded.
 use super::ProcessPhysicalAllocation;
 use alloc::vec::Vec;
 

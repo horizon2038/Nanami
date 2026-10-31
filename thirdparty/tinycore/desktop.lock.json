@@ -1,0 +1,797 @@
+{
+  "repository": "https://distro.ibiblio.org/tinycorelinux/17.x/x86_64/tcz/",
+  "roots": [
+    "Xfbdev.tcz",
+    "flwm_topside.tcz",
+    "aterm.tcz",
+    "wbar.tcz",
+    "xfe.tcz",
+    "flpicsee.tcz",
+    "mtpaint.tcz",
+    "galculator.tcz",
+    "flit.tcz",
+    "Xorg-7.7-bin.tcz"
+  ],
+  "packages": {
+    "libpng.tcz": {
+      "sha256": "176c3e9309d47d27304e20a1ca5d4de899f02983c7cdb8914585b6c995a742bb",
+      "md5": "f25065f32b928e198abb1baf4f952780",
+      "bytes": 98304,
+      "dependencies": []
+    },
+    "libffi.tcz": {
+      "sha256": "858865486ca6b679933bea3411d95bb93a791cfba60aa12a2f9e8b037a4c6c78",
+      "md5": "95f9b939ed0aebc982074d94b46a2c5d",
+      "bytes": 20480,
+      "dependencies": []
+    },
+    "pcre21042.tcz": {
+      "sha256": "a84da3e1d440b1b8dd5b10eff534e8ccfb189b0b3a8da6235ab2578be2b808ba",
+      "md5": "b971309c16cf89501a21812b9a27c6da",
+      "bytes": 806912,
+      "dependencies": []
+    },
+    "glib2.tcz": {
+      "sha256": "e4c6c79f74b99b32a60df941b8ef9c8e6a8ee091a83606e90b7ac2258ccd93f5",
+      "md5": "1abddc91b4ec29cb1262c01ac064c987",
+      "bytes": 1597440,
+      "dependencies": [
+        "libffi.tcz",
+        "pcre21042.tcz"
+      ]
+    },
+    "graphite.tcz": {
+      "sha256": "093445482f3d7202c36ea3871d7aa36d46f992a1fb0aa44136e498d2a7e1adca",
+      "md5": "7b96dca9ecce3838807b46fc6be8b366",
+      "bytes": 69632,
+      "dependencies": []
+    },
+    "harfbuzz.tcz": {
+      "sha256": "e8bc206616e2bc4192b25fd6c746f22ac5d780b3011b931915a438d748407bcf",
+      "md5": "a8ed14df2296694589ad997ee0495a54",
+      "bytes": 864256,
+      "dependencies": [
+        "glib2.tcz",
+        "graphite.tcz"
+      ]
+    },
+    "bzip2-lib.tcz": {
+      "sha256": "bef8ac6dd3bd2c43e828b0ad5f3e29003999cfe79dffe3c7ddc3d76c4d90898a",
+      "md5": "877832668649689704e352ee09584643",
+      "bytes": 28672,
+      "dependencies": []
+    },
+    "freetype.tcz": {
+      "sha256": "d20dfbe90d41f565fa125bb2dd88e9c8f3be761684004abaaf393df1fd0da362",
+      "md5": "28bb5ad1b82947e383d0d778669f890b",
+      "bytes": 380928,
+      "dependencies": [
+        "libpng.tcz",
+        "harfbuzz.tcz",
+        "bzip2-lib.tcz"
+      ]
+    },
+    "libjpeg-turbo.tcz": {
+      "sha256": "3e6fbb5a5cf81fbe4214934677ef471ccc123fb5e276c8abc426e8679cdbb44a",
+      "md5": "a72b380b4f027235b6e76704d51b983c",
+      "bytes": 315392,
+      "dependencies": []
+    },
+    "libXau.tcz": {
+      "sha256": "337b1cea0771d46c9c2536954c48f7e5008067fe21914a18c71d32e3d6aa8003",
+      "md5": "e4ee100d75b1cc5a9ae355fd2d15b3be",
+      "bytes": 8192,
+      "dependencies": []
+    },
+    "libXdmcp.tcz": {
+      "sha256": "ef03568473ea48e8417862a7ced02846c051c6b23472000d0715b2cdf7d0d508",
+      "md5": "09096ca3df54669c934e4aec5ddc7c3c",
+      "bytes": 8192,
+      "dependencies": []
+    },
+    "libxcb.tcz": {
+      "sha256": "35d4031d7f73c1652d6b66b16bbc87503f5ebc01d3153837fc881e6fbbec9e2c",
+      "md5": "30982a7a72a67534cc1e9549774b919d",
+      "bytes": 425984,
+      "dependencies": [
+        "libXau.tcz",
+        "libXdmcp.tcz"
+      ]
+    },
+    "libX11.tcz": {
+      "sha256": "58bffaec3005292f44e626ff7b44b7210b892426b775c181510641464c56595c",
+      "md5": "2ecd90ecf248eb17b61a4b546a859163",
+      "bytes": 954368,
+      "dependencies": [
+        "libxcb.tcz"
+      ]
+    },
+    "libXext.tcz": {
+      "sha256": "439effc7a5becbb22c54fe84d82d734382bb865a92333b42b732398ecd62898c",
+      "md5": "a7a97bb84905cdf41f153e7f7b83f4bc",
+      "bytes": 28672,
+      "dependencies": [
+        "libX11.tcz"
+      ]
+    },
+    "imlib2.tcz": {
+      "sha256": "f97d076d71135e42e17d77eeb6eb85b33afed37c67d14b9accd9677bcc1271e5",
+      "md5": "339cf5f5a01cc88fcb7e2f01c766fd28",
+      "bytes": 233472,
+      "dependencies": [
+        "freetype.tcz",
+        "libjpeg-turbo.tcz",
+        "libpng.tcz",
+        "libXext.tcz"
+      ]
+    },
+    "libICE.tcz": {
+      "sha256": "39ee806299466a3f732c10a9d7728d3d04ad4da9e7d4cdfcd6a892751a3a5b23",
+      "md5": "6fb1206858f4e164d0e3d2c53f3f525e",
+      "bytes": 40960,
+      "dependencies": []
+    },
+    "libSM.tcz": {
+      "sha256": "a329d4fcf1dd1d2239b54add69acea3cdcac5c7c96313f73d726ff1bc7f71a38",
+      "md5": "8d43d72d644bf54530b3cf0154f83ebe",
+      "bytes": 16384,
+      "dependencies": [
+        "libICE.tcz"
+      ]
+    },
+    "libXt.tcz": {
+      "sha256": "01a999a1a190ac67edcd4f84a1419c6ce3572286682b9b86b37677835e7752fd",
+      "md5": "f1565d3d8c8fbf5c965b9ff969ed6e99",
+      "bytes": 176128,
+      "dependencies": [
+        "libSM.tcz",
+        "libX11.tcz"
+      ]
+    },
+    "libXmu.tcz": {
+      "sha256": "47d6db7155e64dab6f082561bcec968df8a56631beb9c164e462e0c0627180fb",
+      "md5": "2214f3201c719d8d385464273299bf8b",
+      "bytes": 53248,
+      "dependencies": [
+        "libXext.tcz",
+        "libXt.tcz"
+      ]
+    },
+    "Xlibs.tcz": {
+      "sha256": "5c33e324a1fc2d8713a0baf321e4a8c659b50a6265ab3eee16b5588e59910ecd",
+      "md5": "6c3bd4b977290cc493c46c5eda9f5236",
+      "bytes": 1204224,
+      "dependencies": [
+        "imlib2.tcz",
+        "libXmu.tcz"
+      ]
+    },
+    "expat2.tcz": {
+      "sha256": "b4f2c0b0d3c360af85b69907e431724d364b5c75bbd225423acef6f649d5ebad",
+      "md5": "c923270e1ed6228dcb9f0aa89ba402b0",
+      "bytes": 81920,
+      "dependencies": []
+    },
+    "liblzma.tcz": {
+      "sha256": "7e3433f6ea5d64aa24a40c82b28abca30a400cc46ae8aaac12caa39a2b63656c",
+      "md5": "aad8e93277c84d637f2ced898fb19589",
+      "bytes": 94208,
+      "dependencies": []
+    },
+    "libxml2.tcz": {
+      "sha256": "327291af3392fab01023f90eef0fcf94fb604d8d204633f2a82903e29f1a40d7",
+      "md5": "f87f0dcccebad6469e3a7791c763deb1",
+      "bytes": 589824,
+      "dependencies": [
+        "liblzma.tcz"
+      ]
+    },
+    "wayland.tcz": {
+      "sha256": "f5e79882d87d1fd9fc2fd2f9c7b4609b7acb0fed473aaa232927c2895b83fd64",
+      "md5": "c4cbbcb5a66840bfb93cbc9116c27898",
+      "bytes": 135168,
+      "dependencies": [
+        "libffi.tcz",
+        "expat2.tcz",
+        "libxml2.tcz"
+      ]
+    },
+    "xkeyboard-config.tcz": {
+      "sha256": "4f24479afd67dc4d4ea475ed06efd417b1afdd82990b9ee19ddbf68cd5928f3f",
+      "md5": "57edac942e6c0ea372d81dc544521faa",
+      "bytes": 843776,
+      "dependencies": []
+    },
+    "libxkbcommon.tcz": {
+      "sha256": "eec72e8b666c08405368420c1ea905b4d25bebc8d7db9d3d7f7f52e5953229c0",
+      "md5": "3e9899fdb249710149c4f73d4bac9167",
+      "bytes": 270336,
+      "dependencies": [
+        "xkeyboard-config.tcz",
+        "libxcb.tcz"
+      ]
+    },
+    "fontconfig.tcz": {
+      "sha256": "470f3ad3b7a44d979177e4770264cc64e570a70db619d981e2d0c53389f700fe",
+      "md5": "4443f67af9fe6187f211e437a8523c5c",
+      "bytes": 188416,
+      "dependencies": [
+        "expat2.tcz",
+        "freetype.tcz"
+      ]
+    },
+    "pixman.tcz": {
+      "sha256": "6d487072ae95c7950b9f77ed263e206084b56cc41c7b0d8682677c4087598dce",
+      "md5": "541c0c21bc5cc2d68b0bf35feb53f824",
+      "bytes": 294912,
+      "dependencies": []
+    },
+    "cairo.tcz": {
+      "sha256": "d018606c3e41736dfb4a6b9084ff97a6ffdb2e5fbf967c7fe7c2580618ec4d29",
+      "md5": "4bcf2038c7e029b93aab7611095ab1f1",
+      "bytes": 557056,
+      "dependencies": [
+        "glib2.tcz",
+        "fontconfig.tcz",
+        "pixman.tcz",
+        "libpng.tcz",
+        "libX11.tcz"
+      ]
+    },
+    "libXrender.tcz": {
+      "sha256": "38e9b9f7dd51c36092850224b754debfa34f8b5fa5b73ce022a6c6525158767d",
+      "md5": "58bb42e762d1006f0adb2bdeefc3ad0c",
+      "bytes": 20480,
+      "dependencies": [
+        "libX11.tcz"
+      ]
+    },
+    "libXft.tcz": {
+      "sha256": "a632a73f6dc4af7419f8bceb16f03c2c3e47fa1b6b92077825661691fde52ed8",
+      "md5": "383d40d7e484e69b6761b87b3319e6c3",
+      "bytes": 40960,
+      "dependencies": [
+        "fontconfig.tcz",
+        "libXrender.tcz"
+      ]
+    },
+    "fribidi.tcz": {
+      "sha256": "6f159dfcac5a7b12625afdb80e6facc112974b8491b959d768e4dcab0f3cbebd",
+      "md5": "7dbf075a2b68653a14888127731e9a36",
+      "bytes": 28672,
+      "dependencies": [
+        "glib2.tcz"
+      ]
+    },
+    "pango.tcz": {
+      "sha256": "8161bec800e000c51b4ed93fc1d995c1a81b92fdaeebb75ba8a6c1c83cf22f98",
+      "md5": "42f1c362130293cf67a4f23dd33b9cef",
+      "bytes": 282624,
+      "dependencies": [
+        "cairo.tcz",
+        "libXft.tcz",
+        "fribidi.tcz"
+      ]
+    },
+    "libXfixes.tcz": {
+      "sha256": "bae457ad729c72b2dfacc234724f56d6d7ed392734b9bfcb3d35c7b04b30b000",
+      "md5": "6cc92a75bca43a3eb6d4c53401ac10a5",
+      "bytes": 8192,
+      "dependencies": [
+        "libX11.tcz"
+      ]
+    },
+    "libXcursor.tcz": {
+      "sha256": "6c310d6117fc2233fb692659b06fd5b2d0b9ddc2cbc6a520c1d7c6de75427272",
+      "md5": "7e40ce7b36e5445adaa954feb0738347",
+      "bytes": 20480,
+      "dependencies": [
+        "libXrender.tcz",
+        "libXfixes.tcz"
+      ]
+    },
+    "libXinerama.tcz": {
+      "sha256": "c13787b7d3fa429f55c773710d043e0467e903d3c8f44346e3fab855abba89c7",
+      "md5": "9576c31740fe6d46320348c9b68e909e",
+      "bytes": 4096,
+      "dependencies": [
+        "libXext.tcz"
+      ]
+    },
+    "fltk-1.4.tcz": {
+      "sha256": "03fbc6413bf8ed58caf13236a51c560c0aaa7dfbb71c5f875e3e4793a9ad51b8",
+      "md5": "e5ceacd4a281ea671097fea5740ae643",
+      "bytes": 696320,
+      "dependencies": [
+        "wayland.tcz",
+        "libxkbcommon.tcz",
+        "pango.tcz",
+        "libXcursor.tcz",
+        "libjpeg-turbo.tcz",
+        "libXinerama.tcz",
+        "libXft.tcz"
+      ]
+    },
+    "imlib2-bin.tcz": {
+      "sha256": "4440a47cc8a95e5acb801796573afb5b155edf2d28cef380624b659224a8c3ad",
+      "md5": "be7c16e7ee18640a49ae0979854f49aa",
+      "bytes": 45056,
+      "dependencies": [
+        "imlib2.tcz"
+      ]
+    },
+    "Xprogs.tcz": {
+      "sha256": "4024ad3cd5b1bb956d90547aa2ddabeddca4b1dedad357524d44216f537c4d41",
+      "md5": "b1f955ca5c27bad7880a0a1040e53cfe",
+      "bytes": 147456,
+      "dependencies": [
+        "Xlibs.tcz",
+        "fltk-1.4.tcz",
+        "imlib2-bin.tcz"
+      ]
+    },
+    "libfontenc.tcz": {
+      "sha256": "f07ab82d07d9d09100c11ec46bf4ca89cb7922cd42209ad73913b72c54c10e73",
+      "md5": "9a77fd2732f92ba1a9b0ca9fad40cc61",
+      "bytes": 12288,
+      "dependencies": []
+    },
+    "pcre.tcz": {
+      "sha256": "4a66fb073e864e73ff781e8103d3c1855abef39a9b3789fef7782d5041a18ad8",
+      "md5": "6ebeb4117f57ec13bca9ef2a7bc7d347",
+      "bytes": 335872,
+      "dependencies": []
+    },
+    "libXfont.tcz": {
+      "sha256": "a5cc07ecba8539ece7a604647a711cd0e615d39316d263851ce0a64da4285e93",
+      "md5": "c7711c92c0acf1d25076611d13642b44",
+      "bytes": 114688,
+      "dependencies": [
+        "freetype.tcz",
+        "libfontenc.tcz",
+        "pcre.tcz"
+      ]
+    },
+    "Xfbdev.tcz": {
+      "sha256": "f041cfe26c0e8abddb5685c20dda323b12d2dd130f0c7d558f9082bc60af2819",
+      "md5": "07a7b247b3ca4bc3828f1e18c2e5e6b7",
+      "bytes": 364544,
+      "dependencies": [
+        "Xprogs.tcz",
+        "libXfont.tcz"
+      ]
+    },
+    "flwm_topside.tcz": {
+      "sha256": "86c59a4affbe0ffe45f544d6a2cad10fa2b337fdbd5b0036ca887f4bb9d19eeb",
+      "md5": "1c4038b0d5370c2498d7b808a8725863",
+      "bytes": 28672,
+      "dependencies": [
+        "fltk-1.4.tcz"
+      ]
+    },
+    "wbar.tcz": {
+      "sha256": "5411f7d694246d401b394cd69b05e14ea323f773b4573692efd595202f17224e",
+      "md5": "31865dbc39f4abb647602549c02c82fa",
+      "bytes": 40960,
+      "dependencies": [
+        "fltk-1.4.tcz",
+        "imlib2.tcz"
+      ]
+    },
+    "aterm.tcz": {
+      "sha256": "b565d95564db826796112d74472837572f37ee60bcee216a51dca28e67887bf4",
+      "md5": "7bbc09374bdd22e4774d3a526cf5d725",
+      "bytes": 65536,
+      "dependencies": [
+        "libXext.tcz",
+        "libSM.tcz",
+        "libICE.tcz"
+      ]
+    },
+    "flpicsee.tcz": {
+      "sha256": "af605e5259b7812aa5c2ff2d6b522d63d17951f71a37e6099b22172c5a53bf7e",
+      "md5": "f722d8dfa99f9004d9e01305288d85bc",
+      "bytes": 16384,
+      "dependencies": [
+        "fltk-1.4.tcz"
+      ]
+    },
+    "giflib7.tcz": {
+      "sha256": "3add2dac4fdfa7cb06c40547d2a8edc0c061768bfa60844fcf5a5521e245b898",
+      "md5": "c52119d586cfbe4cddb7cda91b86f462",
+      "bytes": 16384,
+      "dependencies": []
+    },
+    "jasper2.tcz": {
+      "sha256": "3dd7ed91ba8eacbf9d57960a7c06ad81171e2f7e8ecaebe0f65965272c37cdda",
+      "md5": "54a93f5cd5bfcc29a1530e7e215bc2de",
+      "bytes": 176128,
+      "dependencies": [
+        "libjpeg-turbo.tcz"
+      ]
+    },
+    "liblcms2.tcz": {
+      "sha256": "4447d2ace91f1716f3c799ab714c6586ea81206685eeb3367a2977bfc81e29f1",
+      "md5": "14df185d8786ae5d2219a237124fa967",
+      "bytes": 163840,
+      "dependencies": []
+    },
+    "glib1.tcz": {
+      "sha256": "12932b3ab8c8eaf3ebe220b25676393fcc9be5d98658ecd303331a04378a4178",
+      "md5": "83d23855e8354caa43652155a6ecfeb5",
+      "bytes": 77824,
+      "dependencies": []
+    },
+    "gtk1.tcz": {
+      "sha256": "66545192d04da1626f6004b6f324532205413293f18e30d60f696c4d61ce5037",
+      "md5": "2c478a0d6fc236d6ec8cd178fcf17ae0",
+      "bytes": 651264,
+      "dependencies": [
+        "glib1.tcz"
+      ]
+    },
+    "libzstd.tcz": {
+      "sha256": "b784fb89fcea06abd605e9e14b226dc68ea0cb98bd420ab4d098a1286e85340b",
+      "md5": "2ee731d7bc669e673852385a345d4ec1",
+      "bytes": 335872,
+      "dependencies": []
+    },
+    "libtiff.tcz": {
+      "sha256": "f0820623c42313e5d175a84d249bbe12968d0062a39fde91516b7175cfe2487e",
+      "md5": "8bba4dbb2bd04fa03f11527d91edb5bd",
+      "bytes": 188416,
+      "dependencies": [
+        "libjpeg-turbo.tcz",
+        "liblzma.tcz",
+        "libzstd.tcz"
+      ]
+    },
+    "mtpaint.tcz": {
+      "sha256": "90834d71ef2eab2d6ca1e2ef0980b345a5cec8531275966ff599a0e1b4ca3068",
+      "md5": "11b52f79b12c9811a00fba43b54966eb",
+      "bytes": 401408,
+      "dependencies": [
+        "giflib7.tcz",
+        "jasper2.tcz",
+        "freetype.tcz",
+        "liblcms2.tcz",
+        "libpng.tcz",
+        "gtk1.tcz",
+        "libXext.tcz",
+        "libtiff.tcz"
+      ]
+    },
+    "fltk-1.3.tcz": {
+      "sha256": "71f9cb1338ab0cec4d661152a65cd0389e84d8e7587791a539f741bedb3d4f49",
+      "md5": "a19db882f949daa2a5fe4566d1975d67",
+      "bytes": 512000,
+      "dependencies": [
+        "libXext.tcz",
+        "libjpeg-turbo.tcz",
+        "libpng.tcz",
+        "libXcursor.tcz"
+      ],
+      "omitted_symlinks": [
+        "usr/local/lib/libfltk.so",
+        "usr/local/lib/libfltk_forms.so",
+        "usr/local/lib/libfltk_images.so"
+      ]
+    },
+    "libepoxy.tcz": {
+      "sha256": "fb74b8b84348b7efffa4533f95a4065e468b1b74ee6aa0cf961f338e4587dd52",
+      "md5": "0acf241dcb664a8f59f9c7c0abef0dc5",
+      "bytes": 307200,
+      "dependencies": []
+    },
+    "attr.tcz": {
+      "sha256": "09c99d721c40fd1cde647f154ec4d9fdd8c7cc81327404adf937ff9c3e56ec04",
+      "md5": "23adabbcdfd3b1c8083bd305f279318e",
+      "bytes": 24576,
+      "dependencies": []
+    },
+    "acl.tcz": {
+      "sha256": "9290f4930c9f4859dab918a0671de7f8ad9030b063ab94a02ef1620058574a4c",
+      "md5": "4ad30b72be3a042477c53a9d0a0094bd",
+      "bytes": 40960,
+      "dependencies": [
+        "attr.tcz"
+      ]
+    },
+    "libcap.tcz": {
+      "sha256": "c6f3c5a7aeda90f508cabb2d723565cf628978d7101a6fb29323185446167877",
+      "md5": "eecacca00fcafb743b5f8e37d8fc4226",
+      "bytes": 24576,
+      "dependencies": [
+        "attr.tcz"
+      ]
+    },
+    "ncursesw.tcz": {
+      "sha256": "e7b93de3c68a3ce9d730108a8ea1488dfd2b11c35a91e73412b99124be9a811a",
+      "md5": "ea1eac0b40bf0492af28394d4a905f39",
+      "bytes": 262144,
+      "dependencies": []
+    },
+    "readline.tcz": {
+      "sha256": "dad913551cfdd2058320d04a001918078279cbf279e002e97a8a9e5fac09f50a",
+      "md5": "c82671c319d592f8ae5d019aa12c57ad",
+      "bytes": 159744,
+      "dependencies": [
+        "ncursesw.tcz"
+      ]
+    },
+    "udev-lib.tcz": {
+      "sha256": "6b357512151a3dae7f71623d1efcd228f0460595bcbd88dbf914c18f112b7087",
+      "md5": "dff3775dea468c31e517f5ec5f403ce0",
+      "bytes": 24576,
+      "dependencies": []
+    },
+    "linux-pam.tcz": {
+      "sha256": "fd6cd5a51f8f99dd636245426263119f8b93eec23588b639d75e46a91083bbb4",
+      "md5": "d88cff9ee5687da6c1aeb2f7e947280f",
+      "bytes": 266240,
+      "dependencies": []
+    },
+    "elogind.tcz": {
+      "sha256": "d019dd0ba03b361f258c76c8fab4445c6f39254ab544aace81641b7de402c8e5",
+      "md5": "0ec34378f8531b460d0a6385e4abd675",
+      "bytes": 1216512,
+      "dependencies": [
+        "acl.tcz",
+        "libcap.tcz",
+        "util-linux.tcz",
+        "linux-pam.tcz"
+      ]
+    },
+    "dbus.tcz": {
+      "sha256": "377883baf19a6717b87306239b09911194c69d07d37033d4b06a20309eda3470",
+      "md5": "5e3d78b4c5bf587012082bf60341f683",
+      "bytes": 290816,
+      "dependencies": [
+        "expat2.tcz",
+        "elogind.tcz",
+        "libX11.tcz"
+      ]
+    },
+    "libXi.tcz": {
+      "sha256": "58988a854875a28c851ac297f733e25c4c7c0a21039430d3f59b6a6fb3b86155",
+      "md5": "0a548940d6c539aded4212c17650c511",
+      "bytes": 28672,
+      "dependencies": [
+        "libXext.tcz"
+      ]
+    },
+    "libXtst.tcz": {
+      "sha256": "0655a31f6ed5955192baae89342281875b18ce9d3c4b76029db17d8442b31fb7",
+      "md5": "ad96031535d4dfc2449bc318d0de5937",
+      "bytes": 12288,
+      "dependencies": [
+        "libXi.tcz"
+      ]
+    },
+    "at-spi2-core.tcz": {
+      "sha256": "a74559ee63696a788a06488a5262f882bfd14b89c9db23750d042f5489f9c926",
+      "md5": "7bd6c85caa6201f3af1903ff473df741",
+      "bytes": 266240,
+      "dependencies": [
+        "dbus.tcz",
+        "glib2.tcz",
+        "libXi.tcz",
+        "libXtst.tcz"
+      ]
+    },
+    "shared-mime-info.tcz": {
+      "sha256": "5b21be735e270d29a54e478e24cadad9c22361471fa5e972f8295a1836378b16",
+      "md5": "3db9074caf278a1b3e1db502afe2c298",
+      "bytes": 663552,
+      "dependencies": [
+        "glib2.tcz",
+        "libxml2.tcz"
+      ]
+    },
+    "gdk-pixbuf2-xlib.tcz": {
+      "sha256": "7ea60ed000fff18b93484e103658a4370d6b94f81e4052be7a933a99cab8b436",
+      "md5": "c9724cdfa4a31efe670d12fb7c46441f",
+      "bytes": 36864,
+      "dependencies": []
+    },
+    "gdk-pixbuf2.tcz": {
+      "sha256": "efd40dfafc592a72ebda207c5e92682cdd25752b27b097ceecfd01819e5d2897",
+      "md5": "c7370c482af1eeed7754149aa2ef15b2",
+      "bytes": 167936,
+      "dependencies": [
+        "libtiff.tcz",
+        "libpng.tcz",
+        "libX11.tcz",
+        "shared-mime-info.tcz",
+        "gdk-pixbuf2-xlib.tcz"
+      ]
+    },
+    "libXcomposite.tcz": {
+      "sha256": "75e43c385fb6b640e4865dd4b6d45e65396dec22b781ad1195d5abe1119fcc26",
+      "md5": "8813a8920d2a244901ed3c8056c3b556",
+      "bytes": 4096,
+      "dependencies": [
+        "libX11.tcz"
+      ]
+    },
+    "libXrandr.tcz": {
+      "sha256": "4bd67369355cc3081cd7cc5ce29c909ad2253c452539f0a6dda396465ce232c3",
+      "md5": "21cec9abbff3e0368e3c1a9a8d933f0e",
+      "bytes": 20480,
+      "dependencies": [
+        "libXext.tcz",
+        "libXrender.tcz"
+      ]
+    },
+    "wayland-protocols.tcz": {
+      "sha256": "706ff72d554c6062e4bb5ad0e29a03dbe542fc3ed04b677125e1f2fb5a43baf7",
+      "md5": "0ce683283322fc151da106f796c7aff8",
+      "bytes": 307200,
+      "dependencies": [
+        "wayland.tcz"
+      ]
+    },
+    "libXdamage.tcz": {
+      "sha256": "35a99648f91e3452ebed4bfd8a96073da86254d72ba9d7570384227e5b53627b",
+      "md5": "d4eeb61be480d93485dbad5a0bfe1dc1",
+      "bytes": 4096,
+      "dependencies": [
+        "libXfixes.tcz"
+      ]
+    },
+    "gtk3.tcz": {
+      "sha256": "43752a98c3a833913c6172a68b4d409a4b14b8ac62280898f8c40ed59871262e",
+      "md5": "b54e52e659e65174db128e0337bf5441",
+      "bytes": 5410816,
+      "dependencies": [
+        "libepoxy.tcz",
+        "at-spi2-core.tcz",
+        "gdk-pixbuf2.tcz",
+        "libXcomposite.tcz",
+        "pango.tcz",
+        "libXcursor.tcz",
+        "libXinerama.tcz",
+        "libXrandr.tcz",
+        "libXi.tcz",
+        "libxkbcommon.tcz",
+        "wayland-protocols.tcz",
+        "libXdamage.tcz"
+      ]
+    },
+    "dav1d.tcz": {
+      "sha256": "a0b9553ef35ff3a8ec3e182f5c04362c120f4bebf6fd1a77ff60b055a5be736b",
+      "md5": "77fd93f57d0b0f0800049e1ff7d9eb1d",
+      "bytes": 835584,
+      "dependencies": []
+    },
+    "librsvg.tcz": {
+      "sha256": "0e7cb99246a493ab812fd8bb287b61d1403d26d0166bb5fea4714c27b8decb5f",
+      "md5": "549c1f677120f9e9a68b39c2f58ae752",
+      "bytes": 5951488,
+      "dependencies": [
+        "pango.tcz",
+        "gdk-pixbuf2.tcz",
+        "dav1d.tcz"
+      ]
+    },
+    "hicolor-icon-theme.tcz": {
+      "sha256": "759c0e8b5fa9c68b13f00f9f658851e5637ca1b8461d6bec9206f42806469bc9",
+      "md5": "2660f50fae7da61cf4e8a00b3b87efdd",
+      "bytes": 8192,
+      "dependencies": []
+    },
+    "gtk-update-icon-cache.tcz": {
+      "sha256": "e00de6313967c454385ec98d8e59efec9e612cd8fcded3dcd86789c063a1e21a",
+      "md5": "eca34b6db9a69406f6dc4d482c566ac5",
+      "bytes": 16384,
+      "dependencies": [
+        "gdk-pixbuf2.tcz",
+        "librsvg.tcz",
+        "hicolor-icon-theme.tcz"
+      ]
+    },
+    "galculator.tcz": {
+      "sha256": "c4b499ad2001ed70a9e1609a3105d8eac367c8772f3e669779b89c838c669818",
+      "md5": "1a28fee0e16bc883be420dc6b9ea5826",
+      "bytes": 155648,
+      "dependencies": [
+        "gtk3.tcz",
+        "gtk-update-icon-cache.tcz"
+      ]
+    },
+    "flit.tcz": {
+      "sha256": "89fb7b7fa8e8b3448cd778435c24ee5f3fa6f66b633dc5a0f6d07a7052d6a9f7",
+      "md5": "1053f927d5888dab7e9170b2b0a6f0b5",
+      "bytes": 24576,
+      "dependencies": [
+        "fltk-1.3.tcz"
+      ]
+    },
+    "Xorg-7.7-bin.tcz": {
+      "sha256": "6eeb48b1bec47a1f18a81a9f8873ca3ac3d95fe15a94bbec052914471ad935e7",
+      "md5": "1892e9103b7af1d0357c43f866db7afb",
+      "bytes": 425984,
+      "dependencies": [
+        "libGL.tcz",
+        "libXaw.tcz",
+        "libXcomposite.tcz",
+        "libXcursor.tcz",
+        "libXft.tcz",
+        "libXinerama.tcz",
+        "libXrandr.tcz",
+        "libXtst.tcz",
+        "libXxf86dga.tcz",
+        "libxkbfile.tcz"
+      ],
+      "selection": {
+        "binaries": [
+          "xwininfo"
+        ],
+        "data_directories": [],
+        "dependencies": [
+          "libX11.tcz",
+          "libxcb.tcz"
+        ]
+      }
+    },
+    "util-linux.tcz": {
+      "sha256": "3877cb66fc959991f857dbb888fdfc0971d8871cbfb8c2db60e5160742a4362f",
+      "md5": "6b099b131d753ca0bd1b89db91206105",
+      "bytes": 1708032,
+      "dependencies": [
+        "readline.tcz",
+        "udev-lib.tcz"
+      ],
+      "selection": {
+        "binaries": [],
+        "data_directories": [
+          "usr/local/lib"
+        ],
+        "dependencies": [
+          "readline.tcz",
+          "udev-lib.tcz"
+        ]
+      }
+    },
+    "glibc_add_lib.tcz": {
+      "sha256": "490b83f3015421a83572ba260177a6e9ea7b5c0271f2faedc9b03a37bf084ec3",
+      "md5": "0ec33b6bd433904e96bfe1ffa0752577",
+      "bytes": 712704,
+      "dependencies": []
+    },
+    "fox.tcz": {
+      "sha256": "60ef5ed3a521508dde0a59bbac923986045958c87d39fa158a700c12a320800e",
+      "md5": "6e3a8833ae220e3bce9a857c31011a7d",
+      "bytes": 1601536,
+      "dependencies": [
+        "glu.tcz",
+        "libXft.tcz",
+        "libjpeg-turbo.tcz",
+        "glibc_add_lib.tcz",
+        "libXrandr.tcz"
+      ],
+      "selection": {
+        "binaries": [],
+        "data_directories": [
+          "usr/local/lib"
+        ],
+        "dependencies": [
+          "libXft.tcz",
+          "libjpeg-turbo.tcz",
+          "glibc_add_lib.tcz",
+          "libXrandr.tcz",
+          "libpng.tcz",
+          "bzip2-lib.tcz"
+        ]
+      }
+    },
+    "xfe.tcz": {
+      "sha256": "13dd4379a2b8e61a3356f672effbca385069fee828ce32e4698e936b5d1135f0",
+      "md5": "7212c8ef2c64ede53a24742e6540ebb9",
+      "bytes": 2375680,
+      "dependencies": [
+        "fox.tcz"
+      ]
+    }
+  }
+}

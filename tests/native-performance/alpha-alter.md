@@ -34,8 +34,9 @@ Other bounded changes:
 - Resident frame lookup does not first query the process entry; that lookup
   is needed only for lazy materialization.
 - Heap mapping resolves its VM tracker once per batch, not once per page.
-- Frame allocation vectors reserve their known size once. This also avoids
-  abandoning successive growth buffers in Alpha's existing bump allocator.
+- Frame allocation vectors reserve their known size once to avoid successive
+  reallocations and copies. Alpha's fixed mapped heap now uses TLSF and recycles
+  released buffers.
 - Same-frame copying uses overlap-safe `ptr::copy` directly. The two copies
   through a 4-KiB static bounce buffer and that buffer are removed. Cross-page
   forward/backward traversal and temporary-map cleanup are unchanged.

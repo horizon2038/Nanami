@@ -521,6 +521,8 @@ Negotoはclientごとに64 KiBの共有領域をattachする。COMMAND=`0xd102`�
 
 Alterのexecution-context APIは別形式である。48 bytesのheaderに`ABI, flags, root_len, cwd_len, executable_len, launch_len`をそれぞれLE u64で置き、その後に各byte列を連結する。過不足・trailing data・未定義flagを検査する。launch部分はさらにargc / envcとNUL終端argv / envpという既存形式を持つ。
 
+`flags`のbit 0はreadonly root、bit 1は明示的なgraphics grantである。NegotoはOCI annotation `io.nanami.graphics="true"`をbit 1へ変換する。未指定・`"false"`ではgrantしない。graphicsはreadonlyとは独立で、通常のdevice passthroughやhost inputの購読権限を意味しない。Alterは実行contextごとのHonoka window、論理framebuffer、window-local input queueに接続する。forkしたX server/client群はcontext leaderを基準に同じgraphics sessionを共有する。framebuffer共有と入力Notificationは既存Honoka protocolを使用し、Kernelのcapability transfer契約は変更しない。
+
 つまり「共有byte配列」という型だけでは、JSON、固定header付き可変長record、複数のNUL文字列という違いを表せない。
 
 ## 10. Managed Service
@@ -812,6 +814,7 @@ protocolであり、A9NのCapability ABIやIPC fastpathは変更しない。
 | `PROCESS_MAPPING_PROTECT` | `0x102a` | target PID, VA, byte count, R/W/X bits | なし |
 | `PROCESS_MEMORY_COMPARE_EXCHANGE` | `0x102b` | target PID, aligned VA, expected u32, desired u32 | 以前のu32 |
 | `PROCESS_THREAD_CREATE` | `0x102c` | source PID, caller側PCB destination slot, priority, reserved=0 | 新しいtask PID |
+| `PROCESS_FORK` | `0x102d` | source PID, caller側PCB destination slot, priority, reserved=0 | 新しいtask PID |
 
 PROTECTのpermissionはbit 0=R、1=W、2=X。0ではleafだけを外し、backingとFrame
 Capabilityは保持する。対象本人またはreaperが要求できる。CASはrobust futexの
@@ -823,8 +826,22 @@ AddressSpaceをaliasとして接続する。Fault resolverには要求元のserv
 新しいtask PIDをidentifierとして固定する。PCBはsuspendedで返すため、register/TLS/TID
 設定の完了前に実行されない。VM所有者のroot/frame arenaは最後の利用taskのreapまで保持する。
 
+FORKもsourceのreaperだけが要求でき、suspended PCBを返す。こちらは独立した
+AddressSpaceとRAM backingを作り、sourceの現在のbacked pageとpermissionを複製する。
+ELFや元のpathnameは参照しない。PROT_NONEの保持済みbackingは複製し、未populatedの
+予約領域は空のままにする。LinuxのFD・signal・VMA・MAP_SHARED再接続はAlterの責任。
+これはCOWではなくeager snapshotであり、他の実行中thread全体を原子的に停止する
+operationではない。生成途中の失敗では新しいroot/VMを回収する。
+
 既存operationの拡張:
 
+- `PROCESS_MAP_ANONYMOUS`の`arg3`=0は従来のzero fill。非0では、callerのaddress
+  spaceにある2 Word `[source VA, initialized bytes]`へのpointerを指定する。
+  `arg0`=target PID、`arg1`=mapping bytes、`arg2`=固定VA（0なら自動割当）は維持する。
+  sourceはcaller自身の領域で、initialized bytesはmapping bytes以下。callerはtarget
+  本人かreaperでなければならない。Alphaがsourceを検証後、新しい各pageへ直接コピーし、
+  残りだけをzero fillしてからpageを公開する。既存backingへの上書きは拒否する。
+  ファイル読み取りの短い応答はAlter側で部分pageだけをbufferし、完全pageは直接渡す。
 - `MAPPING_SHARE`の`arg3`=0は従来どおりpeer VAを割り当てる。非0は固定peer VA。
   固定先は要求元がreaperとして管理する対象に限り、重複mappingを拒否する。
 - `SHARED_MEMORY_CREATE`でpeer PID=0は、要求元だけにreclaimable RAMを作成する。
@@ -854,15 +871,26 @@ VFS側ではsessionが所有するdirectory handleであり、`Word::MAX`はroot
 絶対pathはdirectoryを使わない。POSIXは入力を自分のVFS共有領域にコピーし、FDを
 VFS handleへ変換して転送する。返却byte列も呼出元のoutput bufferへコピーする。
 
-OperationはRESOLVE=1、SYMLINK=2、READLINK=3、STAT=4。
+OperationはRESOLVE=1、SYMLINK=2、READLINK=3、STAT=4、CHMOD=5。
 flagsのbit 0はfinal symlinkを辿る、bit 1は最後のcomponentの未存在を許容する。
-SYMLINKのtargetは保存するlink内容。RESOLVEのoutputはnamespaceから見たcanonicalな
+bit 2（`VFS_PATH_WITH_METADATA=4`）はRESOLVE専用で、outputを4 Wordの
+`PathMetadata { inode, size, mode, file_type }`と、それに続くcanonical pathにする。
+output_bytesとdetail0はともにheaderを含むbyte数で、detail1とheaderのfile_typeは
+従来どおりVFS file type。headerとpathの間にpaddingやNUL終端は入れない。
+modeはfile typeを含むinode modeの全16bitで、permission bitsだけではない。
+未存在の最後のcomponentを許容した場合はheaderを全0にし、canonical pathは返す。
+このflagを指定しない既存clientのpath-only形式は変更しない。情報はその解決処理で
+取得したsnapshotで、後続requestに有効なcacheや永続的なobject handleではない。
+SYMLINKのtargetは保存するlink内容。bit 2未指定のRESOLVEのoutputはnamespaceから見たcanonicalな
 絶対path、READLINKのoutputはlink内容であり、どちらもNUL終端を含まない。
 成功時detail0は返却byte数（STATではinode）、detail1はfile type（STATではpacked metadata）。
+CHMODのtargetはNUL終端文字列ではなく、permission/special mode `0000..7777`を
+表す1 WordのLE整数。CHMOD成功時のdetail0/detail1はともに0。FOLLOW_FINALを
+落としてsymlink自体を指定した場合はunsupportedを返し、link先を変更しない。
 
 filesystem errorは専用status `0x91160001`とdetail0のerror codeで返す。
 1=invalid、2=missing、3=not-directory、4=link-loop、5=too-long、6=exists、
-7=I/O、8=no-space、9=read-only。IPC/Capability errorとは別のerror domainであり、
+7=I/O、8=no-space、9=read-only、10=unsupported。IPC/Capability errorとは別のerror domainであり、
 IDLでは通常のAlpha statusと区別する必要がある。新file typeはVFS symlink=4、POSIX symlink=6。
 
 ### 16.3 Creation mode・stat mode・advisory lock
@@ -879,6 +907,34 @@ detail0は`(mode << 32) | inode`になる。inodeはext2の32bit番号、modeは
 file typeを含む16bitのディスク値。detail1の既存packed metadataは変更しない。
 flags=0の従来clientはinodeのみを受け取る。
 
+FSTATのarg1に`INCLUDE_VERSION=2`を指定すると、detail0は
+`(content_version << 32) | inode`になる。`INCLUDE_MODE`とは排他的で、
+detail1のsize/type配置は変わらない。POSIXは通常のFD所有権確認後、VFSの
+owned handleへ転送する。pathやmtimeだけをキーにした内容キャッシュの代用ではなく、
+そのopen handleが現在指すinodeの内容を識別するためのopt-in拡張である。
+
+versionはVFS instance内で再利用しない32bit token。内容の同サイズwrite、
+truncate、inode metadata変更の前に失効させ、失敗後の部分的変更も含めて
+古いtokenを再発行しない。hardlinkは同じinode/tokenを参照する。
+VFSのtoken表は256件に制限され、追い出したinodeを再参照すると新しいtokenを
+発行する。通常ファイル以外、VFS read-page leaseでpin中のinode、新規tokenを
+発行できない場合はversion=0（キャッシュ不可）。tokenはVFSの再起動や別instanceを
+跨いで比較してはいけない。version=0を「変更なし」と解釈してはいけない。
+
+Alterはopen→FSTATで得たidentity/sizeに対してのみsnapshotを再利用し、cache missでは
+positioned readの完了後に再度FSTATして、読み込み中にtoken/sizeが変わった場合は
+失敗させる。FD offsetを動かさないため、delegated readから通常preadへのfallbackでも
+途中のデータを飛ばさない。ゲストへのMAP_PRIVATEはsnapshotからのprivate copyであり、
+書き込み可能なcache aliasを渡したり、MAP_SHAREDのcoherence契約を置き換えたりしない。
+
+`POSIX_REQUEST_FCHMOD=0xa13e`、`VFS_REQUEST_FCHMOD=0x9117`はarg0にFD／
+owned open handle、arg1にpermission/special mode `0000..7777`を受け取る。
+shared bufferは使用しない。POSIXはsessionのFDからVFS handleへ変換する。
+成功は通常のOKとdetail0/detail1=0、filesystem errorはPATHと同じ
+`0x91160001`とdetail0のerror code。無効・別ownerのhandleは通常の
+INVALID_DESCRIPTOR。pathnameへの再変換はせず、rename/unlink後も開いたinodeを
+変更する。ext2のmodeと各open-handle cacheを更新し、既存writeback/fsyncで永続化する。
+
 `POSIX_REQUEST_FLOCK=0xa13d`はarg0=FD、arg1=SHARED(1)／EXCLUSIVE(2)／
 UNLOCK(8)、arg2=呼出元notification slot（0なら通知登録なし）。成功は通常の
 OK、競合は専用status `0xa13d0001`。Server自体は待機しない。非zeroの通知slotを
@@ -886,3 +942,40 @@ OK、競合は専用status `0xa13d0001`。Server自体は待機しない。非ze
 通知は競合判定より前に接続する。Alterは競合時に対象taskをparkし、通知後に
 再試行するため、他のRPCを処理でき、check/park間の通知も取りこぼさない。
 lockの所有者はPOSIX open-file description、対象はinodeであり、FD番号やPIDではない。
+
+### ファイルシステム統計
+
+`POSIX_REQUEST_FSTATFS=0xa141` はarg0=FD、`VFS_REQUEST_FSTATFS=0x911a`
+はarg0=owned handle。成功時、各clientの登録済みshared bufferのoffset 0へ
+`vfs::FilesystemStats`（80 bytes）を書き、通常OK、detail0/detail1=0を返す。
+fieldはkind、block_size、blocks、free_blocks、available_blocks、files、
+free_files、fsid、name_max、flagsの順で、各fieldはu64。POSIXはFD所有権を
+検証してregular file／directoryのVFS handleへ変換し、VFS側bufferから
+呼出元bufferへ転送する。buffer不足はINVALID_ARGUMENT、無効FD／別ownerの
+handleはINVALID_DESCRIPTOR。ext2はwriteback cacheを通して現在のsuperblock
+を読み、未flushの割当・解放も反映する。これはread-only RPCであり、継続的な
+page leaseや新しいnotificationは作らない。
+
+### 通常ファイルの読み取り共有page lease
+
+`POSIX_REQUEST_MAP_READ_PAGE=0xa13f` / `UNMAP_READ_PAGE=0xa140`は
+arg0=FD、arg1=4096-byte境界のfile offset。POSIXはowned regular-file FDを
+VFS handleへ変換し、`VFS_REQUEST_MAP_READ_PAGE=0x9118` /
+`UNMAP_READ_PAGE=0x9119`へ転送する。VFS側のarg0=owned handle、arg1=offset、
+arg2=peer PIDである。POSIXがpeerへ設定するのは受信identifierであり、clientは
+別PIDを指定できない。MAPの通常OK replyのdetail0はpeer側のpage VA、detail1=0。
+
+VFSはinode/offsetごとに一つのNormal/WB RAM pageを保持し、Alphaの既存
+MAPPING_SHAREでpeerへaliasを作る。これはbulk-transfer bufferでもprivateな
+file snapshotでもない。通常WRITE/WRITE_DELEGATEDは該当pageの内容も更新する。
+peerは自身のaliasと下流aliasを削除してからUNMAPを呼び、最後のleaseでVFS側
+pageを解放する。leaseはowner/handle/peer/offsetで追跡し、callerはlease期間中
+handleを保持する。Alterはhidden FDを保持し、fork/partial unmap/exec/exit時の
+alias管理に既存memfd機構を使用する。guestのwrite permissionは付与しない。
+peerであるmapper自身のaliasはAlphaの通常RAM共有でありR/Wである。read-onlyは
+下流application mappingの契約であり、任意のclientへreadonly capabilityを配るAPIではない。
+
+page lease中のfile size変更は専用status `VFS_RESPONSE_MAPPING_BUSY=0x91180001`
+で拒否し、Alterは`EBUSY`へ変換する。VMA invalidationを実装したという意味ではない。
+上限はVFS全体で1024 backing pages / 4096 leases。writable file共有、EOF以降の
+初期mapping、lease中のresizeはこの契約に含まれない。

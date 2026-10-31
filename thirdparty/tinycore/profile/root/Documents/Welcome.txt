@@ -1,0 +1,16 @@
+Tiny Core on Alter/Linux
+
+This desktop uses the original Tiny Core X11 applications.
+
+The dock contains Terminal, Files, Editor, Images, Paint, Calculator,
+Tiny Core information and Exit desktop. Click the blue desktop for the complete
+application menu, including the Flit clock.
+
+Your folders:
+  /root/Documents    Notes and text files
+  /root/Pictures     Images and drawings
+  /root/Downloads    Downloaded files
+
+Files saved in this bundle survive desktop Exit. A QEMU smoke test instead uses
+a temporary disk snapshot. Exit desktop stops the container, not Nanami.
+

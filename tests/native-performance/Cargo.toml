@@ -8,6 +8,74 @@ publish = false
 path = "heap-tests.rs"
 
 [[test]]
+name = "linux-file-initialization"
+path = "linux-file-initialization.rs"
+
+[[test]]
+name = "alpha-private-pages"
+path = "alpha-private-pages.rs"
+
+[[test]]
+name = "ext2-file-versions"
+path = "ext2-file-versions.rs"
+
+[[test]]
+name = "alter-image-cache"
+path = "alter-image-cache.rs"
+
+[[test]]
+name = "alpha-initialization-window"
+path = "alpha-initialization-window.rs"
+
+[[test]]
+name = "alpha-heap"
+path = "alpha-heap.rs"
+
+[[test]]
+name = "ext2-bitmap"
+path = "ext2-bitmap.rs"
+
+[[test]]
+name = "ext2-mapped-pages"
+path = "ext2-mapped-pages.rs"
+
+[[test]]
+name = "linux-directory"
+path = "linux-directory.rs"
+
+[[test]]
+name = "linux-procfs"
+path = "linux-procfs.rs"
+
+[[test]]
+name = "linux-task-control"
+path = "linux-task-control.rs"
+
+[[test]]
+name = "linux-sysv-shm"
+path = "linux-sysv-shm.rs"
+
+[[test]]
+name = "linux-console"
+path = "linux-console.rs"
+
+[[test]]
+name = "linux-input"
+path = "linux-input.rs"
+
+[[test]]
+name = "linux-fadvise"
+path = "linux-fadvise.rs"
+
+[[test]]
+name = "linux-sysinfo"
+path = "linux-sysinfo.rs"
+
+[[test]]
+name = "linux-path-lookup"
+path = "linux-path-lookup.rs"
+
+[[test]]
 name = "linux-pty"
 path = "linux-pty.rs"
 
@@ -62,6 +130,14 @@ path = "linux-pipe.rs"
 [[test]]
 name = "hotpaths"
 path = "hotpath-tests.rs"
+
+[[test]]
+name = "fbdev-damage"
+path = "fbdev-damage.rs"
+
+[[test]]
+name = "alter-process-index"
+path = "alter-process-index.rs"
 
 [[test]]
 name = "shell-terminal"

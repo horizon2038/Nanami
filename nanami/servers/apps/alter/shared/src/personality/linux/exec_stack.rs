@@ -33,8 +33,8 @@ pub(super) fn rewrite_linux_stack(
     if runtime.exec_stack_buffer == 0
         || runtime.exec_stack_buffer_size < LINUX_EXEC_STACK_BYTES as Word
     {
-        let (stack_buffer, mapped) =
-            nanami_runtime::request_heap(LINUX_EXEC_STACK_BYTES as Word).map_err(map_request_error)?;
+        let (stack_buffer, mapped) = nanami_runtime::request_heap(LINUX_EXEC_STACK_BYTES as Word)
+            .map_err(map_request_error)?;
         if mapped < LINUX_EXEC_STACK_BYTES as Word {
             return Err(ENOMEM);
         }
@@ -175,13 +175,17 @@ pub(super) fn rewrite_linux_stack(
     let guest_sp = stack_base + sp_offset as Word;
     nanami_runtime::request_process_memory_write(
         pid,
-        stack_base,
-        stack_buffer,
-        LINUX_EXEC_STACK_BYTES as Word,
+        guest_sp,
+        stack_buffer + sp_offset as Word,
+        (LINUX_EXEC_STACK_BYTES - sp_offset) as Word,
     )
     .map_err(map_request_error)?;
     if !register_linux_stack_mappings(runtime, pid) {
         return Err(ENOMEM);
+    }
+    if let Some(process) = runtime.managed_process_mut(pid) {
+        process.argument_vector = guest_sp + 8;
+        process.argument_count = argc;
     }
     if process_diagnostics_enabled(runtime, pid) {
         log_exec_image_entry(runtime, pid, elf.entry_point);

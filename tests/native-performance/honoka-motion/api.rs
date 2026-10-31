@@ -29,6 +29,13 @@ thread_local! {
     static MAPPINGS: RefCell<Vec<Box<[u64]>>> = const { RefCell::new(Vec::new()) };
     pub static RELEASED: RefCell<Vec<(Word, Word)>> = const { RefCell::new(Vec::new()) };
     pub static FAIL_ALLOCATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub static FAIL_CAPTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+pub fn request_memory_create(size: Word) -> Result<Word, RequestError> {
+    if FAIL_CAPTURE.with(|fail| fail.replace(false)) {
+        return Err(RequestError::Transport);
+    }
+    request_shared_memory(0, size).map(|(address, _)| address)
 }
 pub fn request_shared_memory(_: Word, size: Word) -> Result<(Word, Word), RequestError> {
     if FAIL_ALLOCATION.with(|fail| fail.replace(false)) {

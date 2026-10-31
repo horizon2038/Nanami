@@ -8,7 +8,7 @@ policy in isolated user processes.
 This document describes the current implementation. It is not an ABI stability
 guarantee.
 
-The current baseline is Nanami v0.6.2, `AlphaEnvironment` ABI 2 and `a9n_abi`
+The current baseline is Nanami v0.7.0, `AlphaEnvironment` ABI 2 and `a9n_abi`
 0.8.0. The checked-out Spencer revision includes A9N v0.3.11-smp. Historical
 QEMU results below retain their original scope; they are not evidence that
 every fixture was rerun after a kernel revision change.
@@ -121,6 +121,13 @@ process record now retains its actual PCB descriptor instead of zero.
 Sub-page final conversions reserve their entire partially occupied page in
 both the page allocator and the untyped frame-source index; exact byte
 watermarks are not treated as page-aligned free ranges.
+
+Per-process capability arenas use the refillable capability-metadata pool,
+not the fixed bootstrap kernel-object pool. Alpha reserves still-untyped RAM
+with its buddy allocator before converting a new pool; device, delegated and
+materialized-frame ranges remain excluded. Large arena alignment leaves enough
+metadata capacity to create the next pool's capability-directory spine. Reaping
+revokes an arena's contents, while its root slot retains the arena for reuse.
 
 The launcher records whole Generic reservation units before converting their
 contents. Image/BSS, private IPC/TLS, stack, archive, configuration, page tables,
@@ -460,6 +467,11 @@ memory cloning, shared memory, MMIO, DMA, and explicit mapping release.
 
 Native heaps request anonymous regions from Alpha. `nanami_runtime` manages multiple
 heap regions and can grow the allocator without assuming a single fixed heap.
+Alpha itself uses TLSF over its fixed 32-MiB bootstrap-mapped heap. Temporary
+process/VM allocations are returned to that heap on deallocation, so repeated
+fork/exec does not consume a new bump region for every released buffer. Heap
+bookkeeping is serialized within Alpha; this does not change Kernel memory
+attributes, physical backing reclamation or IPC paths.
 
 ### Capability Lifecycle Contract
 
@@ -534,6 +546,11 @@ Current service names include:
 
 Service slots are capabilities. A long-lived client should retain a successful
 connection instead of repeatedly connecting into the same occupied slot.
+
+`net-server` publishes `network-service` only after its backend, shared memory
+and receive mechanism are initialized. Without a NIC, lookup fails promptly
+instead of handing Alter a port whose server is still waiting for a backend;
+otherwise one synchronous attachment call could stall unrelated Linux guests.
 
 Registration is append-only: another owner or endpoint cannot replace a name;
 an exact owner/endpoint retry is idempotent. A registration request is not

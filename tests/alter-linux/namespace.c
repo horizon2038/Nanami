@@ -37,6 +37,19 @@ int test_main(void) {
     if (call(267, directory, (word)"relative", (word)target, sizeof(target)) != 5 || !equal(target, "value", 5)) { return 23; }
     static unsigned char metadata[144];
     if (call(262, directory, (word)"relative", (word)metadata, 0x100) != 0 || (*(unsigned int *)(metadata + 24) & 0170000) != 0120000) { return 24; }
+    if (call(262, directory, (word)"relative", (word)metadata, 0) != 0 || *(word *)(metadata + 48) != 4 || (*(unsigned int *)(metadata + 24) & 07777) != 0600) { return 36; }
+    if (call(90, (word)"/tmp/ns-suite/moved/value", 0641, 0, 0) != 0) { return 37; }
+    if (call(262, directory, (word)"value", (word)metadata, 0) != 0 || (*(unsigned int *)(metadata + 24) & 07777) != 0641) { return 38; }
+    if (call(262, directory, (word)"absent", (word)metadata, 0) != -2) { return 39; }
+    unsigned char extended[256];
+    if (linux_call(332, directory, (word)"relative", 0x100, 0x7ff, (word)extended, 0) != 0 || (*(unsigned short *)(extended + 28) & 0170000) != 0120000) { return 40; }
+    if (call(262, (word)-100, (word)"/proc/self/status", (word)metadata, 0) != 0) { return 41; }
+    if (call(88, (word)"/etc/hosts", (word)"/tmp/ns-suite/hosts-alias", 0, 0) != 0) { return 42; }
+    long saved_hosts = call(82, (word)"/etc/hosts", (word)"/tmp/ns-suite/saved-hosts", 0, 0);
+    if (saved_hosts != 0 && saved_hosts != -2) { return 43; }
+    long fallback_stat = call(4, (word)"/tmp/ns-suite/hosts-alias", (word)metadata, 0, 0);
+    if (saved_hosts == 0 && call(82, (word)"/tmp/ns-suite/saved-hosts", (word)"/etc/hosts", 0, 0) != 0) { return 44; }
+    if (fallback_stat != 0) { return 45; }
     fd = call(257, directory, (word)"relative", 0, 0);
     if (fd < 0 || !read_value(fd)) { return 25; }
     if (call(263, directory, (word)"relative", 0, 0) != 0) { return 26; }

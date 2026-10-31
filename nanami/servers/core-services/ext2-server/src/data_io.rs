@@ -82,15 +82,24 @@ pub(super) fn write_file(
     len: usize,
     input_offset: usize,
 ) -> Result<usize, Word> {
+    if len == 0 {
+        return Ok(0);
+    }
     if file_offset.checked_add(len).is_none() {
         return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
     }
     let end = file_offset + len;
+    if end > inode.size as usize && runtime.mapped_pages.pins(inode_no) {
+        return Err(nanami_client::vfs::VFS_RESPONSE_MAPPING_BUSY);
+    }
     if end > runtime.block_size * max_file_blocks(runtime) {
         return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
     }
     let mut copied = 0usize;
     let mut inode_dirty = false;
+    // Same-size writes need not write the inode. Invalidate before the first
+    // possible data mutation, not only after successful metadata writeback.
+    runtime.file_versions.invalidate(inode_no);
     while copied < len {
         let logical_block = (file_offset + copied) / runtime.block_size;
         let block_offset = (file_offset + copied) % runtime.block_size;
@@ -115,6 +124,14 @@ pub(super) fn write_file(
             })
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
             inode_dirty = true;
+            unsafe {
+                runtime.mapped_pages.update(
+                    inode_no,
+                    file_offset + copied,
+                    session.shm_local + input_offset + copied,
+                    n,
+                );
+            }
             copied += n;
             continue;
         }
@@ -150,6 +167,14 @@ pub(super) fn write_file(
         }
         write_blocks(runtime, physical_block, run_blocks)
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
+        unsafe {
+            runtime.mapped_pages.update(
+                inode_no,
+                file_offset + copied,
+                session.shm_local + input_offset + copied,
+                n,
+            );
+        }
         copied += n;
     }
     if end > inode.size as usize {

@@ -73,6 +73,7 @@ struct Fake {
     nodes: usize,
     batches: usize,
     map_attributes: Vec<usize>,
+    tables: BTreeMap<(usize, usize, usize), usize>,
     parents: BTreeMap<usize, usize>,
     fail_revoke: bool,
 }
@@ -110,13 +111,17 @@ pub mod arch {
                 );
                 let bits = match kind {
                     CapabilityType::Node => kernel_object::node_memory_size_bits(radix),
+                    CapabilityType::PageTable => 12,
                     _ => radix,
                 };
                 let bytes = 1usize << bits;
                 let start = (original.cursor + bytes - 1) & !(bytes - 1);
                 let end = start + bytes * count;
                 assert!(end <= original.end, "generic exhausted");
-                if kind != CapabilityType::Node {
+                // Main and overflow process metadata arenas are aligned
+                // 2-MiB allocations from already reserved metadata pools.
+                let process_arena = kind == CapabilityType::Generic && radix == 21;
+                if kind != CapabilityType::Node && !process_arena {
                     // A partially occupied boot page is reserved, not a usable
                     // untyped prefix. No whole free page may be skipped.
                     assert_eq!(
@@ -199,16 +204,40 @@ pub mod arch {
     pub mod address_space {
         use super::super::*;
         pub fn map(
-            _: usize,
-            _: usize,
-            _: usize,
+            address_space: usize,
+            object: usize,
+            address: usize,
             attribute: capability_call::address_space::Attribute,
         ) -> CapabilityResult {
-            FAKE.with(|fake| fake.borrow_mut().map_attributes.push(attribute.bits()));
-            Ok(())
+            FAKE.with_borrow_mut(|fake| {
+                fake.map_attributes.push(attribute.bits());
+                if let Some(cap) = fake.caps.get(&object) {
+                    if cap.kind == CapabilityType::PageTable {
+                        let key = (address_space, address >> (12 + 9 * cap.radix), cap.radix);
+                        if fake.tables.contains_key(&key) {
+                            return Err(CapabilityError::IllegalOperation);
+                        }
+                        fake.tables.insert(key, object);
+                    }
+                }
+                Ok(())
+            })
         }
-        pub fn get_unset_depth(_: usize, _: usize, _: usize) -> Result<usize, CapabilityError> {
-            Ok(0)
+        pub fn get_unset_depth(
+            address_space: usize,
+            address: usize,
+            _: usize,
+        ) -> Result<usize, CapabilityError> {
+            FAKE.with_borrow(|fake| {
+                for depth in (1..=3).rev() {
+                    let key = (address_space, address >> (12 + 9 * depth), depth);
+                    let Some(table) = fake.tables.get(&key) else {
+                        return Ok(depth);
+                    };
+                    assert_eq!(fake.caps[table].kind, CapabilityType::PageTable);
+                }
+                Ok(0)
+            })
         }
     }
 }
@@ -404,6 +433,105 @@ fn directory_and_metadata_pools_grow_beyond_old_fixed_limit() {
 }
 
 #[test]
+fn process_arenas_grow_past_bootstrap_pool_and_reuse_root_slots() {
+    let (mut memory, _) = boot(33, true);
+    let before = memory.physical_memory_info().unwrap().free_pages;
+    let mut descriptors = Vec::new();
+    for slot in 0..100 {
+        let descriptor = memory.ensure_process_arena(slot).unwrap();
+        descriptors.push(descriptor);
+        let start = FAKE.with(|fake| fake.borrow().caps[&descriptor].cursor);
+        assert!(memory.allocate_physical_at(start, 4096, false).is_err());
+        assert!(memory
+            .ensure_alpha_frame_at_physical_index(start >> 12)
+            .is_err());
+        // Mix large arenas with frame-directory nodes in the refillable pool.
+        map(&mut memory, 0x200000000 + slot * 0x1000000, false);
+    }
+    assert!(memory.physical_memory_info().unwrap().free_pages < before);
+    let after = memory.physical_memory_info().unwrap().free_pages;
+    for (slot, descriptor) in descriptors.into_iter().enumerate() {
+        memory.reset_process_arena(slot).unwrap();
+        assert_eq!(memory.ensure_process_arena(slot).unwrap(), descriptor);
+    }
+    assert_eq!(memory.physical_memory_info().unwrap().free_pages, after);
+}
+
+#[test]
+fn large_process_frame_metadata_grows_lazily_and_reuses_its_backing_on_reap() {
+    let (mut memory, _) = boot(33, true);
+    let primary = memory.ensure_process_arena(10).unwrap();
+    let directory = make_root_slot_descriptor(12, 2000);
+    arch::generic::convert(
+        memory.kernel_object_generic(),
+        CapabilityType::Node,
+        10,
+        1,
+        0,
+        2000,
+    )
+    .unwrap();
+    let mut expected = Vec::new();
+    let mut plateau = None;
+    for lifetime in 0..20 {
+        for chunk in 0..100 {
+            let source = memory.process_frame_arena(10, chunk, 9).unwrap();
+            if chunk < 16 {
+                assert_eq!(source, primary);
+            } else {
+                assert_ne!(source, primary);
+            }
+            arch::generic::convert(source, CapabilityType::Node, 9, 1, directory, chunk).unwrap();
+            let descriptor = make_child_slot_descriptor(directory, 10, chunk);
+            let address = FAKE.with_borrow(|fake| fake.caps[&descriptor].end);
+            if lifetime == 0 {
+                expected.push(address);
+            } else {
+                assert_eq!(address, expected[chunk]);
+            }
+        }
+        let free = memory.physical_memory_info().unwrap().free_pages;
+        assert_eq!(
+            *plateau.get_or_insert(free),
+            free,
+            "metadata RAM leaked across root-slot reuse"
+        );
+        memory.reset_process_arena(10).unwrap();
+    }
+    assert!(memory.process_frame_arena(10, 0, usize::MAX).is_err());
+}
+
+#[test]
+fn process_frame_metadata_revoke_keeps_other_processes_alive_and_reports_failure() {
+    let (mut memory, _) = boot(33, true);
+    memory.ensure_process_arena(10).unwrap();
+    memory.ensure_process_arena(11).unwrap();
+    let source = memory.process_frame_arena(10, 16, 9).unwrap();
+    let peer = memory.process_frame_arena(11, 16, 9).unwrap();
+    assert_ne!(source, peer);
+    let directory = make_root_slot_descriptor(12, 2000);
+    arch::generic::convert(
+        memory.kernel_object_generic(),
+        CapabilityType::Node,
+        10,
+        1,
+        0,
+        2000,
+    )
+    .unwrap();
+    arch::generic::convert(peer, CapabilityType::Node, 9, 1, directory, 0).unwrap();
+    let node = make_child_slot_descriptor(directory, 10, 0);
+    memory.reset_process_arena(10).unwrap();
+    FAKE.with_borrow(|fake| assert!(fake.caps.contains_key(&node)));
+    FAKE.with_borrow_mut(|fake| fake.fail_revoke = true);
+    assert!(memory.reset_process_arena(11).is_err());
+    FAKE.with_borrow(|fake| assert!(fake.caps.contains_key(&node)));
+    FAKE.with_borrow_mut(|fake| fake.fail_revoke = false);
+    memory.reset_process_arena(11).unwrap();
+    FAKE.with_borrow(|fake| assert!(!fake.caps.contains_key(&node)));
+}
+
+#[test]
 fn fragmented_unaligned_sources_preserve_every_page() {
     let (mut memory, _) = boot(33, true);
     // The root's remainder starts at 1.5 MiB, not on an 8-MiB boundary.
@@ -503,6 +631,122 @@ fn mapping_flags_use_the_existing_attribute_word_and_keep_default_normal() {
     }
     memory.map_frame_strict(1, 2, 0x3000, &mut vm).unwrap();
     FAKE.with(|fake| assert_eq!(fake.borrow().map_attributes, [7, 7, 0x17, 0x27, 7]));
+}
+
+#[derive(Default)]
+struct PageTableVm {
+    slots: Vec<usize>,
+}
+
+impl nanami_core::vm_space::VmTracker for PageTableVm {
+    fn page_tables_ready(&self, _: usize) -> bool {
+        false
+    }
+    fn record_frame(&mut self, _: usize, _: usize) -> Result<(), ()> {
+        Ok(())
+    }
+    fn record_page_table(&mut self, _: usize, slot: usize) -> Result<(), ()> {
+        self.slots.push(slot);
+        Ok(())
+    }
+}
+
+fn destroy_test_address_space(
+    memory: &mut MemoryManager,
+    address_space: usize,
+) -> CapabilityResult {
+    // Model destroying the stopped PCB/root's last address-space alias first.
+    FAKE.with_borrow_mut(|fake| {
+        fake.tables
+            .retain(|&(owner, _, _), _| owner != address_space)
+    });
+    memory.release_page_tables(address_space)
+}
+
+#[test]
+fn page_tables_reuse_backing_pages_and_slots_across_process_exit_and_exec() {
+    let (mut memory, _) = boot(33, true);
+    let mut live = PageTableVm::default();
+    memory.ensure_page_tables(1, 0x1000, &mut live).unwrap();
+    let permanent: Vec<_> = FAKE.with_borrow(|fake| fake.tables.values().copied().collect());
+    let mut plateau = None;
+    // 2,000 address-space lifetimes and 8,000 tables exceed the old 1,024
+    // lifetime allocations. Reuse both identical (exec) and new descriptors.
+    for cycle in 0..1000 {
+        for address_space in [2, cycle + 3] {
+            let mut vm = PageTableVm::default();
+            memory
+                .ensure_page_tables(address_space, 0x1000, &mut vm)
+                .unwrap();
+            memory
+                .ensure_page_tables(address_space, 0x40_0000, &mut vm)
+                .unwrap();
+            assert_eq!(vm.slots.len(), 4);
+            destroy_test_address_space(&mut memory, address_space).unwrap();
+        }
+        let cursor = FAKE.with_borrow(|fake| fake.caps[&memory.kernel_object_generic()].cursor);
+        assert_eq!(*plateau.get_or_insert(cursor), cursor, "backing RAM leaked");
+        memory.ensure_page_tables(1, 0x1000, &mut live).unwrap();
+        FAKE.with_borrow(|fake| {
+            assert_eq!(fake.tables.values().copied().collect::<Vec<_>>(), permanent);
+        });
+    }
+}
+
+#[test]
+fn exhausted_page_table_pool_recovers_without_reclaiming_live_tables() {
+    let (mut memory, _) = boot(33, true);
+    memory
+        .ensure_page_tables(1, 0, &mut PageTableVm::default())
+        .unwrap();
+    let mut vm = PageTableVm::default();
+    for region in 0..1018 {
+        memory.ensure_page_tables(2, region << 21, &mut vm).unwrap();
+    }
+    assert_eq!(
+        memory.ensure_page_tables(2, 1018 << 21, &mut vm),
+        Err(CapabilityError::InvalidArgument)
+    );
+    destroy_test_address_space(&mut memory, 2).unwrap();
+    memory
+        .ensure_page_tables(3, 0, &mut PageTableVm::default())
+        .unwrap();
+    memory
+        .ensure_page_tables(1, 0, &mut PageTableVm::default())
+        .unwrap();
+}
+
+#[test]
+fn page_table_conversion_and_revoke_failures_do_not_recycle_owned_pages() {
+    let (mut memory, _) = boot(33, true);
+    FAKE.with_borrow_mut(|fake| fake.fail_kind = Some((CapabilityType::PageTable, 1)));
+    assert_eq!(
+        memory.ensure_page_tables(1, 0, &mut PageTableVm::default()),
+        Err(CapabilityError::Fatal)
+    );
+    FAKE.with_borrow_mut(|fake| fake.fail_revoke = true);
+    assert!(destroy_test_address_space(&mut memory, 1).is_err());
+    let mut vm = PageTableVm::default();
+    memory.ensure_page_tables(2, 0, &mut vm).unwrap();
+    assert!(vm.slots.iter().all(|&slot| slot >= 2));
+    FAKE.with_borrow_mut(|fake| fake.fail_revoke = false);
+    destroy_test_address_space(&mut memory, 1).unwrap();
+    // The other, still-live address space must not have lost any tables.
+    memory.ensure_page_tables(2, 0, &mut vm).unwrap();
+    destroy_test_address_space(&mut memory, 2).unwrap();
+}
+
+#[test]
+fn bootstrap_page_tables_remain_permanent_without_heap_owned_metadata() {
+    let (mut memory, _) = boot(33, false);
+    let mut vm = PageTableVm::default();
+    memory.ensure_page_tables(1, 0, &mut vm).unwrap();
+    // Bootstrap Alpha tables are not owned by a process teardown path.
+    memory.release_page_tables(1).unwrap();
+    assert_eq!(vm.slots.len(), 3);
+    memory.initialize_physical_allocator().unwrap();
+    memory.ensure_page_tables(1, 0, &mut vm).unwrap();
+    assert_eq!(vm.slots.len(), 3);
 }
 
 #[test]

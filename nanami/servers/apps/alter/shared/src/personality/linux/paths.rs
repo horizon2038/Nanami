@@ -189,7 +189,9 @@ pub(super) fn path_has_component_prefix(base: Word, len: Word, prefix: &[u8]) ->
 pub(super) fn current_virtual_node(runtime: &Runtime, pid: Word, len: Word) -> Option<VirtualNode> {
     let path =
         unsafe { ::core::slice::from_raw_parts(runtime.posix_shm as *const u8, len as usize) };
-    virtual_fs::lookup(path, graphics_enabled(runtime, pid))
+    super::procfs::lookup(runtime, pid, path)
+        .and_then(super::procfs::node)
+        .or_else(|| virtual_fs::lookup(path, graphics_enabled(runtime, pid)))
 }
 
 pub(super) fn guest_root_for_process(runtime: &Runtime, pid: Word) -> Result<&[u8], i32> {
@@ -334,7 +336,9 @@ pub(super) fn path_is_absolute(base: Word, len: Word) -> bool {
 }
 
 pub(super) fn is_at_fdcwd(fd: Word) -> bool {
-    fd == LINUX_AT_FDCWD
+    // Linux dirfd is a signed 32-bit int. libc may zero-extend its register
+    // argument (e.g. x86-64 movl), while raw callers may sign-extend it.
+    fd as i32 == LINUX_AT_FDCWD as i32
 }
 
 pub(super) fn basename_in_bytes(bytes: &[u8], len: usize) -> (usize, usize) {

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Dock commands with arguments/log files; applications remain upstream ELFs.
+export DISPLAY=unix/:0
+application=$1
+if [ -z "$application" ]; then
+    application=${0##*/}
+fi
+case "$application" in
+    terminal|Terminal) exec /usr/local/bin/aterm -fn 9x15 -title Terminal -e /bin/busybox ash -i ;;
+    files|Files) exec /usr/local/bin/xfe /root ;;
+    editor|Editor) exec /usr/local/bin/editor ;;
+    images|Images) exec /usr/local/bin/flpicsee /usr/local/share/pixmaps/logo.png ;;
+    paint|Paint) exec /usr/local/bin/mtpaint ;;
+    calculator|Calculator)
+        export GDK_BACKEND=x11 NO_AT_BRIDGE=1 GSETTINGS_BACKEND=memory
+        exec /usr/local/bin/galculator
+        ;;
+    clock|Clock) exec /usr/local/bin/flit ;;
+    information|Information)
+        exec /usr/local/bin/aterm -fn 9x15 -geometry 70x16+30+45 \
+            -title 'Tiny Core information' -e /bin/busybox sh -c \
+            'cat /etc/os-release; uname -a; exec /bin/busybox ash -i'
+        ;;
+    exit)
+        read -r wm < /tmp/desktop-wm.pid || exit 1
+        : > /tmp/desktop-exit
+        exec /bin/busybox kill -TERM "$wm"
+        ;;
+    *) printf 'Unknown desktop application: %s\n' "$application" >&2; exit 2 ;;
+esac

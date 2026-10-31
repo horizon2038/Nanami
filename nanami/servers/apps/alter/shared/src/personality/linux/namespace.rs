@@ -8,7 +8,7 @@ const PATH: Word = DESCRIPTOR + 512;
 const TARGET: Word = DESCRIPTOR + 1024;
 const OUTPUT: Word = DESCRIPTOR + 8192;
 
-fn path_error(error: PathError) -> i32 {
+pub(super) fn path_error(error: PathError) -> i32 {
     match error {
         PathError::Transport(error) => map_request_error(error),
         PathError::Filesystem(code) => match code {
@@ -20,6 +20,7 @@ fn path_error(error: PathError) -> i32 {
             VFS_PATH_ERROR_IO => EIO,
             VFS_PATH_ERROR_NO_SPACE => ENOSPC,
             VFS_PATH_ERROR_READ_ONLY => EROFS,
+            VFS_PATH_ERROR_UNSUPPORTED => EOPNOTSUPP,
             _ => EINVAL,
         },
     }
@@ -122,6 +123,61 @@ pub(super) fn resolve_at(
     input_bytes: Word,
     follow: bool,
 ) -> Result<Word, i32> {
+    Ok(resolve_at_with_metadata(runtime, pid, dirfd, input_bytes, follow, false)?.bytes)
+}
+
+pub(super) struct ResolvedPath {
+    pub bytes: Word,
+    pub metadata: Option<PathMetadata>,
+}
+
+pub(super) fn decode_metadata(
+    value: PathMetadata,
+) -> Result<Option<(Word, Word, Word, Word, Word)>, i32> {
+    if value.inode == 0 {
+        if value.size != 0 || value.mode != 0 || value.file_type != 0 {
+            return Err(EIO);
+        }
+        return Ok(None);
+    }
+    if value.inode > u32::MAX as Word || value.mode > u16::MAX as Word {
+        return Err(EIO);
+    }
+    let kind = match value.file_type {
+        VFS_FILE_TYPE_REGULAR => posix::POSIX_FILE_TYPE_REGULAR,
+        VFS_FILE_TYPE_DIRECTORY => posix::POSIX_FILE_TYPE_DIRECTORY,
+        VFS_FILE_TYPE_SOCKET => posix::POSIX_FILE_TYPE_SOCKET,
+        VFS_FILE_TYPE_SYMLINK => posix::POSIX_FILE_TYPE_SYMLINK,
+        _ => return Err(EIO),
+    };
+    Ok(Some((
+        value.inode | (value.mode << 32),
+        value.size,
+        kind,
+        0,
+        0,
+    )))
+}
+
+pub(super) fn stat_at(
+    runtime: &mut Runtime,
+    pid: Word,
+    dirfd: Word,
+    input_bytes: Word,
+    follow: bool,
+) -> Result<(Word, Word, Word, Word, Word), i32> {
+    let resolved = resolve_at_with_metadata(runtime, pid, dirfd, input_bytes, follow, true)?;
+    super::metadata::stat_resolved_path(runtime, pid, resolved)
+}
+
+fn resolve_at_with_metadata(
+    runtime: &mut Runtime,
+    pid: Word,
+    dirfd: Word,
+    input_bytes: Word,
+    follow: bool,
+    with_metadata: bool,
+) -> Result<ResolvedPath, i32> {
     if input_bytes == 0 {
         return Err(ENOENT);
     }
@@ -131,6 +187,7 @@ pub(super) fn resolve_at(
     let mut path = [0u8; LINUX_CWD_MAX];
     let input = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, input_bytes) };
     let mut directory = VFS_PATH_DIRECTORY_ROOT;
+    let mut proc_directory = [0u8; 64];
     let (prefix, prefix_bytes) = if input[0] == b'/' {
         (&[][..], 0)
     } else if is_at_fdcwd(dirfd) {
@@ -145,8 +202,15 @@ pub(super) fn resolve_at(
             if file.kind != LinuxFileKind::VirtualDirectory {
                 return Err(ENOTDIR);
             }
-            let node = VirtualNode::from_id(file.resource).ok_or(ENOTDIR)?;
-            let prefix = virtual_directory(node).ok_or(ENOTDIR)?;
+            super::procfs::validate(runtime, pid, file.resource)?;
+            let node = super::procfs::node(file.resource).ok_or(ENOTDIR)?;
+            let prefix = if let Some(len) =
+                super::procfs::directory_path(file.resource, &mut proc_directory)
+            {
+                &proc_directory[..len]
+            } else {
+                virtual_directory(node).ok_or(ENOTDIR)?
+            };
             (prefix, prefix.len())
         }
     };
@@ -167,12 +231,33 @@ pub(super) fn resolve_at(
         }
         let bytes = resolve_lexical_shm_path(runtime, pid, total)?;
         if is_linux_virtual_path(runtime.posix_shm, bytes) {
-            return Ok(bytes);
+            return Ok(ResolvedPath {
+                bytes,
+                metadata: None,
+            });
         }
-        return resolve_at(runtime, pid, LINUX_AT_FDCWD, bytes, follow);
+        return resolve_at_with_metadata(
+            runtime,
+            pid,
+            LINUX_AT_FDCWD,
+            bytes,
+            follow,
+            with_metadata,
+        );
     }
-    let flags = VFS_PATH_ALLOW_MISSING | if follow { VFS_PATH_FOLLOW_FINAL } else { 0 };
-    let (bytes, _) = request_path(
+    let mut flags = VFS_PATH_ALLOW_MISSING;
+    if follow {
+        flags |= VFS_PATH_FOLLOW_FINAL;
+    }
+    let metadata_bytes = if with_metadata {
+        core::mem::size_of::<PathMetadata>()
+    } else {
+        0
+    };
+    if with_metadata {
+        flags |= VFS_PATH_WITH_METADATA;
+    }
+    let (output_bytes, file_type) = request_path(
         runtime,
         pid,
         VFS_PATH_RESOLVE,
@@ -180,12 +265,33 @@ pub(super) fn resolve_at(
         &path[..total],
         &[],
         flags,
-        LINUX_CWD_MAX - 1,
+        metadata_bytes + LINUX_CWD_MAX - 1,
     )?;
+    if output_bytes <= metadata_bytes {
+        return Err(EIO);
+    }
+    if with_metadata && unsafe { *((runtime.posix_shm + metadata_bytes) as *const u8) } != b'/' {
+        return Err(EIO);
+    }
+    let metadata = if with_metadata {
+        let value = unsafe { core::ptr::read_unaligned(runtime.posix_shm as *const PathMetadata) };
+        if value.file_type != file_type {
+            return Err(EIO);
+        }
+        Some(value)
+    } else {
+        None
+    };
+    let bytes = output_bytes - metadata_bytes;
     unsafe {
+        core::ptr::copy(
+            (runtime.posix_shm + metadata_bytes) as *const u8,
+            runtime.posix_shm as *mut u8,
+            bytes,
+        );
         *((runtime.posix_shm + bytes) as *mut u8) = 0;
     }
-    Ok(bytes)
+    Ok(ResolvedPath { bytes, metadata })
 }
 
 pub(super) fn fchdir(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {

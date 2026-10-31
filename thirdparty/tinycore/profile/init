@@ -1,0 +1,50 @@
+#!/bin/sh
+# Tiny Core userspace boot for Alter/Linux; not a Linux kernel initramfs init.
+# Alter supplies /dev, /proc and /sys. Do not remount root, load Linux modules,
+# start udev, wait for zram/RTC, or pretend this process has Linux PID 1.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root USER=root LOGNAME=root LANG=C LC_ALL=C
+export TERM="${TERM:-nanami-256color}"
+umask 022
+cd / || exit 1
+. /etc/init.d/rcS || exit 1
+
+if [ "$1" = "--desktop" ]; then
+    exec /bin/busybox sh /usr/local/bin/nanami-desktop
+fi
+
+if [ "$1" = "--smoke" ]; then
+    set -e
+    test -L /bin/sh
+    test -L /sbin/init
+    test -r /lib/ld-linux-x86-64.so.2
+    /bin/busybox sh -c 'test "$HOME" = /root && test "$(pwd)" = /'
+    # Stock glibc opendir uses openat with a zero-extended AT_FDCWD. Listing
+    # one explicit file with ls -l does not exercise this directory path.
+    ls . > /tmp/tinycore-root-list
+    test -s /tmp/tinycore-root-list
+    ls /bin > /tmp/tinycore-bin-list
+    test -s /tmp/tinycore-bin-list
+    cd /tmp
+    ls . > /tmp/tinycore-tmp-list
+    cd /
+    printf 'tinycore-write-ok\n' > /tmp/tinycore-write
+    chmod 640 /tmp/tinycore-write
+    case "$(ls -l /tmp/tinycore-write)" in
+        -rw-r-----*) ;;
+        *) exit 1 ;;
+    esac
+    test "$(cat /tmp/tinycore-write)" = tinycore-write-ok
+    test "$(printf 'pipe-ok\n' | cat)" = pipe-ok
+    /bin/busybox true &
+    wait "$!"
+    ps > /tmp/tinycore-ps
+    test -s /tmp/tinycore-ps
+    printf 'tinycore-init-ok\n' > /tmp/tinycore-init-ok
+    printf 'tinycore-init-ok\n'
+    exit 0
+fi
+
+printf '\nTiny Core on Alter/Linux. Type exit to return to Nanami.\n'
+export PS1='tinycore:\w# '
+exec /bin/busybox ash -i

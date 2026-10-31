@@ -19,10 +19,12 @@ mod mappings;
 pub use mapping_table::MappingTable;
 #[path = "state/poll_objects.rs"]
 pub mod poll_objects;
-#[path = "state/pty.rs"]
-pub mod pty;
+#[path = "state/process_index.rs"]
+mod process_index;
 #[path = "state/processes.rs"]
 mod processes;
+#[path = "state/pty.rs"]
+pub mod pty;
 #[path = "state/readiness.rs"]
 pub mod readiness;
 #[path = "state/signals.rs"]
@@ -40,9 +42,8 @@ use nanami_runtime::{RequestError, Word};
 
 use super::framebuffer_size::FramebufferSize;
 use crate::abi::{
-    ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PATH_MAX, ALTER_PROCESS_MAPPING_MAX,
+    ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PROCESS_MAPPING_MAX,
 };
-use crate::elf::ElfMetadata;
 use crate::process::LinuxSyscallContext;
 
 pub const LINUX_FD_MAX: usize = 64;
@@ -52,7 +53,6 @@ pub const LINUX_PIPE_MAX: usize = 16;
 pub const LINUX_PIPE_BYTES: usize = 4096;
 pub const ALTER_GRAPHICS_SESSION_MAX: usize = 4;
 pub const ALTER_EVDEV_QUEUE_CAPACITY: usize = 128;
-const FORK_IMAGE_CACHE_ENTRIES: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum OsPersonality {
@@ -282,15 +282,6 @@ impl LinuxPipe {
 }
 
 #[derive(Clone, Copy)]
-pub struct CachedElfImage {
-    pub path: [u8; ALTER_PATH_MAX],
-    pub path_len: usize,
-    pub address: Word,
-    pub size: Word,
-    pub metadata: ElfMetadata,
-}
-
-#[derive(Clone, Copy)]
 pub struct ProcessMapping {
     pub base: Word,
     pub size: Word,
@@ -313,6 +304,11 @@ pub struct ManagedProcess {
     pub fs_group: Word,
     pub umask: Word,
     pub parent_pid: Word,
+    // Guest argv table survives fork; exec replaces it. No copied command-line buffer.
+    pub argument_vector: Word,
+    pub argument_count: Word,
+    // Linux USER_HZ (100), measured from the timer service's monotonic epoch.
+    pub started_at: Word,
     pub job: ProcessJobControl,
     pub owner_pid: Word,
     pub rootfs: super::context::RootfsContext,
@@ -338,6 +334,9 @@ pub struct ManagedProcess {
     pub personality: OsPersonality,
     pub image_name: [u8; ALTER_IMAGE_NAME_MAX],
     pub image_name_len: usize,
+    /// Linux task name, independent of the executable used by fork/exec.
+    pub comm: [u8; 16],
+    pub no_new_privs: bool,
     pub cwd: [u8; LINUX_CWD_MAX],
     pub cwd_len: usize,
     pub files: FileTable,
@@ -381,6 +380,9 @@ impl ManagedProcess {
         fs_group: 0,
         umask: 0o022,
         parent_pid: 0,
+        argument_vector: 0,
+        argument_count: 0,
+        started_at: 0,
         job: ProcessJobControl::EMPTY,
         owner_pid: 0,
         rootfs: super::context::RootfsContext::DEFAULT,
@@ -405,6 +407,8 @@ impl ManagedProcess {
         personality: OsPersonality::Linux,
         image_name: [0; ALTER_IMAGE_NAME_MAX],
         image_name_len: 0,
+        comm: [0; 16],
+        no_new_privs: false,
         cwd: [0; LINUX_CWD_MAX],
         cwd_len: 0,
         files: FileTable::EMPTY,
@@ -436,6 +440,7 @@ impl ManagedProcess {
 
 #[derive(Clone, Copy)]
 pub struct GraphicsSession {
+    pub console: super::console::Console,
     pub active: bool,
     pub root_pid: Word,
     pub honoka_port: Word,
@@ -463,6 +468,7 @@ pub struct GraphicsSession {
 
 impl GraphicsSession {
     pub const EMPTY: Self = Self {
+        console: super::console::Console::EMPTY,
         active: false,
         root_pid: 0,
         honoka_port: 0,
@@ -539,13 +545,14 @@ pub struct Runtime {
     pub exec_snapshot_buffer_size: Word,
     pub exec_stack_buffer: Word,
     pub exec_stack_buffer_size: Word,
-    pub fork_image_cache: [Option<CachedElfImage>; FORK_IMAGE_CACHE_ENTRIES],
+    pub image_cache: super::image_cache::ImageCache,
     pub trapped_faults: Word,
     // False for the normal non-strace case. Once enabled it remains true so
     // hot syscall paths can skip all trace-related process-table scans.
     pub trace_ever_enabled: bool,
     pub signals_pending: bool,
     pub managed: [ManagedProcess; ALTER_MANAGED_PROCESS_MAX],
+    process_index: process_index::ProcessIndex,
     pub pipes: [LinuxPipe; LINUX_PIPE_MAX],
     pub poll_objects: poll_objects::Objects,
     pub tasks: task_sync::Tasks,
@@ -613,11 +620,12 @@ impl Runtime {
             exec_snapshot_buffer_size: 0,
             exec_stack_buffer: 0,
             exec_stack_buffer_size: 0,
-            fork_image_cache: [None; FORK_IMAGE_CACHE_ENTRIES],
+            image_cache: super::image_cache::ImageCache::new(),
             trapped_faults: 0,
             trace_ever_enabled: false,
             signals_pending: false,
             managed: [ManagedProcess::EMPTY; ALTER_MANAGED_PROCESS_MAX],
+            process_index: process_index::ProcessIndex::new(),
             pipes: [LinuxPipe::EMPTY; LINUX_PIPE_MAX],
             poll_objects: poll_objects::Objects::new(),
             tasks: task_sync::Tasks::new(),

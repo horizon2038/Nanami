@@ -274,6 +274,9 @@ pub(super) fn sys_ioctl(
             return super::pty::ioctl(runtime, pid, file, request, argument)
         }
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            if super::console::device(file).is_some() {
+                return super::console::ioctl(runtime, pid, file, request, argument);
+            }
             return sys_evdev_ioctl(runtime, pid, file, request, argument);
         }
         LinuxFileKind::Framebuffer => {

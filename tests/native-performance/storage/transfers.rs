@@ -1,6 +1,24 @@
 use super::*;
 
 #[test]
+fn pinned_read_pages_receive_each_successful_write_and_growth_is_rejected() {
+    let mut runtime = runtime(vec![100, 101]);
+    runtime.mapped_pages.pinned = true;
+    let mut inode = Ext2Inode { size: (2 * BLOCK_SIZE) as u32 };
+    let bytes = [0x38; 64];
+    assert_eq!(write(&mut runtime, &mut inode, BLOCK_SIZE - 24, &bytes), Ok(64));
+    let updates = runtime.mapped_pages.updates.borrow();
+    assert_eq!(updates.len(), 2);
+    assert_eq!((updates[0].1, updates[0].2.as_slice()), (BLOCK_SIZE - 24, &bytes[..24]));
+    assert_eq!((updates[1].1, updates[1].2.as_slice()), (BLOCK_SIZE, &bytes[24..]));
+    drop(updates);
+    assert_eq!(write(&mut runtime, &mut inode, 2 * BLOCK_SIZE, &bytes), Err(vfs::VFS_RESPONSE_MAPPING_BUSY));
+    assert_eq!(write(&mut runtime, &mut inode, 3 * BLOCK_SIZE, &[]), Ok(0));
+    assert_eq!(inode.size, (2 * BLOCK_SIZE) as u32);
+    assert_eq!(runtime.mapped_pages.updates.borrow().len(), 2);
+}
+
+#[test]
 fn sparse_reads_zero_holes_and_continue_to_later_data() {
     let mut runtime = runtime(vec![0, 100, 0, 101, 0]);
     let mut output = vec![0xaau8; 5 * BLOCK_SIZE];

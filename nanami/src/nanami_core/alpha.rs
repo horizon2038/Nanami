@@ -6,6 +6,8 @@ mod domain_manifest;
 mod domains;
 mod mapping_protection;
 mod memory_copy;
+mod memory_init;
+mod memory_pages;
 mod memory_requests;
 mod mmio;
 mod process_policy;
@@ -26,6 +28,7 @@ mod arch_impl;
 #[path = "alpha/arch/aarch64.rs"]
 mod arch_impl;
 
+use self::memory_pages::PageSource;
 use self::process_policy::{ComponentSpec, ProcessPolicies, ProcessPolicy};
 use self::support::*;
 
@@ -99,8 +102,6 @@ const USER_STACK_PAGES: usize = 64;
 const USER_ANONYMOUS_MAP_BASE: usize = 0x1000_0000;
 const USER_HEAP_GUARD_PAGES: usize = 8;
 const USER_HEAP_LIMIT: usize = 0x7000_0000;
-const TEMP_MAP_BASE: usize = 0x7000_0000;
-const TEMP_MAP_STRIDE: usize = 0x0020_0000;
 const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
 const PROCESS_COPY_TEMP_WINDOW_SIZE: usize = 0x0100_0000;
 const PROCESS_ZERO_TEMP_BASE: usize = PROCESS_COPY_TEMP_BASE + PROCESS_COPY_TEMP_WINDOW_SIZE;
@@ -126,7 +127,7 @@ const FRAMEBUFFER_INFORMATION_REGION: usize = 0;
 const FRAMEBUFFER_INFORMATION_GEOMETRY: usize = 1;
 const FRAMEBUFFER_INFORMATION_FORMAT: usize = 2;
 const FRAMEBUFFER_INFORMATION_COLOR_AND_ID: usize = 3;
-const PROCESS_ROOT_RESERVED_SLOTS: [usize; 25] = [
+const PROCESS_ROOT_RESERVED_SLOTS: [usize; 29] = [
     1024,
     1025,
     1026,
@@ -147,6 +148,10 @@ const PROCESS_ROOT_RESERVED_SLOTS: [usize; 25] = [
     1201,
     1202,
     1203, // page-table pool node candidates
+    1204,
+    1205,
+    1206,
+    1207, // page-table Generic owner node candidates
     1210,
     1211,
     1212,
@@ -170,6 +175,7 @@ pub struct Alpha {
     platform_rsdp_address: usize,
     runtime_stack_top: usize,
     copy_window: memory_copy::CopyWindow,
+    initialization_window: memory_init::InitializationWindow,
     launch_capabilities: nanami_uapi::alpha::SelfCapabilities,
     platform_information: nanami_uapi::alpha::PlatformInformation,
     domain_id: usize,
@@ -330,6 +336,7 @@ impl Alpha {
             platform_rsdp_address: environment.platform.rsdp_address,
             runtime_stack_top: 0,
             copy_window: memory_copy::CopyWindow::new(),
+            initialization_window: memory_init::InitializationWindow::new(),
             launch_capabilities: environment.capabilities,
             platform_information: environment.platform,
             domain_id: environment.domain_id,
@@ -708,6 +715,9 @@ impl Alpha {
             }
             nanami_uapi::os::OS_REQUEST_PROCESS_THREAD_CREATE => {
                 response_from_detail_result(self.handle_thread_create(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_FORK => {
+                response_from_detail_result(self.handle_raw_task_create(request, false))
             }
             OS_REQUEST_PROCESS_SPAWN_MEMORY => {
                 response_from_detail_result(self.handle_process_spawn_memory_request(request))

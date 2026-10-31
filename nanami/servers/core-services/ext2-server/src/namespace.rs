@@ -145,7 +145,12 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
         let request = unsafe {
             ptr::read_unaligned((session.shm_local + message.arg0) as *const PathRequest)
         };
-        if request.flags & !(VFS_PATH_FOLLOW_FINAL | VFS_PATH_ALLOW_MISSING) != 0 {
+        if request.flags
+            & !(VFS_PATH_FOLLOW_FINAL | VFS_PATH_ALLOW_MISSING | VFS_PATH_WITH_METADATA)
+            != 0
+            || (request.flags & VFS_PATH_WITH_METADATA != 0
+                && request.operation != VFS_PATH_RESOLVE)
+        {
             return Err(Error::Invalid);
         }
         let root_path = input(session, request.root_offset, request.root_bytes)?;
@@ -187,7 +192,12 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
         )?;
         match request.operation {
             VFS_PATH_RESOLVE => {
-                if resolved.path.len() > request.output_bytes {
+                let metadata_bytes = if request.flags & VFS_PATH_WITH_METADATA != 0 {
+                    core::mem::size_of::<PathMetadata>()
+                } else {
+                    0
+                };
+                if metadata_bytes + resolved.path.len() > request.output_bytes {
                     return Err(Error::TooLong);
                 }
                 let file_type = resolved.node.map_or(0, |node| match node.kind {
@@ -196,7 +206,36 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                     Kind::Symlink => VFS_FILE_TYPE_SYMLINK,
                     Kind::Socket => VFS_FILE_TYPE_SOCKET,
                 });
-                Ok((output(session, request, &resolved.path)?, file_type))
+                if metadata_bytes != 0 {
+                    let metadata = match resolved.node {
+                        Some(node) => {
+                            let inode = read_inode(runtime, node.inode).map_err(|_| Error::Io)?;
+                            PathMetadata {
+                                inode: node.inode as Word,
+                                size: inode.size as Word,
+                                mode: inode.mode as Word,
+                                file_type,
+                            }
+                        }
+                        None => PathMetadata::default(),
+                    };
+                    let bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            &metadata as *const PathMetadata as *const u8,
+                            metadata_bytes,
+                        )
+                    };
+                    output(session, request, bytes)?;
+                }
+                let path_output = PathRequest {
+                    output_offset: request.output_offset + metadata_bytes,
+                    output_bytes: request.output_bytes - metadata_bytes,
+                    ..request
+                };
+                Ok((
+                    metadata_bytes + output(session, path_output, &resolved.path)?,
+                    file_type,
+                ))
             }
             VFS_PATH_READLINK => {
                 let inode = resolved.node.ok_or(Error::Missing)?.inode;
@@ -209,6 +248,14 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                     number as Word,
                     (inode.size as Word) | (file_kind(inode.mode) << VFS_STAT_TYPE_SHIFT),
                 ))
+            }
+            VFS_PATH_CHMOD => {
+                let mode = input(session, request.target_offset, request.target_bytes)?;
+                let mode =
+                    Word::from_le_bytes(mode.as_slice().try_into().map_err(|_| Error::Invalid)?);
+                let number = resolved.node.ok_or(Error::Missing)?.inode;
+                chmod_inode(runtime, number, mode)?;
+                Ok((0, 0))
             }
             VFS_PATH_SYMLINK => {
                 if resolved.node.is_some() {
@@ -271,6 +318,39 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
     }
 }
 
+fn chmod_inode(runtime: &mut Ext2Runtime, number: u32, mode: Word) -> Result<(), Error> {
+    if mode & !0o7777 != 0 {
+        return Err(Error::Invalid);
+    }
+    writeback::check_writable(runtime).map_err(|_| Error::ReadOnly)?;
+    let mut inode = read_inode(runtime, number).map_err(|_| Error::Io)?;
+    if kind(inode) == Kind::Symlink {
+        return Err(Error::Unsupported);
+    }
+    inode.mode = (inode.mode & EXT2_S_IFMT) | mode as u16;
+    // write_inode updates inode and open-handle caches and dirties the existing
+    // writeback cache. Existing fsync/sync/periodic flush persists the metadata.
+    write_inode(runtime, number, inode).map_err(|_| Error::Io)
+}
+
+pub(super) fn handle_fchmod(
+    request: ServiceRequest,
+    runtime: &mut Ext2Runtime,
+) -> (Word, Word, Word) {
+    let Some(handle) = runtime
+        .handles
+        .get(request.arg0)
+        .copied()
+        .filter(|handle| handle.active && handle.owner_pid == request.identifier)
+    else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    match chmod_inode(runtime, handle.inode, request.arg1) {
+        Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
+        Err(error) => (VFS_PATH_RESPONSE_ERROR, error_code(error), 0),
+    }
+}
+
 fn error_code(error: Error) -> Word {
     match error {
         Error::Invalid => VFS_PATH_ERROR_INVALID,
@@ -282,5 +362,6 @@ fn error_code(error: Error) -> Word {
         Error::Io => VFS_PATH_ERROR_IO,
         Error::NoSpace => VFS_PATH_ERROR_NO_SPACE,
         Error::ReadOnly => VFS_PATH_ERROR_READ_ONLY,
+        Error::Unsupported => VFS_PATH_ERROR_UNSUPPORTED,
     }
 }

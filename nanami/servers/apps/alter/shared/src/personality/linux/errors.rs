@@ -1,5 +1,5 @@
 use super::{
-    RequestError, Word, EACCES, EADDRINUSE, EAGAIN, EEXIST, EINVAL, EIO, ENETDOWN, ENOENT, ENOSYS,
+    RequestError, Word, EACCES, EADDRINUSE, EAGAIN, EBUSY, EEXIST, EINVAL, EIO, ENETDOWN, ENOENT, ENOSYS,
 };
 
 pub(super) fn map_word(result: Result<Word, RequestError>) -> Result<Word, i32> {
@@ -16,6 +16,7 @@ pub(super) fn map_request_error(error: RequestError) -> i32 {
         RequestError::Unsupported => ENOSYS,
         RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT) => EINVAL,
         RequestError::Status(nanami_runtime::OS_RESPONSE_PERMISSION_DENIED) => EACCES,
+        RequestError::Status(nanami_client::vfs::VFS_RESPONSE_MAPPING_BUSY) => EBUSY,
         RequestError::Status(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION) => EIO,
         RequestError::Status(_) | RequestError::Transport | RequestError::Protocol => EIO,
     }

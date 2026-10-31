@@ -7,6 +7,7 @@ pub const STRING_COUNT_MAX: usize = 64;
 // Leave room for argv/envp, auxv and alignment in Alter's 16-KiB initial stack.
 pub const LAUNCH_STRING_MAX_BYTES: usize = 12 * 1024;
 pub const ANNOTATION_MAX_BYTES: usize = 8 * 1024;
+pub const GRAPHICS_ANNOTATION: &str = "io.nanami.graphics";
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -19,6 +20,12 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn graphics(&self) -> bool {
+        self.annotations
+            .get(GRAPHICS_ANNOTATION)
+            .is_some_and(|value| value == "true")
+    }
+
     /// Unsupported isolation requirements are errors, never silently ignored.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > CONFIG_MAX_BYTES {
@@ -177,6 +184,12 @@ impl Config {
                 annotations.insert(key.clone(), value.into());
             }
         }
+        if annotations
+            .get(GRAPHICS_ANNOTATION)
+            .is_some_and(|value: &String| value != "true" && value != "false")
+        {
+            return Err(Error("io.nanami.graphics must be true or false".into()));
+        }
         Ok(Self {
             root: root_path.into(),
             readonly: boolean(root, "readonly", false)?,
@@ -297,6 +310,24 @@ mod tests {
         assert_eq!(config.cwd, "/work");
         assert!(!config.readonly);
         assert_eq!(config.env, ["PATH=/bin"]);
+        assert!(!config.graphics());
+    }
+    #[test]
+    fn window_local_graphics_requires_an_explicit_valid_annotation() {
+        let mut json = minimal();
+        for (value, expected) in [("true", true), ("false", false)] {
+            json["annotations"] = serde_json::json!({GRAPHICS_ANNOTATION: value});
+            let config = Config::parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(config.graphics(), expected);
+        }
+        for value in [
+            serde_json::json!("yes"),
+            serde_json::json!(true),
+            serde_json::json!(1),
+        ] {
+            json["annotations"] = serde_json::json!({GRAPHICS_ANNOTATION: value});
+            assert!(Config::parse(&serde_json::to_vec(&json).unwrap()).is_err());
+        }
     }
     #[test]
     fn checked_in_busybox_sample_matches_the_supported_profile() {

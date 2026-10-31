@@ -1,7 +1,6 @@
 use super::{
-    honoka, input, map_request_error, Runtime, Word,
-    EINVAL, EIO, ENODEV, ENOENT, ENOMEM, ESRCH, SLOT_HONOKA_PRESENT_NOTIFICATION_BASE,
-    SLOT_HONOKA_SERVICE, SLOT_INPUT_SERVICE,
+    honoka, input, map_request_error, Runtime, Word, EINVAL, EIO, ENODEV, ENOENT, ENOMEM, ESRCH,
+    SLOT_HONOKA_PRESENT_NOTIFICATION_BASE, SLOT_HONOKA_SERVICE, SLOT_INPUT_SERVICE,
 };
 use crate::common::framebuffer_size::FramebufferSize;
 
@@ -113,11 +112,13 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
         }
     };
     if let Err(error) = honoka::honoka_attach_input_notification(port, window) {
-        let _ = nanami_runtime::request_mapping_release(input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+        let _ =
+            nanami_runtime::request_mapping_release(input_queue, input::INPUT_EVENT_QUEUE_BYTES);
         let _ = honoka::honoka_destroy_window(port, window);
         return Err(map_request_error(error));
     }
     runtime.graphics[index] = crate::state::GraphicsSession {
+        console: crate::common::console::Console::EMPTY,
         active: true,
         root_pid,
         honoka_port: port,
@@ -144,10 +145,20 @@ pub(super) fn ensure_graphics_session(runtime: &mut Runtime, pid: Word) -> Resul
     };
     let id = index as Word + 1;
     let _ = runtime.set_graphics_session(pid, id);
+    // The context leader owns the window even if a forked X server opened fb0.
+    // It must participate in normal exit cleanup and pass the session to peers.
+    if root_pid != pid {
+        let _ = runtime.set_graphics_session(root_pid, id);
+    }
     Ok(id)
 }
 
 pub(super) fn process_tree_root(runtime: &Runtime, pid: Word) -> Result<Word, i32> {
+    if let Some(process) = runtime.managed_process(pid) {
+        if process.rootfs.leader != 0 {
+            return Ok(process.rootfs.leader);
+        }
+    }
     let mut current = pid;
     let mut depth = 0usize;
     while depth < runtime.managed.len() {
@@ -188,8 +199,10 @@ pub(super) fn cleanup_graphics_for_process(runtime: &mut Runtime, pid: Word) {
     let session = runtime.graphics[index];
     let _ = honoka::honoka_destroy_window(session.honoka_port, session.window_id);
     if session.input_queue != 0 {
-        let _ =
-            nanami_runtime::request_mapping_release(session.input_queue, input::INPUT_EVENT_QUEUE_BYTES);
+        let _ = nanami_runtime::request_mapping_release(
+            session.input_queue,
+            input::INPUT_EVENT_QUEUE_BYTES,
+        );
     }
     runtime.graphics[index] = crate::state::GraphicsSession::EMPTY;
 }

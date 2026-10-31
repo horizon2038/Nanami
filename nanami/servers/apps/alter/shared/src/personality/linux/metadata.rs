@@ -1,11 +1,10 @@
 use super::{
     align_up_word, arch, ensure_graphics_session, graphics_enabled, graphics_session, is_at_fdcwd,
     is_linux_virtual_path, map_path_request_error, map_request_error, posix, read_c_string,
-    resolve_path, translate_guest_path_for_vfs, virtual_fs, write_target_memory, write_u16,
-    write_u32, write_u64, LinuxFile, LinuxFileKind, Runtime, VirtualNode, Word, EBADF, EFAULT,
-    EINVAL, ENOENT, EOPNOTSUPP, ESRCH, LINUX_AT_EMPTY_PATH, LINUX_STATX_BASIC_STATS,
-    LINUX_STATX_SIZE, LINUX_S_IFIFO, LINUX_S_IFSOCK, POSIX_FILE_TYPE_PIPE, POSIX_FILE_TYPE_SOCKET,
-    STAT_SIZE,
+    translate_guest_path_for_vfs, virtual_fs, write_target_memory, write_u16, write_u32, write_u64,
+    LinuxFile, LinuxFileKind, Runtime, VirtualNode, Word, EBADF, EFAULT, EINVAL, ENOENT,
+    EOPNOTSUPP, ESRCH, LINUX_AT_EMPTY_PATH, LINUX_STATX_BASIC_STATS, LINUX_STATX_SIZE,
+    LINUX_S_IFIFO, LINUX_S_IFSOCK, POSIX_FILE_TYPE_PIPE, POSIX_FILE_TYPE_SOCKET, STAT_SIZE,
 };
 
 pub(super) fn sys_stat(
@@ -14,8 +13,8 @@ pub(super) fn sys_stat(
     path_ptr: Word,
     stat_ptr: Word,
 ) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
-    let stat = stat_current_path(runtime, pid, len)?;
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    let stat = super::namespace::stat_at(runtime, pid, super::LINUX_AT_FDCWD, bytes, true)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
 }
@@ -26,8 +25,8 @@ pub(super) fn sys_lstat(
     path_ptr: Word,
     stat_ptr: Word,
 ) -> Result<Word, i32> {
-    let len = super::resolve_nofollow(runtime, pid, path_ptr)?;
-    let stat = stat_current_path(runtime, pid, len)?;
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    let stat = super::namespace::stat_at(runtime, pid, super::LINUX_AT_FDCWD, bytes, false)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
 }
@@ -57,15 +56,14 @@ pub(super) fn sys_newfstatat(
             *(runtime.posix_shm as *mut u8) = b'.';
         }
     }
-    let len = super::resolve_at(runtime, pid, dirfd, raw_len.max(1), flags & 0x100 == 0)?;
-    let stat = stat_current_path(runtime, pid, len)?;
+    let stat = super::namespace::stat_at(runtime, pid, dirfd, raw_len.max(1), flags & 0x100 == 0)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)
 }
 
 pub(super) fn sys_chown(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
-    let _ = stat_current_path(runtime, pid, len)?;
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    let _ = super::namespace::stat_at(runtime, pid, super::LINUX_AT_FDCWD, bytes, true)?;
     Ok(0)
 }
 
@@ -85,8 +83,7 @@ pub(super) fn sys_fchownat(
     if raw_len == 0 && (flags & LINUX_AT_EMPTY_PATH) != 0 {
         return sys_fchown(runtime, pid, dirfd);
     }
-    let len = super::resolve_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
-    let _ = stat_current_path(runtime, pid, len)?;
+    let _ = super::namespace::stat_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
     Ok(0)
 }
 
@@ -154,10 +151,31 @@ pub(super) fn sys_statx(
         write_linux_statx(runtime, pid, statx_ptr, stat)?;
         return Ok(0);
     }
-    let len = super::resolve_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
-    let stat = stat_current_path(runtime, pid, len)?;
+    let stat = super::namespace::stat_at(runtime, pid, dirfd, raw_len, flags & 0x100 == 0)?;
     write_linux_statx(runtime, pid, statx_ptr, stat)?;
     Ok(0)
+}
+
+pub(super) fn stat_resolved_path(
+    runtime: &mut Runtime,
+    pid: Word,
+    resolved: super::namespace::ResolvedPath,
+) -> Result<(Word, Word, Word, Word, Word), i32> {
+    if let Some(metadata) = resolved.metadata {
+        if let Some(stat) = super::namespace::decode_metadata(metadata)? {
+            return Ok(stat);
+        }
+        // A missing final inode still has its canonical pathname. Preserve
+        // the resolver/hosts fallback without another filesystem request.
+        let path =
+            unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, resolved.bytes) };
+        if let Some(node) = virtual_fs::fallback_file(path) {
+            return virtual_node_stat_from_node(runtime, pid, node);
+        }
+        return Err(ENOENT);
+    }
+    // Personality-owned /dev, /proc and /sys never request disk metadata.
+    stat_current_path(runtime, pid, resolved.bytes)
 }
 
 pub(super) fn stat_current_path(
@@ -170,6 +188,9 @@ pub(super) fn stat_current_path(
     if super::pty::number(path).is_some() {
         let id = super::pty::path_id(runtime, pid, path)?;
         return super::pty::stat(runtime, id, false);
+    }
+    if let Some(resource) = super::procfs::lookup(runtime, pid, path) {
+        return super::procfs::stat(runtime, pid, resource);
     }
     if let Some(node) = virtual_fs::lookup(path, graphics_enabled(runtime, pid)) {
         if node != VirtualNode::Root {
@@ -281,6 +302,13 @@ pub(super) fn virtual_node_stat(
     pid: Word,
     file: LinuxFile,
 ) -> Result<(Word, Word, Word, Word, Word), i32> {
+    if matches!(
+        file.kind,
+        LinuxFileKind::VirtualDirectory | LinuxFileKind::VirtualFile
+    ) && file.resource >> 32 != 0
+    {
+        return super::procfs::stat(runtime, pid, file.resource);
+    }
     let node = if file.kind == LinuxFileKind::Framebuffer {
         VirtualNode::DevFramebuffer
     } else {
@@ -298,6 +326,8 @@ pub(super) fn virtual_node_stat_from_node(
         VirtualNode::DevNull => (0, 1, 3),
         VirtualNode::DevZero => (0, 1, 5),
         VirtualNode::DevTty => (0, 5, 0),
+        VirtualNode::DevConsole => (0, 4, 1),
+        VirtualNode::DevPs2Mouse => (0, 13, 63),
         VirtualNode::DevPtmx => (0, 5, 2),
         VirtualNode::DevKeyboard => (0, 13, 64),
         VirtualNode::DevMouse => (0, 13, 65),

@@ -15,6 +15,7 @@ pub enum Error {
     Io,
     NoSpace,
     ReadOnly,
+    Unsupported,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {

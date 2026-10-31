@@ -1,0 +1,72 @@
+#!/bin/sh
+# Official, unmodified Xfbdev and FLWM, using Alter's window-local devices.
+set -e
+export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
+export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib
+# Xfbdev deliberately has no TCP listener. A bare :0 lets Xlib fall back to
+# TCP if a client starts before the local socket exists, blocking startup
+# instead of letting the startup loop retry. Require local UNIX transport.
+export DISPLAY=unix/:0
+export SHELL=/bin/sh
+export GDK_BACKEND=x11 NO_AT_BRIDGE=1 GSETTINGS_BACKEND=memory
+# Preserve the host/window pointer correspondence; FLWM otherwise warps the
+# nested pointer when mapping new clients.
+export NOWARP=1
+mkdir -p /tmp/.X11-unix /root/.wmx /root/Documents /root/Pictures /root/Downloads
+ln -sf /usr/local/share/pixmaps/logo.png /root/Pictures/TinyCore.png
+# FLWM executes menu entries without arguments. Point directly at upstream ELFs;
+# the dock uses explicit BusyBox shell wrappers for its arguments and log files.
+for entry in Terminal:aterm Files:xfe Editor:editor Images:flpicsee Paint:mtpaint Calculator:galculator Clock:flit; do
+    ln -sf "/usr/local/bin/${entry#*:}" "/root/.wmx/${entry%%:*}"
+done
+chmod 1777 /tmp/.X11-unix
+rm -f /tmp/desktop-ready /tmp/desktop-input-ok /tmp/desktop-launch-ok /tmp/desktop-info-ok /tmp/desktop-exit
+xpid=
+wmpid=
+termpid=
+barpid=
+cleanup() {
+    trap - EXIT INT TERM
+    for process in "$termpid" "$barpid" "$wmpid" "$xpid"; do
+        if [ -n "$process" ]; then
+            kill "$process" 2>/dev/null || true
+            wait "$process" 2>/dev/null || true
+        fi
+    done
+}
+trap cleanup EXIT INT TERM
+Xfbdev :0 -fb /dev/fb0 -mouse /dev/input/mice,3 -a 1 -t 0 -nolisten tcp -ac -noreset \
+    -fp /usr/local/lib/X11/fonts/misc > /tmp/Xfbdev.log 2>&1 &
+xpid=$!
+attempt=0
+# Tiny Core's waitforX calls XOpenDisplay(":0") unconditionally and ignores
+# DISPLAY. Use the stock query client with an explicit local display instead.
+# It handles a not-yet-listening server and verifies a real X11 round trip.
+while ! xset -display "$DISPLAY" q > /tmp/waitforX.log 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 30 ] || ! kill -0 "$xpid" 2>/dev/null; then
+        cat /tmp/Xfbdev.log /tmp/waitforX.log >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+hsetroot -solid '#3d6f8e' || true
+flwm_topside > /tmp/flwm.log 2>&1 &
+wmpid=$!
+printf '%s\n' "$wmpid" > /tmp/desktop-wm.pid
+wbar --config /etc/nanami-wbar --pos bottom --isize 32 --idist 8 --dblclk 0 \
+    --noreload --zoomf 1.0 --jumpf 0 > /tmp/wbar.log 2>&1 &
+barpid=$!
+aterm -fn 9x15 -geometry 70x24+30+45 -title 'Tiny Core on Alter/Linux' \
+    -e /bin/busybox sh -c 'printf ready > /tmp/desktop-ready; exec /bin/busybox ash -i' \
+    > /tmp/aterm.log 2>&1 &
+termpid=$!
+printf 'Tiny Core desktop: Xfbdev + FLWM + wbar; applications in dock and desktop menu\n'
+# The session belongs to the desktop, not to the initial terminal. The dock's
+# Exit action requests shutdown; Negoto then reaps the remaining descendants.
+if ! wait "$wmpid"; then
+    if [ ! -f /tmp/desktop-exit ]; then
+        cat /tmp/Xfbdev.log /tmp/flwm.log /tmp/wbar.log >&2
+        exit 1
+    fi
+fi

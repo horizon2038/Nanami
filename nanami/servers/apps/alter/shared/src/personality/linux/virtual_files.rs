@@ -15,7 +15,7 @@ pub(super) fn sys_virtual_getdents(
     count: Word,
 ) -> Result<Word, i32> {
     let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    let directory = VirtualNode::from_id(file.resource).ok_or(ENOTDIR)?;
+    let directory = super::procfs::node(file.resource).ok_or(ENOTDIR)?;
     if !directory.is_directory() {
         return Err(ENOTDIR);
     }
@@ -25,7 +25,26 @@ pub(super) fn sys_virtual_getdents(
     let graphics = graphics_enabled(runtime, pid);
     let mut out = 0usize;
     let mut index = file.offset as usize;
-    while let Some(entry) = virtual_fs::directory_entry(directory, index, graphics) {
+    loop {
+        let mut name = [0u8; 20];
+        let entry = if matches!(
+            directory,
+            VirtualNode::Proc | VirtualNode::ProcProcess | VirtualNode::ProcTask
+        ) {
+            super::procfs::directory_entry(runtime, pid, file.resource, index, &mut name)?
+        } else {
+            virtual_fs::directory_entry(directory, index, graphics).map(|entry| {
+                super::procfs::Entry {
+                    name: entry.name,
+                    resource: entry.node.id(),
+                    next: index + 1,
+                }
+            })
+        };
+        let Some(entry) = entry else {
+            break;
+        };
+        let node = super::procfs::node(entry.resource).ok_or(EINVAL)?;
         let reclen = align_up_word(
             (LINUX_DIRENT64_NAME_OFFSET + entry.name.len() + 1) as Word,
             8,
@@ -39,12 +58,12 @@ pub(super) fn sys_virtual_getdents(
         unsafe {
             let base = runtime.posix_shm + out as Word;
             ::core::ptr::write_bytes(base as *mut u8, 0, reclen);
-            write_u64(base, entry.node.id());
-            write_u64(base + 8, (index + 1) as Word);
+            write_u64(base, entry.resource);
+            write_u64(base + 8, entry.next);
             write_u16(base + 16, reclen as u16);
-            let dtype = if entry.node.is_directory() {
+            let dtype = if node.is_directory() {
                 LINUX_DT_DIR
-            } else if entry.node.is_regular_file() {
+            } else if node.is_regular_file() {
                 LINUX_DT_REG
             } else {
                 LINUX_DT_CHR
@@ -57,7 +76,7 @@ pub(super) fn sys_virtual_getdents(
             );
         }
         out += reclen;
-        index += 1;
+        index = entry.next;
     }
     if out != 0 {
         write_target_memory(runtime, pid, user_buffer, out as Word)?;
@@ -77,7 +96,29 @@ pub(super) fn sys_virtual_read(
     len: Word,
 ) -> Result<Word, i32> {
     let mut file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    let node = VirtualNode::from_id(file.resource).ok_or(EBADF)?;
+    let node = super::procfs::node(file.resource).ok_or(EBADF)?;
+    if file.resource >> 32 != 0 && node != VirtualNode::ProcSelfExe
+        || node == VirtualNode::ProcUptime
+    {
+        let mut buffer = [0u8; 4096];
+        let limit = len.min(buffer.len()).min(runtime.posix_shm_size);
+        let amount = super::procfs::read(
+            runtime,
+            pid,
+            file.resource,
+            file.offset,
+            &mut buffer[..limit],
+        )?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), runtime.posix_shm as *mut u8, amount);
+        }
+        write_target_memory(runtime, pid, user_buffer, amount)?;
+        file.offset = file.offset.checked_add(amount).ok_or(EINVAL)?;
+        if !runtime.set_linux_file(pid, fd, file) {
+            return Err(EBADF);
+        }
+        return Ok(amount);
+    }
     if node == VirtualNode::DevNull {
         return Ok(0);
     }
@@ -105,7 +146,13 @@ pub(super) fn sys_virtual_read(
         let len = super::resolver::read_resolv_conf(runtime, &mut resolver_text)?;
         &resolver_text[..len]
     } else if node == VirtualNode::ProcSelfExe {
-        let process = runtime.managed_process(pid).ok_or(ESRCH)?;
+        super::procfs::validate(runtime, pid, file.resource)?;
+        let subject = if file.resource >> 32 == 0 {
+            pid
+        } else {
+            file.resource >> 32
+        };
+        let process = runtime.managed_process(subject).ok_or(ESRCH)?;
         image_name = process.image_name;
         &image_name[..process.image_name_len]
     } else {
@@ -204,6 +251,9 @@ pub(super) fn open_virtual_path(
         let id = super::pty::path_id(runtime, pid, path)?;
         return super::pty::open_slave(runtime, pid, id, linux_flags).map(Some);
     }
+    if let Some(resource) = super::procfs::lookup(runtime, pid, path) {
+        return open_virtual_resource(runtime, pid, resource, linux_flags).map(Some);
+    }
     let Some(node) = virtual_fs::lookup(path, graphics_enabled) else {
         return if is_linux_virtual_path(runtime.posix_shm, len) {
             Err(ENOENT)
@@ -220,6 +270,17 @@ pub(super) fn open_virtual_node(
     node: VirtualNode,
     linux_flags: Word,
 ) -> Result<Word, i32> {
+    open_virtual_resource(runtime, pid, node.id(), linux_flags)
+}
+
+fn open_virtual_resource(
+    runtime: &mut Runtime,
+    pid: Word,
+    resource: Word,
+    linux_flags: Word,
+) -> Result<Word, i32> {
+    let node = super::procfs::node(resource).ok_or(ENOENT)?;
+    super::procfs::validate(runtime, pid, resource)?;
     if (linux_flags & LINUX_O_DIRECTORY) != 0 && !node.is_directory() {
         return Err(ENOTDIR);
     }
@@ -282,10 +343,10 @@ pub(super) fn open_virtual_node(
         VirtualNode::DevNull | VirtualNode::DevZero => {
             LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags)
         }
-        VirtualNode::DevKeyboard => {
+        VirtualNode::DevKeyboard | VirtualNode::DevConsole => {
             if runtime
                 .managed_process(pid)
-                .is_some_and(|process| process.rootfs.leader != 0)
+                .is_some_and(|process| process.rootfs.leader != 0 && !process.graphics_enabled)
             {
                 return Err(super::EPERM);
             }
@@ -296,10 +357,10 @@ pub(super) fn open_virtual_node(
                 fd_flags,
             )
         }
-        VirtualNode::DevMouse => {
+        VirtualNode::DevMouse | VirtualNode::DevPs2Mouse => {
             if runtime
                 .managed_process(pid)
-                .is_some_and(|process| process.rootfs.leader != 0)
+                .is_some_and(|process| process.rootfs.leader != 0 && !process.graphics_enabled)
             {
                 return Err(super::EPERM);
             }
@@ -317,10 +378,11 @@ pub(super) fn open_virtual_node(
             file
         }
         node if node.is_directory() => {
-            LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, node.id(), fd_flags)
+            LinuxFile::virtual_node(LinuxFileKind::VirtualDirectory, resource, fd_flags)
         }
-        _ => LinuxFile::virtual_node(LinuxFileKind::VirtualFile, node.id(), fd_flags),
+        _ => LinuxFile::virtual_node(LinuxFileKind::VirtualFile, resource, fd_flags),
     };
+    super::console::open(runtime, file)?;
     match runtime.allocate_linux_file(pid, file, 0) {
         Some(fd) => Ok(fd),
         None => {

@@ -106,10 +106,6 @@ pub(super) const LINUX_PT_LOAD: u32 = 1;
 
 pub(super) const LINUX_PT_TLS: u32 = 7;
 
-pub(super) const LINUX_PF_W: u32 = 2;
-
-pub(super) const LINUX_MAX_LOAD_SEGMENTS: usize = 16;
-
 pub(super) const LINUX_STACK_TOP: Word = 0x4040000;
 
 pub(super) const LINUX_STACK_BYTES: Word = 0x40000;

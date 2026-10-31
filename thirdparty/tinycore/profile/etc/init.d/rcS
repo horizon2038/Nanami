@@ -1,0 +1,15 @@
+#!/bin/sh
+# Console-only port profile. The original Linux rcS/tc-config remain in upstream/.
+mkdir -p /root /tmp /run /var/run || return 1
+chmod 1777 /tmp || return 1
+. /etc/os-release
+printf '\n%s - Alter console profile\n' "$PRETTY_NAME"
+printf 'Userspace: '
+/bin/busybox | head -n 1
+printf 'Host: '
+uname -srm
+# Run the upstream administrator hook in the Tiny Core shell. Do not start
+# hardware services or use the Linux tc-config boot path on this host.
+if [ -r /opt/bootlocal.sh ]; then
+    . /opt/bootlocal.sh
+fi

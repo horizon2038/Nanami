@@ -239,9 +239,13 @@ fn overlay_tree(builder: &mut ImageBuilder, host: &Path, guest: &str, args: &Com
             let data = fs::read(&source)?;
             payload::validate_elf(&data, args.arch, &source)?;
             builder.add_file(&destination, permissions(&source, 0o644)?, data)?;
+        } else if kind.is_symlink() {
+            let target = fs::read_link(&source)?;
+            let target = target.to_str().context("non-UTF8 overlay symlink target")?;
+            builder.add_symlink(&destination, target)?;
         } else {
             anyhow::bail!(
-                "overlay links/special files are not supported: {}",
+                "overlay special files are not supported: {}",
                 source.display()
             );
         }
@@ -359,6 +363,22 @@ mod tests {
         args.linux_rootfs_dir = Some("overlay".into());
         assert!(create(root.path(), &args).is_err());
         assert!(!root.path().join("fixture.img").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn overlay_preserves_absolute_and_dangling_links_without_following_host_paths() {
+        use std::os::unix::fs::symlink;
+        let (root, mut args) = fixture();
+        let overlay = root.path().join("overlay");
+        fs::create_dir_all(overlay.join("lib")).unwrap();
+        symlink("/lib/ld-linux-x86-64.so.2", overlay.join("interpreter")).unwrap();
+        symlink("../missing", overlay.join("lib/dangling")).unwrap();
+        args.linux_rootfs_dir = Some(overlay);
+        let image = fs::read(create(root.path(), &args).unwrap()).unwrap();
+        for text in [b"/lib/ld-linux-x86-64.so.2".as_slice(), b"../missing"] {
+            assert!(image.windows(text.len()).any(|window| window == text));
+        }
     }
 
     #[test]

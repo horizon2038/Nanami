@@ -90,13 +90,38 @@ impl NodePool {
 
     pub fn create_node(&mut self, radix: usize, slot: Slot) -> Result<(), CapabilityError> {
         let bytes = 1usize << kernel_object::node_memory_size_bits(radix);
-        let end = checked_align_up(self.consumed, bytes)
+        self.convert(CapabilityType::Node, radix, bytes, slot)
+    }
+
+    pub fn create_generic(&mut self, radix: usize, slot: Slot) -> Result<(), CapabilityError> {
+        self.convert(CapabilityType::Generic, radix, 1usize << radix, slot)
+    }
+
+    pub fn can_allocate(&self, bytes: usize, reserve: usize) -> bool {
+        self.allocation_end(bytes)
+            .and_then(|end| end.checked_add(reserve))
+            .is_some_and(|end| end <= 1 << FRAME_LEAF_POOL_RADIX)
+    }
+
+    fn allocation_end(&self, bytes: usize) -> Option<usize> {
+        checked_align_up(self.consumed, bytes)
             .and_then(|start| start.checked_add(bytes))
             .filter(|end| *end <= 1 << FRAME_LEAF_POOL_RADIX)
+    }
+
+    fn convert(
+        &mut self,
+        kind: CapabilityType,
+        radix: usize,
+        bytes: usize,
+        slot: Slot,
+    ) -> Result<(), CapabilityError> {
+        let end = self
+            .allocation_end(bytes)
             .ok_or(CapabilityError::InvalidArgument)?;
         arch::generic::convert(
             self.descriptor,
-            CapabilityType::Node,
+            kind,
             radix as Word,
             1,
             slot.node,

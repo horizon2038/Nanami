@@ -129,6 +129,7 @@ impl Compositor {
             return Err(RequestError::InvalidArgument);
         }
         self.commit_size(index, width, height);
+        self.drain_window_damage(index);
         Ok(())
     }
 }

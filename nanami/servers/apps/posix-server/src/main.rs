@@ -23,6 +23,7 @@ pub(crate) mod process;
 mod state;
 mod sync;
 mod truncate;
+mod mapping;
 
 use environment::*;
 use fd::*;
@@ -136,6 +137,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_CLOSE => handle_close(runtime, request),
         POSIX_REQUEST_FSYNC | POSIX_REQUEST_SYNC => sync::handle_sync(runtime, request),
         POSIX_REQUEST_FTRUNCATE => truncate::handle_ftruncate(runtime, request),
+        POSIX_REQUEST_MAP_READ_PAGE | POSIX_REQUEST_UNMAP_READ_PAGE => mapping::handle(runtime, request),
         POSIX_REQUEST_DUP => handle_dup(runtime, request),
         POSIX_REQUEST_DUP2 => handle_dup2(runtime, request),
         POSIX_REQUEST_FCNTL => handle_fcntl(runtime, request),
@@ -157,10 +159,12 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
         POSIX_REQUEST_CREATE_SOCKET_NODE => handle_create_socket_node(runtime, request),
         POSIX_REQUEST_PATH => namespace::handle(runtime, request),
+        POSIX_REQUEST_FCHMOD => namespace::handle_fchmod(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
         POSIX_REQUEST_LINK => handle_link(runtime, request),
         POSIX_REQUEST_RENAME => handle_rename(runtime, request),
         POSIX_REQUEST_FSTAT => handle_fstat(runtime, request),
+        POSIX_REQUEST_FSTATFS => mapping::statfs(runtime, request),
         POSIX_REQUEST_READ_DIR => handle_read_dir(runtime, request),
         POSIX_REQUEST_SEEK => handle_seek(runtime, request),
         POSIX_REQUEST_RMDIR => handle_rmdir(runtime, request),

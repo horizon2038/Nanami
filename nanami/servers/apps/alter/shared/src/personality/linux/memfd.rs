@@ -42,7 +42,9 @@ pub(super) fn create(
         pid,
         LinuxFileKind::MemoryFile,
         Object::Memory(MemoryFile {
+            sysv: None,
             anonymous: false,
+            backing: None,
             pages: BTreeMap::new(),
             size: 0,
             offset: 0,
@@ -70,8 +72,12 @@ pub(super) fn page(runtime: &mut Runtime, id: Word, index: Word) -> Result<Word,
     if let Some(address) = object(runtime, id)?.pages.get(&index) {
         return Ok(*address);
     }
-    let address =
-        nanami_runtime::request_memory_create(LINUX_PAGE_SIZE).map_err(map_request_error)?;
+    let address = if let Some(fd) = object(runtime, id)?.backing {
+        posix::posix_map_read_page(runtime.posix_port, fd, index * LINUX_PAGE_SIZE)
+            .map_err(map_request_error)?
+    } else {
+        nanami_runtime::request_memory_create(LINUX_PAGE_SIZE).map_err(map_request_error)?
+    };
     object_mut(runtime, id)?.pages.insert(index, address);
     Ok(address)
 }
@@ -294,6 +300,9 @@ pub(super) fn map(
         offset,
         prot,
         shared,
+        attachment: object(runtime, file.resource)?.sysv.as_ref().map(|_| base),
+        readonly_attachment: object(runtime, file.resource)?.sysv.is_some()
+            && file.flags & LINUX_O_ACCMODE == LINUX_O_RDONLY,
     };
     object_mut(runtime, file.resource)?.maps.push(mapping);
     let valid = bytes.min(align_up_word(
@@ -335,6 +344,61 @@ pub(super) fn map(
     Ok(base)
 }
 
+/// Ordinary files use the same alias/fork/unmap machinery as memfd, but their
+/// pages belong to VFS and remain coherent with native and Linux file writes.
+pub(super) fn map_read_file(
+    runtime: &mut Runtime,
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    prot: Word,
+    flags: Word,
+    file: LinuxFile,
+    size: Word,
+    offset: Word,
+) -> Result<Word, i32> {
+    if prot & LINUX_PROT_WRITE != 0 {
+        return Err(EOPNOTSUPP);
+    }
+    if offset >= size || bytes > size - offset {
+        return Err(EOPNOTSUPP);
+    }
+    let fd = posix::posix_dup(runtime.posix_port, file.posix_fd).map_err(map_request_error)?;
+    let Some(id) = runtime.poll_objects.insert(Object::Memory(MemoryFile {
+        sysv: None,
+        anonymous: false,
+        backing: Some(fd),
+        pages: BTreeMap::new(),
+        size,
+        offset: 0,
+        status_flags: 0,
+        seals: SEALS,
+        maps: Vec::new(),
+    })) else {
+        let _ = posix::posix_close(runtime.posix_port, fd);
+        return Err(ENOMEM);
+    };
+    let result = map(
+        runtime,
+        pid,
+        address,
+        bytes,
+        prot,
+        flags,
+        LinuxFile {
+            kind: LinuxFileKind::MemoryFile,
+            resource: id,
+            posix_fd: id,
+            ..LinuxFile::EMPTY
+        },
+        offset,
+    );
+    if result.is_err() {
+        collect(runtime, id);
+    }
+    result
+}
+
 fn mappings(runtime: &Runtime, pid: Word) -> Vec<(Word, MemoryMapping)> {
     runtime
         .poll_objects
@@ -353,6 +417,18 @@ fn mappings(runtime: &Runtime, pid: Word) -> Vec<(Word, MemoryMapping)> {
                 })
         })
         .collect()
+}
+
+pub(super) fn sync_files(runtime: &Runtime, pid: Word, base: Word, bytes: Word) -> Result<(), i32> {
+    let end = base.checked_add(bytes).ok_or(EINVAL)?;
+    for (id, mapping) in mappings(runtime, pid) {
+        if mapping.base < end && base < mapping.base + mapping.bytes {
+            if let Some(fd) = object(runtime, id)?.backing {
+                posix::posix_fsync(runtime.posix_port, fd).map_err(map_request_error)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn mapping_at(
@@ -394,6 +470,9 @@ pub(super) fn remap(
     let Some((id, mapping)) = mapping_at(runtime, pid, old) else {
         return Ok(None);
     };
+    if mapping.attachment.is_some() {
+        return Err(EOPNOTSUPP);
+    }
     if old
         .checked_add(old_size)
         .is_none_or(|end| end > mapping.base + mapping.bytes)
@@ -516,6 +595,13 @@ pub(super) fn protect(
     let maps = mappings(runtime, pid);
     // Reject a sealed shared mapping before touching any permission.
     for (id, mapping) in &maps {
+        if mapping.base < end
+            && mapping.base + mapping.bytes > base
+            && mapping.readonly_attachment
+            && prot & LINUX_PROT_WRITE != 0
+        {
+            return Err(EACCES);
+        }
         if mapping.base < end
             && mapping.base + mapping.bytes > base
             && mapping.shared
@@ -698,6 +784,9 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
     let Ok(memory) = object(runtime, id) else {
         return;
     };
+    if memory.sysv.as_ref().is_some_and(|segment| !segment.removed) {
+        return;
+    }
     if !memory.maps.is_empty() {
         return;
     }
@@ -724,11 +813,31 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
         .map(|(&index, &address)| (index, address))
         .collect();
     for (index, address) in pages {
-        if nanami_runtime::request_mapping_release(address, LINUX_PAGE_SIZE).is_err() {
+        if address != 0
+            && nanami_runtime::request_mapping_release(address, LINUX_PAGE_SIZE).is_err()
+        {
             return;
+        }
+        let backing = object(runtime, id).ok().and_then(|memory| memory.backing);
+        if let Some(fd) = backing {
+            // Record local release before IPC so a failed lease release can
+            // be retried without attempting to release the same alias twice.
+            if let Ok(memory) = object_mut(runtime, id) {
+                memory.pages.insert(index, 0);
+            }
+            if posix::posix_unmap_read_page(runtime.posix_port, fd, index * LINUX_PAGE_SIZE)
+                .is_err()
+            {
+                return;
+            }
         }
         if let Ok(memory) = object_mut(runtime, id) {
             memory.pages.remove(&index);
+        }
+    }
+    if let Some(fd) = object(runtime, id).ok().and_then(|memory| memory.backing) {
+        if posix::posix_close(runtime.posix_port, fd).is_err() {
+            return;
         }
     }
     runtime.poll_objects.remove(id);
@@ -784,7 +893,9 @@ pub(super) fn map_anonymous(
     let id = runtime
         .poll_objects
         .insert(Object::Memory(MemoryFile {
+            sysv: None,
             anonymous: true,
+            backing: None,
             pages: BTreeMap::new(),
             size: bytes,
             offset: 0,

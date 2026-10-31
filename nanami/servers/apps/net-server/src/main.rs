@@ -1088,13 +1088,6 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION);
     nanami_runtime::ipc::bind_current_thread_notification(notification)?;
 
-    match nanami_client::registry::register_network_service() {
-        Ok(()) => nanami_runtime::print!("[net-server] service registered: network-service\n"),
-        Err(e) => {
-            log_request_error("[net-server] register failed: ", e);
-            return Err(e.into());
-        }
-    }
     let timer_port = connect_timer_service();
 
     nanami_runtime::print!("[net-server] connect backend: net-device\n");
@@ -1245,6 +1238,16 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         }
     }
 
+    // Publish only after backend initialization. Otherwise a machine without a
+    // NIC accepts clients into an IPC queue that this server never receives,
+    // blocking unrelated Linux guests behind Alter's network attachment call.
+    match nanami_client::registry::register_network_service() {
+        Ok(()) => nanami_runtime::print!("[net-server] service registered: network-service\n"),
+        Err(e) => {
+            log_request_error("[net-server] register failed: ", e);
+            return Err(e.into());
+        }
+    }
     nanami_runtime::print!("[net-server] enter service loop\n");
     loop {
         let used_reply_receive = has_pending_reply;

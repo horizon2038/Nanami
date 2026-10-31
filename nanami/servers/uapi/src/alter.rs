@@ -9,6 +9,9 @@ pub const ALTER_REQUEST_START_CONTEXT: Word = 0xb109;
 pub const ALTER_REQUEST_DELETE_CONTEXT: Word = 0xb10a;
 pub const ALTER_REQUEST_SIGNAL_CONTEXT: Word = 0xb10b;
 pub const ALTER_CONTEXT_READONLY: Word = 1;
+/// Explicit opt-in to a window-local framebuffer and input session.
+pub const ALTER_CONTEXT_GRAPHICS: Word = 1 << 1;
+const ALTER_CONTEXT_FLAGS: Word = ALTER_CONTEXT_READONLY | ALTER_CONTEXT_GRAPHICS;
 pub const ALTER_CONTEXT_ABI: Word = 1;
 pub const ALTER_CONTEXT_HEADER_BYTES: usize = 48;
 
@@ -29,7 +32,7 @@ impl<'a> ExecutionRequest<'a> {
         let word = |index: usize| -> Option<usize> {
             Some(u64::from_le_bytes(bytes.get(index * 8..index * 8 + 8)?.try_into().ok()?) as usize)
         };
-        if word(0)? != ALTER_CONTEXT_ABI || word(1)? & !ALTER_CONTEXT_READONLY != 0 {
+        if word(0)? != ALTER_CONTEXT_ABI || word(1)? & !ALTER_CONTEXT_FLAGS != 0 {
             return None;
         }
         let mut cursor = ALTER_CONTEXT_HEADER_BYTES;
@@ -62,7 +65,7 @@ impl<'a> ExecutionRequest<'a> {
             .try_fold(ALTER_CONTEXT_HEADER_BYTES, |total, part| {
                 total.checked_add(part.len())
             })?;
-        if size > out.len() || self.flags & !ALTER_CONTEXT_READONLY != 0 {
+        if size > out.len() || self.flags & !ALTER_CONTEXT_FLAGS != 0 {
             return None;
         }
         for (index, value) in [
@@ -108,7 +111,9 @@ mod tests {
             assert!(ExecutionRequest::decode(&bytes[..end]).is_none());
         }
         assert!(ExecutionRequest::decode(&bytes[..size + 1]).is_none());
-        bytes[8] = 2;
+        bytes[8] = (ALTER_CONTEXT_READONLY | ALTER_CONTEXT_GRAPHICS) as u8;
+        assert!(ExecutionRequest::decode(&bytes[..size]).is_some());
+        bytes[8] = 4;
         assert!(ExecutionRequest::decode(&bytes[..size]).is_none());
     }
 }

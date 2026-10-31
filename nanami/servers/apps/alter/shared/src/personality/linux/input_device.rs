@@ -9,9 +9,10 @@ pub(super) fn pump_input_events(runtime: &mut Runtime) {
     let source = runtime.input_queue;
     let mut graphics_index = 0usize;
     while graphics_index < runtime.graphics.len() {
-        let session = runtime.graphics[graphics_index];
-        if session.active && session.input_queue != 0 {
-            drain_input_queue(runtime, session.input_queue, graphics_index as Word + 1);
+        let session = &runtime.graphics[graphics_index];
+        let queue = session.input_queue;
+        if session.active && queue != 0 {
+            drain_input_queue(runtime, queue, graphics_index as Word + 1);
         }
         graphics_index += 1;
     }
@@ -25,6 +26,16 @@ pub(super) fn drain_input_queue(runtime: &mut Runtime, source: Word, session_id:
     while let Some(packed) = queue.pop() {
         let (kind, code, value0, value1, flags) = input::unpack_input_event(packed);
         match kind {
+            input::INPUT_EVENT_KIND_WINDOW_CLOSE if session_id != 0 => {
+                if let Some(session) = runtime.graphics.get(session_id as usize - 1) {
+                    let root = session.root_pid;
+                    let _ = super::signals_runtime::queue_group(
+                        runtime,
+                        root,
+                        crate::common::signals::Info::new(crate::common::signals::SIGTERM, 0, 0),
+                    );
+                }
+            }
             input::INPUT_EVENT_KIND_WINDOW_RESIZE if session_id != 0 => {
                 if let Some(session) = runtime.graphics.get(session_id as usize - 1) {
                     if let Err(error) = honoka::honoka_resize_viewport(
@@ -124,10 +135,22 @@ pub(super) fn normalize_mouse_movement(
     let Some(session) = runtime.graphics.get_mut(session_id as usize - 1) else {
         return (0, 0);
     };
+    // The viewport may be larger than the fixed-resolution guest framebuffer.
+    // Never advance the relative baseline beyond the nested pointer's bounds.
+    let x = x.clamp(0, session.width.saturating_sub(1) as i32);
+    let y = y.clamp(0, session.height.saturating_sub(1) as i32);
     let movement = if session.mouse_position_valid {
         (
             x.saturating_sub(session.mouse_x),
             y.saturating_sub(session.mouse_y),
+        )
+    } else if session.console.display_mode == 1 {
+        // A nested legacy X server starts its relative PS/2 pointer at the
+        // screen center. Align its first sample with Honoka's absolute point.
+        // Evdev-only clients retain the existing zero-delta initialization.
+        (
+            x - (session.width / 2) as i32,
+            y - (session.height / 2) as i32,
         )
     } else {
         (0, 0)
@@ -162,6 +185,13 @@ pub(super) fn push_mouse_event(runtime: &mut Runtime, session_id: Word, event: W
     let Some(session) = runtime.graphics.get_mut(session_id as usize - 1) else {
         return;
     };
+    if session.console.mouse.is_announced() {
+        // Accumulate before the finite evdev ring can overwrite REL records.
+        // PS/2 has its own byte queue plus residual motion; slow readers must
+        // not permanently lose the absolute-to-relative displacement.
+        let (kind, code, value) = unpack_linux_input_event(event);
+        session.console.mouse.event(kind, code, value);
+    }
     push_event_ring(
         &mut session.mouse_events,
         &mut session.mouse_head,
@@ -250,6 +280,10 @@ pub(super) fn sys_evdev_read(
     user_buffer: Word,
     len: Word,
 ) -> Result<Word, i32> {
+    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
+    if super::console::device(file).is_some() {
+        return super::console::read(runtime, pid, file, user_buffer, len);
+    }
     if len < LINUX_INPUT_EVENT_BYTES {
         return Err(EINVAL);
     }

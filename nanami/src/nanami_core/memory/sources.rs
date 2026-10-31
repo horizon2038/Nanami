@@ -124,6 +124,10 @@ impl MemoryManager {
         if self.node_pool.remaining() >= directory::REFILL_RESERVE_BYTES {
             return Ok(());
         }
+        self.refill_metadata_pool()
+    }
+
+    pub(super) fn refill_metadata_pool(&mut self) -> Result<(), CapabilityError> {
         // Use only still-untyped RAM, never a materialized frame or device
         // range. Reserve with the buddy allocator before converting it.
         let mut selected = None;

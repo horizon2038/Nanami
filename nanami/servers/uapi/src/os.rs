@@ -86,6 +86,13 @@ pub const OS_REQUEST_PROCESS_MEMORY_COMPARE_EXCHANGE: Word = 0x102b;
 /// Create a suspended raw task sharing a supervised task's address space.
 /// args: source PID, PCB destination slot, priority, reserved (zero).
 pub const OS_REQUEST_PROCESS_THREAD_CREATE: Word = 0x102c;
+/// Create a suspended raw task with a private snapshot of a supervised VM.
+/// args: source PID, PCB destination slot, priority, reserved (zero).
+pub const OS_REQUEST_PROCESS_FORK: Word = 0x102d;
+/// MAP_ANONYMOUS arg3 may point to two caller Words: source VA and initialized
+/// byte count. Copy that prefix once and zero only the rest, before publishing
+/// each destination page. Zero arg3 retains ordinary anonymous zero fill.
+pub const OS_MAP_INITIALIZER_WORDS: usize = 2;
 /// High bit of MEMORY_READ/WRITE byte count: enforce guest read/write access.
 /// Clear retains the supervisor's privileged image/debugging-copy semantics.
 pub const OS_MEMORY_COPY_USER_ACCESS: Word = 1 << (Word::BITS - 1);

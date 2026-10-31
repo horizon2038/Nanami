@@ -56,13 +56,24 @@ pub(super) fn read_target_memory(
     user_ptr: Word,
     len: Word,
 ) -> Result<(), i32> {
+    copyin_into(runtime, pid, user_ptr, runtime.posix_shm, len)
+}
+
+/// Copy directly into an owned server buffer without staging through POSIX SHM.
+pub(super) fn copyin_into(
+    runtime: &Runtime,
+    pid: Word,
+    user_ptr: Word,
+    destination: Word,
+    len: Word,
+) -> Result<(), i32> {
     if len == 0 {
         return Ok(());
     }
     if !runtime.memory_access_allowed(pid, user_ptr, len, 1) {
         return Err(EFAULT);
     }
-    nanami_runtime::request_process_memory_read_checked(pid, user_ptr, runtime.posix_shm, len)
+    nanami_runtime::request_process_memory_read_checked(pid, user_ptr, destination, len)
         .map_err(|_| EFAULT)
 }
 

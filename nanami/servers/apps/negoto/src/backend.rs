@@ -50,16 +50,19 @@ impl Backend {
             launch.extend_from_slice(string.as_bytes());
             launch.push(0);
         }
+        let mut flags = 0;
+        if config.readonly {
+            flags |= ALTER_CONTEXT_READONLY;
+        }
+        if config.graphics() {
+            flags |= ALTER_CONTEXT_GRAPHICS;
+        }
         let wire = ExecutionRequest {
             root: root.as_bytes(),
             cwd: config.cwd.as_bytes(),
             executable: executable.as_bytes(),
             launch: &launch,
-            flags: if config.readonly {
-                ALTER_CONTEXT_READONLY
-            } else {
-                0
-            },
+            flags,
         };
         let output = unsafe { core::slice::from_raw_parts_mut(self.shm as *mut u8, self.bytes) };
         let len = wire

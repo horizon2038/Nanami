@@ -48,6 +48,8 @@ fn allocate_memory(runtime: &mut Runtime, bytes: Word) -> Result<Word, i32> {
     let id = runtime
         .poll_objects
         .insert(Object::Memory(MemoryFile {
+            sysv: None,
+            backing: None,
             anonymous: true,
             pages: BTreeMap::new(),
             size: bytes,

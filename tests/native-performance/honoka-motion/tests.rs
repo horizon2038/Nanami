@@ -299,6 +299,90 @@ fn guest_remap_keeps_mode_after_viewport_resize() {
     assert_eq!(compositor.window_content_size(18, 1).unwrap(), (200, 100));
 }
 
+#[test]
+fn resized_guest_pointer_uses_the_cropped_backing_extent_and_returns_without_drift() {
+    let (mut compositor, _) = setup();
+    compositor
+        .attach_logical_framebuffer_to_process(18, 1, 19)
+        .unwrap();
+    let (base, _) = compositor.attach_input_queue(18, 1).unwrap();
+    let mut events = honoka_api::WindowEventQueue::new(base);
+    // The guest backing remains 400x300 even in a larger viewport.
+    compositor.resize_viewport(18, 1, 600, 450).unwrap();
+    for (dx, dy, x, y) in [
+        (0, 150, 399, 299),
+        (-500, -330, 16, 10),
+        (290, 260, 306, 270),
+    ] {
+        compositor.process_input(move_by(dx, dy));
+        let mut last = None;
+        while let Some(packed) = events.pop() {
+            let event = input::unpack_input_event(packed);
+            if event.0 == input::INPUT_EVENT_KIND_MOUSE_MOVE {
+                last = Some((event.2, event.3));
+            }
+        }
+        assert_eq!(last, Some((x, y)));
+    }
+}
+
+#[test]
+fn fbdev_capture_skips_idle_frames_and_presents_only_changed_tiles() {
+    let (mut compositor, pixels) = setup();
+    let (source, _) = compositor
+        .attach_logical_framebuffer_to_process(18, 1, 19)
+        .unwrap();
+    compositor.render_if_needed();
+    PRESENTED.with(|rects| rects.borrow_mut().clear());
+    compositor.invalidate_presented_logical_framebuffer(1);
+    compositor.render_if_needed();
+    PRESENTED.with(|rects| assert!(rects.borrow().is_empty()));
+    unsafe {
+        (source as *mut u32).add(50 * 400 + 73).write(0x123456);
+    }
+    compositor.invalidate_presented_logical_framebuffer(1);
+    compositor.render_if_needed();
+    assert_eq!(
+        pixels[(80 + constants::TITLE_BAR_HEIGHT as usize + 50) * 800 + 84 + 73],
+        0x123456
+    );
+    PRESENTED.with(|rects| {
+        let rects = rects.borrow();
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].width * rects[0].height, 32 * 16);
+    });
+    compositor.detach_logical_framebuffer(18, 1).unwrap();
+    RELEASED.with(|released| {
+        assert_eq!(
+            released
+                .borrow()
+                .iter()
+                .filter(|(_, bytes)| *bytes == 400 * 300 * 4)
+                .count(),
+            2
+        )
+    });
+}
+
+#[test]
+fn fbdev_capture_allocation_failure_keeps_the_existing_full_redraw_path() {
+    let (mut compositor, pixels) = setup();
+    FAIL_CAPTURE.with(|fail| fail.set(true));
+    let (source, _) = compositor
+        .attach_logical_framebuffer_to_process(18, 1, 19)
+        .unwrap();
+    unsafe {
+        (source as *mut u32).add(50 * 400 + 73).write(0x654321);
+    }
+    compositor.invalidate_presented_logical_framebuffer(1);
+    compositor.render_if_needed();
+    assert_eq!(
+        pixels[(80 + constants::TITLE_BAR_HEIGHT as usize + 50) * 800 + 84 + 73],
+        0x654321
+    );
+    compositor.detach_logical_framebuffer(18, 1).unwrap();
+}
+
 fn compare(events: &[InputEvent], drag: bool) -> Vec<framebuffer::Rect> {
     let (mut batched, pixels) = setup();
     let (mut reference, expected) = setup();

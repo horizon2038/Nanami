@@ -4,7 +4,7 @@ This guide describes how to add native Nanami applications, services, and
 drivers. The Rust application ABI supports x86_64 and AArch64; the freestanding
 C++ SDK remains x86_64-only.
 
-This guide follows Nanami v0.6.2 and `AlphaEnvironment` ABI 2. Public wire types
+This guide follows Nanami v0.7.0 and `AlphaEnvironment` ABI 2. Public wire types
 are defined in `nanami-uapi`; generic Alpha requests and managed-Service helpers
 are exposed through `nanami-runtime`.
 
@@ -193,7 +193,23 @@ cargo xtask rootfs --rootfs out/freebsd.img --freebsd-bin "path/to/sh"
 
 The default Linux directory is `bin/`; additional files use repeatable
 `--linux-bin`. Duplicate names and host links/special files are rejected.
-A Linux directory tree can be added with `--linux-rootfs-dir`.
+A Linux directory tree can be added with `--linux-rootfs-dir`; unlike basename
+payload collection, that overlay preserves guest symlinks without following
+host targets. Special files remain rejected. The
+[Tiny Core port recipe](../../thirdparty/tinycore/README.md) builds a private
+distribution rootfs and loads its explicit console or Xfbdev/FLWM/wbar desktop init
+profile through Negoto/Alter, without replacing the Nanami session or changing
+the Kernel. The desktop uses `io.nanami.graphics="true"` in its OCI annotations
+to request one context-local Honoka framebuffer/input session. This does not
+grant host-global input, physical GPU registers or Linux VT ownership.
+The dock launches Terminal, Xfe, Editor, FlPicSee, mtPaint, Galculator
+and Tiny Core information; Clock is also available through the desktop menu.
+Programs retain their official Tiny Core ELF binaries. Dock commands explicitly
+invoke BusyBox for wrapper scripts; menu entries point at the ELF programs.
+The desktop image defaults to a 256-MiB ext2 filesystem and includes home
+directories and a sample image. The session follows
+the window manager rather than the initial terminal; Exit desktop shuts down
+the context. See the recipe for the pinned package list and compatibility limits.
 
 Public protocol constants/types belong in `nanami-uapi`. Runtime code belongs
 in `nanami-runtime`; service IPC wrappers belong in `nanami-client`.

@@ -83,23 +83,27 @@ fn copy_in(
     message: &Message,
     len: usize,
 ) -> Result<Vec<u8>, i32> {
-    let mut data = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
     data.try_reserve_exact(len).map_err(|_| ENOMEM)?;
     for index in 0..message.count {
         let count = message.lengths[index].min(len - data.len());
         let mut done = 0;
         while done < count {
             let chunk = (count - done).min(runtime.posix_shm_size);
-            read_target_memory(
+            let initialized = data.len();
+            copyin_into(
                 runtime,
                 pid,
                 message.bases[index].checked_add(done).ok_or(EFAULT)?,
+                unsafe { data.as_mut_ptr().add(initialized) } as Word,
                 chunk,
             )
             .map_err(|_| EFAULT)?;
-            data.extend_from_slice(unsafe {
-                core::slice::from_raw_parts(runtime.posix_shm as *const u8, chunk)
-            });
+            // Expose bytes only after copyin succeeded; failed transfers never
+            // commit a packet or reveal uninitialized allocation contents.
+            unsafe {
+                data.set_len(initialized + chunk);
+            }
             done += chunk;
         }
         if data.len() == len {
@@ -116,17 +120,11 @@ fn copy_out(runtime: &mut Runtime, pid: Word, message: &Message, data: &[u8]) ->
         let mut done = 0;
         while done < count {
             let chunk = (count - done).min(runtime.posix_shm_size);
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data[copied..].as_ptr(),
-                    runtime.posix_shm as *mut u8,
-                    chunk,
-                );
-            }
-            write_target_memory(
+            copyout_from(
                 runtime,
                 pid,
                 message.bases[index].checked_add(done).ok_or(EFAULT)?,
+                data[copied..].as_ptr() as Word,
                 chunk,
             )
             .map_err(|_| EFAULT)?;
@@ -338,8 +336,18 @@ fn receive(
         }
         return Err(EAGAIN);
     }
+    // A large caller buffer need not mean a large allocation: X11 frequently
+    // asks for 64 KiB while only a few bytes are queued. Retain the same stream
+    // barrier/packet rules and allocate only the bytes this receive can return.
+    let mut queued = 0;
+    for packet in &this.packets {
+        queued += (packet.data.len() - packet.offset).min(capacity - queued);
+        if datagram || queued == capacity || !packet.rights.is_empty() {
+            break;
+        }
+    }
     let mut data = Vec::new();
-    data.try_reserve_exact(capacity).map_err(|_| ENOMEM)?;
+    data.try_reserve_exact(queued).map_err(|_| ENOMEM)?;
     let mut files = Vec::new();
     let mut source = Address::UNNAMED;
     let mut packet_length = 0;

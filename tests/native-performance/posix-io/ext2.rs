@@ -4,7 +4,7 @@ use ipc::ServiceRequest;
 const EXT2_S_IFREG: u16 = 0x8000;
 const EXT2_S_IFMT: u16 = 0xf000;
 const EXT2_S_IFSOCK: u16 = 0xc000;
-fn release_socket_inode(runtime: &mut Ext2Runtime, _: u32) -> Result<(), RequestError> {
+fn release_unlinked_inode(runtime: &mut Ext2Runtime, _: u32) -> Result<(), RequestError> {
     assert!(runtime.frozen_by.is_none());
     runtime.socket_reclaims += 1;
     Ok(())
@@ -230,22 +230,21 @@ fn socket_mode_is_not_mistaken_for_a_regular_file_or_directory() {
 }
 
 #[test]
-fn frozen_socket_close_defers_inode_reclamation_until_thaw() {
-    let mut runtime = runtime(&[]);
-    runtime.handles[0].mode = EXT2_S_IFSOCK;
-    runtime.frozen_by = Some(9);
-    let request = request(1, 0, 0);
-    assert_eq!(
-        file_io::handle_close(request, &mut runtime).0,
-        OS_RESPONSE_OK
-    );
-    assert!(!runtime.handles[0].active);
-    assert!(runtime.handles[0].close_pending);
-    assert_eq!(runtime.socket_reclaims, 0);
-    runtime.frozen_by = None;
-    file_io::reclaim_closed_sockets(&mut runtime).unwrap();
-    assert!(!runtime.handles[0].close_pending);
-    assert_eq!(runtime.socket_reclaims, 1);
+fn frozen_close_defers_inode_reclamation_until_thaw() {
+    for mode in [EXT2_S_IFSOCK, EXT2_S_IFREG, EXT2_S_IFDIR] {
+        let mut runtime = runtime(&[]);
+        runtime.handles[0].mode = mode;
+        runtime.frozen_by = Some(9);
+        let request = request(1, 0, 0);
+        assert_eq!(file_io::handle_close(request, &mut runtime).0, OS_RESPONSE_OK);
+        assert!(!runtime.handles[0].active);
+        assert!(runtime.handles[0].close_pending);
+        assert_eq!(runtime.socket_reclaims, 0);
+        runtime.frozen_by = None;
+        file_io::reclaim_closed_inodes(&mut runtime).unwrap();
+        assert!(!runtime.handles[0].close_pending);
+        assert_eq!(runtime.socket_reclaims, 1);
+    }
 }
 
 fn request(delegate: Word, input: Word, len: Word) -> ServiceRequest {

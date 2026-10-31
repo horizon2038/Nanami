@@ -1,6 +1,6 @@
 [package]
 name = "nanami"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 
 [features]
@@ -17,3 +17,4 @@ nun = { path = "../spencer/Nun" }
 a9n_abi = "=0.8.0"
 crabtime = { version = "1.1.4", default-features = false }
 libm = { version = "0.2", default-features = false }
+rlsf = { version = "=0.2.3", default-features = false }

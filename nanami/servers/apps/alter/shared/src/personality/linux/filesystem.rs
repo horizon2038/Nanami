@@ -1,16 +1,15 @@
 use super::{
     bounded_len, current_virtual_node, is_linux_virtual_path, map_create_request_error,
     map_link_request_error, map_path_request_error, map_request_error, map_unit, move_shm_bytes,
-    path_equals, posix, read_c_string, reject_virtual_fs_mutation, resolve_path,
-    translate_guest_path_at, translate_guest_path_for_vfs, write_target_memory, Runtime, Word,
-    EFAULT, EINVAL, ENAMETOOLONG, ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR,
-    LINUX_AT_SYMLINK_FOLLOW, LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR,
-    LINUX_S_IFMT,
+    posix, read_c_string, reject_virtual_fs_mutation, resolve_path, translate_guest_path_at,
+    translate_guest_path_for_vfs, write_target_memory, Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG,
+    ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW,
+    LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
 };
 
 pub(super) fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
-    super::stat_current_path(runtime, pid, len).map(|_| 0)
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    super::namespace::stat_at(runtime, pid, super::LINUX_AT_FDCWD, bytes, true).map(|_| 0)
 }
 
 pub(super) fn sys_faccessat(
@@ -22,8 +21,7 @@ pub(super) fn sys_faccessat(
     _flags: Word,
 ) -> Result<Word, i32> {
     let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    let len = super::resolve_at(runtime, pid, dirfd, raw_len, _flags & 0x100 == 0)?;
-    super::stat_current_path(runtime, pid, len).map(|_| 0)
+    super::namespace::stat_at(runtime, pid, dirfd, raw_len, _flags & 0x100 == 0).map(|_| 0)
 }
 
 pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
@@ -342,8 +340,27 @@ pub(super) fn readlink_from_current_path(
     if user_buffer == 0 && len != 0 {
         return Err(EFAULT);
     }
-    if path_equals(runtime.posix_shm, path_len, b"/proc/self/exe") {
-        let Some(process) = runtime.managed_process(pid) else {
+    let path = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, path_len) };
+    if path == b"/proc/self" {
+        if len == 0 {
+            return Err(EINVAL);
+        }
+        let mut name = [0u8; 20];
+        let size = super::append_decimal_to_array(&mut name, 0, runtime.thread_group(pid)).min(len);
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), runtime.posix_shm as *mut u8, size);
+        }
+        write_target_memory(runtime, pid, user_buffer, size)?;
+        return Ok(size);
+    }
+    let proc_entry = super::procfs::lookup(runtime, pid, path);
+    if let Some(resource) = proc_entry
+        .filter(|value| super::procfs::node(*value) == Some(super::VirtualNode::ProcSelfExe))
+    {
+        if len == 0 {
+            return Err(EINVAL);
+        }
+        let Some(process) = runtime.managed_process(resource >> 32) else {
             return Err(ESRCH);
         };
         if process.rootfs.root_len != 0 {

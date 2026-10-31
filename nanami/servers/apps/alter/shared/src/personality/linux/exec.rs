@@ -107,6 +107,7 @@ pub(super) fn sys_execve(
     }
     close_cloexec_files(runtime, pid);
     runtime.tasks.remove(pid);
+    super::sysv_shm::leaving_vm(runtime, pid);
     super::memfd::forget_process(runtime, pid);
     if !runtime.reset_process_runtime_for_exec(pid) {
         return Err(ExecError::ImageReplaced);
@@ -162,6 +163,11 @@ pub(super) fn log_execve_stage_error(
     path_len: Word,
     errno: i32,
 ) {
+    // PATH search routinely probes missing candidates. Keep failures visible
+    // under strace, but do not serialize normal shell startup on UART output.
+    if errno == super::ENOENT && !super::process_trace_enabled(runtime, pid) {
+        return;
+    }
     nanami_runtime::println!(
         "[alter/linux] execve failed pid={} stage={} path-len={} client-shm={:#x} posix-shm={:#x} errno={}",
         pid,

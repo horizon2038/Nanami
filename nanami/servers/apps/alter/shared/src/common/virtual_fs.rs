@@ -36,6 +36,16 @@ pub enum VirtualNode {
     Hosts,
     DevPtmx,
     DevPts,
+    DevConsole,
+    DevPs2Mouse,
+    ProcProcess,
+    ProcTask,
+    ProcStat,
+    ProcStatus,
+    ProcCmdline,
+    ProcComm,
+    ProcStatm,
+    ProcUptime,
 }
 
 impl VirtualNode {
@@ -76,6 +86,16 @@ impl VirtualNode {
             29 => Some(Self::Hosts),
             30 => Some(Self::DevPtmx),
             31 => Some(Self::DevPts),
+            32 => Some(Self::DevConsole),
+            33 => Some(Self::DevPs2Mouse),
+            34 => Some(Self::ProcProcess),
+            35 => Some(Self::ProcTask),
+            36 => Some(Self::ProcStat),
+            37 => Some(Self::ProcStatus),
+            38 => Some(Self::ProcCmdline),
+            39 => Some(Self::ProcComm),
+            40 => Some(Self::ProcStatm),
+            41 => Some(Self::ProcUptime),
             _ => None,
         }
     }
@@ -89,6 +109,8 @@ impl VirtualNode {
                 | Self::DevPts
                 | Self::Proc
                 | Self::ProcSelf
+                | Self::ProcProcess
+                | Self::ProcTask
                 | Self::Sys
                 | Self::SysClass
                 | Self::SysClassInput
@@ -106,7 +128,19 @@ impl VirtualNode {
     pub const fn is_regular_file(self) -> bool {
         matches!(
             self,
-            Self::ProcSelfExe | Self::ProcVersion | Self::ProcCpuInfo | Self::ProcMemInfo | Self::ProcNetArp | Self::ResolvConf | Self::Hosts
+            Self::ProcSelfExe
+                | Self::ProcVersion
+                | Self::ProcCpuInfo
+                | Self::ProcMemInfo
+                | Self::ProcNetArp
+                | Self::ProcStat
+                | Self::ProcStatus
+                | Self::ProcCmdline
+                | Self::ProcComm
+                | Self::ProcStatm
+                | Self::ProcUptime
+                | Self::ResolvConf
+                | Self::Hosts
         )
     }
 }
@@ -117,13 +151,41 @@ pub struct DirectoryEntry {
     pub node: VirtualNode,
 }
 
-// Only mounted/aliased paths belong here. Ordinary root entries come from VFS.
-pub const ROOT_MOUNTS: &[DirectoryEntry] = &[
-    DirectoryEntry { name: b"dev", node: VirtualNode::Dev },
-    DirectoryEntry { name: b"proc", node: VirtualNode::Proc },
-    DirectoryEntry { name: b"sys", node: VirtualNode::Sys },
-    DirectoryEntry { name: b"temp", node: VirtualNode::Temp },
+// These mounts exist in every guest root. Ordinary root entries come from VFS.
+const PRIVATE_ROOT_MOUNTS: &[DirectoryEntry] = &[
+    DirectoryEntry {
+        name: b"dev",
+        node: VirtualNode::Dev,
+    },
+    DirectoryEntry {
+        name: b"proc",
+        node: VirtualNode::Proc,
+    },
+    DirectoryEntry {
+        name: b"sys",
+        node: VirtualNode::Sys,
+    },
 ];
+
+// /temp aliases /tmp only in the legacy personality root. A private OCI root
+// may have its own /temp, or none; never invent or shadow that disk entry.
+pub const ROOT_MOUNTS: &[DirectoryEntry] = &[
+    PRIVATE_ROOT_MOUNTS[0],
+    PRIVATE_ROOT_MOUNTS[1],
+    PRIVATE_ROOT_MOUNTS[2],
+    DirectoryEntry {
+        name: b"temp",
+        node: VirtualNode::Temp,
+    },
+];
+
+pub fn root_mounts(private_root: bool) -> &'static [DirectoryEntry] {
+    if private_root {
+        PRIVATE_ROOT_MOUNTS
+    } else {
+        ROOT_MOUNTS
+    }
+}
 
 pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
     match path {
@@ -134,6 +196,12 @@ pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
         b"/dev/input" => Some(VirtualNode::DevInput),
         b"/dev/null" => Some(VirtualNode::DevNull),
         b"/dev/zero" => Some(VirtualNode::DevZero),
+        b"/dev/tty0" | b"/dev/tty1" | b"/dev/console" if graphics_enabled => {
+            Some(VirtualNode::DevConsole)
+        }
+        b"/dev/input/mice" | b"/dev/psaux" | b"/dev/mouse" if graphics_enabled => {
+            Some(VirtualNode::DevPs2Mouse)
+        }
         b"/dev/tty" | b"/dev/console" | b"/dev/tty0" => Some(VirtualNode::DevTty),
         b"/dev/input/event0" => Some(VirtualNode::DevKeyboard),
         b"/dev/input/event1" => Some(VirtualNode::DevMouse),
@@ -144,6 +212,7 @@ pub fn lookup(path: &[u8], graphics_enabled: bool) -> Option<VirtualNode> {
         b"/proc/version" => Some(VirtualNode::ProcVersion),
         b"/proc/cpuinfo" => Some(VirtualNode::ProcCpuInfo),
         b"/proc/meminfo" => Some(VirtualNode::ProcMemInfo),
+        b"/proc/uptime" => Some(VirtualNode::ProcUptime),
         b"/proc/net" | b"/proc/self/net" => Some(VirtualNode::ProcNet),
         b"/proc/net/arp" | b"/proc/self/net/arp" => Some(VirtualNode::ProcNetArp),
         b"/sys" => Some(VirtualNode::Sys),
@@ -181,11 +250,21 @@ pub fn directory_entry(
                 name: b"tty",
                 node: VirtualNode::DevTty,
             },
-            4 => DirectoryEntry { name: b"ptmx", node: VirtualNode::DevPtmx },
-            5 => DirectoryEntry { name: b"pts", node: VirtualNode::DevPts },
+            4 => DirectoryEntry {
+                name: b"ptmx",
+                node: VirtualNode::DevPtmx,
+            },
+            5 => DirectoryEntry {
+                name: b"pts",
+                node: VirtualNode::DevPts,
+            },
             6 if graphics_enabled => DirectoryEntry {
                 name: b"fb0",
                 node: VirtualNode::DevFramebuffer,
+            },
+            7 | 8 if graphics_enabled => DirectoryEntry {
+                name: if index == 7 { b"tty0" } else { b"tty1" },
+                node: VirtualNode::DevConsole,
             },
             _ => return None,
         },
@@ -197,6 +276,10 @@ pub fn directory_entry(
             1 => DirectoryEntry {
                 name: b"event1",
                 node: VirtualNode::DevMouse,
+            },
+            2 if graphics_enabled => DirectoryEntry {
+                name: b"mice",
+                node: VirtualNode::DevPs2Mouse,
             },
             _ => return None,
         },
@@ -217,7 +300,14 @@ pub fn directory_entry(
                 name: b"meminfo",
                 node: VirtualNode::ProcMemInfo,
             },
-            4 => DirectoryEntry { name: b"net", node: VirtualNode::ProcNet },
+            4 => DirectoryEntry {
+                name: b"net",
+                node: VirtualNode::ProcNet,
+            },
+            5 => DirectoryEntry {
+                name: b"uptime",
+                node: VirtualNode::ProcUptime,
+            },
             _ => return None,
         },
         VirtualNode::ProcSelf => match index {
@@ -225,11 +315,17 @@ pub fn directory_entry(
                 name: b"exe",
                 node: VirtualNode::ProcSelfExe,
             },
-            1 => DirectoryEntry { name: b"net", node: VirtualNode::ProcNet },
+            1 => DirectoryEntry {
+                name: b"net",
+                node: VirtualNode::ProcNet,
+            },
             _ => return None,
         },
         VirtualNode::ProcNet => match index {
-            0 => DirectoryEntry { name: b"arp", node: VirtualNode::ProcNetArp },
+            0 => DirectoryEntry {
+                name: b"arp",
+                node: VirtualNode::ProcNetArp,
+            },
             _ => return None,
         },
         VirtualNode::Sys => match index {

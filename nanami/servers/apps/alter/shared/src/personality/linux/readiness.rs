@@ -132,12 +132,26 @@ pub(super) fn fd_readiness(
         | LinuxFileKind::SocketTcpListener
         | LinuxFileKind::SocketIcmp => socket_readiness(runtime, pid, fd, file)?,
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            let console = super::console::device(file).is_some();
+            let writable = if console && super::console::writable(runtime, file) {
+                write
+            } else {
+                0
+            };
             if events & read == 0 {
-                return Ok(0);
+                return Ok(writable);
             }
             if !*input_pumped {
                 pump_input_events(runtime);
                 *input_pumped = true;
+            }
+            if console {
+                return Ok(writable
+                    | if super::console::ready(runtime, file) {
+                        read
+                    } else {
+                        0
+                    });
             }
             let ready = if file.kind == LinuxFileKind::EvdevKeyboard {
                 keyboard_event_ready(runtime, file.resource >> 32)

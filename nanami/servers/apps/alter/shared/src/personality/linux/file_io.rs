@@ -287,7 +287,12 @@ pub(super) fn sys_write(
         LinuxFileKind::SocketTcpListener => return Err(ENOTCONN),
         LinuxFileKind::VirtualDirectory => return Err(EISDIR),
         LinuxFileKind::VirtualFile => return sys_virtual_write(runtime, pid, fd, len),
-        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => return Err(EBADF),
+        LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => {
+            if super::console::device(file).is_some() {
+                return super::console::write(runtime, pid, file, user_buffer, len);
+            }
+            return Err(EBADF);
+        }
         LinuxFileKind::Framebuffer => {
             return sys_framebuffer_write(runtime, pid, fd, user_buffer, len);
         }

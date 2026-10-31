@@ -1,5 +1,5 @@
-use nanami_runtime::{RequestError, Word};
 use nanami_client::posix;
+use nanami_runtime::{RequestError, Word};
 
 use crate::abi::{ALTER_IO_OFFSET, ALTER_PATH_MAX};
 use crate::elf::{parse_elf64_header, parse_elf64_image, ElfError, ElfMetadata};
@@ -20,10 +20,43 @@ pub struct LoadedElfImage {
     pub metadata: ElfMetadata,
 }
 
+struct FileSnapshot {
+    address: Word,
+    metadata: Option<ElfMetadata>,
+}
+
+/// mmap uses a fresh identity from its own FD. Only fill on a whole-file read,
+/// never prefetch a large file for a small mapping. Returned bytes are private,
+/// immutable Alter snapshots; guests receive copies, not shared writable aliases.
+pub fn file_mapping_source(
+    runtime: &mut Runtime,
+    fd: Word,
+    identity: Word,
+    size: Word,
+    offset: Word,
+    bytes: Word,
+) -> Result<Option<Word>, LoadError> {
+    if offset.checked_add(bytes).is_none_or(|end| end > size) {
+        return Err(LoadError::InvalidArgument);
+    }
+    if let Some(cached) = runtime.image_cache.get(identity, size) {
+        return Ok(Some(cached.address + offset));
+    }
+    if identity >> 32 == 0
+        || size == 0
+        || size > super::image_cache::MAX_IMAGE_BYTES
+        || offset != 0
+        || bytes != size
+    {
+        return Ok(None);
+    }
+    let file = load_file_snapshot(runtime, fd, identity, size, ImageBuffer::Reusable)?;
+    Ok(Some(file.address))
+}
+
 #[derive(Clone, Copy)]
 enum ImageBuffer {
     Reusable,
-    Cached,
     Interpreter,
 }
 
@@ -41,36 +74,6 @@ pub fn load_linux_elf_image(
 ) -> Result<LoadedElfImage, LoadError> {
     let (path, path_len) = read_client_path(runtime, path_offset, path_len)?;
     load_elf_image(runtime, &path[..path_len], ImageBuffer::Reusable)
-}
-
-pub fn load_cached_fork_linux_elf_image(
-    runtime: &mut Runtime,
-    path_offset: Word,
-    path_len: Word,
-) -> Result<LoadedElfImage, LoadError> {
-    let (path, path_len) = read_client_path(runtime, path_offset, path_len)?;
-    let path = &path[..path_len];
-    if let Some(cached) = runtime.cached_fork_image(path) {
-        return Ok(LoadedElfImage {
-            address: cached.address,
-            size: cached.size,
-            metadata: cached.metadata,
-        });
-    }
-
-    let buffer = if runtime.has_fork_image_cache_slot() {
-        ImageBuffer::Cached
-    } else {
-        ImageBuffer::Reusable
-    };
-    let loaded = load_elf_image(runtime, path, buffer)?;
-    if matches!(buffer, ImageBuffer::Cached)
-        && !runtime.cache_fork_image(path, loaded.address, loaded.size, loaded.metadata)
-    {
-        let _ = nanami_runtime::request_mapping_release(loaded.address, loaded.size);
-        return Err(LoadError::Io);
-    }
-    Ok(loaded)
 }
 
 pub fn validate_linux_elf(
@@ -116,79 +119,177 @@ fn load_elf_image(
     }
 
     copy_path_to_posix_shm(runtime, path);
-    let stat = posix::posix_stat(runtime.posix_port, 0, path.len() as Word)
+    // Resolve once. Size and content identity belong to this open file, even
+    // if another client renames/replaces the pathname during loading.
+    let fd = posix::posix_open(runtime.posix_port, 0, path.len() as Word, 0)
         .map_err(map_load_request_error)?;
-    let size = stat.1;
+    let result = (|| {
+        let (identity, size, kind, _, _) =
+            posix::posix_fstat_flags(runtime.posix_port, fd, posix::POSIX_STAT_INCLUDE_VERSION)
+                .map_err(|_| LoadError::Io)?;
+        if kind != posix::POSIX_FILE_TYPE_REGULAR {
+            return Err(LoadError::InvalidElf);
+        }
+        load_opened_image(runtime, fd, identity, size, buffer)
+    })();
+    let closed = posix::posix_close(runtime.posix_port, fd);
+    let loaded = result?;
+    closed.map_err(|_| LoadError::Io)?;
+    Ok(loaded)
+}
+
+fn load_opened_image(
+    runtime: &mut Runtime,
+    fd: Word,
+    identity: Word,
+    size: Word,
+    buffer: ImageBuffer,
+) -> Result<LoadedElfImage, LoadError> {
     if size < 64 {
         return Err(LoadError::InvalidElf);
     }
-
-    let (image, allocation_size) = match buffer {
-        ImageBuffer::Reusable | ImageBuffer::Interpreter => {
-            let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter) {
-                (&mut runtime.interpreter_image_buffer, &mut runtime.interpreter_image_buffer_size)
-            } else {
-                (&mut runtime.exec_image_buffer, &mut runtime.exec_image_buffer_size)
-            };
-            if *address == 0 || *capacity < size {
-                let (image, image_size) =
-                    nanami_runtime::request_heap(size).map_err(|_| LoadError::Io)?;
-                if image_size < size {
-                    let _ = nanami_runtime::request_mapping_release(image, image_size);
-                    return Err(LoadError::Io);
-                }
-                if *address != 0 { let _ = nanami_runtime::request_mapping_release(*address, *capacity); }
-                *address = image;
-                *capacity = image_size;
-            }
-            (*address, *capacity)
-        }
-        ImageBuffer::Cached => {
-            let (image, image_size) = nanami_runtime::request_heap(size).map_err(|_| LoadError::Io)?;
-            if image_size < size {
-                let _ = nanami_runtime::request_mapping_release(image, image_size);
-                return Err(LoadError::Io);
-            }
-            (image, image_size)
+    let file = load_file_snapshot(runtime, fd, identity, size, buffer)?;
+    let metadata = match file.metadata {
+        Some(metadata) => metadata,
+        None => {
+            let bytes = unsafe { core::slice::from_raw_parts(file.address as *const u8, size) };
+            return parse_elf64_image(bytes)
+                .map(|metadata| LoadedElfImage {
+                    address: file.address,
+                    size,
+                    metadata,
+                })
+                .map_err(map_elf_error);
         }
     };
-
-    let result = read_and_parse_elf(runtime, path, image, size);
-    if result.is_err() && matches!(buffer, ImageBuffer::Cached) {
-        let _ = nanami_runtime::request_mapping_release(image, allocation_size);
-    }
-    let metadata = result?;
     Ok(LoadedElfImage {
-        address: image,
+        address: file.address,
         size,
         metadata,
     })
 }
 
-fn read_and_parse_elf(
+fn load_file_snapshot(
     runtime: &mut Runtime,
-    path: &[u8],
-    image: Word,
+    fd: Word,
+    identity: Word,
     size: Word,
-) -> Result<ElfMetadata, LoadError> {
-    copy_path_to_posix_shm(runtime, path);
-    let fd = posix::posix_open(runtime.posix_port, 0, path.len() as Word, 0)
-        .map_err(map_load_request_error)?;
+    buffer: ImageBuffer,
+) -> Result<FileSnapshot, LoadError> {
+    if let Some(cached) = runtime.image_cache.get(identity, size) {
+        return Ok(FileSnapshot {
+            address: cached.address,
+            metadata: cached.metadata,
+        });
+    }
+    let cache_slot = if identity >> 32 != 0 && size <= super::image_cache::MAX_IMAGE_BYTES {
+        Some(runtime.image_cache.replacement())
+    } else {
+        None
+    };
+    let (image, allocation_size) = if let Some(slot) = cache_slot {
+        let previous = runtime.image_cache.entry(slot);
+        let allocation = match previous.filter(|entry| entry.capacity >= size) {
+            Some(entry) => (entry.address, entry.capacity),
+            None => {
+                // Alpha may defer physical-page reuse after mapping release.
+                // Reuse each cache buffer in place, and grow geometrically so
+                // eviction and failed reads cannot accumulate unbounded RAM.
+                let capacity = previous.map_or(size, |_| size.next_power_of_two());
+                let allocation =
+                    nanami_runtime::request_heap(capacity).map_err(|_| LoadError::Io)?;
+                if allocation.1 < size {
+                    let _ = nanami_runtime::request_mapping_release(allocation.0, allocation.1);
+                    return Err(LoadError::Io);
+                }
+                if let Some(entry) = previous {
+                    if nanami_runtime::request_mapping_release(entry.address, entry.capacity)
+                        .is_err()
+                    {
+                        let _ = nanami_runtime::request_mapping_release(allocation.0, allocation.1);
+                        return Err(LoadError::Io);
+                    }
+                }
+                allocation
+            }
+        };
+        // Retain allocation ownership on I/O/parse failure without allowing
+        // the partially overwritten buffer to be used as a content hit.
+        runtime
+            .image_cache
+            .insert(slot, 0, allocation.0, 0, allocation.1, None);
+        allocation
+    } else {
+        let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter) {
+            (
+                &mut runtime.interpreter_image_buffer,
+                &mut runtime.interpreter_image_buffer_size,
+            )
+        } else {
+            (
+                &mut runtime.exec_image_buffer,
+                &mut runtime.exec_image_buffer_size,
+            )
+        };
+        if *address == 0 || *capacity < size {
+            let (image, image_size) =
+                nanami_runtime::request_heap(size).map_err(|_| LoadError::Io)?;
+            if image_size < size {
+                let _ = nanami_runtime::request_mapping_release(image, image_size);
+                return Err(LoadError::Io);
+            }
+            if *address != 0 {
+                if nanami_runtime::request_mapping_release(*address, *capacity).is_err() {
+                    let _ = nanami_runtime::request_mapping_release(image, image_size);
+                    return Err(LoadError::Io);
+                }
+            }
+            *address = image;
+            *capacity = image_size;
+        }
+        (*address, *capacity)
+    };
+    let result = (|| {
+        read_image(runtime, fd, image, size)?;
+        if identity >> 32 != 0 {
+            let current =
+                posix::posix_fstat_flags(runtime.posix_port, fd, posix::POSIX_STAT_INCLUDE_VERSION)
+                    .map_err(|_| LoadError::Io)?;
+            if current.0 != identity || current.1 != size {
+                return Err(LoadError::Io);
+            }
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(image as *const u8, size) };
+        Ok(parse_elf64_image(bytes).ok())
+    })();
+    let metadata = result?;
+    if let Some(slot) = cache_slot {
+        runtime
+            .image_cache
+            .insert(slot, identity, image, size, allocation_size, metadata);
+    }
+    Ok(FileSnapshot {
+        address: image,
+        metadata,
+    })
+}
+
+fn read_image(runtime: &mut Runtime, fd: Word, image: Word, size: Word) -> Result<(), LoadError> {
     let chunk_limit = runtime
         .posix_read_buffer_size()
         .saturating_sub(ALTER_IO_OFFSET as Word);
     if chunk_limit == 0 {
-        let _ = posix::posix_close(runtime.posix_port, fd);
         return Err(LoadError::InvalidArgument);
     }
 
     let mut copied = 0;
     while copied < size {
         let chunk = (size - copied).min(chunk_limit);
-        let (read, source) = match runtime.read_posix(fd, ALTER_IO_OFFSET as Word, chunk) {
+        // Positioned reads make direct-buffer fallback idempotent: a failed
+        // transport cannot silently advance the descriptor's sequential offset.
+        let (read, source) = match runtime.pread_posix(fd, ALTER_IO_OFFSET as Word, chunk, copied) {
             Ok((read, source)) if read != 0 && read <= chunk => (read, source),
             _ => {
-                let _ = posix::posix_close(runtime.posix_port, fd);
                 return Err(LoadError::Io);
             }
         };
@@ -201,9 +302,7 @@ fn read_and_parse_elf(
         }
         copied += read;
     }
-    posix::posix_close(runtime.posix_port, fd).map_err(|_| LoadError::Io)?;
-    let image = unsafe { ::core::slice::from_raw_parts(image as *const u8, size as usize) };
-    parse_elf64_image(image).map_err(map_elf_error)
+    Ok(())
 }
 
 fn read_client_path(
@@ -249,7 +348,9 @@ fn map_elf_error(error: ElfError) -> LoadError {
 fn map_load_request_error(error: RequestError) -> LoadError {
     match error {
         RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)
-        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR) => LoadError::NotFound,
+        | RequestError::Status(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR) => {
+            LoadError::NotFound
+        }
         _ => LoadError::Io,
     }
 }

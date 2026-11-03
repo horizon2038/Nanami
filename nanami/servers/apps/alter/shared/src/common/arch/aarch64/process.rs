@@ -48,6 +48,15 @@ pub fn configure_personality_syscall_reply(
     1
 }
 
+pub fn configure_trapped_syscall_reply(
+    hardware_context: &mut HardwareContext,
+    context: LinuxSyscallContext,
+    value: isize,
+    personality: OsPersonality,
+) -> usize {
+    configure_personality_syscall_reply(hardware_context, context, value, personality)
+}
+
 pub fn read_syscall_context(
     pcb: Word,
     kernel_call_number: Word,

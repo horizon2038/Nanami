@@ -5,13 +5,15 @@ impl Alpha {
         &mut self,
         pcb: CapabilityDescriptor,
         requested: Option<Word>,
+        priority: Word,
     ) -> Result<Word, CapabilityError> {
         // The available cores come from the environment. A newly created, suspended
         // PCB starts on core 0; no affinity probing is needed.
         let affinity = if crate::nanami_core::process::SAME_CORE_DIAGNOSTIC {
             0
         } else {
-            requested.unwrap_or_else(|| self.processes.allocate_affinity())
+            self.process_policies
+                .select_affinity(priority, requested, || self.processes.allocate_affinity())
         };
         if affinity >= self.processes.online_core_count() {
             return Err(CapabilityError::InvalidArgument);
@@ -423,7 +425,8 @@ impl Alpha {
             0,
         ));
         spawn_stage = "affinity";
-        let affinity = spawn_try!(self.configure_process_affinity(child_pcb, policy.affinity));
+        let affinity =
+            spawn_try!(self.configure_process_affinity(child_pcb, policy.affinity, priority));
 
         spawn_stage = "process-install";
         spawn_try!(self.processes.install_process(
@@ -452,7 +455,7 @@ impl Alpha {
             spawn_try!(arch::process_control_block::resume(child_pcb));
         }
         crate::force_info!(
-            "[smp] process pid={:>3} image={} affinity={} priority={}",
+            "spawn pid={} {} cpu={} prio={}",
             pid,
             image_name,
             affinity,
@@ -528,12 +531,25 @@ impl Alpha {
 
         let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
         for allocation in physical_allocations.iter() {
-            let _ = self.memory.free_physical(
+            if let Err(error) = self.memory.free_physical(
                 allocation.base_page * PAGE_SIZE,
                 allocation.page_count * PAGE_SIZE,
-            );
+            ) {
+                error!(
+                    "[proc.err] failed spawn RAM retained pid={} err={:?}",
+                    pid, error
+                );
+                return;
+            }
         }
-        self.free_deferred_process_allocations(pid, None);
+        self.processes.drop_active_physical_allocations_for_pid(pid);
+        if let Err(error) = self.free_deferred_process_allocations(pid, None) {
+            error!(
+                "[proc.err] failed spawn deferred RAM retained pid={} err={:?}",
+                pid, error
+            );
+            return;
+        }
 
         if self.processes.find_entry_by_pid(pid).is_some() {
             let _ = self.processes.mark_exited(pid, 0, 1);
@@ -541,35 +557,6 @@ impl Alpha {
         } else {
             self.processes.discard_process_artifacts(pid, root_slot);
         }
-    }
-
-    pub(super) fn free_deferred_process_allocations(
-        &mut self,
-        pid: usize,
-        process_root: Option<CapabilityDescriptor>,
-    ) {
-        let allocations = self
-            .processes
-            .releasable_deferred_physical_allocations_for_pid(pid);
-        for allocation in allocations.iter() {
-            if let Some(root_node) = process_root {
-                let mut i = 0usize;
-                while i < allocation.page_count {
-                    let slot = allocation.start_slot + i;
-                    let _ = arch::node::remove(
-                        process_frame_chunk_descriptor(root_node, slot / PROCESS_FRAME_CHUNK_PAGES),
-                        (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                    );
-                    i += 1;
-                }
-            }
-            let _ = self.memory.free_physical(
-                allocation.base_page * PAGE_SIZE,
-                allocation.page_count * PAGE_SIZE,
-            );
-        }
-        self.processes
-            .drop_deferred_physical_allocations_for_pid(pid);
     }
 
     pub(super) fn try_handle_demand_page_fault(
@@ -953,51 +940,71 @@ impl Alpha {
         let total_frames = image_pages + USER_STACK_PAGES;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
 
-        self.drop_process_runtime_mappings(pid, target)?;
-        self.recreate_process_address_space_for_exec(target)?;
-        self.processes.reset_runtime_memory_for_exec(
-            pid,
-            total_frames,
-            heap_base,
-            USER_HEAP_LIMIT,
-        )?;
-        self.processes.ensure_vm_space_for_pid(pid)?;
-        self.processes.register_lazy_mapping(
-            pid,
-            USER_STACK_BASE,
-            USER_STACK_PAGES,
-            image_pages,
-            ProcessLazyMappingKind::Zero,
-        )?;
-
-        let image_kind = ProcessLazyMappingKind::Image {
-            image: image_bytes,
-            elf,
-        };
-        let mut image_page = 0usize;
-        while image_page < image_pages {
-            let image_va = image_base + image_page * PAGE_SIZE;
-            self.materialize_exec_image_page(
+        let installation = (|| -> Result<usize, CapabilityError> {
+            let begin = exec_profile::stamp();
+            self.drop_process_runtime_mappings(pid, target)?;
+            let dropped = exec_profile::stamp();
+            self.recreate_process_address_space_for_exec(target)?;
+            let space = exec_profile::stamp();
+            self.processes.reset_runtime_memory_for_exec(
                 pid,
-                target.root_node,
-                target.address_space,
-                image_kind,
-                image_va,
-                image_page,
+                total_frames,
+                heap_base,
+                USER_HEAP_LIMIT,
             )?;
-            image_page += 1;
+            self.processes.ensure_vm_space_for_pid(pid)?;
+            self.processes.register_lazy_mapping(
+                pid,
+                USER_STACK_BASE,
+                USER_STACK_PAGES,
+                image_pages,
+                ProcessLazyMappingKind::Zero,
+            )?;
+
+            let image_kind = ProcessLazyMappingKind::Image {
+                image: image_bytes,
+                elf,
+            };
+            let plan = exec_profile::stamp();
+            let mut image_page = 0usize;
+            while image_page < image_pages {
+                let image_va = image_base + image_page * PAGE_SIZE;
+                self.materialize_exec_image_page(
+                    pid,
+                    target.root_node,
+                    target.address_space,
+                    image_kind,
+                    image_va,
+                    image_page,
+                )?;
+                image_page += 1;
+            }
+            let image_done = exec_profile::stamp();
+            let mut stack_page = 0usize;
+            while stack_page < USER_STACK_PAGES {
+                let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
+                self.materialize_lazy_page(pid, target.root_node, target.address_space, stack_va)?;
+                stack_page += 1;
+            }
+            let stack_done = exec_profile::stamp();
+            exec_profile::report(
+                pid,
+                image_pages,
+                [begin, dropped, space, plan, image_done, stack_done],
+            );
+            info!(
+                "[proc] exec memory pid={:>3} image=[{:#018x}..{:#018x}) pages={} entry={:#018x}",
+                pid, image_base, image_end, image_pages, elf.entry_point
+            );
+            Ok(elf.entry_point)
+        })();
+        if target.capabilities_sealed {
+            // Past validation, any error can follow destructive VM changes.
+            // The supervisor must terminate, not resume the replaced image.
+            installation.map_err(|_| CapabilityError::Fatal)
+        } else {
+            installation
         }
-        let mut stack_page = 0usize;
-        while stack_page < USER_STACK_PAGES {
-            let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
-            self.materialize_lazy_page(pid, target.root_node, target.address_space, stack_va)?;
-            stack_page += 1;
-        }
-        info!(
-            "[proc] exec memory pid={:>3} image=[{:#018x}..{:#018x}) pages={} entry={:#018x}",
-            pid, image_base, image_end, image_pages, elf.entry_point
-        );
-        Ok(elf.entry_point)
     }
 
     pub(super) fn materialize_exec_image_page(
@@ -1069,22 +1076,31 @@ impl Alpha {
         pid: usize,
         target: crate::nanami_core::process::ProcessEntry,
     ) -> Result<(), CapabilityError> {
+        if target.capabilities_sealed {
+            return self.drop_sealed_process_runtime_mappings(pid, target);
+        }
+        let begin = exec_profile::stamp();
         self.invalidate_process_copy_mappings(pid)?;
         let allocations =
             self.processes
                 .reset_runtime_memory_for_exec(pid, 0, 0, USER_HEAP_LIMIT)?;
+        let reset_done = exec_profile::stamp();
+        let references = allocations.len();
+        let mut phases = [0u64; 4];
         for (allocation, is_last_reference) in allocations {
             let mut i = 0usize;
             while i < allocation.page_count {
                 let slot = allocation.start_slot + i;
                 let frame = process_frame_descriptor(target.root_node, slot);
                 let va = allocation.base_va + i * PAGE_SIZE;
+                let before_unmap = exec_profile::stamp();
                 if let Err(e) = arch::address_space::unmap(target.address_space, frame, va) {
                     info!(
                         "[proc.exec.warn] unmap failed pid={:>3} va={:#018x} frame={:#018x} err={:?}",
                         pid, va, frame, e
                     );
                 }
+                let after_unmap = exec_profile::stamp();
                 if let Err(e) = arch::node::remove(
                     process_frame_chunk_descriptor(
                         target.root_node,
@@ -1097,16 +1113,24 @@ impl Alpha {
                         pid, frame, slot, e
                     );
                 }
+                let after_remove = exec_profile::stamp();
+                phases[0] += after_unmap.saturating_sub(before_unmap);
+                phases[1] += after_remove.saturating_sub(after_unmap);
                 i += 1;
             }
             if is_last_reference {
+                let before_free = exec_profile::stamp();
                 self.memory.free_physical(
                     allocation.base_page * PAGE_SIZE,
                     allocation.page_count * PAGE_SIZE,
                 )?;
+                phases[2] += exec_profile::stamp().saturating_sub(before_free);
             }
         }
-        self.free_deferred_process_allocations(pid, Some(target.root_node));
+        let before_deferred = exec_profile::stamp();
+        self.free_deferred_process_allocations(pid, Some(target.root_node))?;
+        phases[3] = exec_profile::stamp().saturating_sub(before_deferred);
+        exec_profile::report_drop(pid, references, reset_done.saturating_sub(begin), phases);
         Ok(())
     }
 
@@ -1252,10 +1276,15 @@ impl Alpha {
         {
             return Err(CapabilityError::Fatal);
         }
+        let begin = exec_profile::stamp();
         self.invalidate_process_copy_mappings(pid)?;
+        let invalidated = exec_profile::stamp();
         arch::node::revoke(self.root.root_descriptor, entry.root_slot as Word)?;
+        let revoked = exec_profile::stamp();
         arch::node::remove(self.root.root_descriptor, entry.root_slot as Word)?;
+        let removed = exec_profile::stamp();
         self.memory.release_page_tables(entry.address_space)?;
+        let tables = exec_profile::stamp();
         let physical_allocations = self.processes.releasable_physical_allocations_for_pid(pid);
         for allocation in physical_allocations.iter() {
             self.memory.free_physical(
@@ -1263,10 +1292,34 @@ impl Alpha {
                 allocation.page_count * PAGE_SIZE,
             )?;
         }
-        self.free_deferred_process_allocations(pid, None);
+        let freed = exec_profile::stamp();
+        // A deferred alias can become the final reference only after this
+        // process's active aliases have retired. Keep peer references intact.
+        self.processes.drop_active_physical_allocations_for_pid(pid);
+        self.free_deferred_process_allocations(pid, None)?;
+        let deferred = exec_profile::stamp();
         self.processes.drop_physical_allocations_for_pid(pid);
+        let references = exec_profile::stamp();
         self.memory.reset_process_arena(entry.root_slot)?;
+        let arena = exec_profile::stamp();
         self.processes.reap_process(pid, true)?;
+        let reaped = exec_profile::stamp();
+        exec_profile::report_reap(
+            pid,
+            physical_allocations.len(),
+            [
+                begin,
+                invalidated,
+                revoked,
+                removed,
+                tables,
+                freed,
+                deferred,
+                references,
+                arena,
+                reaped,
+            ],
+        );
         if entry.memory_owner != pid {
             if let Some(owner) = self.processes.find_entry_by_pid(entry.memory_owner) {
                 if owner.deferred_vm_reap && !self.processes.has_memory_peers(owner.pid) {

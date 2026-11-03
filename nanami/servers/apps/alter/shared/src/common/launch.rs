@@ -171,6 +171,10 @@ pub fn handle_spawn_linux(runtime: &mut Runtime, request: ServiceRequest) -> Rep
 
     match nanami_runtime::request_process_spawn_fault_handler_suspended(image_name, pcb_slot) {
         Ok(pid) => {
+            if let Err(status) = seal_linux_capabilities(pid, personality) {
+                discard_spawned_process(pid);
+                return ReplyAction::Reply(status, 0, 0);
+            }
             let pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
             let stack_pointer = match prepare_initial_stack(
                 runtime,
@@ -270,16 +274,13 @@ fn spawn_rootfs_linux_image(
         .as_ref()
         .map(|context| (context.executable_offset, context.executable_len))
         .unwrap_or((info.argv_offsets[0], info.argv_lens[0]));
-    let loaded = match load_linux_elf_image(
-        runtime,
-        executable_offset as Word,
-        executable_len as Word,
-    ) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0);
-        }
-    };
+    let loaded =
+        match load_linux_elf_image(runtime, executable_offset as Word, executable_len as Word) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0);
+            }
+        };
 
     if loaded.metadata.has_interpreter && personality != OsPersonality::Linux {
         return ReplyAction::Reply(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
@@ -302,6 +303,10 @@ fn spawn_rootfs_linux_image(
         pcb_slot,
     ) {
         Ok(pid) => {
+            if let Err(status) = seal_linux_capabilities(pid, personality) {
+                discard_spawned_process(pid);
+                return ReplyAction::Reply(status, 0, 0);
+            }
             let pcb = nanami_runtime::ipc::process_slot_descriptor(pcb_slot);
             let diagnostics = (request.arg3 & ALTER_LAUNCH_FLAG_DIAGNOSTICS) != 0;
             let graphics = info.context.as_ref().map_or(
@@ -445,6 +450,14 @@ fn personality_from_flags(_flags: Word) -> OsPersonality {
 fn discard_spawned_process(pid: Word) {
     let _ = nanami_runtime::request_process_kill(pid, 1);
     let _ = nanami_runtime::request_process_reap(pid);
+}
+
+fn seal_linux_capabilities(pid: Word, personality: OsPersonality) -> Result<(), Word> {
+    if personality == OsPersonality::Linux {
+        nanami_runtime::request_process_seal_capabilities(pid)
+            .map_err(map_request_error_to_status)?;
+    }
+    Ok(())
 }
 
 fn ensure_terminal_client(runtime: &mut Runtime, terminal_id: Word) -> Result<(), Word> {

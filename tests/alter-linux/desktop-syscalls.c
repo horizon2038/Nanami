@@ -17,7 +17,39 @@ static volatile word shared;
 enum { STACK_BYTES = 16384 };
 static void shared_child(void) { shared = 0x1234; }
 
+static int resid_copyout_checks(void) {
+    for (long syscall = 118; syscall <= 120; syscall += 2) {
+        unsigned int ids[3] = {99, 99, 99};
+        CHECK(call(syscall, (word)&ids[0], (word)&ids[1], (word)&ids[2], 0) == 0);
+        CHECK(ids[0] == 0 && ids[1] == 0 && ids[2] == 0);
+        ids[0] = 99; ids[1] = 99; ids[2] = 99;
+        CHECK(call(syscall, (word)&ids[0], 0, (word)&ids[2], 0) == -14);
+        CHECK(ids[0] == 0 && ids[1] == 99 && ids[2] == 99);
+        CHECK(call(syscall, (word)&ids[2], (word)&ids[1], (word)&ids[0], 0) == 0);
+        CHECK(ids[0] == 0 && ids[1] == 0 && ids[2] == 0);
+        long pages = linux_call(9, 0, 8192, 3, 0x22, (word)-1, 0);
+        CHECK(pages > 0);
+        unsigned int *tail = (void *)(pages + 4096 - 8);
+        tail[0] = 99; tail[1] = 99; tail[2] = 99;
+        CHECK(call(10, pages + 4096, 4096, 0, 0) == 0);
+        CHECK(call(syscall, (word)&tail[0], (word)&tail[1], (word)&tail[2], 0) == -14);
+        CHECK(tail[0] == 0 && tail[1] == 0);
+        CHECK(call(10, pages + 4096, 4096, 3, 0) == 0 && tail[2] == 99);
+        unsigned char *unaligned = (void *)(pages + 4096 - 6);
+        for (word i = 0; i < 12; ++i) { unaligned[i] = 99; }
+        CHECK(call(10, pages + 4096, 4096, 0, 0) == 0);
+        CHECK(call(syscall, (word)unaligned, (word)(unaligned + 4), (word)(unaligned + 8), 0) == -14);
+        for (word i = 0; i < 4; ++i) { CHECK(unaligned[i] == 0); }
+        CHECK(call(10, pages + 4096, 4096, 3, 0) == 0);
+        for (word i = 4; i < 12; ++i) { CHECK(unaligned[i] == 99); }
+        CHECK(call(11, pages, 8192, 0, 0) == 0);
+    }
+    return 0;
+}
+
 int test_main(void) {
+    int resid_status = resid_copyout_checks();
+    if (resid_status != 0) { return resid_status; }
     _Alignas(8) unsigned char system_info[120];
     for (word i = 0; i < sizeof(system_info); ++i) { system_info[i] = 0xa5; }
     word before[2], after[2];

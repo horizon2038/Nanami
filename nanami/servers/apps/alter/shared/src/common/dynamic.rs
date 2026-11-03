@@ -66,7 +66,7 @@ pub fn prepare_in_root(
         .ok_or(LoadError::InvalidArgument)?;
     host_path[..prefix.len()].copy_from_slice(prefix);
     host_path[prefix.len()..len].copy_from_slice(path);
-    let image = load_interpreter_elf_image(runtime, &host_path[..len])?;
+    let image = load_interpreter_elf_image(runtime, &host_path[..len], executable.address)?;
     if image.metadata.elf_type != 3 || image.metadata.has_interpreter {
         return Err(LoadError::UnsupportedElf);
     }

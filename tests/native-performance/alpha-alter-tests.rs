@@ -9,6 +9,49 @@ pub type CapabilityDescriptor = usize;
 pub mod avl;
 pub mod static_avl {
     include!(env!("NANAMI_STATIC_AVL_SOURCE"));
+
+    pub(super) fn assert_valid<const N: usize>(tree: &StaticAvlTree<N>) {
+        fn walk<const N: usize>(
+            tree: &StaticAvlTree<N>,
+            current: Option<usize>,
+            lower: Option<usize>,
+            upper: Option<usize>,
+            seen: &mut [bool; N],
+        ) -> i16 {
+            let Some(index) = current else {
+                return 0;
+            };
+            assert!(index < tree.initialized && !seen[index]);
+            seen[index] = true;
+            let node = tree.nodes[index];
+            if let Some(lower) = lower {
+                assert!(node.key > lower);
+            }
+            if let Some(upper) = upper {
+                assert!(node.key < upper);
+            }
+            let left = walk(tree, node.left, lower, Some(node.key), seen);
+            let right = walk(tree, node.right, Some(node.key), upper, seen);
+            assert!((left - right).abs() <= 1);
+            let height = left.max(right) + 1;
+            assert_eq!(node.height, height);
+            height
+        }
+
+        assert!(tree.initialized <= N);
+        let mut seen = [false; N];
+        walk(tree, tree.root, None, None, &mut seen);
+        let mut free = tree.free;
+        while let Some(index) = free {
+            assert!(index < tree.initialized && !seen[index]);
+            seen[index] = true;
+            assert_eq!(tree.nodes[index].height, 0);
+            assert_eq!(tree.nodes[index].right, None);
+            free = tree.nodes[index].left;
+        }
+        assert!(seen[..tree.initialized].iter().all(|used| *used));
+        assert!(seen[tree.initialized..].iter().all(|used| !*used));
+    }
 }
 pub mod nanami_utils {
     pub use crate::{avl, static_avl};
@@ -47,6 +90,98 @@ fn static_avl_recycles_all_node_shapes_and_preserves_updates_at_capacity() {
     let mut empty = static_avl::StaticAvlTree::<0>::new();
     assert_eq!(empty.insert(0, 1), Err(()));
     assert_eq!(empty.remove(0), None);
+}
+
+#[test]
+fn static_avl_all_five_key_insertion_and_deletion_orders_preserve_balance() {
+    fn permute(keys: &mut [usize], offset: usize, orders: &mut Vec<Vec<usize>>) {
+        if offset == keys.len() {
+            orders.push(keys.to_vec());
+            return;
+        }
+        for next in offset..keys.len() {
+            keys.swap(offset, next);
+            permute(keys, offset + 1, orders);
+            keys.swap(offset, next);
+        }
+    }
+
+    let mut orders = Vec::new();
+    permute(&mut [0, 1, 2, usize::MAX - 1, usize::MAX], 0, &mut orders);
+    assert_eq!(orders.len(), 120);
+    for insertions in &orders {
+        for deletions in &orders {
+            let mut tree = static_avl::StaticAvlTree::<5>::new();
+            let mut expected = std::collections::BTreeMap::new();
+            for &key in insertions {
+                tree.insert(key, key ^ 0x1234).unwrap();
+                expected.insert(key, key ^ 0x1234);
+                static_avl::assert_valid(&tree);
+            }
+            for &key in deletions {
+                assert_eq!(tree.remove(key), expected.remove(&key));
+                static_avl::assert_valid(&tree);
+                for &remaining in insertions {
+                    assert_eq!(tree.find(remaining), expected.get(&remaining).copied());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn static_avl_mixed_mutations_preserve_heights_live_nodes_and_free_list() {
+    let mut tree = static_avl::StaticAvlTree::<63>::new();
+    let mut expected = std::collections::BTreeMap::new();
+    let mut random = 0x9e3779b97f4a7c15u64;
+    for step in 0..50_000 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let key = (random >> 32) as usize % 95;
+        if step % 3 == 0 {
+            assert_eq!(tree.remove(key), expected.remove(&key));
+        } else if expected.len() < 63 || expected.contains_key(&key) {
+            tree.insert(key, step).unwrap();
+            expected.insert(key, step);
+        } else {
+            assert_eq!(tree.insert(key, step), Err(()));
+        }
+        static_avl::assert_valid(&tree);
+        if step % 199 == 0 {
+            for key in 0..95 {
+                assert_eq!(tree.find(key), expected.get(&key).copied());
+            }
+        }
+    }
+    for (key, value) in expected {
+        assert_eq!(tree.remove(key), Some(value));
+        static_avl::assert_valid(&tree);
+    }
+}
+
+#[test]
+fn static_avl_full_updates_failed_insertions_and_refill_keep_every_slot_owned() {
+    let mut empty = static_avl::StaticAvlTree::<0>::new();
+    assert_eq!(empty.insert(usize::MAX, usize::MAX), Err(()));
+    static_avl::assert_valid(&empty);
+
+    let mut tree = static_avl::StaticAvlTree::<31>::new();
+    for round in 0..32 {
+        for key in (0..31).rev() {
+            tree.insert(key, round).unwrap();
+            static_avl::assert_valid(&tree);
+        }
+        for key in 0..31 {
+            tree.insert(key, usize::MAX - key).unwrap();
+            static_avl::assert_valid(&tree);
+        }
+        assert_eq!(tree.insert(usize::MAX, 7), Err(()));
+        assert_eq!(tree.remove(usize::MAX), None);
+        static_avl::assert_valid(&tree);
+        for key in 0..31 {
+            assert_eq!(tree.remove(key), Some(usize::MAX - key));
+            static_avl::assert_valid(&tree);
+        }
+    }
 }
 
 #[test]
@@ -100,12 +235,13 @@ fn check_page_table_hint(vm: &mut impl VmTracker) {
     assert!(vm.page_tables_ready(BASE)); // UNMAP of a frame leaves the table in place.
     vm.record_frame(BASE + REGION, 8).unwrap();
     assert!(vm.page_tables_ready(BASE + REGION));
-    assert!(!vm.page_tables_ready(BASE)); // Bounded one-entry hint; misses are safe.
 }
 
 #[test]
 fn page_table_hint_covers_only_the_last_successfully_mapped_region() {
-    check_page_table_hint(&mut VmSpace::new());
+    let mut vm = VmSpace::new();
+    check_page_table_hint(&mut vm);
+    assert!(!vm.page_tables_ready(0x68000000)); // Ordinary VM keeps one region.
 }
 
 #[test]
@@ -125,7 +261,9 @@ fn bootstrap_page_table_hint_has_the_same_lifetime_and_region_rules() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
-            check_page_table_hint(&mut BootstrapVmSpace::new());
+            let mut vm = BootstrapVmSpace::new();
+            check_page_table_hint(&mut vm);
+            assert!(vm.page_tables_ready(0x68000000)); // Bootstrap retains both.
         })
         .unwrap()
         .join()

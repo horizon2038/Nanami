@@ -26,9 +26,9 @@ ROOTS = ["Xfbdev.tcz", "flwm_topside.tcz", "aterm.tcz", "wbar.tcz",
 # This TCZ also contains GL/hardware diagnostics. Installing only these unchanged
 # X11 clients does not require its Mesa/LLVM stack. Keep the selection in the lock.
 SELECTIONS = {"Xorg-7.7-bin.tcz": {
-    "binaries": ["xwininfo"],
+    "binaries": ["xwininfo", "xsetroot"],
     "data_directories": [],
-    "dependencies": ["libX11.tcz", "libxcb.tcz"],
+    "dependencies": ["libX11.tcz", "libxcb.tcz", "libXmu.tcz", "libXcursor.tcz"],
 }, "util-linux.tcz": {
     # GTK's session libraries need these libraries, not Linux hardware tools.
     # Xlibs already supplies the mcookie executable used by X11.
@@ -54,6 +54,17 @@ TOOLS_SHA256 = "9c4974e07c61547dae14af4ed1f358b7d04618ae194e54d6be72ee126f0d2f53
 CACHE = HERE / "downloads" / "desktop"
 LOCK = HERE / "desktop.lock.json"
 LIMIT = 32 * 1024 * 1024
+# Default desktop configuration, not work to repeat in every guest session.
+PROFILE_LINKS = {
+    "root/.wmx/Terminal": "/usr/local/bin/aterm",
+    "root/.wmx/Files": "/usr/local/bin/xfe",
+    "root/.wmx/Editor": "/usr/local/bin/editor",
+    "root/.wmx/Images": "/usr/local/bin/flpicsee",
+    "root/.wmx/Paint": "/usr/local/bin/mtpaint",
+    "root/.wmx/Calculator": "/usr/local/bin/galculator",
+    "root/.wmx/Clock": "/usr/local/bin/flit",
+    "root/Pictures/TinyCore.png": "/usr/local/share/pixmaps/logo.png",
+}
 
 
 def download(url, optional=False):
@@ -221,6 +232,52 @@ def merge(source, target):
             destination.chmod((stat.S_IMODE(mode) & 0o777) | 0o400)
         else:
             raise ValueError(f"desktop contains a host special file: {entry}")
+
+
+def configure_links(root):
+    """Install image defaults without following or replacing destination aliases."""
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("desktop profile root must be a real directory")
+    with tempfile.TemporaryDirectory(prefix="tinycore-profile-links-") as temporary:
+        source = Path(temporary)
+        for relative, target in PROFILE_LINKS.items():
+            link = source / relative
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target)
+        merge(source, root)
+    return dict(PROFILE_LINKS)
+
+
+def build_readiness(root):
+    """Build profile-owned glue against the pinned, unchanged runtime libraries."""
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("desktop profile root must be a real directory")
+    resolved = root.resolve()
+    for relative in ["usr", "usr/local", "usr/local/bin"]:
+        directory = root / relative
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"desktop readiness directory is not real: {relative}")
+    libraries = []
+    for relative in ["usr/local/lib/libX11.so.6", "lib/libc.so.6"]:
+        library = (root / relative).resolve(strict=True)
+        if not library.is_relative_to(resolved) or not library.is_file():
+            raise ValueError(f"profile library escapes root: {relative}")
+        libraries.append(str(library))
+    binary = root / "usr/local/bin/nanami-wait-for-x"
+    if binary.parent.is_symlink() or binary.is_symlink() or binary.exists():
+        raise ValueError("desktop readiness destination is not empty")
+    subprocess.run([
+        os.environ.get("CC", "clang"), "--target=x86_64-unknown-linux-gnu", "-fuse-ld=lld",
+        "-nostdlib", "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
+        "-fno-pie", "-no-pie", "-mno-sse", "-mno-sse2", "-mno-red-zone",
+        "-O2", "-Wall", "-Wextra", "-Werror", "-Wl,-e,_start,--image-base=0x400000",
+        "-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined",
+        str(HERE / "tools/wait-for-x.c"), str(HERE / "tools/start-x86_64.S"),
+        *libraries, "-o", str(binary),
+    ], check=True)
+    binary.chmod(0o755)
+    return {str(binary.relative_to(root)): hashlib.sha256(binary.read_bytes()).hexdigest()}
 
 
 def install(root, offline=False):

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::state::readiness::*;
 
-pub(super) fn file_sources(file: LinuxFile) -> Word {
+pub(super) fn file_sources(file: LinuxFile, events: i16) -> Word {
     match file.kind {
         LinuxFileKind::Terminal => READY_TERMINAL,
         LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => READY_PTY,
@@ -15,7 +15,16 @@ pub(super) fn file_sources(file: LinuxFile) -> Word {
         LinuxFileKind::IoUring => READY_OBJECT,
         LinuxFileKind::TimerFd => READY_OBJECT | READY_TIMER,
         LinuxFileKind::SignalFd => READY_OBJECT,
-        LinuxFileKind::SocketUnix => READY_UNIX,
+        LinuxFileKind::SocketUnix => {
+            let mut sources = READY_UNIX;
+            if events & (LINUX_POLLIN | LINUX_POLLRDNORM) != 0 {
+                sources |= READY_UNIX_READ;
+            }
+            if events & (LINUX_POLLOUT | LINUX_POLLWRNORM) != 0 {
+                sources |= READY_UNIX_WRITE;
+            }
+            sources
+        }
         LinuxFileKind::EvdevKeyboard | LinuxFileKind::EvdevMouse => READY_INPUT,
         LinuxFileKind::SocketUdp
         | LinuxFileKind::SocketTcp
@@ -37,7 +46,7 @@ pub(super) fn scan_readiness(
         entry.revents = if entry.fd < 0 {
             0
         } else if let Some(file) = runtime.linux_file(pid, entry.fd as Word) {
-            wait.sources |= file_sources(file);
+            wait.sources |= file_sources(file, entry.events);
             if file.kind == LinuxFileKind::Epoll {
                 wait.sources |= super::epoll::sources(runtime, file.resource);
             }

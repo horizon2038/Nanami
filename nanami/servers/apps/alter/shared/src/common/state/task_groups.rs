@@ -63,6 +63,7 @@ impl Runtime {
         target.mappings.release();
         target.mappings = source.mappings;
         target.vm_group = source.vm_group;
+        target.vm_private_shared = source.vm_private_shared;
         if files {
             target.files.release();
             target.files = source.files;

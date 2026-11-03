@@ -14,6 +14,12 @@ pub(super) struct FrameRange {
 }
 
 impl FrameRange {
+    pub(super) fn contains_descriptor(self, frame: CapabilityDescriptor) -> bool {
+        self.node.is_some_and(|node| {
+            crate::nanami_utils::descriptor::is_within_node_namespace(frame, node)
+        })
+    }
+
     fn contains(self, page: usize) -> bool {
         page.checked_sub(self.base_page)
             .is_some_and(|offset| offset < self.page_count)

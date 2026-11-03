@@ -57,6 +57,17 @@ impl ProcessPolicy {
 
 pub(super) struct ProcessPolicies<'a> {
     entries: Vec<(&'a str, ProcessPolicy)>,
+    priority_placements: Vec<(Word, Word)>,
+    cores: Word,
+}
+
+fn decimal_word(value: &str) -> Result<Word, CapabilityError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CapabilityError::InvalidArgument);
+    }
+    value
+        .parse::<Word>()
+        .map_err(|_| CapabilityError::InvalidArgument)
 }
 
 fn path_key(path: &str) -> &str {
@@ -71,9 +82,25 @@ impl<'a> ProcessPolicies<'a> {
             return Err(CapabilityError::InvalidArgument);
         }
         let mut entries: Vec<(&'a str, ProcessPolicy)> = Vec::new();
+        let mut priority_placements: Vec<(Word, Word)> = Vec::new();
         for line in configuration.lines() {
             let mut tokens = line.split('#').next().unwrap_or("").split_whitespace();
-            if tokens.next() != Some("@process") {
+            let directive = tokens.next();
+            if directive == Some("@placement") {
+                let priority =
+                    decimal_word(tokens.next().ok_or(CapabilityError::InvalidArgument)?)?;
+                let core = decimal_word(tokens.next().ok_or(CapabilityError::InvalidArgument)?)?;
+                if priority > 31
+                    || core >= 64
+                    || tokens.next().is_some()
+                    || priority_placements.iter().any(|(key, _)| *key == priority)
+                {
+                    return Err(CapabilityError::InvalidArgument);
+                }
+                priority_placements.push((priority, core));
+                continue;
+            }
+            if directive != Some("@process") {
                 continue;
             }
             let image = tokens.next().ok_or(CapabilityError::InvalidArgument)?;
@@ -92,12 +119,7 @@ impl<'a> ProcessPolicies<'a> {
                 let (key, value) = option
                     .split_once('=')
                     .ok_or(CapabilityError::InvalidArgument)?;
-                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return Err(CapabilityError::InvalidArgument);
-                }
-                let value = value
-                    .parse::<Word>()
-                    .map_err(|_| CapabilityError::InvalidArgument)?;
+                let value = decimal_word(value)?;
                 match key {
                     "priority" if policy.priority.is_none() && value <= 31 => {
                         policy.priority = Some(value);
@@ -122,7 +144,33 @@ impl<'a> ProcessPolicies<'a> {
             }
             entries.push((image, policy));
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            priority_placements,
+            cores,
+        })
+    }
+
+    /// Exact per-image placement wins. A configured priority-class preference
+    /// only affects scheduling, never platform/service authority or priority.
+    /// Consume the automatic slot before applying a preference so other tasks
+    /// keep the same round-robin sequence. An unavailable CPU leaves it intact.
+    pub fn select_affinity(
+        &self,
+        priority: Word,
+        requested: Option<Word>,
+        automatic: impl FnOnce() -> Word,
+    ) -> Word {
+        if let Some(core) = requested {
+            return core;
+        }
+        let fallback = automatic();
+        self.priority_placements
+            .iter()
+            .find(|(key, _)| *key == priority)
+            .map(|(_, core)| *core)
+            .filter(|core| *core < self.cores)
+            .unwrap_or(fallback)
     }
 
     /// Only configured initramfs images receive these defaults or platform access.

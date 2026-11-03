@@ -47,7 +47,7 @@ pub(super) fn park(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContex
         context,
         entries,
         count: 1,
-        sources: super::readiness::file_sources(file),
+        sources: super::readiness::file_sources(file, events),
         deadline: None,
         select: false,
     });

@@ -725,12 +725,15 @@
       ],
       "selection": {
         "binaries": [
-          "xwininfo"
+          "xwininfo",
+          "xsetroot"
         ],
         "data_directories": [],
         "dependencies": [
           "libX11.tcz",
-          "libxcb.tcz"
+          "libxcb.tcz",
+          "libXmu.tcz",
+          "libXcursor.tcz"
         ]
       }
     },

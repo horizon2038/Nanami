@@ -58,6 +58,11 @@ mod vfs {
             if let Some(error) = p.error {
                 return Err(PathError::Filesystem(error));
             }
+            // Like the actual proxy, mutation replies carry details but no
+            // path payload. Do not let this mock fabricate a data reply.
+            if !matches!(request.operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK) {
+                return Ok((0, 0));
+            }
             let metadata_bytes = if request.flags & VFS_PATH_WITH_METADATA != 0 {
                 std::mem::size_of::<PathMetadata>()
             } else {
@@ -76,7 +81,7 @@ mod vfs {
             }
             Ok((
                 p.reply_bytes.unwrap_or(metadata_bytes + p.path.len()),
-                p.metadata.file_type,
+                p.reply_type.unwrap_or(p.metadata.file_type),
             ))
         })
     }
@@ -90,6 +95,7 @@ struct Provider {
     path: Vec<u8>,
     error: Option<Word>,
     reply_bytes: Option<Word>,
+    reply_type: Option<Word>,
 }
 impl Provider {
     fn new(shm: Word) -> Self {
@@ -106,6 +112,7 @@ impl Provider {
             path: b"/lib/value".to_vec(),
             error: None,
             reply_bytes: None,
+            reply_type: None,
         }
     }
 }
@@ -184,8 +191,8 @@ impl Runtime {
 fn map_request_error(error: i32) -> i32 {
     error
 }
-fn guest_root_for_process(_: &Runtime, _: Word) -> Result<Vec<u8>, i32> {
-    Ok(b"/test/rootfs".to_vec())
+fn guest_root_for_process(_: &Runtime, _: Word) -> Result<&[u8], i32> {
+    Ok(b"/test/rootfs")
 }
 fn is_at_fdcwd(fd: Word) -> bool {
     fd as i32 == -100
@@ -359,5 +366,127 @@ fn short_oversized_and_inconsistent_metadata_fail_without_reading_stale_bytes() 
         },
     ] {
         assert!(matches!(namespace::decode_metadata(value), Err(EIO)));
+    }
+}
+
+#[test]
+fn readlink_output_can_fill_its_limit_and_preserves_the_following_byte() {
+    let mut r = Runtime::new();
+    r.buffer[4096] = 0xa5;
+    PROVIDER.with(|p| p.borrow_mut().path = vec![b'x'; 4096]);
+    assert_eq!(
+        namespace::request_path(
+            &mut r,
+            1,
+            VFS_PATH_READLINK,
+            VFS_PATH_DIRECTORY_ROOT,
+            b"/link",
+            &[],
+            0,
+            4096
+        )
+        .unwrap()
+        .0,
+        4096
+    );
+    assert!(r.buffer[..4096].iter().all(|b| *b == b'x'));
+    assert_eq!(r.buffer[4096], 0xa5);
+}
+
+#[test]
+fn request_limits_precede_writes_and_nonoutput_replies_preserve_existing_bytes() {
+    for size in [
+        0,
+        128,
+        0xc000 + std::mem::size_of::<PathRequest>(),
+        0xd400 - 1,
+    ] {
+        let mut r = Runtime::new();
+        r.posix_shm_size = size;
+        r.buffer.fill(0xa5);
+        assert_eq!(
+            namespace::request_path(
+                &mut r,
+                1,
+                VFS_PATH_RESOLVE,
+                VFS_PATH_DIRECTORY_ROOT,
+                b"/x",
+                &[],
+                0,
+                127
+            ),
+            Err(ENAMETOOLONG)
+        );
+        assert!(r.buffer.iter().all(|b| *b == 0xa5));
+        PROVIDER.with(|p| assert!(p.borrow().requests.is_empty()));
+    }
+    let mut r = Runtime::new();
+    let path = [b'x'; LINUX_CWD_MAX];
+    let target = [b'x'; 4097];
+    for (path, target, count) in [
+        (&path[..], &[][..], 127),
+        (&b"/x"[..], &target[..], 127),
+        (&b"/x"[..], &[][..], 4097),
+    ] {
+        assert_eq!(
+            namespace::request_path(
+                &mut r,
+                1,
+                VFS_PATH_RESOLVE,
+                VFS_PATH_DIRECTORY_ROOT,
+                path,
+                target,
+                0,
+                count
+            ),
+            Err(ENAMETOOLONG)
+        );
+    }
+    PROVIDER.with(|p| assert!(p.borrow().requests.is_empty()));
+    r.buffer[..8].copy_from_slice(b"preserve");
+    let mode = 0o6754usize.to_le_bytes();
+    assert_eq!(
+        namespace::request_path(
+            &mut r,
+            1,
+            VFS_PATH_CHMOD,
+            VFS_PATH_DIRECTORY_ROOT,
+            b"/x",
+            &mode,
+            VFS_PATH_FOLLOW_FINAL,
+            0
+        ),
+        Ok((0, 0))
+    );
+    assert_eq!(&r.buffer[..8], b"preserve");
+}
+
+#[test]
+fn maximum_canonical_reply_and_mismatched_metadata_type_are_validated() {
+    let mut r = Runtime::new();
+    let path = format!("/{}", "x".repeat(LINUX_CWD_MAX - 2));
+    let reply_bytes = std::mem::size_of::<PathMetadata>() + path.len();
+    r.buffer[reply_bytes + 1] = 0xa5;
+    PROVIDER.with(|p| p.borrow_mut().path = path.as_bytes().to_vec());
+    let bytes = r.path(b"value");
+    namespace::stat_at(&mut r, 1, LINUX_AT_FDCWD, bytes, true).unwrap();
+    assert_eq!(&r.buffer[..path.len()], path.as_bytes());
+    assert_eq!(r.buffer[path.len()], 0);
+    assert_eq!(r.buffer[reply_bytes + 1], 0xa5);
+    for (path, reply_type) in [
+        (&b"relative"[..], None),
+        (&b"/valid"[..], Some(VFS_FILE_TYPE_DIRECTORY)),
+    ] {
+        let mut r = Runtime::new();
+        PROVIDER.with(|p| {
+            let mut p = p.borrow_mut();
+            p.path = path.to_vec();
+            p.reply_type = reply_type;
+        });
+        let bytes = r.path(b"value");
+        assert_eq!(
+            namespace::stat_at(&mut r, 1, LINUX_AT_FDCWD, bytes, true),
+            Err(EIO)
+        );
     }
 }

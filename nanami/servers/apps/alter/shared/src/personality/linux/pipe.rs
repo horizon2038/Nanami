@@ -99,11 +99,12 @@ pub(super) fn sys_pipe(
     if (flags & !(LINUX_O_CLOEXEC | super::LINUX_O_NONBLOCK)) != 0 {
         return Err(EINVAL);
     }
-    let fd_flags = (flags & super::LINUX_O_NONBLOCK) | if (flags & LINUX_O_CLOEXEC) != 0 {
-        LINUX_FD_CLOEXEC
-    } else {
-        0
-    };
+    let fd_flags = (flags & super::LINUX_O_NONBLOCK)
+        | if (flags & LINUX_O_CLOEXEC) != 0 {
+            LINUX_FD_CLOEXEC
+        } else {
+            0
+        };
     let pipe_id = runtime.allocate_pipe().ok_or(EMFILE)?;
     let read_fd = match runtime.allocate_linux_file(pid, LinuxFile::pipe_read(pipe_id, fd_flags), 0)
     {

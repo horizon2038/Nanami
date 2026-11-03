@@ -5,7 +5,10 @@ use super::*;
 // a dangling mapping. This caches mappings, NOT page contents: every allocation
 // is still zeroed or filled before it is exposed to its new owner.
 const BASE: usize = 0x6700_0000;
-const PAGES: usize = 1024;
+// Keep the mapping cache within an 8-MiB alias region (32 KiB of tags on
+// 64-bit targets), leaving space before the separate image-staging window.
+const PAGES: usize = 2048;
+const _: () = assert!(BASE + PAGES * PAGE_SIZE <= PROCESS_COPY_TEMP_BASE);
 
 #[derive(Clone, Copy)]
 struct Mapping {
@@ -61,5 +64,4 @@ impl Alpha {
             .ready = true;
         Ok(va)
     }
-
 }

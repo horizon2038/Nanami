@@ -1,5 +1,6 @@
 use super::{
-    RequestError, Word, EACCES, EADDRINUSE, EAGAIN, EBUSY, EEXIST, EINVAL, EIO, ENETDOWN, ENOENT, ENOSYS,
+    RequestError, Word, EACCES, EADDRINUSE, EAGAIN, EBUSY, EEXIST, EINVAL, EIO, ENETDOWN, ENOENT,
+    ENOSYS,
 };
 
 pub(super) fn map_word(result: Result<Word, RequestError>) -> Result<Word, i32> {

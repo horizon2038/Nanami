@@ -673,6 +673,7 @@ Fault continuationは`[status, detail0, detail1]`の通常replyと同じ契約�
 - Alphaの通常page fault処理には、payload length=0のreplyで元のcontextを継続する経路がある。
 - `service_fault_continue_receive_event`は、MR4以降に更新hardware contextを置き、長さを更新Word数としてreplyする。
 - INVALID_KERNEL_CALLのreplyは、Kernelがそのcontextをfaulting Processのregisterへ適用してから実行を再開する。
+- 更新対象はregister配列の先頭から送信Word数までであり、未送信のregisterは保持される。x86_64のAlter/Linuxでは、未変更のFault snapshotから通常復帰し、RIPが既にcontinuationを指している場合、RAXだけを1 Wordで返す。PCを書き換える場合はRIPまでの16 Word、FreeBSDのcarry flag更新はRFLAGSまでの18 Wordを使う。Signalや待機contextを編集する処理は、通常のcontext更新経路を維持する。
 - Alterは一部のsyscall待機でProcessをparkし、後でcontextを書いてPCB RESUMEする。この場合のreply関係の処理も通常serviceの遅延reply用tokenとは異なる。
 
 `MessageInfo.source`はdecoder用のtagであり、それだけをsenderの権限証明としては使わない。通常IPCのmetadataは送信値も扱うため、Kernel由来Faultとして解釈するendpointには、適切なresolver / Capabilityの付与規則が必要である。
@@ -814,7 +815,11 @@ protocolであり、A9NのCapability ABIやIPC fastpathは変更しない。
 | `PROCESS_MAPPING_PROTECT` | `0x102a` | target PID, VA, byte count, R/W/X bits | なし |
 | `PROCESS_MEMORY_COMPARE_EXCHANGE` | `0x102b` | target PID, aligned VA, expected u32, desired u32 | 以前のu32 |
 | `PROCESS_THREAD_CREATE` | `0x102c` | source PID, caller側PCB destination slot, priority, reserved=0 | 新しいtask PID |
-| `PROCESS_FORK` | `0x102d` | source PID, caller側PCB destination slot, priority, reserved=0 | 新しいtask PID |
+| `PROCESS_FORK` | `0x102d` | source PID, caller側PCB destination slot, priority, options | 新しいtask PID |
+| `PROCESS_MEMORY_READ_VECTOR` | `0x102e` | target PID, caller側descriptor VA, count, reserved=0 | なし |
+| `PROCESS_MEMORY_WRITE_VECTOR` | `0x102f` | target PID, caller側descriptor VA, count, reserved=0 | なし |
+| `PROCESS_SEAL_CAPABILITIES` | `0x1030` | target PID, reserved=0, reserved=0, reserved=0 | なし |
+| `PROCESS_PRIVATE_WRITE` | `0x1031` | target PID, VA, byte count, mode | QUERY: 分離の要否、DETACH: 0 |
 
 PROTECTのpermissionはbit 0=R、1=W、2=X。0ではleafだけを外し、backingとFrame
 Capabilityは保持する。対象本人またはreaperが要求できる。CASはrobust futexの
@@ -827,11 +832,72 @@ AddressSpaceをaliasとして接続する。Fault resolverには要求元のserv
 設定の完了前に実行されない。VM所有者のroot/frame arenaは最後の利用taskのreapまで保持する。
 
 FORKもsourceのreaperだけが要求でき、suspended PCBを返す。こちらは独立した
-AddressSpaceとRAM backingを作り、sourceの現在のbacked pageとpermissionを複製する。
+AddressSpaceを作り、sourceの現在のbacked pageとpermissionを複製する。
 ELFや元のpathnameは参照しない。PROT_NONEの保持済みbackingは複製し、未populatedの
 予約領域は空のままにする。LinuxのFD・signal・VMA・MAP_SHARED再接続はAlterの責任。
-これはCOWではなくeager snapshotであり、他の実行中thread全体を原子的に停止する
-operationではない。生成途中の失敗では新しいroot/VMを回収する。
+options=0は従来のeager snapshot。options=1 (`OS_FORK_SHARE_READONLY`) はsealedな
+sourceに限るopt-inで、x86_64では所有権を確認できるprivate R/RX/X pageのRAM backingを
+aliasする。RW、PROT_NONE、明示的な共有buffer、外部aliasを持つ未追跡pageは個別にコピーする。
+options=1ではsupervisorがsource VMの全taskをquiesceしてから要求する。PTEを既にRに
+変更していても、実行中peerに古いwritable TLB entryが残る可能性があるためである。
+対象VMは初回実行前にsealし、supervisorの管理外へwritable capabilityを渡していないことを
+前提とする。後からsealしても、既に外へ渡したcapabilityは撤回されない。
+他architectureはeager copyを維持する。sourceのPTEは変更しない。Alphaのこのoperation自体は
+全体を原子的に停止するoperationではない。生成途中の失敗では新しいroot/VMを回収する。
+
+PRIVATE_WRITEは対象のreaper専用で、自身・Alpha・終了済みtaskは対象外。byte countは非0、
+VA+byte countのoverflowを拒否する。mode=0 (`QUERY`) は範囲内にprivate fork aliasがあるかを
+返すだけで、停止・割当・PTE変更を行わない。mode=1 (`DETACH`) は該当pageのbackingを分離し、
+内容とR/W/Xを保持する。最後の参照だけならコピーせず共有markerを外す。
+DETACH前にsupervisorは対象VMを使う全taskがinactiveであることを保証する。実行中taskには
+既存の同期SUSPENDを使う。配送済みfault、処理済みの待機syscall、prepared/stopped taskは
+再停止・再開しない。Alterは自分が停止完了を確認したtaskだけを再開する。
+
+opt-inしたsupervisorは代理書き込み・W付与・writable alias公開より前にQUERY/DETACHを行う。
+Alphaも共有markerが残るpageへのこれらの操作を拒否し、RW temporary aliasによる回避を防ぐ。
+通常のpermission-checked copyoutは従来どおりで、書き込み可能なprivate pageにQUERYを追加しない。
+分離失敗は通常のerror replyで、未公開backingの参照は保持する。コピーの自動再実行や、
+失敗したVM全体のretry可能性を保証するprotocolではない。RW pageのfault-driven COWとは異なる。
+
+SEAL_CAPABILITIESは対象のreaperだけが要求できる。自身・Alpha・終了済みtaskは対象外。
+信頼するsupervisorは初回実行より前に要求する。既に他者へ移譲したcapabilityの撤回を
+保証するoperationではなく、supervisor自身のPCB/root操作を制限するものでもない。
+初回は既存のSMP-safe SUSPENDで停止完了を待ち、PCBの実行用Capability rootを、Alphaが
+保持する共有の空Nodeへ差し替える。AddressSpace、Frame、PCBと管理用Nodeは削除せず、
+Alphaのprivate namespaceに保持する。成功後もtaskは停止状態で返し、resumeはsupervisorが行う。
+成功済みtaskへの再要求はno-opであり、再停止はしない。失敗を成功済みと記録しない。
+SDKのrequest lengthはcodeとPIDの2 Wordである。Alphaのdecoderはlength外のargを0に
+補うため、3つのreserved Wordは省略できる。これはKernelによるMRのzero fillではなく、
+Alphaの明示的なdecode規約である。5 Wordで全reserved=0を送っても同じ意味になる。
+
+制限はexec後も維持し、FORKとTHREAD_CREATEにも継承する。子のメモリ管理用capabilityは
+引き続き子ごとの管理用Nodeに作るが、実行用rootからは到達できない。Alter/Linuxは両方の
+初回launch経路で、実行開始前にこのoperationを要求する。通常のLinux mmap/mprotect/brkは
+従来どおりAlter/Alphaを通る。Nanami nativeと通常のFreeBSD launchには自動適用しない。
+この分離自体は共有/COWを有効化しない。Frame共有時の代理書き込み、permission変更、
+fault処理、寿命管理は別途一貫して処理する必要がある。
+
+READ_VECTOR / WRITE_VECTORは同期・順序付きのchecked copyで、単発READ/WRITEの
+代替として任意に利用できる。`count`は1..16。descriptor VAはcaller自身のaddress spaceに
+ある`ProcessMemoryTransfer[count]`を指す。各recordはnative endianの3 Wordで、
+順序は`target VA, caller-local VA, byte count`。対応する両64-bit architectureでは24 bytes。
+recordのpointer・長さは非0とし、byte countの`OS_MEMORY_COPY_USER_ACCESS` bitは許可しない。
+Vector操作は常にcheckedであり、READではtargetのR、WRITEではWを各範囲の全pageで検証する。
+callerは対象本人またはreaperでなければならず、他PIDのauthorityをrecord内で指定できない。
+
+Alphaは全descriptorをcallerから取り込み、最大16 recordのlocal snapshotを作ってから
+順に転送する。転送先が元のdescriptor領域と重なっても、後続のrecordは変更されない。
+payload本体は事前snapshotせず、各recordの実行時に読み取る。既存のcopyと同様に、同一
+PID内で重なるsource/destinationはmemmove相当で扱う。descriptorもpayloadも
+borrowであり、callerはreplyまで必要な領域を保持する。Capability移譲やNotificationはない。
+
+全体が原子的なtransactionではない。record kの引数・permission・copyが失敗すると、
+先行recordは完了済みのまま、kより後は実行しない。各recordの全範囲のpermissionは、その
+recordの最初のbyteを転送する前に検証する。実際のmapping/copy失敗で生じ得る部分書き込みは
+単発copyと同じであり、完了済みrecordのrollbackは行わない。descriptorの取り込み失敗では
+payload転送を開始しない。応答は既存status形式で、失敗indexや完了数は返さず、自動再送もしない。
+Rust SDKは`request_process_memory_{readv,writev}_checked`を提供する。既存の単発opcodeと
+privileged copyの意味は変更しない。新APIを使うclientには対応するAlphaが必要となる。
 
 既存operationの拡張:
 
@@ -979,3 +1045,13 @@ page lease中のfile size変更は専用status `VFS_RESPONSE_MAPPING_BUSY=0x9118
 で拒否し、Alterは`EBUSY`へ変換する。VMA invalidationを実装したという意味ではない。
 上限はVFS全体で1024 backing pages / 4096 leases。writable file共有、EOF以降の
 初期mapping、lease中のresizeはこの契約に含まれない。
+
+### POSIX接続のidentity取得
+
+`GETUID` / `GETEUID` / `GETGID` / `GETEGID`は、それぞれsessionのreal/effective
+user/group IDを通常replyのdetail0で返す。現行APIにはcredential変更操作がなく、
+これらの値は同じsession内では不変である。Alter/Linuxは各値の最初の成功だけを
+接続単位で保持する。失敗は保持せず、別接続では再取得する。同じdescriptorを再利用
+するsessionの再bind時も明示的な失効が必要であり、descriptorの数値一致だけでは
+sessionの継続を証明しない。今後credential変更を追加する場合は、所有者側のsnapshot
+更新・失効を変更契約に含める。VFSの権限判定結果をcacheする仕様ではない。

@@ -51,10 +51,38 @@ pub mod nanami_core {
 #[path = "../../nanami/src/nanami_core"]
 mod production {
     pub mod memory;
+
+    pub fn pool_frame(memory: &memory::MemoryManager, frame: usize) -> bool {
+        memory.is_pool_frame_descriptor(frame)
+    }
 }
 use descriptor::{make_child_slot_descriptor, make_root_slot_descriptor};
 use memory::MemoryManager;
 use production::memory;
+
+#[test]
+fn namespace_checks_use_prefix_and_depth_not_rights_or_numeric_nearness() {
+    use descriptor::is_within_node_namespace as within;
+    let pool = make_root_slot_descriptor(12, 1024);
+    let other = make_root_slot_descriptor(12, 1025);
+    for index in [0, 1, 127, 255] {
+        let node = make_child_slot_descriptor(pool, 8, index);
+        let frame = make_child_slot_descriptor(node, 11, 2047);
+        assert!(within(node, pool));
+        assert!(within(frame, pool));
+        assert!(within(frame, node));
+        assert!(!within(frame, other));
+        assert!(!within(pool, node));
+    }
+    assert!(!within(pool, pool));
+    assert!(!within(usize::MAX, pool));
+    assert!(!within(pool, usize::MAX));
+    for slot in [200, 999, 1023, 1025, 2000] {
+        let root = make_root_slot_descriptor(12, slot);
+        let child_frame = make_child_slot_descriptor(root, 9, 3);
+        assert!(!within(child_frame, pool));
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Cap {
@@ -376,6 +404,29 @@ fn bootstrap_cost_is_independent_of_installed_ram() {
         costs[0].2, 1,
         "only the alpha heap is materialized before heap init"
     );
+}
+
+#[test]
+fn pool_origin_is_distinct_from_child_aliases_and_survives_process_arena_reset() {
+    let (mut memory, _) = boot(33, true);
+    let bootstrap = memory
+        .physical_frame_descriptor_from_index(0x80000000 >> 12)
+        .unwrap();
+    let frame = map(&mut memory, 0x200000000, false);
+    assert!(production::pool_frame(&memory, bootstrap));
+    assert!(production::pool_frame(&memory, frame));
+    let child_root = make_root_slot_descriptor(12, 200);
+    let child_alias = make_child_slot_descriptor(child_root, 9, 10);
+    assert!(!production::pool_frame(&memory, child_alias));
+    let before = FAKE.with(|fake| fake.borrow().frames.clone());
+    memory.ensure_process_arena(200).unwrap();
+    memory.reset_process_arena(200).unwrap();
+    assert_eq!(
+        memory.physical_frame_descriptor_from_index(0x200000000 >> 12),
+        Some(frame)
+    );
+    assert!(production::pool_frame(&memory, frame));
+    FAKE.with(|fake| assert_eq!(fake.borrow().frames, before));
 }
 
 #[test]

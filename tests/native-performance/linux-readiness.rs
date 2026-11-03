@@ -42,10 +42,20 @@ mod flock {
 // tested in linux-pty; complete syscall integration runs in the QEMU fixture.
 mod pty {
     use super::*;
-    pub(super) fn readiness(_: &Runtime, _: LinuxFile) -> Result<i16, i32> {
+    pub(super) fn readiness(runtime: &Runtime, _: LinuxFile) -> Result<i16, i32> {
+        runtime.pty_observed_deadline.set(
+            runtime.managed[0]
+                .readiness_wait
+                .as_ref()
+                .and_then(|wait| wait.deadline),
+        );
         Ok(0)
     }
-    pub(super) fn update_deadline(_: &Runtime, _: Word, _: &mut ReadinessWait) {}
+    pub(super) fn update_deadline(runtime: &Runtime, _: Word, wait: &mut ReadinessWait) {
+        if let Some(deadline) = runtime.pty_deadline_override {
+            wait.deadline = deadline;
+        }
+    }
     pub(super) fn retry(
         _: &mut Runtime,
         _: Word,
@@ -89,8 +99,9 @@ mod unix {
     ) -> Option<Result<Word, i32>> {
         None
     }
-    pub(super) fn readiness(_: &Runtime, _: Word) -> Result<i16, i32> {
-        Ok(0)
+    pub(super) fn readiness(runtime: &Runtime, _: Word) -> Result<i16, i32> {
+        runtime.unix_queries.set(runtime.unix_queries.get() + 1);
+        Ok(runtime.unix_ready)
     }
 }
 const EFAULT: i32 = 14;
@@ -277,6 +288,9 @@ impl Process {
     fn signals_mut(&mut self) -> &mut signal_state::Signals {
         self.signals.get_or_insert_with(signal_state::Signals::new)
     }
+    fn signal_stopped(&self) -> bool {
+        self.signals().is_some_and(|signals| signals.stopped)
+    }
 }
 struct Runtime {
     posix_port: Word,
@@ -308,6 +322,10 @@ struct Runtime {
     copy_error: bool,
     posix_shm_size: Word,
     poll_objects: poll_objects::Objects,
+    pty_deadline_override: Option<Option<Word>>,
+    pty_observed_deadline: std::cell::Cell<Option<Word>>,
+    unix_ready: i16,
+    unix_queries: std::cell::Cell<usize>,
 }
 impl Runtime {
     fn vm_group(&self, pid: Word) -> Word {
@@ -330,8 +348,9 @@ impl Runtime {
     fn managed_process(&self, pid: Word) -> Option<&Process> {
         self.managed.iter().find(|process| process.pid == pid)
     }
-    fn is_signal_stopped(&self, _: Word) -> bool {
-        false
+    fn is_signal_stopped(&self, pid: Word) -> bool {
+        self.managed_process(pid)
+            .is_some_and(Process::signal_stopped)
     }
     fn linux_file(&self, _: Word, fd: Word) -> Option<LinuxFile> {
         self.files
@@ -493,6 +512,7 @@ fn write_guest_u64(runtime: &mut Runtime, pid: Word, ptr: Word, value: Word) -> 
     write_target_memory(runtime, pid, ptr, 8)
 }
 fn write_target_memory_from(
+    _: &Runtime,
     _: Word,
     destination: Word,
     source: Word,
@@ -507,13 +527,13 @@ fn write_target_memory_from(
     Ok(())
 }
 fn copyout_from(
-    _: &Runtime,
+    runtime: &Runtime,
     pid: Word,
     destination: Word,
     source: Word,
     bytes: Word,
 ) -> Result<(), i32> {
-    write_target_memory_from(pid, destination, source, bytes)
+    write_target_memory_from(runtime, pid, destination, source, bytes)
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/futex.rs"]
 mod futex;
@@ -786,6 +806,10 @@ fn runtime() -> Runtime {
         copy_error: false,
         posix_shm_size: 4096,
         poll_objects: poll_objects::Objects::new(),
+        pty_deadline_override: None,
+        pty_observed_deadline: std::cell::Cell::new(None),
+        unix_ready: 0,
+        unix_queries: std::cell::Cell::new(0),
         posix_shm: scratch.as_mut_ptr() as Word,
         scratch,
         files: [
@@ -973,6 +997,138 @@ fn empty_terminals_and_sockets_are_not_readable_and_scratch_is_not_retained() {
     r.files[7].peer_port = 1;
     assert_eq!(poll(&mut r, &mut fds, 0), EmulationAction::Return(4));
 }
+#[test]
+fn unix_read_and_write_notifications_only_scan_matching_interests() {
+    for (events, matching, unrelated) in [
+        (LINUX_POLLIN, READY_UNIX_READ, READY_UNIX_WRITE),
+        (LINUX_POLLOUT, READY_UNIX_WRITE, READY_UNIX_READ),
+    ] {
+        let mut r = runtime();
+        let descriptor = r
+            .allocate_linux_file(
+                1,
+                LinuxFile {
+                    kind: LinuxFileKind::SocketUnix,
+                    resource: 111,
+                    ..LinuxFile::EMPTY
+                },
+                0,
+            )
+            .unwrap();
+        let mut fds = [fd(descriptor as i32, events)];
+        assert_eq!(poll(&mut r, &mut fds, -1), EmulationAction::Park);
+        assert_eq!(
+            r.managed[0].readiness_wait.unwrap().sources,
+            READY_UNIX | matching
+        );
+        r.unix_queries.set(0);
+        r.unix_ready = events;
+        wake_readiness_waiters(&mut r, unrelated);
+        assert_eq!(r.unix_queries.get(), 0);
+        assert!(r.managed[0].readiness_wait.is_some());
+        r.managed[0].signals_mut().stopped = true;
+        wake_readiness_waiters(&mut r, matching);
+        assert_eq!(r.unix_queries.get(), 0);
+        assert!(r.managed[0].readiness_wait.is_some());
+        r.managed[0].signals_mut().stopped = false;
+        wake_readiness_waiters(&mut r, matching);
+        assert!(r.managed[0].readiness_wait.is_none());
+        assert_eq!(fds[0].revents, events);
+        RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 1)]));
+    }
+}
+
+#[test]
+fn unix_status_changes_wake_zero_event_interests_and_report_hup_or_invalid_fd() {
+    for closed in [false, true] {
+        let mut r = runtime();
+        let descriptor = r
+            .allocate_linux_file(
+                1,
+                LinuxFile {
+                    kind: LinuxFileKind::SocketUnix,
+                    resource: 111,
+                    ..LinuxFile::EMPTY
+                },
+                0,
+            )
+            .unwrap();
+        let mut fds = [fd(descriptor as i32, 0)];
+        assert_eq!(poll(&mut r, &mut fds, -1), EmulationAction::Park);
+        assert_eq!(r.managed[0].readiness_wait.unwrap().sources, READY_UNIX);
+        r.unix_queries.set(0);
+        r.unix_ready = LINUX_POLLHUP;
+        if closed {
+            r.files[descriptor] = LinuxFile::EMPTY;
+        }
+        wake_readiness_waiters(&mut r, READY_UNIX_READ | READY_UNIX_WRITE);
+        assert_eq!(r.unix_queries.get(), 0);
+        assert!(r.managed[0].readiness_wait.is_some());
+        wake_readiness_waiters(&mut r, READY_UNIX);
+        assert!(r.managed[0].readiness_wait.is_none());
+        let expected = if closed {
+            LINUX_POLLNVAL
+        } else {
+            LINUX_POLLHUP
+        };
+        assert_eq!(fds[0].revents, expected);
+        RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 1)]));
+    }
+}
+
+#[test]
+fn stopped_readiness_waiter_only_wakes_after_continue() {
+    let mut r = runtime();
+    let mut fds = [fd(4, LINUX_POLLIN)];
+    assert_eq!(poll(&mut r, &mut fds, -1), EmulationAction::Park);
+    r.managed[0].signals_mut().stopped = true;
+    r.pipe.len = 1;
+    wake_readiness_waiters(&mut r, READY_PIPE);
+    assert!(r.managed[0].readiness_wait.is_some());
+    RETURNS.with(|values| assert!(values.borrow().is_empty()));
+    r.managed[0].signals_mut().stopped = false;
+    wake_readiness_waiters(&mut r, READY_PIPE);
+    assert!(r.managed[0].readiness_wait.is_none());
+    assert_eq!(fds[0].revents, LINUX_POLLIN);
+    RETURNS.with(|values| assert_eq!(&*values.borrow(), &[(101, 1)]));
+}
+
+#[test]
+fn pty_deadline_is_published_before_scan_and_preserves_the_interest_snapshot() {
+    let mut r = runtime();
+    let descriptor = r.files.len() as i32;
+    r.files.push(LinuxFile {
+        kind: LinuxFileKind::PtySlave,
+        ..LinuxFile::EMPTY
+    });
+    let mut entries = [PollFd::EMPTY; LINUX_FD_MAX];
+    entries[0] = fd(descriptor, LINUX_POLLIN);
+    let context = LinuxSyscallContext {
+        number: SYS_READ,
+        args: [descriptor as Word, 17, 29, 0, 0, 0],
+    };
+    r.managed[0].readiness_wait = Some(ReadinessWait {
+        context,
+        entries,
+        count: 1,
+        sources: READY_PTY,
+        deadline: Some(110),
+        select: false,
+    });
+    r.pty_deadline_override = Some(Some(180));
+    wake_readiness_waiters(&mut r, READY_PTY);
+    assert_eq!(r.pty_observed_deadline.get(), Some(180));
+    let wait = r.managed[0].readiness_wait.as_ref().unwrap();
+    assert_eq!(wait.deadline, Some(180));
+    assert_eq!(wait.context.args, context.args);
+    assert_eq!(wait.entries[0].fd, descriptor);
+    assert_eq!(
+        (wait.count, wait.sources, wait.select),
+        (1, READY_PTY, false)
+    );
+    assert_eq!(r.arms.last(), Some(&Some(180)));
+}
+
 #[test]
 fn infinite_wait_only_rechecks_its_sources_and_snapshots_guest_interest() {
     let mut r = runtime();
@@ -1239,6 +1395,78 @@ fn epoll_delivers_packed_user_data_and_level_triggering_without_consuming_counte
     assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Return(0));
     assert_eq!(epoll::control(&mut r, 1, ep, 2, fd, 0), Ok(0));
     assert_eq!(epoll::control(&mut r, 1, ep, 2, fd, 0), Err(ENOENT));
+}
+
+#[test]
+fn unix_epoll_one_shot_rearm_retains_direction_and_failed_copy_preserves_event() {
+    let mut r = runtime();
+    let descriptor = r
+        .allocate_linux_file(
+            1,
+            LinuxFile {
+                kind: LinuxFileKind::SocketUnix,
+                resource: 111,
+                ..LinuxFile::EMPTY
+            },
+            0,
+        )
+        .unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(
+        &mut r,
+        ep,
+        descriptor,
+        1,
+        LINUX_POLLIN as u32 | (1 << 30),
+        11,
+    )
+    .unwrap();
+    r.unix_ready = LINUX_POLLIN;
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let immediate = epoll_context(ep, &mut output, 0);
+    r.copy_error = true;
+    assert_eq!(
+        sys_poll_action(&mut r, 1, immediate),
+        EmulationAction::Return(-(EFAULT as isize))
+    );
+    r.copy_error = false;
+    assert_eq!(
+        sys_poll_action(&mut r, 1, immediate),
+        EmulationAction::Return(1)
+    );
+    assert_eq!(
+        sys_poll_action(&mut r, 1, immediate),
+        EmulationAction::Return(0)
+    );
+    r.unix_ready = 0;
+    let waiting = epoll_context(ep, &mut output, -1);
+    assert_eq!(sys_poll_action(&mut r, 1, waiting), EmulationAction::Park);
+    watch(
+        &mut r,
+        ep,
+        descriptor,
+        3,
+        LINUX_POLLIN as u32 | (1 << 30),
+        13,
+    )
+    .unwrap();
+    handle_readiness_changes(&mut r);
+    assert_eq!(
+        r.managed[0].readiness_wait.unwrap().sources,
+        READY_OBJECT | READY_UNIX | READY_UNIX_READ
+    );
+    r.unix_queries.set(0);
+    r.unix_ready = LINUX_POLLIN;
+    wake_readiness_waiters(&mut r, READY_UNIX_WRITE);
+    assert_eq!(r.unix_queries.get(), 0);
+    assert!(r.managed[0].readiness_wait.is_some());
+    wake_readiness_waiters(&mut r, READY_UNIX_READ);
+    assert!(r.managed[0].readiness_wait.is_none());
+    assert_eq!(&output[TEST_EVENT_BYTES - 8..], &13u64.to_le_bytes());
+    assert_eq!(
+        sys_poll_action(&mut r, 1, immediate),
+        EmulationAction::Return(0)
+    );
 }
 
 #[test]

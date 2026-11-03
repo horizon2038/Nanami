@@ -324,7 +324,7 @@ pub(super) fn map(
                     .pages
                     .get(&((offset + page_offset) / LINUX_PAGE_SIZE))
                 {
-                    write_target_memory_from(pid, base + page_offset, *source, LINUX_PAGE_SIZE)?;
+                    write_target_memory_from(runtime, pid, base + page_offset, *source, LINUX_PAGE_SIZE)?;
                 }
                 nanami_runtime::request_process_mapping_protect(
                     pid,

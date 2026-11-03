@@ -274,6 +274,112 @@ fn canvas(pixels: &mut [u32], screen: framebuffer::ScreenInfo) -> framebuffer::F
         .unwrap()
 }
 
+fn reference_blend(
+    screen: framebuffer::ScreenInfo,
+    background: u32,
+    foreground: u32,
+    alpha: u8,
+) -> u32 {
+    if alpha == 0 {
+        return background;
+    }
+    if alpha == u8::MAX {
+        return foreground;
+    }
+    let mut rgb_mask = 0;
+    let mut channels = 0;
+    for (size, position) in [
+        (screen.red_size, screen.red_position),
+        (screen.green_size, screen.green_position),
+        (screen.blue_size, screen.blue_position),
+    ] {
+        if size == 0 || position >= 32 {
+            continue;
+        }
+        let bits = u32::MAX >> (32 - size.min(32 - position));
+        let mask = bits << position;
+        rgb_mask |= mask;
+        let old = ((background & mask) >> position) as u64;
+        let new = ((foreground & mask) >> position) as u64;
+        let value = (new * alpha as u64 + old * (255 - alpha as u64) + 127) / 255;
+        channels |= ((value as u32) << position) & mask;
+    }
+    (background & !rgb_mask) | channels
+}
+
+#[test]
+fn rgb8_blending_is_exact_for_every_channel_pair_and_opacity() {
+    let geometry = screen(1, 1);
+    let mut pixels = [0u32; 6];
+    let fb = canvas(&mut pixels, geometry);
+    for alpha in 0..=255 {
+        for old in 0u32..=255 {
+            let background = 0xa1000000 | old | ((old ^ 0x5a) << 8) | ((255 - old) << 16);
+            for new in 0u32..=255 {
+                let foreground = 0x7b000000 | new | ((new ^ 0xa5) << 8) | ((255 - new) << 16);
+                pixels[0] = background;
+                fb.blend_pixel(0, 0, foreground, alpha as u8);
+                assert_eq!(
+                    pixels[0],
+                    reference_blend(geometry, background, foreground, alpha as u8),
+                    "background={background:08x} foreground={foreground:08x} alpha={alpha}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn blending_preserves_generic_formats_unused_bits_and_padding() {
+    for (rp, rs, gp, gs, bp, bs) in [
+        (16, 8, 8, 8, 0, 8),
+        (0, 8, 8, 8, 16, 8),
+        (11, 5, 5, 6, 0, 5),
+        (20, 10, 10, 10, 0, 10),
+        (0, 32, 0, 0, 0, 0),
+        (0, 10, 5, 10, 9, 10),
+        (32, 8, 31, 8, 0, 0),
+    ] {
+        let geometry = framebuffer::ScreenInfo {
+            red_position: rp,
+            red_size: rs,
+            green_position: gp,
+            green_size: gs,
+            blue_position: bp,
+            blue_size: bs,
+            ..screen(3, 2)
+        };
+        let mut actual = vec![0xdeadbeef; geometry.stride_bytes / 4 * geometry.height + 4];
+        let mut expected = actual.clone();
+        let fb = canvas(&mut actual, geometry);
+        let mut random = 7;
+        for step in 0..500 {
+            let color = next(&mut random) as u32;
+            let alpha = (step % 256) as u8;
+            fb.fill_rect_alpha(-1, -1, 5, 4, color, alpha);
+            for y in 0..geometry.height {
+                for x in 0..geometry.width {
+                    let index = y * geometry.stride_bytes / 4 + x;
+                    expected[index] = reference_blend(geometry, expected[index], color, alpha);
+                }
+            }
+            assert_eq!(actual, expected);
+        }
+        let source = [0x1987abcd, 0xfedcba98, 0x44556677, 0, u32::MAX, 0x80000000];
+        for alpha in [0, 1, 2, 127, 128, 247, 254, 255] {
+            fb.blit_bgra32_from_alpha(0, 0, 3, 2, source.as_ptr() as usize, 24, 3, 0, 0, alpha);
+            for y in 0..2 {
+                for x in 0..3 {
+                    let index = y * geometry.stride_bytes / 4 + x;
+                    expected[index] =
+                        reference_blend(geometry, expected[index], source[y * 3 + x], alpha);
+                }
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
 fn paint_reference(fb: &framebuffer::Framebuffer, rect: framebuffer::Rect) {
     for y in rect.y..rect.y + rect.height {
         for x in rect.x..rect.x + rect.width {

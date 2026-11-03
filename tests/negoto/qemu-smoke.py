@@ -24,6 +24,10 @@ profile.add_argument("--tinycore-desktop", action="store_true", help="test the r
 profile.add_argument("--tinycore-apps", action="store_true", help="test installed GUI applications with real X windows")
 profile.add_argument("--tinycore-perf", action="store_true", help="measure fixed AF_UNIX round-trip workloads")
 profile.add_argument("--tinycore-process-perf", action="store_true", help="measure Alpha creation, Negoto prepare and Linux fork/exec separately")
+profile.add_argument("--tinycore-startup-perf", action="store_true", help="measure real OCI create/start through an X11 terminal connection")
+profile.add_argument("--ram-sharing-reuse", action="store_true", help="check private-page reuse while a suspended peer retains a shared mapping")
+profile.add_argument("--ram-alias-retirement", action="store_true", help="check RAM reclamation when its final owner holds two aliases")
+profile.add_argument("--private-readonly-fork", action="store_true", help="verify real RO-fork RAM savings and privileged-write isolation")
 args = parser.parse_args()
 if not args.image.is_file():
     parser.error("--image must be a regular test image")
@@ -57,7 +61,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
             text = serial.read_text(errors="replace") if serial.exists() else ""
             plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
             if ("NEGOTO-SMOKE-FAIL" in plain or "FATAL FAULT" in plain
-                    or (args.tinycore_desktop and ("[proc.err] spawn failed" in plain
+                    or ((args.tinycore_desktop or args.tinycore_startup_perf) and ("[proc.err] spawn failed" in plain
                                                  or "[shm.err] share rollback" in plain))
                     or re.search(r"\bPANIC\b|\bpanic(?:ked)?\b", plain, re.IGNORECASE)):
                 raise RuntimeError("Guest regression failed; see serial.log")
@@ -132,6 +136,12 @@ with (logs / "qemu.log").open("w") as diagnostics:
         time.sleep(2)
         keys = {"/": "slash", "-": "minus", "\n": "ret"}
         guest = "/alter/linux/bin/negoto-smoke"
+        if args.ram_sharing_reuse:
+            guest = "/alter/linux/bin/ram-share-smoke --ram-sharing-reuse"
+        if args.ram_alias_retirement:
+            guest = "/alter/linux/bin/ram-share-smoke --ram-alias-retirement"
+        if args.private_readonly_fork:
+            guest = "/alter/linux/bin/ram-share-smoke --private-readonly-fork"
         if args.tinycore:
             guest += " --tinycore"
         if args.tinycore_desktop:
@@ -142,10 +152,36 @@ with (logs / "qemu.log").open("w") as diagnostics:
             guest += " --tinycore-perf"
         if args.tinycore_process_perf:
             guest += " --tinycore-process-perf"
+        if args.tinycore_startup_perf:
+            guest += " --tinycore-startup-perf"
         keys[" "] = "spc"
         for character in guest + "\n":
             send(f"sendkey {keys.get(character, character)} 40")
             time.sleep(0.25)
+        if args.private_readonly_fork:
+            marker = "PRIVATE-READONLY-FORK-PASS ram=true guarded-write=true isolation=true"
+            wait_for(lambda text: re.search(re.escape(marker) + r"(?: source-reap=true)?\r?\n", text))
+            for line in checked_serial().splitlines():
+                if "PRIVATE-RO-RAM " in line or line.startswith("PRIVATE-READONLY-FORK-PASS "):
+                    print(line, flush=True)
+            print(f"PASS {marker} (smp={args.smp})", flush=True)
+            raise SystemExit(0)
+        if args.ram_sharing_reuse:
+            marker = "RAM-SHARING-REUSE-PASS rounds=8 peer-data=true cleanup=true"
+            wait_for(lambda text: marker in text)
+            print(f"PASS {marker} (smp={args.smp})", flush=True)
+            raise SystemExit(0)
+        if args.ram_alias_retirement:
+            marker = "RAM-ALIAS-RETIREMENT-PASS rounds=4 aliases=2 cleanup=true"
+            wait_for(lambda text: marker in text)
+            print(f"PASS {marker} (smp={args.smp})", flush=True)
+            raise SystemExit(0)
+        if args.tinycore_startup_perf:
+            wait_for(lambda text: "TINYCORE-STARTUP-PERFORMANCE-PASS samples=3 cleanup=true" in text)
+            for line in checked_serial().splitlines():
+                if "STARTUP-PERF " in line:
+                    print(line, flush=True)
+            raise SystemExit(0)
         if args.tinycore_process_perf:
             # The summary prefix precedes the captured workload output. Do not
             # stop QEMU halfway through UART emission of the timing samples.
@@ -156,7 +192,11 @@ with (logs / "qemu.log").open("w") as diagnostics:
                     print(line, flush=True)
             raise SystemExit(0)
         if args.tinycore_perf:
-            wait_for(lambda text: "TINYCORE-PERFORMANCE-PASS" in text)
+            # The prefix is printed before the captured timing report. Wait
+            # for its footer too, before quitting QEMU or reading the samples.
+            wait_for(lambda text: "TINYCORE-PERFORMANCE-PASS" in text
+                     and re.search(r"(?m)^DESKTOP-PERFORMANCE-PASS\r?$",
+                                   text.split("TINYCORE-PERFORMANCE-PASS", 1)[1]))
             text = checked_serial()
             for line in text.splitlines():
                 if line.startswith("FRAME-PERF "):
@@ -229,7 +269,10 @@ with (logs / "qemu.log").open("w") as diagnostics:
             time.sleep(0.1)
             send("mouse_button 0")
             keys[">"] = "shift-dot"
-            for character in "echo desktop-input-ok > /tmp/desktop-input-ok\n":
+            keys["&"] = "shift-7"
+            command_text = (f"sh /usr/local/bin/nanami-desktop-links-test {cycle}"
+                            " && echo desktop-input-ok > /tmp/desktop-input-ok\n")
+            for character in command_text:
                 send(f"sendkey {keys.get(character, character)} 40")
                 time.sleep(0.25)
             wait_for(lambda text: f"TINYCORE-DESKTOP-INPUT-PASS cycle={cycle}" in text)

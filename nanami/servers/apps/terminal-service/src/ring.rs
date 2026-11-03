@@ -100,7 +100,10 @@ impl ByteRing {
         let mut events = 0;
         for offset in 0..self.len {
             let byte = self.buffer[(self.read + offset) % RING_BYTES];
-            if let Some(index) = controls.iter().position(|value| *value != 0 && *value == byte) {
+            if let Some(index) = controls
+                .iter()
+                .position(|value| *value != 0 && *value == byte)
+            {
                 events |= 1 << index;
                 if flush {
                     kept = 0;

@@ -388,7 +388,7 @@ fn sys_mprotect(_: &mut Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<W
 fn sys_munmap(_: &mut Runtime, _: Word, _: Word, _: Word) -> Result<Word, i32> {
     Err(EFAULT)
 }
-fn write_target_memory_from(_: Word, _: Word, _: Word, _: Word) -> Result<(), i32> {
+fn write_target_memory_from(_: &Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<(), i32> {
     Err(EFAULT)
 }
 fn write_target_memory(runtime: &mut Runtime, _: Word, _: Word, bytes: Word) -> Result<(), i32> {

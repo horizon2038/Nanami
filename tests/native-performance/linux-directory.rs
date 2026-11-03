@@ -82,7 +82,8 @@ struct Runtime {
     posix_shm_size: Word,
     process: Process,
     file: LinuxFile,
-    _buffer: Box<[u8; 8192]>,
+    copy_error: Option<i32>,
+    _buffer: Box<[u8; 65536]>,
 }
 impl Runtime {
     fn linux_file(&self, _: Word, fd: Word) -> Option<LinuxFile> {
@@ -94,9 +95,10 @@ impl Runtime {
 }
 #[derive(Default)]
 struct Backend {
-    names: Vec<&'static str>,
+    names: Vec<String>,
     cursor: usize,
     shm: usize,
+    reads: usize,
 }
 thread_local! {
     static BACKEND: RefCell<Backend> = RefCell::new(Backend::default());
@@ -123,6 +125,7 @@ mod posix {
     ) -> Result<(Word, Word), i32> {
         BACKEND.with(|backend| {
             let mut backend = backend.borrow_mut();
+            backend.reads += 1;
             let end = (backend.cursor + count).min(backend.names.len());
             for (record, index) in (backend.cursor..end).enumerate() {
                 let name = backend.names[index].as_bytes();
@@ -164,6 +167,9 @@ fn write_target_memory(
     destination: Word,
     count: Word,
 ) -> Result<(), i32> {
+    if let Some(error) = runtime.copy_error {
+        return Err(error);
+    }
     unsafe {
         std::ptr::copy_nonoverlapping(
             runtime.posix_shm as *const u8,
@@ -176,14 +182,15 @@ fn write_target_memory(
 fn sys_virtual_getdents(_: &mut Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<Word, i32> {
     panic!("the root must use its shared POSIX directory cursor")
 }
-fn fixture(private_root: bool, names: Vec<&'static str>) -> Runtime {
-    let mut buffer = Box::new([0; 8192]);
+fn fixture(private_root: bool, names: Vec<&str>) -> Runtime {
+    let mut buffer = Box::new([0; 65536]);
     let shm = buffer.as_mut_ptr() as usize;
     BACKEND.with(|backend| {
         *backend.borrow_mut() = Backend {
-            names,
+            names: names.into_iter().map(str::to_owned).collect(),
             shm,
             cursor: 0,
+            reads: 0,
         }
     });
     Runtime {
@@ -199,11 +206,12 @@ fn fixture(private_root: bool, names: Vec<&'static str>) -> Runtime {
             kind: LinuxFileKind::VirtualDirectory,
             posix_fd: 4,
         },
+        copy_error: None,
         _buffer: buffer,
     }
 }
 fn read(runtime: &mut Runtime, fd: Word, capacity: usize) -> Vec<(String, Word, Word)> {
-    let mut output = [0u8; 512];
+    let mut output = vec![0u8; capacity];
     let count =
         directory::sys_getdents64(runtime, 1, fd, output.as_mut_ptr() as Word, capacity).unwrap();
     let mut result = Vec::new();
@@ -213,6 +221,8 @@ fn read(runtime: &mut Runtime, fd: Word, capacity: usize) -> Vec<(String, Word, 
         let bytes = u16::from_ne_bytes(record[16..18].try_into().unwrap()) as usize;
         assert!(bytes >= 24 && bytes % 8 == 0 && bytes <= record.len());
         let name = record[19..bytes].split(|byte| *byte == 0).next().unwrap();
+        assert!(record[19 + name.len()..bytes].iter().all(|byte| *byte == 0));
+        assert_eq!(record[18], LINUX_DT_DIR as u8);
         result.push((
             std::str::from_utf8(name).unwrap().to_owned(),
             u64::from_ne_bytes(record[..8].try_into().unwrap()) as Word,
@@ -277,4 +287,131 @@ fn root_cookie_rewind_and_dup_keep_the_same_stream_for_both_profiles() {
             assert_eq!(all(&mut runtime), expected[index + 1..]);
         }
     }
+}
+
+#[test]
+fn large_directory_reads_compact_forward_without_clobbering_unread_records() {
+    let names: Vec<_> = (0..300).map(|index| format!("entry-{index:03}")).collect();
+    let mut runtime = fixture(true, names.iter().map(String::as_str).collect());
+    runtime.file.kind = LinuxFileKind::Posix;
+    let first = read(&mut runtime, 0, 32768);
+    // Reserve a worst-case packed record for each backend entry. A large
+    // caller buffer must no longer be limited to the old 512-byte prefix.
+    assert_eq!(first.len(), 32768 / 280);
+    let mut entries = first;
+    loop {
+        let batch = read(&mut runtime, 1, 32768);
+        if batch.is_empty() {
+            break;
+        }
+        entries.extend(batch);
+    }
+    for (index, (name, inode, cookie)) in entries.iter().enumerate() {
+        assert_eq!(name, &names[index]);
+        assert_eq!(*inode, 100 + index);
+        assert_eq!(*cookie, index + 1);
+    }
+    assert_eq!(entries.len(), names.len());
+    BACKEND.with(|backend| assert_eq!(backend.borrow().reads, 4));
+}
+
+#[test]
+fn maximum_length_directory_names_and_short_buffers_preserve_every_cookie() {
+    let names: Vec<_> = (0..240)
+        .map(|index| format!("{index:03}{}", "x".repeat(252)))
+        .collect();
+    let mut runtime = fixture(true, names.iter().map(String::as_str).collect());
+    runtime.file.kind = LinuxFileKind::Posix;
+    let first = read(&mut runtime, 0, 32768);
+    assert_eq!(first.len(), 117);
+    assert_eq!(first.last().unwrap().2, 117);
+    // A buffer too short for the next record must not consume its cookie.
+    let mut output = [0u8; 32];
+    assert_eq!(
+        directory::sys_getdents64(&mut runtime, 1, 1, output.as_mut_ptr() as Word, 32),
+        Err(EINVAL)
+    );
+    BACKEND.with(|backend| assert_eq!(backend.borrow().cursor, 117));
+    let next = read(&mut runtime, 1, 280);
+    assert_eq!(next, vec![(names[117].clone(), 217, 118)]);
+    posix::posix_seek(1, 4, first[10].2, posix::POSIX_SEEK_SET).unwrap();
+    assert_eq!(read(&mut runtime, 0, 280)[0].0, names[11]);
+}
+
+#[test]
+fn failed_large_directory_copyout_restores_the_shared_stream() {
+    for root in [false, true] {
+        let names: Vec<_> = (0..150).map(|index| format!("file-{index}")).collect();
+        let mut runtime = fixture(true, names.iter().map(String::as_str).collect());
+        if !root {
+            runtime.file.kind = LinuxFileKind::Posix;
+        }
+        let prefix = if root {
+            let entries = read(&mut runtime, 0, 512);
+            assert_eq!(entries.len(), 3);
+            3
+        } else {
+            0
+        };
+        runtime.copy_error = Some(EFAULT);
+        let mut output = vec![0u8; 32768];
+        assert_eq!(
+            directory::sys_getdents64(
+                &mut runtime,
+                1,
+                0,
+                output.as_mut_ptr() as Word,
+                output.len()
+            ),
+            Err(EFAULT)
+        );
+        BACKEND.with(|backend| assert_eq!(backend.borrow().cursor, prefix));
+        runtime.copy_error = None;
+        let retry = read(&mut runtime, 1, 32768);
+        assert_eq!(retry.len(), 117);
+        assert_eq!(retry[0], (names[0].clone(), 100, prefix + 1));
+        assert_eq!(retry[116].0, names[116]);
+    }
+}
+
+#[test]
+fn large_root_batches_keep_overlay_shadowing_and_seek_cookies() {
+    let mut names: Vec<_> = (0..130).map(|index| format!("dir-{index:03}")).collect();
+    names[0] = "dev".into();
+    names[30] = "proc".into();
+    names[116] = "sys".into();
+    let mut runtime = fixture(true, names.iter().map(String::as_str).collect());
+    let prefix = read(&mut runtime, 0, 32768);
+    assert_eq!(
+        prefix.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+        ["dev", "proc", "sys"]
+    );
+    let first = read(&mut runtime, 1, 32768);
+    assert_eq!(first.len(), 114);
+    assert_eq!(first.last().unwrap().2, 119);
+    posix::posix_seek(1, 4, first[50].2, posix::POSIX_SEEK_SET).unwrap();
+    assert_eq!(read(&mut runtime, 0, 32)[0], first[51]);
+    // Return to the batch boundary whose last backing record was shadowed.
+    posix::posix_seek(1, 4, 120, posix::POSIX_SEEK_SET).unwrap();
+    assert_eq!(read(&mut runtime, 1, 32768)[0].0, names[117]);
+}
+
+#[test]
+fn oversized_guest_count_still_obeys_the_actual_shared_memory_extent() {
+    let names = ["a".repeat(255), "b".repeat(255), "c".repeat(255)];
+    let mut runtime = fixture(true, names.iter().map(String::as_str).collect());
+    runtime.file.kind = LinuxFileKind::Posix;
+    runtime.posix_shm_size = ALTER_IO_OFFSET + 2 * vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+    let end = runtime.posix_shm_size;
+    runtime._buffer[end..].fill(0xa5);
+    let mut output = [0xa5u8; 4096];
+    let copied =
+        directory::sys_getdents64(&mut runtime, 1, 0, output.as_mut_ptr() as Word, Word::MAX)
+            .unwrap();
+    assert_eq!(copied, 560);
+    assert_eq!(&output[19..274], names[0].as_bytes());
+    assert_eq!(&output[299..554], names[1].as_bytes());
+    assert!(output[copied..].iter().all(|byte| *byte == 0xa5));
+    assert!(runtime._buffer[end..].iter().all(|byte| *byte == 0xa5));
+    BACKEND.with(|backend| assert_eq!(backend.borrow().cursor, 2));
 }

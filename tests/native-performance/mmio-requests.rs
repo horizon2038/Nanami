@@ -93,11 +93,16 @@ impl Memory {
     fn map_frame_with_attribute(
         &mut self,
         _: Word,
-        _: Word,
-        _: Word,
+        frame: Word,
+        address: Word,
         mapping: Attribute,
         _: &mut (),
     ) -> Result<(), CapabilityError> {
+        assert_eq!(
+            frame,
+            process_frame_descriptor(1, (address - 0x10000000) / PAGE_SIZE),
+            "explicit MMIO must retain its child alias and scoped cleanup"
+        );
         FAKE.with(|fake| fake.borrow_mut().mappings.push(mapping));
         step("map-frames")
     }

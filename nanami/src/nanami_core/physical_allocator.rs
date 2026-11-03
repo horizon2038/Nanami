@@ -2,6 +2,9 @@ use alloc::vec::Vec;
 
 const PAGE_BITS: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
+const INITIAL_INDEX_BUCKETS: usize = 32;
+const MAX_INDEX_BYTES: usize = 256 * 1024;
+const INDEX_BUCKET_LOAD: usize = 4;
 
 #[derive(Clone, Copy)]
 pub struct PhysicalAllocation {
@@ -29,6 +32,8 @@ struct AllocationRecord {
     page_count: usize,
     is_device: bool,
     reserved: bool,
+    // One-based Vec index; zero ends the chain. Fits existing 64-bit padding.
+    next: u32,
 }
 
 struct BuddyPool {
@@ -243,6 +248,7 @@ pub struct PhysicalAllocator {
     normal: BuddyPool,
     device: BuddyPool,
     allocations: Vec<AllocationRecord>,
+    allocation_buckets: Vec<u32>,
 }
 
 impl PhysicalAllocator {
@@ -251,6 +257,7 @@ impl PhysicalAllocator {
             normal: BuddyPool::new(),
             device: BuddyPool::new(),
             allocations: Vec::new(),
+            allocation_buckets: Vec::new(),
         }
     }
 
@@ -271,11 +278,12 @@ impl PhysicalAllocator {
         let base_page = base_address >> PAGE_BITS;
 
         if used {
-            self.allocations.push(AllocationRecord {
+            self.push_record(AllocationRecord {
                 base_page,
                 page_count,
                 is_device,
                 reserved: true,
+                next: 0,
             });
             return Ok(());
         }
@@ -392,19 +400,35 @@ impl PhysicalAllocator {
             .checked_add(req_count)
             .ok_or(PhysicalAllocError::InvalidArgument)?;
 
+        let contains = |allocation: &AllocationRecord| {
+            if allocation.reserved {
+                return false;
+            }
+            let allocation_end = allocation.base_page + allocation.page_count;
+            req_base >= allocation.base_page && req_end <= allocation_end
+        };
+        // Process pages are normally released newest-first. Check the last
+        // live allocation before scanning unrelated, longer-lived allocations.
+        // Interleaved exact-base releases use the compact index; interior
+        // partial releases retain the same validated linear fallback.
         let index = self
             .allocations
-            .iter()
-            .position(|allocation| {
-                if allocation.reserved {
-                    return false;
-                }
-                let allocation_end = allocation.base_page + allocation.page_count;
-                req_base >= allocation.base_page && req_end <= allocation_end
-            })
+            .len()
+            .checked_sub(1)
+            .filter(|&index| contains(&self.allocations[index]))
+            .or_else(|| self.find_exact_record(req_base, req_end))
+            .or_else(|| self.allocations.iter().position(contains))
             .ok_or(PhysicalAllocError::InvalidArgument)?;
 
+        self.unindex_record(index);
+        let last = self.allocations.len() - 1;
+        if index != last {
+            self.unindex_record(last);
+        }
         let allocation = self.allocations.swap_remove(index);
+        if index != last {
+            self.index_record(index);
+        }
         let allocation_end = allocation
             .base_page
             .checked_add(allocation.page_count)
@@ -440,12 +464,114 @@ impl PhysicalAllocator {
     }
 
     fn record_allocation(&mut self, base_page: usize, page_count: usize, is_device: bool) {
-        self.allocations.push(AllocationRecord {
+        self.push_record(AllocationRecord {
             base_page,
             page_count,
             is_device,
             reserved: false,
+            next: 0,
         });
+    }
+
+    fn push_record(&mut self, record: AllocationRecord) {
+        let index = self.allocations.len();
+        self.allocations.push(record);
+        let buckets = self.allocation_buckets.len();
+        let desired = if buckets == 0 {
+            INITIAL_INDEX_BUCKETS
+        } else if self.allocations.len() / INDEX_BUCKET_LOAD >= buckets {
+            (buckets * 2).min(MAX_INDEX_BYTES / core::mem::size_of::<u32>())
+        } else {
+            buckets
+        };
+        // This is an optional lookup aid, not allocation authority. An index
+        // allocation failure must not fail an otherwise valid RAM allocation.
+        if desired > buckets
+            && self
+                .allocation_buckets
+                .try_reserve_exact(desired - buckets)
+                .is_ok()
+        {
+            self.allocation_buckets.resize(desired, 0);
+            self.allocation_buckets.fill(0);
+            for index in 0..self.allocations.len() {
+                self.index_record(index);
+            }
+        } else {
+            self.index_record(index);
+        }
+    }
+
+    fn record_link(index: usize) -> Option<u32> {
+        u32::try_from(index).ok()?.checked_add(1)
+    }
+
+    fn record_bucket(&self, base_page: usize) -> usize {
+        let mut hash = base_page as u64;
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d049bb133111eb);
+        hash ^= hash >> 31;
+        (hash as usize) & (self.allocation_buckets.len() - 1)
+    }
+
+    fn index_record(&mut self, index: usize) {
+        let Some(link) = Self::record_link(index) else {
+            return;
+        };
+        if self.allocation_buckets.is_empty() {
+            return;
+        }
+        let bucket = self.record_bucket(self.allocations[index].base_page);
+        self.allocations[index].next = self.allocation_buckets[bucket];
+        self.allocation_buckets[bucket] = link;
+    }
+
+    fn unindex_record(&mut self, index: usize) {
+        let Some(target) = Self::record_link(index) else {
+            return;
+        };
+        if self.allocation_buckets.is_empty() {
+            return;
+        }
+        let bucket = self.record_bucket(self.allocations[index].base_page);
+        let mut link = self.allocation_buckets[bucket];
+        let mut previous: Option<usize> = None;
+        while link != 0 {
+            let current = link as usize - 1;
+            let next = self.allocations[current].next;
+            if link == target {
+                if let Some(previous) = previous {
+                    self.allocations[previous].next = next;
+                } else {
+                    self.allocation_buckets[bucket] = next;
+                }
+                return;
+            }
+            previous = Some(current);
+            link = next;
+        }
+    }
+
+    fn find_exact_record(&self, base_page: usize, end_page: usize) -> Option<usize> {
+        if self.allocation_buckets.is_empty() {
+            return None;
+        }
+        let mut link = self.allocation_buckets[self.record_bucket(base_page)];
+        let mut found = None;
+        while link != 0 {
+            let index = link as usize - 1;
+            let allocation = self.allocations[index];
+            if allocation.base_page == base_page
+                && !allocation.reserved
+                && end_page <= allocation.base_page + allocation.page_count
+            {
+                found = Some(found.map_or(index, |previous: usize| previous.min(index)));
+            }
+            link = allocation.next;
+        }
+        found
     }
 
     fn pool_mut(&mut self, is_device: bool) -> &mut BuddyPool {

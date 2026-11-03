@@ -102,6 +102,9 @@ impl Alpha {
             .vm_space_mut(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         let old = vm.permissions(va);
+        if permissions & 2 != 0 && vm.private_page_shared(va) {
+            return Err(CapabilityError::IllegalOperation);
+        }
         if old == permissions {
             return Ok(());
         }

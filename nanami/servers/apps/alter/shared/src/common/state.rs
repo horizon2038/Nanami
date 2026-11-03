@@ -7,8 +7,11 @@ mod file_table;
 pub use file_table::FileTable;
 #[path = "state/events.rs"]
 mod events;
+#[path = "state/identity_cache.rs"]
+mod identity_cache;
 #[path = "state/io.rs"]
 mod io;
+pub use identity_cache::{IdentityCache, IdentityField};
 #[path = "state/job_control.rs"]
 pub mod job_control;
 pub use job_control::{JobControlError, ProcessJobControl, TerminalControl};
@@ -41,9 +44,7 @@ mod waiters;
 use nanami_runtime::{RequestError, Word};
 
 use super::framebuffer_size::FramebufferSize;
-use crate::abi::{
-    ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PROCESS_MAPPING_MAX,
-};
+use crate::abi::{ALTER_IMAGE_NAME_MAX, ALTER_MANAGED_PROCESS_MAX, ALTER_PROCESS_MAPPING_MAX};
 use crate::process::LinuxSyscallContext;
 
 pub const LINUX_FD_MAX: usize = 64;
@@ -301,6 +302,7 @@ pub struct ManagedProcess {
     pub pid: Word,
     pub tgid: Word,
     pub vm_group: Word,
+    pub vm_private_shared: bool,
     pub fs_group: Word,
     pub umask: Word,
     pub parent_pid: Word,
@@ -377,6 +379,7 @@ impl ManagedProcess {
         pid: 0,
         tgid: 0,
         vm_group: 0,
+        vm_private_shared: false,
         fs_group: 0,
         umask: 0o022,
         parent_pid: 0,
@@ -496,12 +499,15 @@ impl GraphicsSession {
 }
 
 pub struct Runtime {
+    /// Accepted fault whose reply has not yet been sent. Not a runnable task.
+    pub current_fault_pid: Word,
     pub ptys: pty::Ptys,
     pub terminal_controls: [TerminalControl; ALTER_MANAGED_PROCESS_MAX],
     pub clients: [clients::ClientMemory; ALTER_MANAGED_PROCESS_MAX],
     pub internal_shm: Word,
     pub internal_shm_size: Word,
     pub posix_port: Word,
+    pub identity_cache: IdentityCache,
     pub posix_shm: Word,
     pub posix_shm_size: Word,
     pub posix_direct_shm: Word,
@@ -571,12 +577,14 @@ impl Runtime {
         terminal_shm_size: Word,
     ) -> Self {
         Self {
+            current_fault_pid: 0,
             terminal_controls: [TerminalControl::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             ptys: pty::Ptys::new(),
             clients: [clients::ClientMemory::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             internal_shm: 0,
             internal_shm_size: 0,
             posix_port,
+            identity_cache: IdentityCache::new(),
             posix_shm,
             posix_shm_size,
             posix_direct_shm,

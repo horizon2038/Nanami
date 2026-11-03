@@ -46,6 +46,12 @@ struct Process {
     sleep_context: LinuxSyscallContext,
     exited: bool,
     readiness_wait: Option<ReadinessWait>,
+    stopped: bool,
+}
+impl Process {
+    fn signal_stopped(&self) -> bool {
+        self.stopped
+    }
 }
 #[derive(Clone, Copy)]
 struct ReadinessWait {
@@ -103,8 +109,9 @@ struct Runtime {
     graphics: [Graphics; 4],
 }
 impl Runtime {
-    fn is_signal_stopped(&self, _: Word) -> bool {
-        false
+    fn is_signal_stopped(&self, pid: Word) -> bool {
+        self.managed_process(pid)
+            .is_some_and(Process::signal_stopped)
     }
     fn managed_process(&self, pid: Word) -> Option<&Process> {
         self.managed.iter().find(|p| p.pid == pid)
@@ -571,6 +578,39 @@ fn unavailable_cpu_and_tai_clocks_fail_without_timer_ipc() {
         assert_eq!(sys_clock_gettime(&mut runtime, 1, id, 1), Err(EINVAL));
     }
     FAKE.with(|fake| assert_eq!(fake.borrow().clock_reads, 0));
+}
+
+#[test]
+fn clock_deadlines_exclude_stopped_sleep_and_readiness_waiters() {
+    let mut r = runtime(1000);
+    r.managed[0].sleep_waiting = true;
+    r.managed[0].sleep_deadline = 40;
+    r.managed[1].readiness_wait = Some(ReadinessWait { deadline: Some(30) });
+    r.managed[2].sleep_waiting = true;
+    r.managed[2].sleep_deadline = 20;
+    r.managed[2].stopped = true;
+    arm_clock_timer(&mut r).unwrap();
+    assert_eq!(r.clock_deadline, Some(30));
+    r.managed[1].stopped = true;
+    arm_clock_timer(&mut r).unwrap();
+    assert_eq!(r.clock_deadline, Some(40));
+    r.managed[0].stopped = true;
+    arm_clock_timer(&mut r).unwrap();
+    assert_eq!(r.clock_deadline, None);
+}
+
+#[test]
+fn timer_does_not_complete_a_stopped_sleep_until_continue() {
+    let mut r = runtime(1000);
+    assert_eq!(sleep(&mut r, 1, 1_000_000), EmulationAction::Park);
+    r.managed[0].stopped = true;
+    notify(&mut r, 100);
+    assert!(r.managed[0].sleep_waiting);
+    FAKE.with_borrow(|fake| assert!(fake.resumed.is_empty()));
+    r.managed[0].stopped = false;
+    notify(&mut r, 100);
+    assert!(!r.managed[0].sleep_waiting);
+    FAKE.with_borrow(|fake| assert_eq!(fake.resumed, [1]));
 }
 
 #[test]

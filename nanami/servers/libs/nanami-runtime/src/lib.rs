@@ -581,6 +581,17 @@ pub fn request_process_spawn_memory_fault_handler_suspended(
     Ok(child_pid)
 }
 
+/// Drop a supervised guest's direct native capability access. The first call
+/// leaves it stopped; repeating an already successful seal is a no-op.
+/// Its supervisor retains the PCB and Alpha retains all memory-management caps.
+pub fn request_process_seal_capabilities(pid: Word) -> Result<(), RequestError> {
+    let (status, _, _) = call_os_port(OS_REQUEST_PROCESS_SEAL_CAPABILITIES, pid, 0, 0, 0, 2)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
 pub fn request_process_thread_create(
     source_pid: Word,
     pcb_destination_slot: Word,
@@ -607,18 +618,74 @@ pub fn request_process_fork(
     pcb_destination_slot: Word,
     priority: Word,
 ) -> Result<Word, RequestError> {
+    request_process_fork_options(source_pid, pcb_destination_slot, priority, 0)
+}
+
+/// Opt-in private R/RX aliasing. The supervisor must quiesce all source VM
+/// users before forking, and query/detach before privileged writes/upgrades.
+pub fn request_process_fork_shared_readonly(
+    source_pid: Word,
+    pcb_destination_slot: Word,
+    priority: Word,
+) -> Result<Word, RequestError> {
+    request_process_fork_options(
+        source_pid,
+        pcb_destination_slot,
+        priority,
+        OS_FORK_SHARE_READONLY,
+    )
+}
+
+fn request_process_fork_options(
+    source_pid: Word,
+    pcb_destination_slot: Word,
+    priority: Word,
+    options: Word,
+) -> Result<Word, RequestError> {
     let (status, pid, _) = call_os_port(
         OS_REQUEST_PROCESS_FORK,
         source_pid,
         pcb_destination_slot,
         priority,
-        0,
+        options,
         5,
     )?;
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
     Ok(pid)
+}
+
+/// Query is side-effect free. DETACH requires all tasks sharing the target VM
+/// to be inactive through the current fault or a completed synchronous stop.
+pub fn request_process_private_write(
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    mode: Word,
+) -> Result<bool, RequestError> {
+    if pid == 0
+        || bytes == 0
+        || address.checked_add(bytes).is_none()
+        || (mode != OS_PRIVATE_WRITE_QUERY && mode != OS_PRIVATE_WRITE_DETACH)
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, needed, _) = call_os_port(
+        OS_REQUEST_PROCESS_PRIVATE_WRITE,
+        pid,
+        address,
+        bytes,
+        mode,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if needed > 1 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(needed != 0)
 }
 
 /// Allocate initialized private pages at a fixed address. The source prefix is
@@ -830,6 +897,44 @@ pub fn request_process_memory_write_checked(
         return Err(RequestError::InvalidArgument);
     }
     request_process_memory_write(pid, target, source, bytes | OS_MEMORY_COPY_USER_ACCESS)
+}
+
+pub fn request_process_memory_readv_checked(
+    pid: Word,
+    transfers: &[ProcessMemoryTransfer],
+) -> Result<(), RequestError> {
+    request_process_memory_vector(OS_REQUEST_PROCESS_MEMORY_READ_VECTOR, pid, transfers)
+}
+
+pub fn request_process_memory_writev_checked(
+    pid: Word,
+    transfers: &[ProcessMemoryTransfer],
+) -> Result<(), RequestError> {
+    request_process_memory_vector(OS_REQUEST_PROCESS_MEMORY_WRITE_VECTOR, pid, transfers)
+}
+
+fn request_process_memory_vector(
+    operation: Word,
+    pid: Word,
+    transfers: &[ProcessMemoryTransfer],
+) -> Result<(), RequestError> {
+    if pid == 0 || transfers.is_empty() || transfers.len() > OS_MEMORY_COPY_VECTOR_MAX {
+        return Err(RequestError::InvalidArgument);
+    }
+    // Entry validation belongs to the server, in order: rejecting a later
+    // record here would prevent earlier records from completing.
+    let (status, _, _) = call_os_port(
+        operation,
+        pid,
+        transfers.as_ptr() as Word,
+        transfers.len() as Word,
+        0,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }
 
 pub fn request_process_memory_write(

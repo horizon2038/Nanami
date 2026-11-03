@@ -167,7 +167,7 @@ pub(super) fn sources(runtime: &Runtime, id: Word) -> Word {
             .iter()
             .filter(|watch| watch.armed)
             .fold(READY_OBJECT, |sources, watch| {
-                sources | super::readiness::file_sources(watch.file)
+                sources | super::readiness::file_sources(watch.file, watch.events as i16)
             })
     })
 }

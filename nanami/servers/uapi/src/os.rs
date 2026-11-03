@@ -87,8 +87,41 @@ pub const OS_REQUEST_PROCESS_MEMORY_COMPARE_EXCHANGE: Word = 0x102b;
 /// args: source PID, PCB destination slot, priority, reserved (zero).
 pub const OS_REQUEST_PROCESS_THREAD_CREATE: Word = 0x102c;
 /// Create a suspended raw task with a private snapshot of a supervised VM.
-/// args: source PID, PCB destination slot, priority, reserved (zero).
+/// args: source PID, PCB destination slot, priority, options (zero or
+/// OS_FORK_SHARE_READONLY). Zero retains the eager private-copy behavior.
 pub const OS_REQUEST_PROCESS_FORK: Word = 0x102d;
+/// Ordered, permission-checked copies using caller-owned transfer descriptors.
+/// args: target PID, descriptor VA, count (1..=16), reserved (zero).
+pub const OS_REQUEST_PROCESS_MEMORY_READ_VECTOR: Word = 0x102e;
+pub const OS_REQUEST_PROCESS_MEMORY_WRITE_VECTOR: Word = 0x102f;
+/// Replace a supervised task's native capability namespace with an empty root.
+/// (target PID, zero, zero, zero) -> (). Only its reaper may request this;
+/// the first successful call leaves the task suspended; repeats are no-ops.
+/// Alpha retains its management
+/// capabilities. The restriction survives exec and is inherited by fork/thread.
+pub const OS_REQUEST_PROCESS_SEAL_CAPABILITIES: Word = 0x1030;
+/// Query/detach private fork aliases: (PID, VA, bytes, mode) -> needs-detach.
+/// DETACH requires the reaper to have quiesced every task sharing the VM.
+/// Successful detach preserves bytes and R/W/X; only backing becomes private.
+pub const OS_REQUEST_PROCESS_PRIVATE_WRITE: Word = 0x1031;
+pub const OS_PRIVATE_WRITE_QUERY: Word = 0;
+pub const OS_PRIVATE_WRITE_DETACH: Word = 1;
+/// PROCESS_FORK arg3 opt-in. Only sealed tasks may share private R/RX backing.
+/// Their reaper must quiesce all users of the source VM before this fork.
+/// Their reaper must DETACH before privileged writes or granting write access.
+pub const OS_FORK_SHARE_READONLY: Word = 1;
+pub const OS_MEMORY_COPY_VECTOR_MAX: usize = 16;
+
+/// Native-Word wire record; addresses refer to target and caller respectively.
+/// A failure stops at that record; preceding records have already completed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProcessMemoryTransfer {
+    pub target: Word,
+    pub local: Word,
+    pub bytes: Word,
+}
+
 /// MAP_ANONYMOUS arg3 may point to two caller Words: source VA and initialized
 /// byte count. Copy that prefix once and zero only the rest, before publishing
 /// each destination page. Zero arg3 retains ordinary anonymous zero fill.

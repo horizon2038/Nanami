@@ -345,8 +345,12 @@ fn write_sysctl_bytes(
     unsafe {
         ::core::ptr::copy_nonoverlapping(bytes.as_ptr(), runtime.posix_shm as *mut u8, copy_len);
     }
-    match nanami_runtime::request_process_memory_write(pid, old_ptr, runtime.posix_shm, copy_len as Word)
-    {
+    match nanami_runtime::request_process_memory_write(
+        pid,
+        old_ptr,
+        runtime.posix_shm,
+        copy_len as Word,
+    ) {
         Ok(()) => 0,
         Err(_) => -FREEBSD_EFAULT,
     }
@@ -414,7 +418,8 @@ fn read_user_word(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Wo
     if user_ptr == 0 {
         return Err(());
     }
-    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, 8).map_err(|_| ())?;
+    nanami_runtime::request_process_memory_read(pid, user_ptr, runtime.posix_shm, 8)
+        .map_err(|_| ())?;
     Ok(unsafe { ::core::ptr::read_unaligned(runtime.posix_shm as *const Word) })
 }
 

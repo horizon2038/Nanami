@@ -19,7 +19,7 @@ impl Rect {
 }
 #[path = "../../../../nanami/servers/apps/honoka/src/app/fbdev_damage.rs"]
 mod current;
-#[path = "../../../native-performance/fbdev-reference.rs"]
+#[path = "../../../native-performance/fbdev-capture-baseline.rs"]
 mod reference;
 pub fn benchmark(timer: Word) {
     const PIXELS: usize = 800 * 600;
@@ -27,10 +27,16 @@ pub fn benchmark(timer: Word) {
     const FRAMES: usize = 120;
     let source = nanami_runtime::request_memory_create(BYTES).unwrap();
     let previous = nanami_runtime::request_memory_create(BYTES).unwrap();
-    for sample in 0..3 {
+    // Alternate both implementations' order; each starts from the same bytes.
+    let orders = [[true, false], [false, true], [false, true], [true, false]];
+    for (sample, order) in orders.into_iter().enumerate() {
         for workload in 0..3 {
-            let mut expected_pixels = 0;
-            for before in [true, false] {
+            let expected_pixels = match workload {
+                0 => 0,
+                1 => FRAMES * 32 * 16,
+                _ => FRAMES * PIXELS,
+            };
+            for before in order {
                 unsafe {
                     core::ptr::write_bytes(source as *mut u8, 0, BYTES);
                     core::ptr::write_bytes(previous as *mut u8, 0, BYTES);
@@ -56,11 +62,7 @@ pub fn benchmark(timer: Word) {
                     }
                 }
                 let (end, _) = nanami_client::timer::timer_service_monotonic_ticks(timer).unwrap();
-                if before {
-                    expected_pixels = pixels;
-                } else {
-                    assert_eq!(pixels, expected_pixels);
-                }
+                assert_eq!(pixels, expected_pixels);
                 nanami_runtime::println!(
                     "FRAME-PERF sample={} workload={} before={} frames={} ns={} damaged-pixels={}",
                     sample,

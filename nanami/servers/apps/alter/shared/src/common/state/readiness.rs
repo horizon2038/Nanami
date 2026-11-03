@@ -9,6 +9,10 @@ pub const READY_OBJECT: Word = 32;
 pub const READY_UNIX: Word = 64;
 pub const READY_FLOCK: Word = 128;
 pub const READY_PTY: Word = 256;
+// READY_UNIX remains the general state-change source (close, shutdown, etc.).
+// Data arrival and capacity release need only wake matching I/O interests.
+pub const READY_UNIX_READ: Word = 512;
+pub const READY_UNIX_WRITE: Word = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

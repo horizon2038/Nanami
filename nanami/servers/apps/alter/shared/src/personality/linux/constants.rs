@@ -84,6 +84,10 @@ pub(super) const LINUX_STATX_SIZE: usize = 256;
 
 pub(super) const LINUX_PAGE_SIZE: Word = 4096;
 
+// Guest workers must not acquire service-level scheduling priority on clone.
+// Match the priority used by Alpha's Linux fault-handler launch path.
+pub(super) const LINUX_TASK_PRIORITY: Word = 4;
+
 // read_c_string() uses [0, LINUX_PAGE_SIZE) as its page-sized scratch area.
 // Keep the saved first pathname outside it for two-path syscalls.
 pub(super) const LINUX_SECOND_PATH_OFFSET: Word = LINUX_PAGE_SIZE;

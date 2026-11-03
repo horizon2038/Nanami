@@ -4,6 +4,36 @@ use std::collections::BTreeMap;
 mod path_walk;
 use path_walk::{resolve, Error, Filesystem, Kind, Node};
 
+struct Chain {
+    depth: u32,
+}
+impl Filesystem for Chain {
+    fn lookup(&mut self, directory: u32, name: &[u8]) -> Result<Node, Error> {
+        if name == b"segment" && directory <= self.depth {
+            return Ok(Node {
+                inode: directory + 1,
+                kind: Kind::Directory,
+            });
+        }
+        if name == b"value" && directory == self.depth + 1 {
+            return Ok(Node {
+                inode: directory + 1,
+                kind: Kind::File,
+            });
+        }
+        Err(Error::Missing)
+    }
+    fn read_link(&mut self, _: u32) -> Result<Vec<u8>, Error> {
+        Err(Error::Invalid)
+    }
+    fn parent_name(&mut self, directory: u32) -> Result<(u32, Vec<u8>), Error> {
+        if directory > 1 && directory <= self.depth + 1 {
+            return Ok((directory - 1, b"segment".to_vec()));
+        }
+        Err(Error::Invalid)
+    }
+}
+
 struct Tree {
     children: BTreeMap<(u32, Vec<u8>), Node>,
     parents: BTreeMap<u32, (u32, Vec<u8>)>,
@@ -147,5 +177,77 @@ fn loops_and_invalid_targets_are_bounded_without_lexical_shortcuts() {
     assert_eq!(
         resolve(&mut tree, 2, 2, b"/link", true, false).err(),
         Some(Error::Invalid)
+    );
+}
+
+#[test]
+fn deep_paths_keep_the_final_leaf_and_parent() {
+    let mut tree = Chain { depth: 64 };
+    let path = format!("{}/value", "/segment".repeat(tree.depth as usize));
+    let result = resolve(&mut tree, 1, 1, path.as_bytes(), true, false);
+    let found = result.unwrap();
+    assert_eq!(found.path, path.as_bytes());
+    assert_eq!(found.name, b"value");
+    assert_eq!(found.parent, 65);
+    assert_eq!(
+        found.node,
+        Some(Node {
+            inode: 66,
+            kind: Kind::File
+        })
+    );
+}
+
+#[test]
+fn leaf_names_survive_symlinks_dots_and_missing_targets() {
+    let mut tree = Tree::new();
+    tree.add(2, b"long-directory-name", 11, Kind::Directory);
+    tree.add(11, b"x", 12, Kind::Directory);
+    tree.add(12, b"short", 13, Kind::Symlink);
+    tree.links.insert(13, b"../../dir/value".to_vec());
+    for path in [
+        &b"/long-directory-name/x/short"[..],
+        &b"/dir/./nested/../value"[..],
+        &b"/absolute"[..],
+    ] {
+        let found = resolve(&mut tree, 2, 2, path, true, false).unwrap();
+        assert_eq!(
+            found.node,
+            Some(Node {
+                inode: 5,
+                kind: Kind::File
+            })
+        );
+        assert_eq!(found.path, b"/dir/value");
+        assert_eq!(found.name, b"value");
+        assert_eq!(found.parent, 3);
+    }
+    let missing = resolve(
+        &mut tree,
+        2,
+        2,
+        b"/long-directory-name/x/../../dir/z",
+        false,
+        true,
+    )
+    .unwrap();
+    assert_eq!(missing.name, b"z");
+    assert_eq!(missing.path, b"/dir/z");
+    assert_eq!(missing.parent, 3);
+    assert_eq!(missing.node, None);
+    let root = resolve(&mut tree, 2, 2, b"/dir/..", true, false).unwrap();
+    assert_eq!(root.path, b"/");
+    assert!(root.name.is_empty());
+}
+
+#[test]
+fn reconstructed_directory_path_accepts_the_limit_and_rejects_longer_results() {
+    let mut tree = Chain { depth: 512 };
+    let found = resolve(&mut tree, 1, 512, b"segment", true, false).unwrap();
+    assert_eq!(found.path.len(), path_walk::PATH_MAX);
+    assert_eq!(found.name, b"segment");
+    assert_eq!(
+        resolve(&mut tree, 1, 513, b"value", true, false).err(),
+        Some(Error::TooLong)
     );
 }

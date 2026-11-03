@@ -1,21 +1,10 @@
 use super::{
     basename_in_bytes, close_cloexec_files, copy_current_path_to_client_shm,
     current_elf_metadata_from_loaded, load_linux_elf_image, log_execve_load_error, map_load_error,
-    map_request_error, preferred_exec_image_base, resolve_path, rewrite_linux_stack,
-    snapshot_exec_strings, translate_guest_path_for_vfs, OsPersonality, Runtime, Word,
-    ENAMETOOLONG, ENOEXEC, ESRCH, LINUX_EXEC_PATH_MAX,
+    preferred_exec_image_base, resolve_path, rewrite_linux_stack, snapshot_exec_strings,
+    translate_guest_path_for_vfs, ExecError, OsPersonality, Runtime, Word, ENAMETOOLONG, ENOEXEC,
+    ESRCH, LINUX_EXEC_PATH_MAX,
 };
-
-pub(super) enum ExecError {
-    Errno(i32),
-    ImageReplaced,
-}
-
-impl From<i32> for ExecError {
-    fn from(errno: i32) -> Self {
-        Self::Errno(errno)
-    }
-}
 
 pub(super) fn sys_execve(
     runtime: &mut Runtime,
@@ -95,7 +84,10 @@ pub(super) fn sys_execve(
     if let Err(error) =
         nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
     {
-        let errno = map_request_error(error);
+        let error = ExecError::from(error);
+        let ExecError::Errno(errno) = error else {
+            return Err(error);
+        };
         nanami_runtime::println!(
             "[alter/linux] execve exec-memory failed pid={} image_base={:#x} bytes={:#x} errno={}",
             pid,

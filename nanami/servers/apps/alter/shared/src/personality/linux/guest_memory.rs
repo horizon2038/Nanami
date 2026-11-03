@@ -104,6 +104,7 @@ pub(super) fn copyout_from(
 }
 
 pub(super) fn write_target_memory_from(
+    runtime: &Runtime,
     pid: Word,
     user_ptr: Word,
     source: Word,
@@ -112,8 +113,38 @@ pub(super) fn write_target_memory_from(
     if len == 0 {
         return Ok(());
     }
-    nanami_runtime::request_process_memory_write(pid, user_ptr, source, len)
-        .map_err(map_request_error)
+    super::private_memory::with_private_write(runtime, pid, user_ptr, len, || {
+        nanami_runtime::request_process_memory_write(pid, user_ptr, source, len)
+            .map_err(map_request_error)
+    })
+}
+
+/// Preserve ordered scalar fault behavior when personality preflight fails.
+pub(super) fn copyout_many(
+    runtime: &Runtime,
+    pid: Word,
+    transfers: &[nanami_runtime::ProcessMemoryTransfer],
+) -> Result<(), i32> {
+    if !transfers.is_empty()
+        && transfers.len() <= nanami_runtime::OS_MEMORY_COPY_VECTOR_MAX
+        && transfers.iter().all(|transfer| {
+            transfer.bytes != 0
+                && runtime.memory_access_allowed(pid, transfer.target, transfer.bytes, 2)
+        })
+    {
+        return nanami_runtime::request_process_memory_writev_checked(pid, transfers)
+            .map_err(|_| EFAULT);
+    }
+    for transfer in transfers {
+        copyout_from(
+            runtime,
+            pid,
+            transfer.target,
+            transfer.local,
+            transfer.bytes,
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn write_u32_to_target(
@@ -156,6 +187,38 @@ pub(super) fn write_guest_u64(
         write_u64(runtime.posix_shm, value);
     }
     write_target_memory(runtime, pid, user_ptr, 8)
+}
+
+/// Coalesce adjacent outputs without changing ordered stores on a bad pointer.
+pub(super) fn write_guest_u32s<const N: usize>(
+    runtime: &mut Runtime,
+    pid: Word,
+    pointers: [Word; N],
+    values: [u32; N],
+) -> Result<(), i32> {
+    let contiguous = N > 1
+        && pointers[0] != 0
+        && pointers
+            .windows(2)
+            .all(|pair| pair[0].checked_add(core::mem::size_of::<u32>()) == Some(pair[1]));
+    if contiguous
+        && copyout_from(
+            runtime,
+            pid,
+            pointers[0],
+            values.as_ptr() as Word,
+            core::mem::size_of_val(&values),
+        )
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // A combined copy may reject a later page before writing its valid prefix.
+    // Retry scalar stores so EFAULT preserves the original argument order.
+    for (pointer, value) in pointers.into_iter().zip(values) {
+        write_guest_u32(runtime, pid, pointer, value)?;
+    }
+    Ok(())
 }
 
 pub(super) fn align_up_word(value: Word, align: Word) -> Word {

@@ -46,7 +46,7 @@ pub(super) fn clone_vm(
         .clone_task(flags & CLONE_SIGHAND != 0, thread);
     let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
     let slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
-    let pid = nanami_runtime::request_process_thread_create(parent_pid, slot, 20)
+    let pid = nanami_runtime::request_process_thread_create(parent_pid, slot, LINUX_TASK_PRIORITY)
         .map_err(map_request_error)?;
     let pcb = nanami_runtime::ipc::process_slot_descriptor(slot);
     let result = (|| {
@@ -67,6 +67,12 @@ pub(super) fn clone_vm(
         ) {
             return Err(ENOMEM);
         }
+        // Quiescence must preserve the new task's not-yet-started state.
+        runtime
+            .managed_process_mut(pid)
+            .ok_or(ESRCH)?
+            .rootfs
+            .prepared = true;
         if flags & CLONE_FILES == 0 {
             inherit_linux_files(runtime, parent_pid, pid)?;
         }
@@ -102,6 +108,11 @@ pub(super) fn clone_vm(
             runtime.tasks.ensure(pid).ok_or(ENOMEM)?.clear_tid = options.child_tid;
         }
         a9n_abi::arch::process_control_block::resume(pcb).map_err(|_| EIO)?;
+        runtime
+            .managed_process_mut(pid)
+            .ok_or(ESRCH)?
+            .rootfs
+            .prepared = false;
         Ok(pid)
     })();
     if result.is_err() {

@@ -119,6 +119,7 @@ fn restorer(runtime: &mut Runtime, pid: Word, action: Action) -> Result<Word, i3
     let (address, _) =
         map_anonymous_tracked(runtime, pid, 4096, LINUX_PROT_READ | LINUX_PROT_WRITE)?;
     let result = write_target_memory_from(
+        runtime,
         pid,
         address,
         signal_frame::TRAMPOLINE.as_ptr() as Word,

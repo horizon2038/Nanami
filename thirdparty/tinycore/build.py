@@ -199,9 +199,13 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
         guest = bundle / "rootfs"
         shutil.copytree(upstream, guest, symlinks=True)
         desktop_lock = None
+        profile_links = {}
+        profile_helpers = {}
         if graphical:
             import desktop
             desktop_lock = desktop.install(guest, offline)
+            profile_links = desktop.configure_links(guest)
+            profile_helpers = desktop.build_readiness(guest)
         profile = HERE / "profile"
         changes = []
         for source in sorted(profile.rglob("*")):
@@ -231,6 +235,8 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
                     "entry": ["/bin/busybox", "sh", "/init"]}
         if desktop_lock is not None:
             manifest["desktop"] = desktop_lock
+            manifest["profile_symlinks"] = profile_links
+            manifest["profile_helpers"] = profile_helpers
         (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         if output.exists():
             shutil.rmtree(output)
@@ -271,9 +277,11 @@ def main():
         payload = []
         if args.with_tests:
             if args.desktop:
-                script = output / "overlay/tinycore/rootfs/usr/local/bin/nanami-desktop-test"
-                shutil.copyfile(REPO / "tests/alter-linux/desktop-apps.sh", script)
-                script.chmod(0o755)
+                for name, source in [("nanami-desktop-test", "desktop-apps.sh"),
+                                     ("nanami-desktop-links-test", "desktop-links.sh")]:
+                    script = output / "overlay/tinycore/rootfs/usr/local/bin" / name
+                    shutil.copyfile(REPO / "tests/alter-linux" / source, script)
+                    script.chmod(0o755)
             for name, define, source in [("nanami-chmod", [], "chmod.c"),
                                          ("nanami-chmod-readonly", ["-DCHMOD_READONLY"], "chmod.c"),
                                          ("nanami-procfs", [], "procfs.c"),
@@ -282,17 +290,22 @@ def main():
                                          ("nanami-desktop-pointer", [], "desktop-pointer.c"),
                                          ("nanami-namespace", [], "namespace.c"),
                                          ("nanami-process-performance", [], "process-performance.c"),
+                                         ("nanami-cap-seal", [], "capability-sealing.c"),
                                          ("nanami-exec-cache", [], "exec-cache.c"),
                                          ("nanami-file-mapping", [], "file-mapping.c")]:
                 binary = output / "overlay/tinycore/rootfs/bin" / name
+                extra_sources = []
+                if source == "desktop-syscalls.c":
+                    extra_sources.append(str(REPO / "tests/alter-linux/desktop-syscalls-x86_64.S"))
+                elif source == "capability-sealing.c":
+                    extra_sources.append(str(REPO / "tests/alter-linux/capability-sealing-x86_64.S"))
                 subprocess.run([os.environ.get("CC", "clang"), "--target=x86_64-unknown-linux-gnu",
                                 "-fuse-ld=lld", "-nostdlib", "-static", "-ffreestanding", "-fno-builtin",
                                 "-fno-stack-protector", "-mno-sse", "-mno-sse2", "-mno-red-zone",
                                 "-O2", "-Wall", "-Wextra", "-Werror", "-Wl,-e,_start,--image-base=0x400000",
                                 *define, str(REPO / "tests/alter-linux" / source),
                                 str(REPO / "tests/alter-linux/signals-x86_64.S"),
-                                *([str(REPO / "tests/alter-linux/desktop-syscalls-x86_64.S")]
-                                  if source == "desktop-syscalls.c" else []),
+                                *extra_sources,
                                 "-o", str(binary)], check=True)
                 config = configuration()
                 config["process"]["args"] = [f"/bin/{name}"]
@@ -312,6 +325,13 @@ def main():
                             "-Zbuild-std-features=compiler-builtins-mem", "--release", *extra],
                            cwd=REPO, env=environment, check=True)
             payload = ["--linux-bin", str(output / "probe-target/x86_64-unknown-a9n/release/negoto-smoke")]
+            # Keep the RAM-lifetime regression separate from frozen performance
+            # probes when assembling a private before/after test image.
+            native_tests = output / "overlay/bin"
+            native_tests.mkdir(exist_ok=True)
+            shutil.copyfile(output / "probe-target/x86_64-unknown-a9n/release/negoto-smoke",
+                            native_tests / "ram-share-smoke")
+            (native_tests / "ram-share-smoke").chmod(0o755)
         subprocess.run([cargo, "xtask", "build", "--skip-cpp", "--no-linux-bins", *payload,
                         "--linux-rootfs-dir", str(output / "overlay"), "--size-mib", str(size_mib),
                         "--rootfs", str(output / "rootfs.img"),

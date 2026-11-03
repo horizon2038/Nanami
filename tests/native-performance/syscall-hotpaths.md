@@ -4,6 +4,14 @@ This changes user space only. A9N, the fault/reply ABI, and syscall register
 writeback are unchanged. It does not expose HPET, TSC, or a virtual timer to
 guests. The follow-up also updates the supplied `doomgeneric/` input backend.
 
+This dated review records the initial copy-window implementation. Subsequent
+[optimization cycles](optimization-cycles.md) expand it to a bounded 2,048-page
+four-way cache (cycle 17) and reuse it for ELF/initializer input staging
+(cycle 26). Those input reads now resolve current Frames without allocation
+ownership snapshots or a separate per-read MAP/UNMAP path; the same alias
+invalidation and failure-retention rules apply. Zero-fill and pool-frame
+initialization remain separate mechanisms. No new public protocol is required.
+
 ## Transfer path
 
 Even a 16-byte timespec previously passed through Alpha's per-chunk temporary

@@ -2,9 +2,11 @@
 use crate::elf::ElfMetadata;
 use nanami_runtime::Word;
 
-pub const ENTRIES: usize = 8;
-// A maximum of 16 MiB; large one-off images use the existing reusable buffers.
+pub const ENTRIES: usize = 48;
+pub const MAX_RETAINED_BYTES: Word = 16 * 1024 * 1024;
+// More small-file slots within the original byte budget; large images bypass it.
 pub const MAX_IMAGE_BYTES: Word = 2 * 1024 * 1024;
+const PAGE_BYTES: Word = 4096;
 
 #[derive(Clone, Copy)]
 pub struct CachedImage {
@@ -55,18 +57,42 @@ impl ImageCache {
         Some(entry)
     }
 
-    pub fn replacement(&self) -> usize {
+    pub fn retained_bytes(&self) -> Word {
         self.entries
             .iter()
-            .position(Option::is_none)
-            .unwrap_or_else(|| {
-                self.entries
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, image)| image.as_ref().unwrap().used)
-                    .unwrap()
-                    .0
+            .flatten()
+            .map(|image| image.capacity)
+            .sum()
+    }
+
+    pub fn allocation_capacity(&self, index: usize, size: Word) -> Word {
+        let requested = match self.entry(index) {
+            Some(previous) if previous.capacity >= size => return previous.capacity,
+            Some(_) => size.next_power_of_two(),
+            None => size,
+        };
+        requested.next_multiple_of(PAGE_BYTES)
+    }
+
+    /// Admission is optional. Keep outstanding main ELF bytes intact while
+    /// loading PT_INTERP; otherwise a budget-constrained victim could be MRU.
+    pub fn replacement(&self, size: Word, protected_address: Option<Word>) -> Option<usize> {
+        if size == 0 || size > MAX_IMAGE_BYTES {
+            return None;
+        }
+        let retained = self.retained_bytes();
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(index, entry)| {
+                if entry.is_some_and(|image| Some(image.address) == protected_address) {
+                    return false;
+                }
+                let previous = entry.map_or(0, |image| image.capacity);
+                retained - previous + self.allocation_capacity(*index, size) <= MAX_RETAINED_BYTES
             })
+            .min_by_key(|(_, entry)| entry.map_or(0, |image| image.used))
+            .map(|(index, _)| index)
     }
 
     pub fn entry(&self, index: usize) -> Option<&CachedImage> {

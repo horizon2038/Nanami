@@ -1,10 +1,11 @@
+use super::syscall_profile;
 use nanami_runtime::Word;
 
 use crate::abi::A9N_FAULT_INVALID_KERNEL_CALL;
 use crate::linux::EmulationAction;
 use crate::personality;
 use crate::process::{
-    configure_personality_syscall_reply, read_syscall_context,
+    configure_personality_syscall_reply, configure_trapped_syscall_reply, read_syscall_context,
     syscall_context_from_hardware_context, write_personality_syscall_return, HardwareContext,
 };
 use crate::state::Runtime;
@@ -87,7 +88,14 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
         }
     };
 
+    let before = syscall_profile::stamp();
     let action = personality::dispatch_syscall(process.personality, runtime, pid, context);
+    syscall_profile::record(
+        pid,
+        context.number,
+        before,
+        matches!(action, EmulationAction::Exit(_)),
+    );
 
     match action {
         EmulationAction::Return(value) => {
@@ -106,7 +114,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
                 );
             }
             if fast_context {
-                let hardware_context_count = configure_personality_syscall_reply(
+                let hardware_context_count = configure_trapped_syscall_reply(
                     &mut hardware_context,
                     context,
                     value,
@@ -202,7 +210,7 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
                 );
             }
             if fast_context {
-                let hardware_context_count = configure_personality_syscall_reply(
+                let hardware_context_count = configure_trapped_syscall_reply(
                     &mut hardware_context,
                     context,
                     -enosys,

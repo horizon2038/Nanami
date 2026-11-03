@@ -215,7 +215,7 @@ fn repeated_exec_fork_and_interpreter_hits_skip_all_payload_io_and_allocation() 
         first.address
     );
     assert_eq!(
-        loader::load_interpreter_elf_image(&mut r, b"/alias")
+        loader::load_interpreter_elf_image(&mut r, b"/alias", first.address)
             .ok()
             .unwrap()
             .address,
@@ -250,14 +250,14 @@ fn lru_eviction_reuses_capacity_and_keeps_the_current_main_image_alive() {
     let mut shm = [0; 4096];
     let mut r = fixture(&mut shm);
     let first = load(&mut r);
-    for version in 2..=8 {
+    for version in 2..=image_cache::ENTRIES {
         BACKEND.with(|b| b.borrow_mut().identity = version << 32 | 7);
         load(&mut r);
     }
     BACKEND.with(|b| b.borrow_mut().identity = 1 << 32 | 7);
     assert_eq!(load(&mut r).address, first.address);
-    BACKEND.with(|b| b.borrow_mut().identity = 9 << 32 | 7);
-    loader::load_interpreter_elf_image(&mut r, b"/ld")
+    BACKEND.with(|b| b.borrow_mut().identity = (image_cache::ENTRIES + 1) << 32 | 7);
+    loader::load_interpreter_elf_image(&mut r, b"/ld", first.address)
         .ok()
         .unwrap();
     BACKEND.with(|b| {
@@ -273,6 +273,110 @@ fn lru_eviction_reuses_capacity_and_keeps_the_current_main_image_alive() {
             image_cache::ENTRIES
         );
     });
+}
+
+#[test]
+fn small_library_working_set_above_eight_entries_remains_resident() {
+    let mut shm = [0; 4096];
+    let mut r = fixture(&mut shm);
+    let mut addresses = Vec::new();
+    for version in 1..=32 {
+        BACKEND.with(|b| {
+            let mut b = b.borrow_mut();
+            b.identity = version << 32 | 7;
+            b.bytes[8000] = version as u8;
+        });
+        addresses.push(load(&mut r).address);
+    }
+    let reads = BACKEND.with(|b| b.borrow().reads);
+    for (index, address) in addresses.into_iter().enumerate() {
+        BACKEND.with(|b| b.borrow_mut().identity = (index + 1) << 32 | 7);
+        assert_eq!(load(&mut r).address, address);
+        assert_eq!(
+            unsafe { *((address + 8000) as *const u8) },
+            (index + 1) as u8
+        );
+    }
+    assert_eq!(BACKEND.with(|b| b.borrow().reads), reads);
+    assert!(r.image_cache.retained_bytes() <= image_cache::MAX_RETAINED_BYTES);
+    assert!(std::mem::size_of::<image_cache::ImageCache>() <= 64 * 1024);
+}
+
+#[test]
+fn large_library_churn_cannot_expand_the_original_snapshot_byte_budget() {
+    let mut shm = [0; 65536];
+    let mut r = fixture(&mut shm);
+    BACKEND.with(|b| b.borrow_mut().bytes = elf_bytes(image_cache::MAX_IMAGE_BYTES));
+    for version in 1..=image_cache::ENTRIES + 5 {
+        BACKEND.with(|b| b.borrow_mut().identity = version << 32 | 7);
+        load(&mut r);
+        assert!(r.image_cache.retained_bytes() <= image_cache::MAX_RETAINED_BYTES);
+    }
+    BACKEND.with(|b| {
+        let b = b.borrow();
+        assert_eq!(
+            b.allocations.len(),
+            image_cache::MAX_RETAINED_BYTES / image_cache::MAX_IMAGE_BYTES
+        );
+        assert!(!b.allocations.iter().any(|(_, released)| *released));
+    });
+}
+
+#[test]
+fn interpreter_falls_back_instead_of_overwriting_the_only_fitting_main_buffer() {
+    let mut shm = [0; 65536];
+    let mut r = fixture(&mut shm);
+    BACKEND.with(|b| {
+        let mut b = b.borrow_mut();
+        b.bytes = elf_bytes(image_cache::MAX_IMAGE_BYTES);
+        b.bytes[8000] = 0x5a;
+    });
+    let main = load(&mut r);
+    let remaining_pages = (image_cache::MAX_RETAINED_BYTES - image_cache::MAX_IMAGE_BYTES) / 4096;
+    for index in 1..image_cache::ENTRIES {
+        let pages = if index == image_cache::ENTRIES - 1 {
+            remaining_pages
+                - (image_cache::ENTRIES - 2) * (remaining_pages / (image_cache::ENTRIES - 1))
+        } else {
+            remaining_pages / (image_cache::ENTRIES - 1)
+        };
+        // Metadata-only cold entries. None can admit the largest cacheable
+        // interpreter at a full budget; the live main ELF is the only fit.
+        r.image_cache
+            .insert(index, (index + 1) << 32 | 9, index, 1, pages * 4096, None);
+    }
+    assert_eq!(
+        r.image_cache.retained_bytes(),
+        image_cache::MAX_RETAINED_BYTES
+    );
+    assert_eq!(
+        r.image_cache
+            .replacement(image_cache::MAX_IMAGE_BYTES, None),
+        Some(0)
+    );
+    assert_eq!(
+        r.image_cache
+            .replacement(image_cache::MAX_IMAGE_BYTES, Some(main.address)),
+        None
+    );
+    BACKEND.with(|b| {
+        let mut b = b.borrow_mut();
+        b.identity = 100 << 32 | 7;
+        b.bytes[8000] = 0x42;
+    });
+    let interpreter = loader::load_interpreter_elf_image(&mut r, b"/ld", main.address)
+        .unwrap_or_else(|_| panic!("uncached interpreter load failed"));
+    assert_ne!(interpreter.address, main.address);
+    assert_eq!(unsafe { *((main.address + 8000) as *const u8) }, 0x5a);
+    assert_eq!(
+        unsafe { *((interpreter.address + 8000) as *const u8) },
+        0x42
+    );
+    assert_eq!(
+        r.image_cache.retained_bytes(),
+        image_cache::MAX_RETAINED_BYTES
+    );
+    BACKEND.with(|b| assert_eq!(b.borrow().allocations.len(), 2));
 }
 #[test]
 fn uncacheable_files_use_reusable_buffers_but_never_skip_reads() {
@@ -330,7 +434,7 @@ fn fstat_failure_closes_before_allocating() {
     let mut shm = [0; 4096];
     let mut r = fixture(&mut shm);
     BACKEND.with(|b| b.borrow_mut().fail_stat = true);
-    assert!(loader::load_interpreter_elf_image(&mut r, b"/elf").is_err());
+    assert!(loader::load_interpreter_elf_image(&mut r, b"/elf", 0).is_err());
     BACKEND.with(|b| {
         let b = b.borrow();
         assert_eq!(b.opens, b.closes);
@@ -365,6 +469,67 @@ fn whole_file_mmap_populates_snapshot_and_fixed_segment_maps_do_not_reread() {
 }
 
 #[test]
+fn cacheable_dso_snapshot_reuses_segment_reads_and_still_observes_file_versions() {
+    let mut shm = [0; 65536];
+    let mut runtime = fixture(&mut shm);
+    let bytes = image_cache::MAX_IMAGE_BYTES - 37;
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        backend.bytes = elf_bytes(bytes);
+        backend.bytes[65000] = 0x5a;
+    });
+    let first_identity = 1 << 32 | 7;
+    assert_eq!(
+        loader::file_mapping_source(&mut runtime, 7, first_identity, bytes, 4096, 65536)
+            .unwrap_or_else(|_| panic!("partial mapping source failed")),
+        None
+    );
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.reads, 0);
+        assert!(backend.allocations.is_empty());
+    });
+    let first = loader::file_mapping_source(&mut runtime, 7, first_identity, bytes, 0, bytes)
+        .unwrap_or_else(|_| panic!("whole DSO snapshot failed"))
+        .expect("whole-file snapshot within the ceiling is cacheable");
+    let reads = BACKEND.with(|backend| backend.borrow().reads);
+    assert_eq!(
+        loader::file_mapping_source(&mut runtime, 7, first_identity, bytes, 4096, 65536)
+            .unwrap_or_else(|_| panic!("warm segment failed")),
+        Some(first + 4096)
+    );
+    assert_eq!(BACKEND.with(|backend| backend.borrow().reads), reads);
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        backend.identity = 2 << 32 | 7;
+        backend.bytes[65000] = 0x42;
+    });
+    let next = loader::file_mapping_source(&mut runtime, 7, 2 << 32 | 7, bytes, 0, bytes)
+        .unwrap_or_else(|_| panic!("changed DSO snapshot failed"))
+        .expect("changed cacheable DSO remains cacheable");
+    assert_ne!(next, first);
+    assert!(BACKEND.with(|backend| backend.borrow().reads) > reads);
+    assert_eq!(unsafe { *((first + 65000) as *const u8) }, 0x5a);
+    assert_eq!(unsafe { *((next + 65000) as *const u8) }, 0x42);
+    assert!(runtime.image_cache.retained_bytes() <= image_cache::MAX_RETAINED_BYTES);
+}
+
+#[test]
+fn over_budget_file_mapping_bypasses_cache_without_prefetch_or_allocation() {
+    let mut shm = [0; 65536];
+    let mut runtime = fixture(&mut shm);
+    let bytes = image_cache::MAX_IMAGE_BYTES + 1;
+    let source = loader::file_mapping_source(&mut runtime, 7, 1 << 32 | 7, bytes, 0, bytes)
+        .unwrap_or_else(|_| panic!("uncached mapping source failed"));
+    assert_eq!(source, None);
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        assert_eq!(backend.reads, 0);
+        assert!(backend.allocations.is_empty());
+    });
+}
+
+#[test]
 fn non_elf_file_mappings_cache_bytes_but_exec_still_rejects_them() {
     let mut shm = [0; 4096];
     let mut r = fixture(&mut shm);
@@ -377,6 +542,6 @@ fn non_elf_file_mappings_cache_bytes_but_exec_still_rejects_them() {
             .is_some()
     );
     let reads = BACKEND.with(|b| b.borrow().reads);
-    assert!(loader::load_interpreter_elf_image(&mut r, b"/elf").is_err());
+    assert!(loader::load_interpreter_elf_image(&mut r, b"/elf", 0).is_err());
     BACKEND.with(|b| assert_eq!(b.borrow().reads, reads));
 }

@@ -109,6 +109,10 @@ This keeps Alpha independent of desktop, application, and root filesystem
 policy. Image priority/initial affinity and platform-data grants are explicit
 `@process` boot-list inputs; component labels and Service names carry no
 built-in privilege semantics.
+Optional `@placement <priority> <preferred-cpu>` declarations tune initial
+user-level locality without granting authority or changing IPC. Explicit image
+affinity wins; absent CPUs retain normal automatic placement. See
+[Boot Policy](nanami/docs/architecture.md#boot-policy) for scheduling tradeoffs.
 
 ## Supported Targets
 

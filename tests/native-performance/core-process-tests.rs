@@ -5,6 +5,7 @@ extern crate self as nun;
 pub type Word = usize;
 pub type CapabilityDescriptor = usize;
 pub mod capability_call {
+    pub use a9n_abi::capability_call::process_control_block;
     pub mod address_space {
         pub use a9n_abi::capability_call::address_space::Attribute;
     }
@@ -52,6 +53,24 @@ mod shared_memory_reservations;
 
 #[path = "allocation-index.rs"]
 mod allocation_index;
+
+#[path = "alpha-mapping-release.rs"]
+mod mapping_release_tests;
+
+#[path = "alpha-checked-memory.rs"]
+mod checked_memory_tests;
+#[path = "alpha-memory-clone.rs"]
+mod memory_clone_tests;
+#[path = "alpha-memory-private.rs"]
+mod memory_private_tests;
+#[path = "alpha-memory-staging.rs"]
+mod memory_staging_tests;
+#[path = "alpha-capability-sealing.rs"]
+mod capability_sealing_tests;
+#[path = "alpha-memory-retirement.rs"]
+mod memory_retirement_tests;
+#[path = "alpha-exec-retirement.rs"]
+mod exec_retirement_tests;
 #[path = "shared-memory-lifecycle.rs"]
 mod shared_memory_lifecycle;
 
@@ -371,6 +390,26 @@ fn lookup_handles_out_of_order_install_replacement_missing_and_alpha() {
     install(&mut manager, 16, 987);
     assert_eq!(manager.find_entry_by_pid(16).unwrap().root_slot, 987);
     assert_eq!(manager.statistics().running, 5);
+}
+
+#[test]
+fn owner_reads_are_current_and_owned_entry_lookups_remain_snapshots() {
+    let mut manager = manager();
+    install(&mut manager, 31, 231);
+    install(&mut manager, 7, 207);
+    let before = manager.find_entry_by_pid(31).unwrap();
+    assert_eq!(manager.memory_owner_pid(31), 31);
+    manager.share_address_space(31, 7).unwrap();
+    assert_eq!(manager.memory_owner_pid(31), 7);
+    assert_eq!(before.memory_owner, 31);
+    let shared = manager.find_entry_by_pid(31).unwrap();
+    assert_eq!(shared.memory_owner, 7);
+    install(&mut manager, 31, 999);
+    assert_eq!(manager.memory_owner_pid(31), 31);
+    assert_eq!(shared.root_slot, 231);
+    assert_eq!(manager.find_entry_by_pid(31).unwrap().root_slot, 999);
+    assert_eq!(manager.memory_owner_pid(usize::MAX), usize::MAX);
+    assert_eq!(manager.memory_owner_pid(0), 0);
 }
 
 #[test]

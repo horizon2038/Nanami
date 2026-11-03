@@ -5,6 +5,7 @@ import json
 import hashlib
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import unittest
 import urllib.error
@@ -80,6 +81,171 @@ class ArchiveTests(unittest.TestCase):
 
 
 class DesktopTests(unittest.TestCase):
+    def test_readiness_retry_policy_with_mocked_xlib_and_process_liveness(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "wait-for-x-test"
+            subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            str(build.HERE / "tools/test-wait-for-x.c"), "-o", str(executable)],
+                           check=True)
+            subprocess.run([str(executable)], check=True, timeout=10)
+
+    def test_readiness_builder_records_provenance_and_links_pinned_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "usr/local/bin").mkdir(parents=True)
+            (root / "usr/local/lib").mkdir()
+            (root / "lib").mkdir()
+            xlib = root / "usr/local/lib/libX11.so.6.4.0"
+            xlib.write_bytes(b"pinned Xlib")
+            (xlib.parent / "libX11.so.6").symlink_to(xlib.name)
+            (root / "lib/libc.so.6").write_bytes(b"pinned libc")
+            def compile_helper(command, **options):
+                self.assertTrue(options["check"])
+                self.assertIn("--target=x86_64-unknown-linux-gnu", command)
+                self.assertIn(str(xlib.resolve()), command)
+                self.assertIn("-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined", command)
+                Path(command[-1]).write_bytes(b"profile ELF")
+            with mock.patch.object(desktop.subprocess, "run", side_effect=compile_helper):
+                result = desktop.build_readiness(root)
+            self.assertEqual(result, {"usr/local/bin/nanami-wait-for-x": hashlib.sha256(b"profile ELF").hexdigest()})
+            with self.assertRaises(ValueError):
+                desktop.build_readiness(root)
+
+    def test_readiness_builder_refuses_destination_aliases_before_compiling(self):
+        for relative in [None, "usr", "usr/local", "usr/local/bin"]:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary)
+                root, outside = parent / "root", parent / "outside"
+                outside.mkdir()
+                if relative is None:
+                    root.symlink_to(outside)
+                else:
+                    alias = root / relative
+                    alias.parent.mkdir(parents=True)
+                    alias.symlink_to(outside)
+                with mock.patch.object(desktop.subprocess, "run") as compiler:
+                    with self.assertRaises(ValueError):
+                        desktop.build_readiness(root)
+                    compiler.assert_not_called()
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_readiness_builder_refuses_library_escapes_without_invoking_compiler(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "root"
+            (root / "usr/local/bin").mkdir(parents=True)
+            (root / "usr/local/lib").mkdir()
+            (root / "lib").mkdir()
+            outside = parent / "outside.so"
+            outside.write_bytes(b"unrelated host library")
+            (root / "usr/local/lib/libX11.so.6").symlink_to(outside)
+            (root / "lib/libc.so.6").write_bytes(b"pinned libc")
+            with mock.patch.object(desktop.subprocess, "run") as compiler:
+                with self.assertRaisesRegex(ValueError, "escapes root"):
+                    desktop.build_readiness(root)
+                compiler.assert_not_called()
+            self.assertEqual(outside.read_bytes(), b"unrelated host library")
+
+    def test_failed_helper_build_preserves_previous_output_and_removes_staging(self):
+        data = archive([("etc/os-release", stat.S_IFREG | 0o644, b"VERSION_ID=17.1\n")])
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            output = parent / "desktop"
+            output.mkdir()
+            (output / "manifest.json").write_text("{}")
+            (output / "saved-data").write_bytes(b"keep")
+            with mock.patch.object(desktop, "install", return_value={"packages": {}}), \
+                    mock.patch.object(desktop, "build_readiness", side_effect=RuntimeError("compiler failed")):
+                with self.assertRaisesRegex(RuntimeError, "compiler failed"):
+                    build.assemble(data, rebuild=True, graphical=True, output=output)
+            self.assertEqual((output / "saved-data").read_bytes(), b"keep")
+            self.assertEqual(list(parent.iterdir()), [output])
+
+    def test_profile_links_are_guest_defaults_and_repeated_install_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            links = desktop.configure_links(root)
+            self.assertEqual(len(links), 8)
+            self.assertEqual(desktop.configure_links(root), links)
+            self.assertEqual(set((root / "root/.wmx").iterdir()),
+                             {root / name for name in links if name.startswith("root/.wmx/")})
+            for relative, target in links.items():
+                self.assertEqual((root / relative).readlink(), Path(target))
+            self.assertEqual(links["root/.wmx/Terminal"], "/usr/local/bin/aterm")
+            self.assertEqual(links["root/Pictures/TinyCore.png"], "/usr/local/share/pixmaps/logo.png")
+
+    def test_profile_links_refuse_symlink_roots_and_parent_directories(self):
+        for relative in [None, "root", "root/.wmx", "root/Pictures"]:
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                temporary = Path(temporary)
+                root = temporary / "guest"
+                outside = temporary / "outside"
+                outside.mkdir()
+                if relative is None:
+                    root.symlink_to(outside)
+                else:
+                    root.mkdir()
+                    alias = root / relative
+                    alias.parent.mkdir(parents=True, exist_ok=True)
+                    alias.symlink_to(outside)
+                with self.assertRaises(ValueError):
+                    desktop.configure_links(root)
+                self.assertEqual(list(outside.iterdir()), [])
+
+    def test_profile_links_preserve_conflicting_files_and_aliases(self):
+        for alias in [False, True]:
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = root / "root/.wmx/Terminal"
+                path.parent.mkdir(parents=True)
+                if alias:
+                    path.symlink_to("/custom/terminal")
+                else:
+                    path.write_bytes(b"custom command")
+                with self.assertRaises(ValueError):
+                    desktop.configure_links(root)
+                if alias:
+                    self.assertEqual(path.readlink(), Path("/custom/terminal"))
+                else:
+                    self.assertEqual(path.read_bytes(), b"custom command")
+
+    def test_only_graphical_assembly_installs_and_records_default_links(self):
+        data = archive([("etc/os-release", stat.S_IFREG | 0o644, b"VERSION_ID=17.1\n")])
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            with mock.patch.object(desktop, "install", return_value={"packages": {}}), \
+                    mock.patch.object(desktop, "build_readiness", return_value={"helper": "digest"}) as readiness:
+                graphical = build.assemble(data, graphical=True, output=temporary / "desktop")
+                console = build.assemble(data, output=temporary / "console")
+            manifest = json.loads((graphical / "manifest.json").read_text())
+            self.assertEqual(manifest["profile_symlinks"], desktop.PROFILE_LINKS)
+            self.assertEqual(manifest["profile_helpers"], {"helper": "digest"})
+            readiness.assert_called_once()
+            self.assertTrue((graphical / "overlay/tinycore/rootfs/root/.wmx/Editor").is_symlink())
+            self.assertNotIn("profile_symlinks", json.loads((console / "manifest.json").read_text()))
+            self.assertFalse((console / "overlay/tinycore/rootfs/root/.wmx").exists())
+
+    def test_startup_does_not_recreate_menu_or_picture_configuration(self):
+        startup = (build.HERE / "profile/usr/local/bin/nanami-desktop").read_text()
+        self.assertNotIn("ln -sf", startup)
+        self.assertNotIn("for entry in", startup)
+        self.assertIn("mkdir -p", startup)
+
+    def test_graphical_defaults_reject_archive_aliases_before_copying_profile_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            outside = temporary / "outside"
+            outside.mkdir()
+            data = archive([
+                ("etc/os-release", stat.S_IFREG | 0o644, b"VERSION_ID=17.1\n"),
+                ("root", stat.S_IFLNK | 0o777, str(outside).encode()),
+            ])
+            with mock.patch.object(desktop, "install", return_value={"packages": {}}):
+                with self.assertRaises(ValueError):
+                    build.assemble(data, graphical=True, output=temporary / "desktop")
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((temporary / "desktop").exists())
+
     def test_public_mirror_retry_is_bounded_and_does_not_hide_errors(self):
         forbidden = urllib.error.HTTPError("https://example.invalid", 403, "temporary", {}, None)
         response = mock.MagicMock()
@@ -127,7 +293,9 @@ class DesktopTests(unittest.TestCase):
     def test_x11_diagnostic_selection_does_not_install_gpu_clients(self):
         name = "Xorg-7.7-bin.tcz"
         selection = desktop.SELECTIONS[name]
-        self.assertEqual(selection["binaries"], ["xwininfo"])
+        self.assertEqual(selection["binaries"], ["xwininfo", "xsetroot"])
+        self.assertIn("libXmu.tcz", selection["dependencies"])
+        self.assertIn("libXcursor.tcz", selection["dependencies"])
         self.assertNotIn("libGL.tcz", selection["dependencies"])
         with tempfile.TemporaryDirectory() as temporary:
             temporary = Path(temporary)
@@ -141,11 +309,13 @@ class DesktopTests(unittest.TestCase):
                 destination = Path(command[command.index("-d") + 1]) / "usr/local/bin"
                 destination.mkdir(parents=True)
                 (destination / "xwininfo").write_bytes(b"unchanged-ELF")
+                (destination / "xsetroot").write_bytes(b"unchanged-background-ELF")
                 (destination / "xdriinfo").write_bytes(b"not-selected")
 
             with mock.patch.object(desktop, "ROOTS", [name]), mock.patch.object(desktop, "LOCK", lock), mock.patch.object(desktop, "cached", return_value=temporary / "input.tcz"), mock.patch.object(desktop, "extractor", return_value="unsquashfs"), mock.patch.object(desktop.subprocess, "run", side_effect=extract):
                 desktop.install(root, offline=True)
             self.assertEqual((root / "usr/local/bin/xwininfo").read_bytes(), b"unchanged-ELF")
+            self.assertEqual((root / "usr/local/bin/xsetroot").read_bytes(), b"unchanged-background-ELF")
             self.assertFalse((root / "usr/local/bin/xdriinfo").exists())
 
     def test_profile_documents_are_not_executable_but_launchers_are(self):
@@ -210,10 +380,19 @@ class DesktopTests(unittest.TestCase):
         startup = (build.HERE / "profile/usr/local/bin/nanami-desktop").read_text()
         self.assertIn("export DISPLAY=unix/:0\n", startup)
         self.assertIn("-nolisten tcp", startup)
-        probe = 'while ! xset -display "$DISPLAY" q'
+        probe = 'nanami-wait-for-x "$DISPLAY" "$xpid"'
         self.assertIn(probe, startup)
         self.assertNotIn("while ! waitforX", startup)
+        self.assertNotIn('while ! xset', startup)
         self.assertLess(startup.index("export DISPLAY=unix/:0"), startup.index(probe))
+
+    def test_solid_background_does_not_start_an_image_rendering_client(self):
+        startup = (build.HERE / "profile/usr/local/bin/nanami-desktop").read_text()
+        self.assertIn("xsetroot -solid '#3d6f8e' || true\n", startup)
+        self.assertNotIn("hsetroot ", startup)
+        lock = json.loads(desktop.LOCK.read_text())
+        self.assertEqual(lock["packages"]["Xorg-7.7-bin.tcz"]["selection"],
+                         desktop.SELECTIONS["Xorg-7.7-bin.tcz"])
 
     def test_merge_preserves_guest_links_and_refuses_destination_aliases(self):
         with tempfile.TemporaryDirectory() as temporary:

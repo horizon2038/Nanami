@@ -27,6 +27,8 @@ pub mod device {
         Ok(0x1000)
     }
 }
+#[path = "../../nanami/servers/core-services/timer-server/src/arch/hpet_clock.rs"]
+mod clock_math;
 #[path = "../../nanami/servers/core-services/timer-server/src/arch/x86_64_hpet.rs"]
 mod hpet;
 
@@ -149,4 +151,94 @@ fn physical_24mhz_period_arms_ten_milliseconds_without_resetting_the_epoch() {
     assert_ne!(mmio[0x100 / 8] & (1 << 2), 0);
     assert_eq!(mmio[0x100 / 8] & (1 << 3), 0);
     assert_eq!(mmio[0x10 / 8], 3);
+}
+
+#[test]
+fn exact_time_conversion_matches_wide_math_on_both_sides_of_product_overflow() {
+    for period in [
+        1,
+        10,
+        1_000_000,
+        10_000_000,
+        41_666_667,
+        100_000_000,
+        u64::MAX,
+    ] {
+        let clock = clock_math::Clock::new(period, true);
+        let boundary = u64::MAX / period;
+        for cycles in [
+            0,
+            1,
+            999_999,
+            1_000_000,
+            1_000_001,
+            boundary.saturating_sub(1),
+            boundary,
+            boundary.saturating_add(1),
+            u64::MAX,
+        ] {
+            let expected = (u128::from(cycles) * u128::from(period) / 1_000_000)
+                .min(u128::from(u64::MAX)) as u64;
+            assert_eq!(
+                clock.nanoseconds(cycles),
+                expected,
+                "period={period} cycles={cycles}"
+            );
+        }
+        let boundary = u64::MAX / 1_000_000;
+        for nanos in [
+            0,
+            1,
+            9,
+            10,
+            999_999,
+            1_000_000,
+            1_000_000_000,
+            boundary - 1,
+            boundary,
+            boundary + 1,
+            u64::MAX,
+        ] {
+            let expected = (u128::from(nanos) * 1_000_000)
+                .div_ceil(u128::from(period))
+                .min(u128::from(u64::MAX)) as u64;
+            assert_eq!(
+                clock.cycles_ceil(nanos),
+                expected,
+                "period={period} nanos={nanos}"
+            );
+        }
+    }
+}
+
+#[test]
+fn valid_hpet_periods_keep_exact_floor_and_ceil_for_small_and_large_timestamps() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..10_000 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let period = seed % 100_000_000 + 1;
+        let clock = clock_math::Clock::new(period, true);
+        for value in [seed, seed % 1_000_000_000] {
+            let nanos = (u128::from(value) * u128::from(period) / 1_000_000)
+                .min(u128::from(u64::MAX)) as u64;
+            let cycles = (u128::from(value) * 1_000_000)
+                .div_ceil(u128::from(period))
+                .min(u128::from(u64::MAX)) as u64;
+            assert_eq!(clock.nanoseconds(value), nanos);
+            assert_eq!(clock.cycles_ceil(value), cycles);
+        }
+    }
+}
+
+#[test]
+fn conversion_keeps_bounded_clock_metadata_and_observed_counter() {
+    assert!(std::mem::size_of::<clock_math::Clock>() <= 3 * std::mem::size_of::<u64>());
+    let mut clock = clock_math::Clock::new(41_666_667, true);
+    for raw in [0, 1, 24_000_000, u64::MAX] {
+        assert_eq!(clock.observe(raw), raw);
+        let expected = (u128::from(raw) * 41_666_667 / 1_000_000).min(u128::from(u64::MAX)) as u64;
+        assert_eq!(clock.nanoseconds(clock.last_cycles()), expected);
+    }
 }

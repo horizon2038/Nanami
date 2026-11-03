@@ -6,6 +6,13 @@ use super::{
     LINUX_DT_CHR, LINUX_DT_DIR, LINUX_DT_REG, LINUX_DT_SOCK, LINUX_DT_UNKNOWN,
 };
 
+const MAX_RECORD_BYTES: Word =
+    (LINUX_DIRENT64_NAME_OFFSET + vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES).next_multiple_of(8);
+const SMALL_BUFFER_BATCH_ENTRIES: Word = 16;
+// Forward compaction must never overwrite the current or unread VFS record.
+const _: () = assert!(ALTER_IO_OFFSET >= MAX_RECORD_BYTES);
+const _: () = assert!(MAX_RECORD_BYTES <= vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES);
+
 pub(super) fn sys_getdents64(
     runtime: &mut Runtime,
     pid: Word,
@@ -84,13 +91,18 @@ fn read_backing(
     mounts: &[virtual_fs::DirectoryEntry],
 ) -> Result<Word, i32> {
     let source_offset = ALTER_IO_OFFSET as Word;
+    let capacity = count.min(runtime.posix_shm_size);
+    // Retain the small-buffer batch, but let large requests carry more entries.
+    // Every worst-case record in the enlarged batch fits the output buffer.
     let max_records = (runtime.posix_shm_size.saturating_sub(source_offset)
         / vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES)
-        .min(16);
+        .min((capacity / MAX_RECORD_BYTES).max(SMALL_BUFFER_BATCH_ENTRIES));
     if max_records == 0 {
         return Err(EIO);
     }
-    let capacity = count.min(source_offset);
+    // Packed Linux records are smaller than their VFS input records. Together
+    // with the initial source gap, that permits output beyond the old prefix
+    // while keeping each current name and all unread records untouched.
     loop {
         let (entries, next_index) = posix::posix_read_dir(
             runtime.posix_port,

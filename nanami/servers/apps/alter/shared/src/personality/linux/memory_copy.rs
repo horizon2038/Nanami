@@ -1,8 +1,19 @@
 use super::{map_request_error, Runtime, Word, LINUX_PAGE_SIZE};
 
-
 pub(super) fn copy_same_process_range(
-    runtime: &mut Runtime,
+    runtime: &Runtime,
+    pid: Word,
+    src_base: Word,
+    dst_base: Word,
+    size: Word,
+) -> Result<(), i32> {
+    super::private_memory::with_private_write(runtime, pid, dst_base, size, || {
+        copy_private_process_range(runtime, pid, src_base, dst_base, size)
+    })
+}
+
+fn copy_private_process_range(
+    runtime: &Runtime,
     pid: Word,
     src_base: Word,
     dst_base: Word,

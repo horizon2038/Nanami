@@ -1,6 +1,19 @@
 use super::*;
 
 impl Runtime {
+    pub fn inherit_mappings(&mut self, parent_pid: Word, child_pid: Word) -> bool {
+        let Some(source) = self
+            .managed_process(parent_pid)
+            .map(|parent| parent.mappings)
+        else {
+            return false;
+        };
+        let Some(child) = self.managed_process_mut(child_pid) else {
+            return false;
+        };
+        child.mappings.initialize_from(source)
+    }
+
     // Privileged Alpha copies may inspect retained PROT_NONE backing, but a
     // Linux copyin/copyout must obey guest permissions. Untracked ELF pages are
     // still validated by Alpha's frame lookup.

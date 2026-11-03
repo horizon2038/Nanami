@@ -200,6 +200,18 @@ impl Client {
 fn main() -> nanami_runtime::NanamiResult {
     ipc::init_ipc_tls()?;
     nanami_runtime::heap::init_heap(1024 * 1024)?;
+    if nanami_runtime::process_arg(1) == Some(b"--private-readonly-fork") {
+        process_perf::private_readonly_fork();
+        return Ok(());
+    }
+    if nanami_runtime::process_arg(1) == Some(b"--ram-alias-retirement") {
+        process_perf::memory_alias_retirement();
+        return Ok(());
+    }
+    if nanami_runtime::process_arg(1) == Some(b"--ram-sharing-reuse") {
+        process_perf::memory_reference_reuse();
+        return Ok(());
+    }
     registry::connect_service("negoto-service", 23)?;
     registry::connect_timer_service(26)?;
     let timer = ipc::process_slot_descriptor(26);
@@ -211,11 +223,13 @@ fn main() -> nanami_runtime::NanamiResult {
     let files = files::Files::connect().unwrap();
     if matches!(
         nanami_runtime::process_arg(1),
-        Some(b"--tinycore" | b"--tinycore-desktop" | b"--tinycore-apps" | b"--tinycore-perf" | b"--tinycore-process-perf")
+        Some(b"--tinycore" | b"--tinycore-desktop" | b"--tinycore-apps" | b"--tinycore-perf" | b"--tinycore-process-perf" | b"--tinycore-startup-perf")
     ) {
         let desktop = nanami_runtime::process_arg(1) == Some(b"--tinycore-desktop");
         let applications = nanami_runtime::process_arg(1) == Some(b"--tinycore-apps");
-        if nanami_runtime::process_arg(1) == Some(b"--tinycore-process-perf") {
+        if nanami_runtime::process_arg(1) == Some(b"--tinycore-startup-perf") {
+            process_perf::desktop_startup(&client, &files, timer);
+        } else if nanami_runtime::process_arg(1) == Some(b"--tinycore-process-perf") {
             process_perf::benchmark(&client, timer);
         } else if applications {
             tinycore_applications(&client, &files, timer);
@@ -576,6 +590,7 @@ fn tinycore_desktop_session(
     for name in [
         "desktop-ready",
         "desktop-input-ok",
+        "desktop-links-ok",
         "desktop-launch-ok",
         "desktop-info-ok",
         "desktop-exit",
@@ -651,6 +666,12 @@ fn tinycore_desktop_session(
         timer::timer_service_sleep_milliseconds(timer, 100).unwrap();
     }
     assert!(input, "X terminal did not execute the keyboard command");
+    assert_eq!(
+        files.read(&format!("{root}desktop-links-ok")).unwrap(),
+        format!("desktop-links-ok-{cycle}\n").as_bytes(),
+        "desktop defaults or guest customizations were lost"
+    );
+    nanami_runtime::println!("TINYCORE-DESKTOP-LINKS-PASS cycle={}", cycle);
     nanami_runtime::println!("TINYCORE-DESKTOP-INPUT-PASS cycle={}", cycle);
     let mut launched = false;
     for _ in 0..1200 {

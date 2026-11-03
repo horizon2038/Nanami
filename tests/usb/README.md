@@ -176,7 +176,8 @@ cargo xtask build --rebuild-rootfs \
 ```
 
 The diagnostic image must print `[smp.diag] all-processes-core=0` and every
-`[smp] process` record must show `affinity=0`. With four physical CPUs the
+`spawn pid=...` record must show `cpu=0` (older images use `[smp] process`
+and `affinity=0`). With four physical CPUs the
 environment/Alpha still reports `cores=4`/`smp_cores=4`; do not mistake that for
 a failed override. Boot without input until Shell is visible, then press and
 release `a` once without moving the mouse. Record whether boot advances on its

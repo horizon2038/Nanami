@@ -120,6 +120,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             Err(e) => return Err(log_error("[alter] ipc receive failed: ", e)),
         };
 
+        runtime.current_fault_pid = 0;
         let mut fault_pid = 0;
         pending = match event {
             ServiceEvent::Request(request) => {
@@ -163,6 +164,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                         .process_for_fault_identifier(identifier)
                         .map_or(0, |process| process.pid);
                 }
+                runtime.current_fault_pid = fault_pid;
                 runtime.trapped_faults = runtime.trapped_faults.saturating_add(1);
                 match fault::handle_fault(
                     &mut runtime,

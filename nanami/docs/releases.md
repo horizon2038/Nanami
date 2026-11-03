@@ -1,5 +1,24 @@
 # Nanami Releases
 
+## v0.7.2
+
+- Optimize process creation and executable loading with bounded ELF caching, batched page cloning, and reusable supervisor mappings.
+- Isolate Linux guests from native memory capabilities and share private read-only pages across x86_64 forks with safe write detachment.
+- Index virtual-memory and physical-allocation bookkeeping, preserve active and deferred ownership, and safely reclaim aliased backing.
+- Batch sealed-process exec capability retirement and prevent destructive exec failures from returning to the old image.
+- Streamline syscall replies, cache session identity, and reduce AF_UNIX payload copies and redundant readiness scans.
+- Reduce Tiny Core desktop startup helper work and fix shared-VM task priority to prevent single-core starvation.
+- Expand native, sanitizer, SMP, memory-lifetime, and desktop restart regression coverage without changing the A9N Kernel or IPC fastpath.
+
+## v0.7.1
+
+- Reduce process-creation overhead with bulk fork mapping inheritance and batched private-page cloning.
+- Reuse validated ELF snapshots within a bounded cache while preserving executable and interpreter lifetimes.
+- Stream executable staging from current Frames and reuse bounded temporary mappings to reduce allocation, lookup, and mapping work.
+- Reduce trapped-syscall reply data, avoid redundant AF_UNIX receive payload copies, and coalesce adjacent credential outputs while preserving validation and error semantics.
+- Build Tiny Core's default desktop links into the rootfs instead of spawning helpers on every startup, while preserving session customizations.
+- Expand memory, process-lifecycle, desktop-restart, and performance regression coverage without changing the A9N Kernel or IPC fastpath.
+
 ## Release CI
 
 `.github/workflows/release.yml` follows A9N's annotated-tag release model.
@@ -17,8 +36,8 @@ Build jobs have read-only repository permissions; only the publication job gets
 For example, after committing the version and release changes:
 
 ```sh
-git tag -a v0.7.0 -F /path/to/release-notes.txt
-git push origin v0.7.0
+git tag -a v0.7.2 -F /path/to/release-notes.txt
+git push origin v0.7.2
 ```
 
 Use an English bullet list for `release-notes.txt`. Do not create a lightweight
@@ -41,7 +60,7 @@ checksums afterwards:
 
 ```sh
 sha256sum --check SHA256SUMS
-tar -xzf nanami-v0.7.0-x86_64-pc99.tar.gz -C /path/to/empty-directory
+tar -xzf nanami-v0.7.2-x86_64-pc99.tar.gz -C /path/to/empty-directory
 cd /path/to/empty-directory
 sha256sum --check SHA256SUMS
 ```

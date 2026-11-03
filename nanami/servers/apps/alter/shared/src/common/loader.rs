@@ -57,14 +57,15 @@ pub fn file_mapping_source(
 #[derive(Clone, Copy)]
 enum ImageBuffer {
     Reusable,
-    Interpreter,
+    Interpreter { main_address: Word },
 }
 
 pub fn load_interpreter_elf_image(
     runtime: &mut Runtime,
     path: &[u8],
+    main_address: Word,
 ) -> Result<LoadedElfImage, LoadError> {
-    load_elf_image(runtime, path, ImageBuffer::Interpreter)
+    load_elf_image(runtime, path, ImageBuffer::Interpreter { main_address })
 }
 
 pub fn load_linux_elf_image(
@@ -182,8 +183,12 @@ fn load_file_snapshot(
             metadata: cached.metadata,
         });
     }
-    let cache_slot = if identity >> 32 != 0 && size <= super::image_cache::MAX_IMAGE_BYTES {
-        Some(runtime.image_cache.replacement())
+    let protected_address = match buffer {
+        ImageBuffer::Reusable => None,
+        ImageBuffer::Interpreter { main_address } => Some(main_address),
+    };
+    let cache_slot = if identity >> 32 != 0 {
+        runtime.image_cache.replacement(size, protected_address)
     } else {
         None
     };
@@ -195,7 +200,7 @@ fn load_file_snapshot(
                 // Alpha may defer physical-page reuse after mapping release.
                 // Reuse each cache buffer in place, and grow geometrically so
                 // eviction and failed reads cannot accumulate unbounded RAM.
-                let capacity = previous.map_or(size, |_| size.next_power_of_two());
+                let capacity = runtime.image_cache.allocation_capacity(slot, size);
                 let allocation =
                     nanami_runtime::request_heap(capacity).map_err(|_| LoadError::Io)?;
                 if allocation.1 < size {
@@ -220,7 +225,7 @@ fn load_file_snapshot(
             .insert(slot, 0, allocation.0, 0, allocation.1, None);
         allocation
     } else {
-        let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter) {
+        let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter { .. }) {
             (
                 &mut runtime.interpreter_image_buffer,
                 &mut runtime.interpreter_image_buffer_size,

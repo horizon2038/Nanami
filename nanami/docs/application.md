@@ -52,6 +52,13 @@ the name as a label, and reports malformed entries. It also accepts trusted
 `@process <initramfs-path> [priority=N] [affinity=N] [platform=0|1] [services=0|1]` defaults.
 These apply by explicit image path, not by a built-in Service name; rootfs ELF
 buffer spawns do not inherit a grant by claiming a matching image label.
+An independent `@placement <priority> <preferred-cpu>` boot directive sets an
+initial scheduling preference for that priority class, including rootfs buffer
+spawns. It grants no authority and does not change priority. Exact per-image
+affinity wins; an absent CPU retains normal round-robin placement. Automatic
+slots are consumed even when a preference applies, so unrelated tasks keep
+their prior sequence. Remove/change this optional declaration to tune another
+topology or workload; defaults without it are unchanged.
 See [Boot Policy](architecture.md#boot-policy). Rootfs system/session entries
 continue to support arguments. Priority is 0..31 on both paths.
 

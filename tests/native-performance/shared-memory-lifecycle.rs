@@ -10,9 +10,14 @@ const PAGE_SIZE: usize = 4096;
 const PROCESS_FRAME_CHUNK_PAGES: usize = 512;
 const PROCESS_FRAME_TOTAL_PAGES: usize = 1 << 19;
 
+fn align_down(value: usize, alignment: usize) -> usize {
+    value & !(alignment - 1)
+}
+
 #[derive(Default)]
 struct Machine {
     frames: BTreeMap<usize, usize>,
+    pool_frames: BTreeMap<usize, usize>,
     maps: BTreeMap<(usize, usize), usize>,
     permissions: BTreeMap<(usize, usize), usize>,
     live: BTreeMap<usize, usize>,
@@ -20,6 +25,7 @@ struct Machine {
     next_page: usize,
     freed: usize,
     zero_calls: usize,
+    copy_calls: usize,
     operation: usize,
     fail_at: Option<usize>,
     fail_unmap: bool,
@@ -47,6 +53,16 @@ fn process_frame_descriptor(root: usize, slot: usize) -> usize {
 fn process_frame_chunk_descriptor(root: usize, chunk: usize) -> usize {
     process_frame_descriptor(root, chunk * PROCESS_FRAME_CHUNK_PAGES)
 }
+fn pool_frame(page: usize) -> usize {
+    0x4000_0000 + page
+}
+fn frame_page(machine: &Machine, frame: usize) -> usize {
+    *machine
+        .frames
+        .get(&frame)
+        .or_else(|| machine.pool_frames.get(&frame))
+        .expect("unknown Frame capability")
+}
 
 mod arch {
     use super::*;
@@ -55,7 +71,7 @@ mod arch {
         pub fn copy(node: usize, slot: Word, source: usize) -> Result<(), CapabilityError> {
             machine(|m| {
                 operation(m)?;
-                let physical = m.frames.get(&source).copied().unwrap_or(source);
+                let physical = frame_page(m, source);
                 assert!(
                     m.frames.insert(node + slot, physical).is_none(),
                     "overwrote live capability"
@@ -90,6 +106,7 @@ mod arch {
         ) -> Result<(), CapabilityError> {
             machine(|m| {
                 operation(m)?;
+                assert!(m.pool_frames.contains_key(&frame));
                 assert!(m.maps.insert((space, va), frame).is_none());
                 m.permissions.insert((space, va), attributes.bits());
                 Ok(())
@@ -101,7 +118,9 @@ mod arch {
                     return Err(CapabilityError::IllegalOperation);
                 }
                 if let Some(mapped) = m.maps.remove(&(space, va)) {
-                    assert_eq!(mapped, frame);
+                    // Kernel MAP/UNMAP identify the Frame by physical object,
+                    // not by which alias capability supplied its address.
+                    assert_eq!(frame_page(m, mapped), frame_page(m, frame));
                 }
                 m.permissions.remove(&(space, va));
                 Ok(())
@@ -112,6 +131,9 @@ mod arch {
 
 struct Memory;
 impl Memory {
+    fn is_pool_frame_descriptor(&self, frame: usize) -> bool {
+        machine(|m| m.pool_frames.contains_key(&frame))
+    }
     fn allocate_physical_any(&mut self, bytes: usize) -> Result<usize, CapabilityError> {
         machine(|m| {
             operation(m)?;
@@ -140,11 +162,15 @@ impl Memory {
             Ok(())
         })
     }
-    fn ensure_alpha_frame_at_physical_index(&mut self, _: usize) -> Result<(), CapabilityError> {
-        machine(operation)
+    fn ensure_alpha_frame_at_physical_index(&mut self, page: usize) -> Result<(), CapabilityError> {
+        machine(|m| {
+            operation(m)?;
+            m.pool_frames.insert(pool_frame(page), page);
+            Ok(())
+        })
     }
     fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> {
-        Some(page)
+        machine(|m| m.pool_frames.contains_key(&pool_frame(page))).then_some(pool_frame(page))
     }
     fn map_frame_strict(
         &mut self,
@@ -154,7 +180,11 @@ impl Memory {
         vm: &mut vm_space::VmSpace,
     ) -> Result<(), CapabilityError> {
         machine(|m| {
-            let page = *m.frames.get(&frame).expect("map without capability");
+            assert!(
+                m.pool_frames.contains_key(&frame),
+                "tracked a revocable child alias"
+            );
+            let page = frame_page(m, frame);
             assert!(m.zeroed.contains(&page), "exposed nonzero recycled page");
             assert!(
                 m.maps.insert((space, va), frame).is_none(),
@@ -182,6 +212,14 @@ struct Alpha {
     copy_window: memory_copy::CopyWindow,
 }
 impl Alpha {
+    fn read_process_memory_into_static_buffer(
+        &mut self,
+        _: usize,
+        _: usize,
+        _: usize,
+    ) -> Result<&[u8], CapabilityError> {
+        panic!("this lifecycle fixture does not issue vector requests");
+    }
     fn process_frame_for_page(
         &mut self,
         pid: Word,
@@ -200,13 +238,32 @@ impl Alpha {
     ) -> Result<(Word, Word), CapabilityError> {
         Err(CapabilityError::InvalidArgument)
     }
+    // Model the byte-transfer boundary with real current-Frame lookup and
+    // CopyWindow selection. Authorization must reject before reaching it.
+    fn copy_process_memory(
+        &mut self,
+        source_pid: usize,
+        source: usize,
+        destination_pid: usize,
+        destination: usize,
+        bytes: usize,
+    ) -> Result<(), CapabilityError> {
+        assert!(bytes != 0 && source % PAGE_SIZE + bytes <= PAGE_SIZE);
+        assert!(destination % PAGE_SIZE + bytes <= PAGE_SIZE);
+        let source_frame = self.process_frame_for_page(source_pid, source)?;
+        let source_alias = self.map_process_copy_frame(source_pid, source_frame, None)?;
+        let destination_frame = self.process_frame_for_page(destination_pid, destination)?;
+        self.map_process_copy_frame(destination_pid, destination_frame, Some(source_alias))?;
+        machine(|m| m.copy_calls += 1);
+        Ok(())
+    }
     fn map_alpha_temporary_frame(
         &mut self,
         frame: usize,
         va: usize,
     ) -> Result<(), CapabilityError> {
         machine(|m| {
-            assert!(m.frames.contains_key(&frame));
+            assert!(m.pool_frames.contains_key(&frame));
             assert!(m.maps.insert((0, va), frame).is_none());
         });
         Ok(())
@@ -243,6 +300,8 @@ impl Alpha {
 #[path = "../../nanami/src/nanami_core/alpha/memory_copy.rs"]
 mod memory_copy;
 
+#[path = "../../nanami/src/nanami_core/alpha/checked_memory.rs"]
+mod checked_memory;
 #[path = "../../nanami/src/nanami_core/alpha/shared_memory.rs"]
 mod implementation;
 #[path = "../../nanami/src/nanami_core/alpha/mapping_protection.rs"]
@@ -321,6 +380,41 @@ fn owned_memory_can_be_shared_at_supervised_addresses_and_reclaimed_in_either_or
     assert_eq!(alias, 0x1_0000_0000);
     release(&mut alpha, 1, owned, 1).unwrap();
     assert_eq!(machine(|m| m.freed), 0);
+    release(&mut alpha, 2, alias, 1).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn private_child_frame_metadata_remains_shareable_without_promoting_foreign_frames() {
+    let mut alpha = alpha();
+    let (owned, _) = alpha
+        .handle_shared_memory_request(OsRequestEvent {
+            identifier: 1,
+            arg0: 0,
+            arg1: PAGE_SIZE,
+            arg2: 0,
+            arg3: 0,
+        })
+        .unwrap();
+    let allocation = alpha
+        .processes
+        .find_active_physical_allocation_reference(1, owned, 1)
+        .unwrap();
+    let entry = alpha.processes.memory_entry(1).unwrap();
+    let child = process_frame_descriptor(entry.root_node, allocation.start_slot);
+    vm_restore(&mut alpha, 1, owned, pool_frame(allocation.base_page + 1));
+    assert!(share(&mut alpha, 1, 2, owned, PAGE_SIZE).is_err());
+    vm_restore(&mut alpha, 1, owned, child);
+    let (_, alias) = share(&mut alpha, 1, 2, owned, PAGE_SIZE).unwrap();
+    assert_eq!(
+        alpha.processes.vm_space_mut(1).unwrap().find_frame(owned),
+        Some(child)
+    );
+    assert_eq!(
+        alpha.processes.vm_space_mut(2).unwrap().find_frame(alias),
+        Some(pool_frame(allocation.base_page))
+    );
+    release(&mut alpha, 1, owned, 1).unwrap();
     release(&mut alpha, 2, alias, 1).unwrap();
     assert_empty();
 }
@@ -541,29 +635,122 @@ fn both_release_orders_remove_caps_before_free_and_reuse_reservations() {
 }
 
 #[test]
-fn copy_window_is_invalidated_before_shared_caps_and_pages_are_recycled() {
+fn resident_pool_alias_never_bypasses_current_permissions_or_supervisor_checks() {
     let mut alpha = alpha();
-    for _ in 0..20 {
-        let (a, b) = create(&mut alpha, 1).unwrap();
-        for (pid, va) in [(1, a), (2, b)] {
-            let frame = alpha
-                .processes
-                .vm_space_mut(pid)
-                .unwrap()
-                .find_frame(va)
-                .unwrap();
-            alpha.map_process_copy_frame(pid, frame, None).unwrap();
+    let (caller, peer) = create(&mut alpha, 2).unwrap();
+    let target = peer + PAGE_SIZE;
+    let request = || OsRequestEvent {
+        identifier: 2,
+        arg0: 2,
+        arg1: target,
+        arg2: peer,
+        arg3: 32 | nanami_uapi::os::OS_MEMORY_COPY_USER_ACCESS,
+    };
+    alpha
+        .handle_process_memory_copy_request(request(), true)
+        .unwrap();
+    let frame = alpha
+        .processes
+        .vm_space_mut(2)
+        .unwrap()
+        .find_frame(target)
+        .unwrap();
+    let alias = alpha.map_process_copy_frame(2, frame, None).unwrap();
+    for permissions in [0, 1, 3, 0, 7] {
+        alpha
+            .handle_mapping_protect_request(OsRequestEvent {
+                identifier: 2,
+                arg0: 2,
+                arg1: target,
+                arg2: PAGE_SIZE,
+                arg3: permissions,
+            })
+            .unwrap();
+        machine(|m| assert_eq!(m.maps.get(&(0, alias)), Some(&frame)));
+        for write in [false, true] {
+            let before = machine(|m| m.copy_calls);
+            let right = if write { 2 } else { 1 };
+            if permissions & right == 0 {
+                assert_eq!(
+                    alpha.handle_process_memory_copy_request(request(), write),
+                    Err(CapabilityError::PermissionDenied)
+                );
+                assert_eq!(machine(|m| m.copy_calls), before);
+            } else {
+                alpha
+                    .handle_process_memory_copy_request(request(), write)
+                    .unwrap();
+                assert_eq!(machine(|m| m.copy_calls), before + 1);
+            }
         }
-        machine(|m| assert_eq!(m.maps.len(), 4));
-        release(&mut alpha, 1, a, 1).unwrap();
-        machine(|m| assert_eq!(m.maps.len(), 2));
-        release(&mut alpha, 2, b, 1).unwrap();
-        assert_empty();
     }
+    let before = machine(|m| m.copy_calls);
+    let mut foreign = request();
+    foreign.identifier = 3;
+    assert_eq!(
+        alpha.handle_process_memory_copy_request(foreign, false),
+        Err(CapabilityError::PermissionDenied)
+    );
+    assert_eq!(machine(|m| m.copy_calls), before);
+    release(&mut alpha, 1, caller, 2).unwrap();
+    release(&mut alpha, 2, peer, 2).unwrap();
+    machine(|m| {
+        assert!(m.frames.is_empty());
+        assert!(m.live.is_empty());
+        assert_eq!(m.maps.len(), 2);
+        assert_eq!(m.maps.get(&(0, alias)), Some(&frame));
+    });
 }
 
 #[test]
-fn failed_copy_window_unmap_keeps_shared_cap_and_backing_live() {
+fn pool_copy_alias_survives_both_guest_aliases_and_recycled_physical_backing() {
+    let mut alpha = alpha();
+    let mut original_alias = None;
+    for _ in 0..20 {
+        let (a, b) = create(&mut alpha, 1).unwrap();
+        let fa = alpha
+            .processes
+            .vm_space_mut(1)
+            .unwrap()
+            .find_frame(a)
+            .unwrap();
+        let fb = alpha
+            .processes
+            .vm_space_mut(2)
+            .unwrap()
+            .find_frame(b)
+            .unwrap();
+        assert_eq!(fa, fb);
+        assert_eq!(fa, pool_frame(0x100));
+        let alias = alpha.map_process_copy_frame(1, fa, None).unwrap();
+        assert_eq!(alpha.map_process_copy_frame(2, fb, None).unwrap(), alias);
+        if let Some(previous) = original_alias {
+            assert_eq!(alias, previous);
+        }
+        original_alias = Some(alias);
+        machine(|m| assert_eq!(m.maps.len(), 3));
+        release(&mut alpha, 1, a, 1).unwrap();
+        machine(|m| {
+            assert_eq!(m.maps.len(), 2);
+            assert_eq!(m.frames.len(), 1);
+            assert_eq!(m.maps[&(0, alias)], fa);
+        });
+        release(&mut alpha, 2, b, 1).unwrap();
+        machine(|m| {
+            assert!(m.frames.is_empty());
+            assert!(m.live.is_empty());
+            assert_eq!(m.maps.len(), 1);
+            assert_eq!(m.maps[&(0, alias)], fa);
+            // The pool capability/alias is permanent; all guest ownership is gone.
+            // Reuse this free physical page for a fresh zeroed allocation next round.
+            m.next_page = 0x100;
+        });
+    }
+    assert_eq!(machine(|m| m.zero_calls), 20);
+}
+
+#[test]
+fn failed_guest_leaf_unmap_keeps_shared_cap_and_backing_live() {
     let mut alpha = alpha();
     let (a, b) = create(&mut alpha, 1).unwrap();
     let frame = alpha
@@ -583,7 +770,12 @@ fn failed_copy_window_unmap_keeps_shared_cap_and_backing_live() {
     });
     release(&mut alpha, 1, a, 1).unwrap();
     release(&mut alpha, 2, b, 1).unwrap();
-    assert_empty();
+    machine(|m| {
+        assert!(m.frames.is_empty());
+        assert!(m.live.is_empty());
+        assert_eq!(m.maps.len(), 1); // Only the permanent pool alias remains.
+        assert!(m.maps.keys().all(|&(space, _)| space == 0));
+    });
 }
 
 #[test]

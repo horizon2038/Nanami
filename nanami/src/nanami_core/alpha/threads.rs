@@ -26,7 +26,9 @@ impl Alpha {
             .filter(|entry| !entry.exited && entry.pid != 0)
             .ok_or(CapabilityError::PermissionDenied)?;
         let slot = request.arg1;
-        if request.arg3 != 0
+        let share_readonly = !shared_vm && request.arg3 == nanami_uapi::os::OS_FORK_SHARE_READONLY;
+        if (request.arg3 != 0 && !share_readonly)
+            || (share_readonly && !source.capabilities_sealed)
             || request.arg2 > 31
             || slot == 0
             || slot >= (1 << PROCESS_ROOT_RADIX)
@@ -44,6 +46,7 @@ impl Alpha {
             slot,
             request.arg2,
             shared_vm,
+            share_readonly,
         );
         if result.is_err() {
             self.cleanup_failed_spawn(pid, root_slot);
@@ -60,6 +63,7 @@ impl Alpha {
         destination: usize,
         priority: Word,
         shared_vm: bool,
+        share_readonly: bool,
     ) -> Result<(), CapabilityError> {
         let root = make_root_slot_descriptor(self.root.root_radix, root_slot);
         let generic = self.memory.ensure_process_arena(root_slot)?;
@@ -126,6 +130,11 @@ impl Alpha {
         let pcb = make_child_slot_descriptor(root, PROCESS_ROOT_RADIX, PROCESS_SLOT_PCB);
         let address_space =
             make_child_slot_descriptor(root, PROCESS_ROOT_RADIX, PROCESS_SLOT_ADDRESS_SPACE);
+        let execution_root = if source.capabilities_sealed {
+            self.sealed_capability_root()?
+        } else {
+            root
+        };
         let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
             true, true, false, false, true, false, false, false, true, false,
         );
@@ -133,7 +142,7 @@ impl Alpha {
             pcb,
             config,
             address_space,
-            root,
+            execution_root,
             0,
             0,
             fault_port,
@@ -143,7 +152,7 @@ impl Alpha {
             priority,
             0,
         )?;
-        let affinity = self.configure_process_affinity(pcb, None)?;
+        let affinity = self.configure_process_affinity(pcb, None, priority)?;
         let memory = self
             .processes
             .memory_entry(source.pid)
@@ -162,13 +171,20 @@ impl Alpha {
             memory.user_heap_next_va,
             memory.user_heap_limit_va,
         )?;
+        if source.capabilities_sealed {
+            self.processes.seal_capabilities(pid)?;
+        }
         if shared_vm {
             self.processes.share_address_space(pid, source.pid)?;
         } else {
             self.processes.ensure_vm_space_for_pid(pid)?;
             // Walk only backed pages, including retained PROT_NONE backing.
             // No ELF parsing, pathname lookup, initial stack or zero-fill pass.
-            self.clone_process_vm(source.pid, pid)?;
+            if share_readonly {
+                self.clone_process_vm_shared_readonly(source.pid, pid)?;
+            } else {
+                self.clone_process_vm(source.pid, pid)?;
+            }
         }
         let types = self.processes.root_types_mut(pid)?;
         *types = crate::nanami_core::process::RootSlotTypes::empty();
@@ -195,8 +211,10 @@ impl Alpha {
             .other(destination);
         if !shared_vm {
             crate::force_info!(
-                "[smp] process pid={:>3} image=fork-vm affinity={} priority={}",
-                pid, affinity, priority
+                "spawn pid={} fork-vm cpu={} prio={}",
+                pid,
+                affinity,
+                priority
             );
         }
         Ok(())

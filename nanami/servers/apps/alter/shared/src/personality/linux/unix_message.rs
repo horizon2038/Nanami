@@ -1,7 +1,7 @@
 //! LP64 msghdr/cmsghdr marshaling and transactional local-socket I/O.
 use super::unix::*;
 use super::*;
-use crate::state::readiness::READY_UNIX;
+use crate::state::readiness::{READY_UNIX_READ, READY_UNIX_WRITE};
 use crate::state::unix_sockets::{
     Address, Kind, Packet, QUEUE_BYTES, QUEUE_MESSAGES, RIGHTS_LIMIT,
 };
@@ -16,55 +16,6 @@ struct Message {
     name: Word,
     name_len: Word,
     header: Option<Word>,
-}
-
-fn message(runtime: &mut Runtime, pid: Word, context: LinuxSyscallContext) -> Result<Message, i32> {
-    let mut result = Message {
-        bases: [0; LINUX_IOV_MAX as usize],
-        lengths: [0; LINUX_IOV_MAX as usize],
-        count: 1,
-        control: 0,
-        control_len: 0,
-        name: 0,
-        name_len: 0,
-        header: None,
-    };
-    let a = context.args;
-    let vector = match context.number {
-        SYS_SENDMSG | SYS_RECVMSG => {
-            read_target_memory(runtime, pid, a[1], 56).map_err(|_| EFAULT)?;
-            result.name = read_shm_u64(runtime, 0);
-            result.name_len = read_shm_u32(runtime, 8) as Word;
-            result.control = read_shm_u64(runtime, 32);
-            result.control_len = read_shm_u64(runtime, 40);
-            result.header = Some(a[1]);
-            Some((read_shm_u64(runtime, 16), read_shm_u64(runtime, 24)))
-        }
-        SYS_READV | SYS_WRITEV => Some((a[1], a[2])),
-        _ => None,
-    };
-    if let Some((iov, count)) = vector {
-        read_linux_iovecs(
-            runtime,
-            pid,
-            iov,
-            count,
-            &mut result.bases,
-            &mut result.lengths,
-        )?;
-        result.count = count;
-    } else {
-        result.bases[0] = a[1];
-        result.lengths[0] = a[2];
-        if a[1] == 0 && a[2] != 0 {
-            return Err(EFAULT);
-        }
-        if context.number == SYS_SENDTO || context.number == SYS_RECVFROM {
-            result.name = a[4];
-            result.name_len = a[5];
-        }
-    }
-    Ok(result)
 }
 
 fn length(message: &Message) -> Result<usize, i32> {
@@ -113,7 +64,7 @@ fn copy_in(
     Ok(data)
 }
 
-fn copy_out(runtime: &mut Runtime, pid: Word, message: &Message, data: &[u8]) -> Result<(), i32> {
+fn copy_out(runtime: &Runtime, pid: Word, message: &Message, data: &[u8]) -> Result<(), i32> {
     let mut copied = 0;
     for index in 0..message.count {
         let count = message.lengths[index].min(data.len() - copied);
@@ -136,6 +87,39 @@ fn copy_out(runtime: &mut Runtime, pid: Word, message: &Message, data: &[u8]) ->
         }
     }
     Ok(())
+}
+
+fn copy_queued_payload(
+    runtime: &Runtime,
+    pid: Word,
+    socket_id: Word,
+    message: &Message,
+    bytes: usize,
+) -> Result<(), i32> {
+    let this = socket(runtime, socket_id)?;
+    let first = this.packets.front().ok_or(EAGAIN)?;
+    if bytes <= first.data.len() - first.offset {
+        // The queue owns these bytes throughout checked copyout. Alter does
+        // not dispatch another request while blocked in the memory service.
+        return copy_out(
+            runtime,
+            pid,
+            message,
+            &first.data[first.offset..first.offset + bytes],
+        );
+    }
+    // Coalesce plain stream writes as before: borrowing each packet separately
+    // would add copyout requests when one guest iovec spans several packets.
+    let mut data = Vec::new();
+    data.try_reserve_exact(bytes).map_err(|_| ENOMEM)?;
+    for packet in &this.packets {
+        let count = (packet.data.len() - packet.offset).min(bytes - data.len());
+        data.extend_from_slice(&packet.data[packet.offset..packet.offset + count]);
+        if data.len() == bytes {
+            break;
+        }
+    }
+    copy_out(runtime, pid, message, &data)
 }
 
 fn rights(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Vec<LinuxFile>, i32> {
@@ -289,6 +273,7 @@ fn send(
         }
     }
     let target = runtime.unix_sockets.get_mut(destination).unwrap();
+    let became_readable = target.packets.is_empty();
     target.queued_bytes += count;
     target.queued_rights += held.len();
     target.packets.push_back(Packet {
@@ -297,7 +282,11 @@ fn send(
         rights: held,
         source,
     });
-    runtime.readiness_changes |= READY_UNIX;
+    // More data in an already-readable queue cannot wake another reader.
+    // Receive still notifies writers when byte, packet or rights capacity frees.
+    if became_readable {
+        runtime.readiness_changes |= READY_UNIX_READ;
+    }
     Ok(count)
 }
 
@@ -336,34 +325,25 @@ fn receive(
         }
         return Err(EAGAIN);
     }
-    // A large caller buffer need not mean a large allocation: X11 frequently
-    // asks for 64 KiB while only a few bytes are queued. Retain the same stream
-    // barrier/packet rules and allocate only the bytes this receive can return.
+    // Plan the receive without copying payloads. Keep ancillary stream barriers
+    // and leave every packet intact until payload and metadata copyout succeed.
     let mut queued = 0;
-    for packet in &this.packets {
-        queued += (packet.data.len() - packet.offset).min(capacity - queued);
-        if datagram || queued == capacity || !packet.rights.is_empty() {
-            break;
-        }
-    }
-    let mut data = Vec::new();
-    data.try_reserve_exact(queued).map_err(|_| ENOMEM)?;
     let mut files = Vec::new();
     let mut source = Address::UNNAMED;
     let mut packet_length = 0;
     for packet in &this.packets {
-        let count = (packet.data.len() - packet.offset).min(capacity - data.len());
-        if data.is_empty() {
+        let count = (packet.data.len() - packet.offset).min(capacity - queued);
+        if queued == 0 {
             source = packet.source;
             packet_length = packet.data.len() - packet.offset;
         }
-        data.extend_from_slice(&packet.data[packet.offset..packet.offset + count]);
+        queued += count;
         if count != 0 || datagram {
             files.try_reserve(packet.rights.len()).map_err(|_| ENOMEM)?;
             files.extend_from_slice(&packet.rights);
         }
         // Ancillary data is a stream barrier, not a message framing protocol.
-        if datagram || data.len() == capacity || !packet.rights.is_empty() {
+        if datagram || queued == capacity || !packet.rights.is_empty() {
             break;
         }
     }
@@ -408,7 +388,7 @@ fn receive(
         output_flags |= MSG_CTRUNC;
     }
     let output = (|| {
-        copy_out(runtime, pid, message, &data)?;
+        copy_queued_payload(runtime, pid, file.resource, message, queued)?;
         if context.number == SYS_RECVFROM {
             write_address(runtime, pid, source, message.name, message.name_len)?;
         }
@@ -447,12 +427,14 @@ fn receive(
                 write_target_memory(runtime, pid, message.control, control_len)
                     .map_err(|_| EFAULT)?;
             }
-            write_u32_to_target(runtime, pid, header + 8, address_len as u32)?;
-            unsafe {
-                write_u64(runtime.posix_shm, control_len);
-            }
-            write_target_memory(runtime, pid, header + 40, 8).map_err(|_| EFAULT)?;
-            write_u32_to_target(runtime, pid, header + 48, output_flags as u32)?;
+            write_result_header(
+                runtime,
+                pid,
+                header,
+                address_len as u32,
+                control_len,
+                output_flags as u32,
+            )?;
         }
         Ok(())
     })();
@@ -463,7 +445,7 @@ fn receive(
         return Err(error);
     }
     if flags & MSG_PEEK == 0 {
-        let mut remaining = data.len();
+        let mut remaining = queued;
         let mut collect_sockets = false;
         loop {
             let this = runtime.unix_sockets.get_mut(file.resource).unwrap();
@@ -492,23 +474,52 @@ fn receive(
         if collect_sockets {
             super::unix::collect(runtime);
         }
-        runtime.readiness_changes |= READY_UNIX;
+        runtime.readiness_changes |= READY_UNIX_WRITE;
     }
     if flags & MSG_TRUNC != 0 && datagram {
         Ok(packet_length)
     } else {
-        Ok(data.len())
+        Ok(queued)
     }
+}
+
+fn write_result_header(
+    runtime: &mut Runtime,
+    pid: Word,
+    header: Word,
+    address_len: u32,
+    control_len: Word,
+    flags: u32,
+) -> Result<(), i32> {
+    use nanami_runtime::ProcessMemoryTransfer;
+    let control_len = control_len as u64;
+    // One request, retaining whole-field preflight and exact store order.
+    super::guest_memory::copyout_many(
+        runtime,
+        pid,
+        &[
+            ProcessMemoryTransfer {
+                target: header + 8,
+                local: &address_len as *const _ as Word,
+                bytes: 4,
+            },
+            ProcessMemoryTransfer {
+                target: header + 40,
+                local: &control_len as *const _ as Word,
+                bytes: 8,
+            },
+            ProcessMemoryTransfer {
+                target: header + 48,
+                local: &flags as *const _ as Word,
+                bytes: 4,
+            },
+        ],
+    )
 }
 
 fn empty_receive(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Word, i32> {
     if let Some(header) = message.header {
-        write_u32_to_target(runtime, pid, header + 8, 0)?;
-        unsafe {
-            write_u64(runtime.posix_shm, 0);
-        }
-        write_target_memory(runtime, pid, header + 40, 8).map_err(|_| EFAULT)?;
-        write_u32_to_target(runtime, pid, header + 48, 0)?;
+        write_result_header(runtime, pid, header, 0, 0, 0)?;
     }
     Ok(0)
 }
@@ -519,7 +530,51 @@ pub(super) fn io(
     file: LinuxFile,
     context: LinuxSyscallContext,
 ) -> Result<Word, i32> {
-    let message = message(runtime, pid, context)?;
+    let mut message = Message {
+        bases: [0; LINUX_IOV_MAX as usize],
+        lengths: [0; LINUX_IOV_MAX as usize],
+        count: 1,
+        control: 0,
+        control_len: 0,
+        name: 0,
+        name_len: 0,
+        header: None,
+    };
+    let a = context.args;
+    let vector = match context.number {
+        SYS_SENDMSG | SYS_RECVMSG => {
+            read_target_memory(runtime, pid, a[1], 56).map_err(|_| EFAULT)?;
+            message.name = read_shm_u64(runtime, 0);
+            message.name_len = read_shm_u32(runtime, 8) as Word;
+            message.control = read_shm_u64(runtime, 32);
+            message.control_len = read_shm_u64(runtime, 40);
+            message.header = Some(a[1]);
+            Some((read_shm_u64(runtime, 16), read_shm_u64(runtime, 24)))
+        }
+        SYS_READV | SYS_WRITEV => Some((a[1], a[2])),
+        _ => None,
+    };
+    if let Some((iov, count)) = vector {
+        read_linux_iovecs(
+            runtime,
+            pid,
+            iov,
+            count,
+            &mut message.bases,
+            &mut message.lengths,
+        )?;
+        message.count = count;
+    } else {
+        message.bases[0] = a[1];
+        message.lengths[0] = a[2];
+        if a[1] == 0 && a[2] != 0 {
+            return Err(EFAULT);
+        }
+        if context.number == SYS_SENDTO || context.number == SYS_RECVFROM {
+            message.name = a[4];
+            message.name_len = a[5];
+        }
+    }
     let flags = match context.number {
         SYS_SENDMSG | SYS_RECVMSG => context.args[2],
         SYS_SENDTO | SYS_RECVFROM => context.args[3],

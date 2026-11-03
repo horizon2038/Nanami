@@ -297,6 +297,15 @@ impl MemoryManager {
         self.kernel_object_generic
     }
 
+    /// Recognize permanent Alpha pool caps in already-resolved Frame metadata.
+    /// This checks namespace/lifetime, not validity, rights or memory attributes.
+    pub(super) fn is_pool_frame_descriptor(&self, frame: CapabilityDescriptor) -> bool {
+        self.capability_directory.contains_descriptor(frame)
+            || self
+                .bootstrap_frames
+                .is_some_and(|range| range.contains_descriptor(frame))
+    }
+
     pub fn ensure_process_arena(
         &mut self,
         process_root_slot: usize,
@@ -549,11 +558,17 @@ impl MemoryManager {
         }
         let frame_index = self.allocate_physical_any(PAGE_SIZE)?;
         if let Err(error) = self.copy_alpha_frame_to_process_node(
-            frame_index, destination_frame_node, destination_frame_node_radix, destination_slot,
+            frame_index,
+            destination_frame_node,
+            destination_frame_node_radix,
+            destination_slot,
         ) {
             crate::info!(
                 "[frame.copy.err] pfn={:#x} dst_node={:#018x} dst_slot={:>6} err={:?}",
-                frame_index, destination_frame_node, destination_slot, error
+                frame_index,
+                destination_frame_node,
+                destination_slot,
+                error
             );
             let _ = self.free_physical(frame_index * PAGE_SIZE, PAGE_SIZE);
             return Err(error);

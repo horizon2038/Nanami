@@ -8,6 +8,34 @@ publish = false
 path = "heap-tests.rs"
 
 [[test]]
+name = "alter-dynamic"
+path = "alter-dynamic.rs"
+
+[[test]]
+name = "vm-index"
+path = "vm-index.rs"
+
+[[test]]
+name = "physical-allocation-index"
+path = "physical-allocation-index.rs"
+
+[[test]]
+name = "fault-reply"
+path = "fault-reply.rs"
+
+[[test]]
+name = "linux-guest-copy"
+path = "linux-guest-copy.rs"
+
+[[test]]
+name = "linux-private-memory"
+path = "linux-private-memory.rs"
+
+[[test]]
+name = "linux-exec-error"
+path = "linux-exec-error.rs"
+
+[[test]]
 name = "linux-file-initialization"
 path = "linux-file-initialization.rs"
 
@@ -22,6 +50,10 @@ path = "ext2-file-versions.rs"
 [[test]]
 name = "alter-image-cache"
 path = "alter-image-cache.rs"
+
+[[test]]
+name = "alter-identity"
+path = "alter-identity.rs"
 
 [[test]]
 name = "alpha-initialization-window"
@@ -342,6 +374,10 @@ path = "usb/irq.rs"
 [[test]]
 name = "physical-memory"
 path = "physical-memory-tests.rs"
+
+[[test]]
+name = "physical-allocator"
+path = "physical-allocator.rs"
 
 [[test]]
 name = "acpi"

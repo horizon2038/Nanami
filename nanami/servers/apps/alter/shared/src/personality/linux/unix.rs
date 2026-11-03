@@ -1,6 +1,8 @@
 //! AF_UNIX is local to the Alter instance, not an IPv4/net-server transport.
 use super::*;
-use crate::state::readiness::{PollFd, ReadinessWait, READY_UNIX};
+use crate::state::readiness::{
+    PollFd, ReadinessWait, READY_UNIX, READY_UNIX_READ, READY_UNIX_WRITE,
+};
 use crate::state::unix_sockets::{Address, Credentials, Kind, Name, Socket};
 use alloc::vec::Vec;
 
@@ -627,11 +629,13 @@ pub(super) fn dispatch(
     if result == Err(EAGAIN) {
         let file = runtime.linux_file(pid, context.args[0])?;
         if !nonblocking(runtime, file) && flags & MSG_DONTWAIT == 0 {
-            let events = match context.number {
+            let (events, sources) = match context.number {
                 SYS_READ | SYS_READV | SYS_RECVFROM | SYS_RECVMSG | SYS_ACCEPT | SYS_ACCEPT4 => {
-                    LINUX_POLLIN
+                    (LINUX_POLLIN, READY_UNIX | READY_UNIX_READ)
                 }
-                SYS_WRITE | SYS_WRITEV | SYS_SENDTO | SYS_SENDMSG | SYS_CONNECT => LINUX_POLLOUT,
+                SYS_WRITE | SYS_WRITEV | SYS_SENDTO | SYS_SENDMSG | SYS_CONNECT => {
+                    (LINUX_POLLOUT, READY_UNIX | READY_UNIX_WRITE)
+                }
                 _ => return Some(EmulationAction::Return(-(EAGAIN as isize))),
             };
             let mut entries = [PollFd::EMPTY; LINUX_FD_MAX];
@@ -644,7 +648,7 @@ pub(super) fn dispatch(
                 context,
                 entries,
                 count: 1,
-                sources: READY_UNIX,
+                sources,
                 deadline: None,
                 select: false,
             });

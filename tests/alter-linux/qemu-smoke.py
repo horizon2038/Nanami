@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import time
 
+# The legacy launch metadata uses this byte limit (common/abi.rs).
+ALTER_IMAGE_NAME_MAX = 24
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, default=4)
@@ -43,6 +46,13 @@ parser.add_argument("--network", action="store_true", help="attach an isolated u
 parser.add_argument("--internet", action="store_true", help="allow outbound NAT for DNS/ICMP interoperability tests (no port forwarding)")
 parser.add_argument("--ui-stress", action="store_true", help="exercise scrollback wrap, page scrolling, clear, and command history; retain screenshots for inspection")
 args = parser.parse_args()
+for program in args.program or []:
+    words = program.split(maxsplit=1)
+    basename = ""
+    if words:
+        basename = pathlib.PurePosixPath(words[0]).name
+    if not basename or len(basename.encode()) > ALTER_IMAGE_NAME_MAX:
+        parser.error(f"--program requires a basename of 1..{ALTER_IMAGE_NAME_MAX} UTF-8 bytes")
 if args.nvim_colors and not args.nvim_editor:
     parser.error("--nvim-colors requires --nvim-editor")
 if args.ctrl_c_after is not None and not 0 < args.ctrl_c_after <= 30:

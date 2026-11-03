@@ -9,7 +9,7 @@ mod root_slots;
 pub use root_slots::{install_notification_alias, RootSlotTypes};
 #[path = "process/physical_allocations.rs"]
 mod physical_allocations;
-use physical_allocations::PhysicalAllocations;
+use physical_allocations::{AllocationState, PhysicalAllocations};
 
 use crate::nanami_core::elf_loader::ElfImage;
 use crate::nanami_core::vm_space::{BootstrapVmSpace, VmSpace};
@@ -62,6 +62,9 @@ pub struct ProcessEntry {
     pub platform_information_access: bool,
     pub service_admin: bool,
     pub resource_quarantined: bool,
+    /// The executing task sees an empty capability root, not `root_node`.
+    /// Alpha's private management root and its objects remain alive unchanged.
+    pub capabilities_sealed: bool,
     pub irq_count: usize,
     pub irq_numbers: [Word; MAX_IRQS_PER_PROCESS],
     pub io_range_count: usize,
@@ -111,7 +114,6 @@ pub struct ProcessManager {
     vm_spaces: Vec<ProcessVmSpace>,
     frame_chunks: Vec<ProcessFrameChunk>,
     physical_allocations: PhysicalAllocations,
-    deferred_physical_allocations: PhysicalAllocations,
     shared_memory: BTreeMap<usize, SharedMemorySpace>,
     lazy_mappings: Vec<ProcessLazyMappingEntry>,
 }
@@ -145,12 +147,20 @@ struct ProcessLazyMappingEntry {
     mapping: ProcessLazyMapping,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ProcessPhysicalAllocation {
     pub base_va: usize,
     pub start_slot: usize,
     pub base_page: usize,
     pub page_count: usize,
+}
+
+/// Request-local ownership handle. Never retain across event-loop iterations.
+#[derive(Clone, Copy)]
+pub struct PhysicalPageReference {
+    pub allocation: ProcessPhysicalAllocation,
+    owner: usize,
+    index: usize,
 }
 
 impl ProcessManager {
@@ -188,6 +198,7 @@ impl ProcessManager {
             platform_information_access: false,
             service_admin: false,
             resource_quarantined: false,
+            capabilities_sealed: false,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,
@@ -213,7 +224,6 @@ impl ProcessManager {
             vm_spaces: Vec::new(),
             frame_chunks: Vec::new(),
             physical_allocations: PhysicalAllocations::default(),
-            deferred_physical_allocations: PhysicalAllocations::default(),
             shared_memory: BTreeMap::new(),
             lazy_mappings: Vec::new(),
         })
@@ -319,6 +329,13 @@ impl ProcessManager {
         Ok(())
     }
 
+    pub fn frame_chunk_indices(&self, pid: usize) -> impl Iterator<Item = usize> + '_ {
+        self.frame_chunks
+            .iter()
+            .filter(move |chunk| chunk.pid == pid)
+            .map(|chunk| chunk.chunk_index)
+    }
+
     pub fn register_physical_allocation(
         &mut self,
         pid: usize,
@@ -332,6 +349,7 @@ impl ProcessManager {
             return Err(CapabilityError::InvalidArgument);
         }
         self.physical_allocations.insert(
+            AllocationState::Active,
             pid,
             ProcessPhysicalAllocation {
                 base_va,
@@ -398,16 +416,21 @@ impl ProcessManager {
         pid: usize,
     ) -> Vec<ProcessPhysicalAllocation> {
         self.physical_allocations
-            .for_pid(pid)
-            .filter(|&allocation| self.physical_allocations.count(allocation) == 1)
-            .collect()
+            .releasable(AllocationState::Active, pid)
+    }
+
+    /// Retire only this PID's active references, not a shared-VM owner's records.
+    /// Deferred references must stay counted until their own cleanup completes.
+    pub fn drop_active_physical_allocations_for_pid(&mut self, pid: usize) {
+        self.physical_allocations
+            .remove_pid(AllocationState::Active, pid, |_, _| {});
     }
 
     pub fn drop_physical_allocations_for_pid(&mut self, pid: usize) {
         self.shared_memory.remove(&pid);
-        self.physical_allocations.remove_pid(pid, |_, _| {});
-        self.deferred_physical_allocations
-            .remove_pid(pid, |_, _| {});
+        self.drop_active_physical_allocations_for_pid(pid);
+        self.physical_allocations
+            .remove_pid(AllocationState::Deferred, pid, |_, _| {});
     }
 
     pub fn defer_physical_allocation_for_pid(
@@ -416,7 +439,28 @@ impl ProcessManager {
         allocation: ProcessPhysicalAllocation,
     ) {
         let pid = self.memory_owner_pid(pid);
-        self.deferred_physical_allocations.insert(pid, allocation);
+        self.physical_allocations
+            .insert(AllocationState::Deferred, pid, allocation);
+    }
+
+    /// After all leaves/capabilities are gone, retain RAM ownership until each
+    /// fallible release commits. This is deliberately PID-local, not VM-wide.
+    pub fn defer_all_active_physical_allocations_for_pid(&mut self, pid: usize) {
+        self.physical_allocations.defer_all(pid);
+    }
+
+    /// A deferred allocation still owns its RAM. Move the existing record so
+    /// peers cannot mistake this state transition for their last reference.
+    pub fn defer_active_physical_allocation(
+        &mut self,
+        pid: usize,
+        base_va: usize,
+        page_count: usize,
+    ) -> Result<ProcessPhysicalAllocation, CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
+        self.physical_allocations
+            .defer(pid, base_va, page_count)
+            .ok_or(CapabilityError::InvalidArgument)
     }
 
     pub fn take_deferred_physical_allocation(
@@ -426,28 +470,38 @@ impl ProcessManager {
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
         let pid = self.memory_owner_pid(pid);
-        self.deferred_physical_allocations
-            .take(pid, base_va, page_count)
-            .map(|(allocation, _)| allocation)
+        self.physical_allocations
+            .take_unique_deferred(pid, base_va, page_count)
     }
 
     pub fn releasable_deferred_physical_allocations_for_pid(
         &self,
         pid: usize,
     ) -> Vec<ProcessPhysicalAllocation> {
-        self.deferred_physical_allocations
-            .for_pid(pid)
-            .filter(|&allocation| {
-                self.physical_allocations.count(allocation)
-                    + self.deferred_physical_allocations.count(allocation)
-                    == 1
-            })
-            .collect()
+        self.physical_allocations
+            .releasable(AllocationState::Deferred, pid)
+    }
+
+    pub fn deferred_physical_allocations_for_pid(
+        &self,
+        pid: usize,
+    ) -> impl Iterator<Item = ProcessPhysicalAllocation> + '_ {
+        self.physical_allocations
+            .for_pid(AllocationState::Deferred, pid)
     }
 
     pub fn drop_deferred_physical_allocations_for_pid(&mut self, pid: usize) {
-        self.deferred_physical_allocations
-            .remove_pid(pid, |_, _| {});
+        self.physical_allocations
+            .remove_pid(AllocationState::Deferred, pid, |_, _| {});
+    }
+
+    pub fn retire_deferred_physical_allocations(
+        &mut self,
+        pid: usize,
+        release: impl FnMut(ProcessPhysicalAllocation, bool) -> Result<(), CapabilityError>,
+    ) -> Result<(), CapabilityError> {
+        self.physical_allocations
+            .try_remove_pid(AllocationState::Deferred, pid, release)
     }
 
     pub fn reset_runtime_memory_for_exec(
@@ -473,7 +527,7 @@ impl ProcessManager {
         }
         let mut allocations = Vec::new();
         self.physical_allocations
-            .remove_pid(pid, |allocation, last| {
+            .remove_pid(AllocationState::Active, pid, |allocation, last| {
                 allocations.push((allocation, last));
             });
         Ok(allocations)
@@ -486,7 +540,8 @@ impl ProcessManager {
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
         let pid = self.memory_owner_pid(pid);
-        self.physical_allocations.find(pid, base_va, page_count)
+        self.physical_allocations
+            .find(AllocationState::Active, pid, base_va, page_count)
     }
 
     pub fn release_physical_allocation_reference(
@@ -497,8 +552,59 @@ impl ProcessManager {
     ) -> Result<(ProcessPhysicalAllocation, bool), CapabilityError> {
         let pid = self.memory_owner_pid(pid);
         self.physical_allocations
-            .take(pid, base_va, page_count)
+            .take(AllocationState::Active, pid, base_va, page_count)
             .ok_or(CapabilityError::InvalidArgument)
+    }
+
+    /// Snapshot one-page ownership references for a request-local range walk.
+    /// Mapping release and ELF staging avoid a full search for every page.
+    pub fn physical_pages_in_range(
+        &self,
+        pid: usize,
+        base_va: usize,
+        end_va: usize,
+    ) -> Vec<ProcessPhysicalAllocation> {
+        let pid = self.memory_owner_pid(pid);
+        let mut pages: Vec<_> = self
+            .physical_allocations
+            .for_pid(AllocationState::Active, pid)
+            .filter(|allocation| {
+                allocation.page_count == 1
+                    && allocation.base_va >= base_va
+                    && allocation.base_va < end_va
+                    && (allocation.base_va - base_va) % USER_PAGE_SIZE == 0
+            })
+            .collect();
+        // Stable sorting retains the newest reference at a duplicated VA,
+        // matching find_active_physical_allocation_reference's existing rule.
+        pages.sort_by_key(|allocation| allocation.base_va);
+        pages.dedup_by_key(|allocation| allocation.base_va);
+        pages
+    }
+
+    pub fn private_page_references(
+        &self,
+        pid: usize,
+        start: usize,
+        end: usize,
+    ) -> Vec<PhysicalPageReference> {
+        self.physical_allocations
+            .page_references(self.memory_owner_pid(pid), start, end)
+    }
+
+    pub fn physical_reference_count(&self, allocation: ProcessPhysicalAllocation) -> usize {
+        self.physical_allocations.count(allocation)
+    }
+
+    /// Commit a copied private page without another search or refcount gap.
+    pub fn replace_private_backing(
+        &mut self,
+        reference: PhysicalPageReference,
+        replacement: ProcessPhysicalAllocation,
+    ) -> Result<bool, CapabilityError> {
+        self.physical_allocations
+            .replace_backing(reference, replacement)
+            .ok_or(CapabilityError::Fatal)
     }
 
     pub fn install_process(
@@ -533,6 +639,7 @@ impl ProcessManager {
             platform_information_access: false,
             service_admin: false,
             resource_quarantined: false,
+            capabilities_sealed: false,
             irq_count: 0,
             irq_numbers: [INVALID_IRQ; MAX_IRQS_PER_PROCESS],
             io_range_count: 0,
@@ -601,6 +708,16 @@ impl ProcessManager {
             .entry_mut_by_pid(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         entry.service_admin = allowed;
+        Ok(())
+    }
+
+    pub fn seal_capabilities(&mut self, pid: usize) -> Result<(), CapabilityError> {
+        if pid == 0 {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        self.entry_mut_by_pid(pid)
+            .ok_or(CapabilityError::InvalidArgument)?
+            .capabilities_sealed = true;
         Ok(())
     }
 

@@ -1,6 +1,11 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(legacy_heap)");
     for (variable, default) in [
+        ("NANAMI_AVL_SOURCE", "../../nanami/src/nanami_utils/avl.rs"),
+        (
+            "NANAMI_VM_SPACE_SOURCE",
+            "../../nanami/src/nanami_core/vm_space.rs",
+        ),
         (
             "NANAMI_STATIC_AVL_SOURCE",
             "../../nanami/src/nanami_utils/static_avl.rs",
@@ -12,6 +17,10 @@ fn main() {
         (
             "NANAMI_PROCESS_SOURCE",
             "../../nanami/src/nanami_core/process.rs",
+        ),
+        (
+            "NANAMI_PHYSICAL_ALLOCATOR_SOURCE",
+            "../../nanami/src/nanami_core/physical_allocator.rs",
         ),
         (
             "NANAMI_TIMER_SOURCE",

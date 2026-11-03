@@ -1,5 +1,420 @@
 # Tiny Core desktop performance (2026-10-30)
 
+## Follow-up: grouped permission metadata rejected (2026-11-03)
+
+Eight independent permission Words per tree entry reduce dense host metadata
+44.88% but grow sparse layouts4.42x. Twelve normal four-CPU comparison boots
+all pass: startup -1.93%, stock ls +0.58%, fork-exec +1.29%, Negoto +9.56%,
+ordinary fork -8.34%. Preserve both directions; do not equate a dense allocation
+or favorable sub-workload with a whole-system5% improvement. Restore exact
+production source/ELFs, retaining only three generic regressions and an ignored
+footprint probe. Native1199/ASan124, ARM checking and three restored startup/
+cleanup/reuse sessions pass. Kernel/authority/default runtime stay unchanged.
+[Cycle77](optimization-cycles.md#cycle-77-grouped-permission-metadata-rejected)
+preserves all raw samples, sparse tradeoffs, parser corrections and restoration.
+
+## Follow-up: fork/exec stage diagnosis (2026-11-03)
+
+Fifteen temporary stages distinguish Alpha construction/VM copy from descriptor
+and metadata work:98.74% versus0.57% FD inheritance within captured fork spans;
+exec VM replacement is65.16%, argv/env capture3.34%. These are partial global
+exit-flush elapsed intervals, not CPU shares or whole-startup percentages.
+A second diagnostic replays the same217752 initialization-cache accesses;
+same-capacity4-way removes5.13% of misses, not5% of application time, while a
+larger cache consumes fixed tracker headroom. Do not adopt either speculative
+path without evidence. Installed rootfs identity and complete padded-label
+coverage are verified. Restore exact sources/ELFs, pass native1196/ASan113,
+ARM checking and three normal startup/cleanup/reuse sessions. No Kernel,
+authority or runtime change is retained; optional safe readonly sharing awaits
+the user's capability-policy decision.
+[Cycle76](optimization-cycles.md#cycle-76-separate-forkexec-stages-and-initialization-cache-work)
+keeps all counts, artifact checks, limitations and restoration evidence.
+
+## Follow-up: name-cache index and combined hint rejected (2026-11-03)
+
+Two separate normal twelve-boot comparisons test a same128-slot FIFO cache
+with a512-byte hash index, then that index plus the final error-safe directory
+hint. Stock ls moves -3.70%/-2.56%, startup -2.07%/+3.23%; all adverse process
+controls remain explicit. Reject both, restore exact accepted runtime/tests,
+and pass native1196/ASan62, ARM checking and three actual X11-ready startup/
+cleanup/reuse sessions. An IPC audit confirms that ordinary register-sized
+calls and RAX-only Linux replies are already in place; it is not a new speedup.
+Remove only closed duplicate trial disks and unused generated probe-build
+caches, keeping accepted images, rootfs, sources and evidence.
+[Cycle75](optimization-cycles.md#cycle-75-indexed-name-cache-and-combined-lookup-hint-rejected)
+preserves both full tables and the restoration/cleanup evidence.
+
+## Follow-up: lookup hint rejected (2026-11-03)
+
+A global last-successful-block hint removes about88% of actual ls directory
+record visits, yet normal stock ls improves only2.55%, startup0.86%, and several
+process controls regress. Reject it after12 paired normal boots. Remove all
+probes and restore exact code/tests; native1196/ASan62, ARM checking and three
+restored startup/reuse sessions pass. Name-cache slot scans remain about
+3.3million per ls8; assess that new workload without assuming it is CPU time
+or repeating the older stat/startup-only index experiment unchanged.
+[Cycle74](optimization-cycles.md#cycle-74-last-block-directory-search-rejected)
+keeps all normal timings, contrary counts, tests and restoration evidence.
+
+## Follow-up: configurable metadata locality (2026-11-03)
+
+Keep VFS near POSIX/Alter using the existing x86_64 priority22 CPU2 preference,
+without changing executable bytes, priorities, authority, service boundaries
+or Kernel IPC. Twelve paired normal boots reduce stock ls7.62%, existing
+stat16.54%, missing stat22.56% and small/large enumeration20.59%/23.14%.
+Startup is only2.99% shorter. Native cross-core bulk reads and several process
+controls regress; keep those results and a separate four-boot repeat explicit.
+Native1196/ASan62, two real GUI sessions with Information after restart, and
+one-CPU fallback pass. No single configuration is claimed fastest universally.
+[Cycle73](optimization-cycles.md#cycle-73-retain-configurable-metadata-broker-locality)
+preserves all raw samples, contrary controls and artifact identity.
+
+## Follow-up: count reduction is not a speedup (2026-11-03)
+
+A block-start checkpoint fits existing padding and reduces actual small-buffer
+directory cached loads17280->4224, with identical request counts/results and
+every other diagnostic field unchanged. Yet normal small/large enumeration
+moves+4.27%/+8.35%; reject it. All12 comparison boots pass. Restore exact runtime,
+retaining3general regressions; native1196/ASan53 and three restoration sessions
+pass. Review actual routing/fastpath eligibility before another local-work guess.
+[Cycle72](optimization-cycles.md#cycle-72-block-local-directory-restart-rejected-despite-fewer-reads)
+preserves both the strong work-count result and contrary timing evidence.
+
+## Follow-up: separate hot-stat and real-ls work (2026-11-03)
+
+Existing sync requests delimit 17 diagnostic counter windows without a new
+protocol. Warm stat512 copies no filesystem block and makes no device read;
+warm stock ls8 still examines904k lookup records. Small-buffer64 scans load
+17280 cached blocks versus1216 for the same large-buffer enumeration. Source
+review finds that the required read-ahead rollback misses Ext2's exact-cursor
+reuse condition; preserve that rollback and investigate safe per-block resume.
+Investigate actual ls name-search repetition separately, not as a promised
+whole-system gain. Every temporary probe is removed byte-for-byte; native1193,
+ASan41 and three normal startup/cleanup/reuse sessions pass. No Kernel change.
+[Cycle 71](optimization-cycles.md#cycle-71-phase-separated-filesystem-work-diagnostic)
+preserves all counts, source-based inferences, limits and the next candidates.
+
+## Follow-up: reject borrowed cached-block inspection (2026-11-03)
+
+An allocation-free candidate inspects cached Ext2 inode/directory bytes through
+scoped immutable callbacks instead of staging a full block on every read.
+All 12 normal comparisons pass, but stock BusyBox ls gains only 2.20% while
+large enumeration and startup move +5.90%/+4.27%. Preserve stat -6.42% too;
+that favorable row alone does not justify adoption. Restore all candidate
+production/test files exactly; native 1,193 / ASan 41 and three normal startup/
+cleanup/reuse sessions pass after restoration.
+No new runtime change, cache, protocol or Kernel change remains.
+[Cycle 70](optimization-cycles.md#cycle-70-borrowed-cached-block-inspection-rejected)
+records all source proofs, tests, samples and adverse controls.
+
+## Follow-up: reject readdir cache prefill (2026-11-03)
+
+Normal reversed-order runs show that populating the existing cache on every
+returned directory entry slows small/large enumeration 19.52%/74.13%, despite
+a 2.77% stock BusyBox ls gain. Reject this policy and restore exact accepted
+runtime bytes, preserving cycle 68's large-buffer batching. Retain only a
+baseline-compatible unlink/recreate/rename cache-freshness regression.
+All 12 comparison boots, restored native 1,193 / ASan 14 and three normal
+startup/cleanup/reuse sessions pass. The first profile exit window contains
+earlier enumeration work; only the later 23 windows establish 472 lstat and
+six getdents calls per ls. Counter spans are not exclusive CPU measurements.
+[Cycle 69](optimization-cycles.md#cycle-69-readdir-driven-dentry-prefill-rejected)
+preserves all samples, negative results, hashes and restoration evidence.
+
+## Follow-up: directory enumeration batches (2026-11-03)
+
+Alter's real getdents64 path previously returned at most 512 bytes and read at
+most 16 backing records, even for a 32-KiB guest buffer. Pack forward within
+the existing shared buffer instead: Linux records are at most 280 bytes versus
+288-byte VFS records, and the 512-byte initial gap protects the current/unread
+source. Compile-time assertions enforce those bounds. Larger batches reserve
+worst-case output space; small-buffer batching, cookies, root shadowing and
+copyout-failure rollback remain intact. No new allocation, cache or protocol.
+
+Normal reversed-order comparisons enumerate the same 474 /usr/local/lib
+entries and checksum. Sixty-four large-buffer scans fall 552.585 -> 105.824ms
+(-80.85%); getdents calls fall 2,560 -> 384. Small-buffer scans are +1.66%,
+unmodified Tiny Core BusyBox ls -4.01%, startup -0.60%. Only the large-buffer
+enumeration target establishes a 5% gain. Preserve all process/native controls
+and raw samples rather than calling this a whole-system 81% improvement.
+Native 1,193 / 16 ignored, ASan 14, ARM checking, 12 comparison boots and two
+actual GUI/restart sessions pass; Kernel and Alpha are unchanged.
+[Cycle 68](optimization-cycles.md#cycle-68-capacity-aware-linux-directory-enumeration)
+records the source proof, new frozen fixture, hashes and complete results.
+
+## Follow-up: directional UNIX readiness (2026-11-03)
+
+Retain separate internal data/capacity notifications and the existing general
+UNIX state-change notification. Poll/select interests and armed epoll watches
+subscribe to their requested direction plus general changes; zero-event waits
+still receive HUP/error/invalid-FD state changes. Receive-side capacity release
+is never suppressed just because POLLOUT was already set. Sending into an
+already-readable packet queue needs no extra read notification.
+
+Matched, same-Kernel/Alpha startup diagnostics observe scans 4,409 -> 2,449,
+unready scans 3,600 -> 1,632 and ready scans 809 -> 817. This is not a 44% CPU
+or startup gain. Normal reversed-order startup changes -1.97%; socket/process
+controls vary and all samples, including slow ones, are retained. The 5% speed
+target remains unproven. Native 1,188 tests, 86 ASan tests, ARM checking,
+24 comparison boots across both candidates and a real two-session GUI check
+pass. Temporary instrumentation is removed and normal hashes restored.
+[Cycle 66](optimization-cycles.md#cycle-66-directional-unix-readiness-work-reduction-retained)
+preserves full results, the narrower acceptance rationale and disk cleanup.
+
+## Follow-up: actual readiness wakeups (2026-11-02)
+
+Two separate diagnostic runs each complete three actual X11-ready startup/
+cleanup/reuse sessions. The first records 4,437 scans, all poll/pselect and no
+parked read/write retries. A provider breakdown in the second records 2,709
+UNIX-only wakeups of 4,056 total. UNIX-only interest sets account for 4,019
+scans but only 602 ready results. This is not exclusive CPU or startup speed
+attribution. Do not add a direct-I/O path that this workload does not exercise.
+Instead audit redundant send notifications when the peer packet queue is
+already readable; retain receive-side capacity/rights-release notifications.
+Both temporary probes are removed byte-for-byte, normal ELFs/rootfs restored,
+and 1,180 native tests, 97 ASan tests and three more normal startup/reuse
+sessions pass. No production optimization or 5% gain is claimed in this
+diagnostic cycle. [Cycle 65](optimization-cycles.md#cycle-65-readiness-wakeup-and-provider-diagnostic)
+preserves counts, artifacts, applicability limits and the next candidate.
+
+## Follow-up: readiness stop checks and state copying (2026-11-02)
+
+An allocation-free candidate replaces repeated PID lookup with the already
+borrowed task's stop flag and publishes only the PTY deadline before a readiness
+scan. Optimized x86_64 code removes the lookup and a 616-byte copy. All semantic
+checks pass, but this alone is not desktop speed evidence: a short awake ABBA
+comparison gives UNIX write/read +3.75% and recvmsg -0.41%, with substantial
+movement in unchanged controls. Reject the runtime candidate, preserve all
+measurements and restore exact cycle62 binaries/rootfs. Retain four general
+stop/continue/deadline tests; 1,180 native tests, 69 ASan tests and three restored
+startup/reuse sessions pass. The earlier twelve-boot batch overlaps host sleep and
+is functional evidence only. Details and the next unimplemented retry-path
+lead are in [Cycle 64](optimization-cycles.md#cycle-64-borrowed-stop-checks-and-readiness-writeback-rejected).
+
+## Follow-up: UNIX payload allocation experiment (2026-11-02)
+
+A one-spare/4KiB-capacity candidate removes all256 payload allocations in a
+native warm round-trip fixture without removing required ownership copies.
+Do not count that as measured desktop speed. The first normal comparison
+overlaps verified macOS sleep and is preserved but not used for speed claims.
+Fresh awake ABBA UNIX runs give write/read -3.33% and recvmsg +0.09%, below a
+convincing 5% gain; unchanged EOF also moves. Reject the runtime cache/budget,
+restore exact cycle62 binaries/rootfs and retain two general semantic tests.
+Native1,176/ASan28 and three restored startup/reuse sessions pass. All raw
+samples, power-event evidence, candidate artifacts and limits are in
+[Cycle 63](optimization-cycles.md#cycle-63-bounded-unix-payload-reuse-rejected).
+
+## Follow-up: Alpha bootstrap mapping readiness (2026-11-02)
+
+Retain eight completed table regions rather than only the last in Alpha's
+allocation-free bootstrap tracker (+64 bytes). Guest trackers are unchanged.
+A separate diagnostic predicts many fewer repeated depth checks; normal
+benchmarks, not that model, justify adoption for native suspended construction/
+reap: 27.391 -> 25.207ms (-7.97%), with all three candidate boot medians below
+all baseline medians. Full BusyBox/Xfe input/construction/cleanup also improve
+in aggregate, but those workloads never execute the Linux ELFs. No desktop
+startup gain is established. Ordinary fork +4.25%, UNIX write/read +4.20% and
+one slow recvmsg boot are retained, not hidden behind the favorable results.
+Eighteen comparison boots, native1,174/ASan55, ARM compile, two-session real GUI
+and one-core process checks pass. Kernel is untouched. Full data and scope are
+in [Cycle 62](optimization-cycles.md#cycle-62-bounded-bootstrap-page-table-readiness-history).
+
+## Follow-up: file-mmap work attribution (2026-11-02)
+
+A temporary opt-in probe covers three complete startup/cleanup/reuse sessions.
+Snapshot hits serve 1,624 of 1,783 file-source requests; 135 more load a whole-file
+snapshot, and only 24 bypass for files above the 2-MiB ceiling. Streaming copies
+just 4,944 bytes through the partial-page tail. This does not justify a region
+cache or unsafe tail storage. Most measured initialization elapsed ticks belong
+to snapshot-backed requests, including service waits: not exclusive CPU or a
+normal-build speedup. All probes are removed; exact normal executable/rootfs/
+image hashes, native 1,170 / ASan 33 and three further startup/reuse sessions
+pass. Full counts and attribution boundaries are in
+[Cycle 61](optimization-cycles.md#cycle-61-file-mmap-source-and-initialization-diagnostic).
+
+## Follow-up: namespace reply placement (2026-11-02)
+
+Receiving at SHM offset zero and viewing the metadata/path prefix in place
+removes two real memmove sites without a new RPC or Kernel change. But twelve
+balanced normal QEMU boots give stat -0.74%, missing stat +0.63%, startup +0.28%
+and BusyBox input/construction/cleanup +4.96%. Reject the runtime change rather
+than count copy elimination as a verified startup gain. Restore exact normal
+ELFs/rootfs and retain three independent namespace-wire regressions; native
+1,170 / ASan 15 and three startup/reuse sessions pass. The rootfs comparison
+checks all 3,890 paths, not merely newly built binary names.
+[Cycle 60](optimization-cycles.md#cycle-60-direct-namespace-reply-placement-rejected)
+preserves full measurements, codegen, disk recovery and the next mmap-work lead.
+
+## Follow-up: request-scoped inode-kind reuse (2026-11-02)
+
+Two read-only ext2 walk candidates reduce repeated inode checks without
+cross-request state. The seeded version keeps the fresh root guard and reduces
+guard-plus-three-component work from seven reads to four, with 16 stack bytes.
+Native 1,173 / ASan 54 / ARM compile pass, but balanced normal QEMU gives only
+stat -2.18%, missing stat -0.23% and startup +0.02%. Reject both candidates,
+restore exact cycle57 runtime and validate three more startup/reuse sessions.
+No new adapter/cache/test target or Kernel change remains. All observations,
+including shifted UNIX controls, and the next result-buffer copy lead are in
+[Cycle 59](optimization-cycles.md#cycle-59-request-scoped-inode-kind-reuse-rejected).
+
+## Follow-up: bounded namespace-root hints (2026-11-02)
+
+A four-entry ext2 root-binding cache passes mutation/SHM/error regressions and
+hits 72.17% of a separately instrumented startup prefix. Balanced normal QEMU
+comparisons still give only stat -3.31%, missing stat -2.50% and startup +1.06%
+(within polling/session variation). Reject it: no persistent root hints or
+extra invalidation work is retained. Exact cycle57 runtime is restored, with
+1,167 native/48 focused ASan tests and three startup/cleanup/reuse sessions
+passing. Kernel is unchanged. Full candidate, all samples and the next
+request-scoped inode-reuse lead are recorded in
+[Cycle 58](optimization-cycles.md#cycle-58-bounded-namespace-root-binding-hints-rejected).
+
+## Follow-up: configurable compatibility-broker locality (2026-11-02)
+
+Keep Alter's existing CPU and group priority21 compatibility/session brokers
+through `@placement 21 2`. No built-in image names, extra RPC or Kernel change.
+Exact affinity wins; unavailable CPUs preserve automatic placement, including
+the normal round-robin sequence. Leave VFS near AHCI: grouping priority22 as
+well regresses large-ELF input and is rejected.
+
+The final changed/normal/normal/changed QEMU trials give stat -12.89%, missing
+stat -15.04% and startup 5201.9090 -> 4991.4025ms (-4.05%). Getpid/getuid are
++0.47%/+0.26%; Xfe input/construction/reap is -1.12%. All samples, contrary
+substages and the rejected wider configuration remain in
+[Cycle 57](optimization-cycles.md#cycle-57-configurable-broker-locality-without-kernel-changes).
+Native1167/ASan149, ARM compile, one-CPU process and two-session GUI checks
+pass. This is not a whole-system/hardware 5% claim; the goal remains active.
+
+## Follow-up: broker and guest placement tradeoffs (2026-11-02)
+
+An Alpha-only placement probe keeps Linux guests, Honoka and drivers on their
+original CPUs while co-locating synchronous brokers. Balanced QEMU trials give
+startup 5132.5355 -> 4393.7045ms (-14.40%), stat -37.32% and recvmsg -32.81%,
+without any Kernel change. But separate controls show getpid/getuid about
+2.8 times slower after separating the main guest from Alter. Do not adopt this
+configuration as an overall win or retain its temporary role-selection rules.
+Next isolate guest/supervisor placement, keeping fork/thread parallelism under
+test. [Cycle 56](optimization-cycles.md#cycle-56-isolate-ipc-locality-without-changing-kernel)
+records favorable and contrary observations and the unchanged placement controls.
+
+## Follow-up: measured stat stages and owner lookup (2026-11-02)
+
+Separate local-counter probes show where stat waits and checked-copy work occur;
+the actor intervals include nested waits and must not be summed as CPU costs.
+Generated-code review already finds no whole ProcessEntry copy in the relevant
+hot paths. A smaller borrowed-owner candidate gives stat -0.21%, missing stat
++2.84%, ordinary fork -10.20% and actual startup +2.10% (one polling step).
+Reject it, retain one semantic regression and restore exact normal runtime.
+Native 1162 and focused ASan 140 pass. The existing Kernel direct Reply-Receive
+branch requires same-core affinity, unlike the currently spread Alpha/Alter/
+POSIX/ext2 placement; investigate that policy without changing Kernel.
+[Cycle 55](optimization-cycles.md#cycle-55-stat-latency-attribution-and-borrowed-owner-lookup-rejected)
+keeps complete measurements, codegen corrections and restoration checks.
+
+## Follow-up: name-cache index evaluation (2026-11-02)
+
+Real ext2 startup lookup counts average 46.74 visited cache slots at a 96.08%
+hit rate. A 512-byte fixed-slot index preserves the existing 128-entry FIFO
+cache, including negative entries and invalidation, but matched actual timings
+are mixed: ordinary stat -1.82%, missing stat +2.30%, startup +0.03%. Reject the
+runtime/test-module candidate and restore exact normal binaries. All twelve
+comparison boots and three further restored startup/reuse sessions pass.
+[Cycle 54](optimization-cycles.md#cycle-54-fixed-slot-indexed-dentry-lookup-rejected)
+records methods, all observations, oracle/collision tests and disk recovery.
+
+## Follow-up: path-walk allocation experiment (2026-11-02)
+
+Ext2 request-local scratch reuse and exact output reservation reduce a fixed
+deep-path host probe from 151 to 80 allocation calls. They do not improve real
+Tiny Core stat/startup: matched normal-image medians are +3.22% / -0.05%.
+Reject the runtime candidate, preserve its evidence and retain only namespace
+semantic tests. The restored normal image completes three additional startup,
+cleanup and same-ID reuse sessions; Kernel remains unchanged.
+[Cycle 53](optimization-cycles.md#cycle-53-request-local-path-walk-buffer-reuse-rejected)
+includes all host observations, contrary controls and full comparison results.
+
+## Follow-up: isolated fork controls (2026-11-02)
+
+Keep Kernel unchanged, as explicitly requested. Four diagnostic boots hold Alter
+fixed while pinning old/new Alpha, then four normal boots hold Alpha and other
+services fixed while replacing only Alter. Ordinary fork does not consistently
+reproduce the earlier penalty; normal Alter-only results are -1.58% for fork
+and +0.37% for fork/exec, with mixed fragmented-fork controls. No new runtime
+optimization or overall 5% claim follows. Original observations remain recorded,
+and all temporary probes/build overrides are removed. Full methods, raw sample
+references and restoration checks are in
+[Cycle 52](optimization-cycles.md#cycle-52-isolate-fork-controls-without-kernel-changes).
+
+## Follow-up: ordered checked-copy vectors (2026-11-02)
+
+The recvmsg output name length, control length and flags now use one ordered
+Alpha request instead of two copy requests with a combined tail/fallback. Each
+field still has whole-range permission preflight, input fields/padding are
+untouched, and a failed later field keeps prior output but not queue consumption
+or newly installed rights. The additive generic protocol is documented in
+[message.md](../../nanami/doc/message.md#161-alpha-vm操作); it is not a Kernel API.
+
+Four balanced normal-image trials give write/recvmsg 836.7795 -> 739.9225ms
+(-11.57%) and EOF recvmsg 524.1200 -> 425.1995ms (-18.87%), six samples per side.
+Plain read/write is +0.26%; startup is +0.34%, below the readiness polling step.
+Process controls are also measured and extended in reverse order because
+ordinary fork initially becomes slower. That issue remains open; do not call
+this a whole-system 5% gain or assert fork equivalence from GUI success.
+[Cycle 51](optimization-cycles.md#cycle-51-ordered-checked-memory-transfer-vectors)
+retains all raw initial/extension samples, constructor controls and GUI evidence.
+
+## Follow-up: UNIX dispatch ordering evaluation (2026-11-02)
+
+Cycle 49 tests a user-level-only decoder that avoids consulting FD state for
+unrelated syscalls. Four matched normal-image trials in both orders show
+getpid/getuid about 1% slower, socket loops essentially unchanged, and startup
+4990.2905 -> 4988.7025ms (-0.03%). Fragmented-fork medians are about 5% higher,
+while unchanged native-constructor controls also vary. A lower operation count
+is not established whole-workload improvement. Reject the candidate and restore
+cycle48's exact Linux/FreeBSD binaries; preserve general routing/FD-reuse tests.
+See [cycle 49](optimization-cycles.md#cycle-49-classify-unix-requests-before-descriptor-lookup-rejected)
+for all scoped results and restoration evidence. No Kernel or IPC changes.
+
+## Follow-up: request-local UNIX I/O descriptions (2026-11-02)
+
+Cycle 48 decodes the bounded iovec/header description directly in its only
+consumer, avoiding a large by-value Result and its two generated copies.
+The iovec limit, input snapshot/error order, packet commit and ancillary-FD
+semantics are unchanged. No Kernel, Alpha or IPC fastpath code changes.
+
+Four sequential normal-image boots in before/after/after/before order use the
+same cycle47 observer, Linux fixtures and Tiny Core overlay. Six observations
+per side give plain UNIX read/write 376.375 -> 370.3735ms (-1.59%), write/recvmsg
+840.7195 -> 844.9865ms (+0.51%), and EOF recvmsg 522.8855 -> 523.5575ms (+0.13%).
+Startup is separately 5039.3785 -> 4984.5315ms (-1.09%), below the 100ms
+readiness observation interval. These results do not establish a 5% speedup,
+nor a clear recvmsg/startup improvement. Retain the smaller copy/storage path
+as a cleanup; do not add cycle47's earlier gains to this comparison.
+See [cycle 48](optimization-cycles.md#cycle-48-decode-unix-io-descriptions-in-place)
+for raw samples, generated-code evidence and regression checks.
+
+## Follow-up: UNIX recvmsg result copies (2026-11-02)
+
+UNIX recvmsg writes its control length and flags together, without overwriting
+input pointers or padding. A failed combined copy falls back to the original
+whole-u64, then u32 stores, keeping partial-error and queued-FD behavior. No
+Kernel, IPC fastpath, permission cache or service protocol is changed.
+
+The expanded `desktop-performance.c` uses the same integer-only Linux ELF in
+both images. It validates actual protected-page failures before timing three
+samples each of send/recvmsg and EOF loops, alongside unchanged stat and plain
+socket controls. The corrected runner waits for the report footer before
+terminating QEMU. An earlier truncated report is retained but excluded in full,
+not treated as zero/fast work. In the balanced, corrected-runner comparison,
+send/recvmsg is 972.0285 -> 844.0535ms (-13.17%) and EOF receive is
+647.4445 -> 522.881ms (-19.24%). Plain read/write changes -0.72%.
+
+Whole desktop startup is measured separately: 4997.8545 -> 5038.069ms (+0.80%),
+below the 100ms readiness-observation interval, not an established improvement.
+Do not equate the fixed socket loops with desktop FPS or exclusive IPC cost.
+Full samples, the incomplete-report diagnosis and final GUI acceptance are
+recorded in [cycle 47](optimization-cycles.md#cycle-47-coalesce-adjacent-unix-recvmsg-result-fields).
+
 ## Follow-up: eliminate fork reload and private-mmap double fill (2026-10-31)
 
 Alter fork now requests a suspended private VM snapshot from Alpha
@@ -187,7 +602,7 @@ claim about capability-reclamation speed.
 
 The former ELF cache retained only its first two pathnames forever. Exec and
 PT_INTERP loads did not use it, and pathname reuse could return obsolete bytes.
-Alter now uses eight LRU content snapshots, at most 2 MiB each, with optional
+That change introduced eight LRU content snapshots, at most 2 MiB each, with optional
 parsed ELF metadata. Every use first validates the opened file's inode/content
 token and size through POSIX/VFS. This works across hardlinks, and avoids stale
 hits after same-size writes, truncate, replacement, or token-table eviction.
@@ -204,6 +619,13 @@ Buffers grow geometrically up to 2 MiB: active cache backing is at most 16 MiB,
 and its accumulated retired growth plus active backing stays below 32 MiB
 (excluding transient allocations and the existing uncached large-image buffers).
 Failed reads invalidate content identity but retain buffer ownership for reuse.
+The 2026-11-01 cycle-31 follow-up uses 48 small-file slots within the same
+16-MiB data budget and explicitly protects a main ELF during PT_INTERP loading.
+Its eight-boot normal-device startup comparison observes a 4.3% pooled median
+reduction, below the 5% cycle target; no broader application-throughput claim
+is made. See [cycle 31](optimization-cycles.md#cycle-31-bounded-small-file-snapshot-working-set)
+for all samples, the slower 6.32-second observation and the admission/lifetime
+regressions.
 
 Alpha's single-page allocation path no longer allocates two temporary Vecs per
 ELF/stack page. A fixed 1,024-slot initialization window caches Alpha's own RAM
@@ -329,6 +751,14 @@ python3 tests/negoto/qemu-smoke.py \
 
 ## Follow-up: capture batching and pointer drift (2026-10-31)
 
+The following table is historical. The current `--tinycore-perf` capture
+baseline is frozen at the already-accepted 2026-11-01 implementation in
+`fbdev-capture-baseline.rs`, with four balanced-order samples and independent
+expected damage areas. It no longer compares against the pre-batching loop
+used in this table. See [cycle 28](optimization-cycles.md#cycle-28-real-desktop-capture-profiling-and-a-rejected-row-major-candidate)
+for the later real-desktop diagnostics, controlled regression and restored
+same-algorithm control. These fixtures do not report whole-desktop FPS.
+
 Honoka compares eight sampled pixels per aligned group, combining differences
 before deciding whether to update the capture. Alignment is checked once per
 tile row, not once per pair. Odd alignment, padding and tail pixels retain a
@@ -336,7 +766,7 @@ bounded scalar path. All comparisons remain exact, and drawing still uses the
 same captured values; the source is never reread after comparison. There is no
 new FPU/Kernel support, reduced refresh rate or skipped input sample.
 
-The integration probe's `--tinycore-perf` mode runs the production capture and
+At that stage, the integration probe's `--tinycore-perf` mode ran the production capture and
 a test-only snapshot of the previous loop in the same x86_64 QEMU/TCG VM.
 Three samples per workload, 800x600, 120 frames, four vCPUs:
 

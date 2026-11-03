@@ -1,14 +1,23 @@
 mod boot;
+mod capability_sealing;
 #[cfg(target_arch = "x86_64")]
 mod boot_trace;
+mod checked_memory;
 mod control_requests;
 mod domain_manifest;
 mod domains;
+mod exec_profile;
 mod mapping_protection;
+mod mapping_release;
+mod memory_clone;
 mod memory_copy;
 mod memory_init;
 mod memory_pages;
+mod memory_private;
+mod memory_exec;
 mod memory_requests;
+mod memory_retirement;
+mod memory_staging;
 mod mmio;
 mod process_policy;
 mod process_requests;
@@ -75,6 +84,7 @@ const ORIGINAL_OS_PORT_SLOT: usize = 64;
 const SERVICE_DIRECTORY_SLOT: usize = 65;
 const EVENT_DIRECTORY_SLOT: usize = 66;
 const NOTIFICATION_COPY_TEMP_SLOT: usize = 67;
+const SEALED_CAPABILITY_ROOT_SLOT: usize = 68;
 const SERVICE_DIRECTORY_RADIX: usize = 8;
 const PROCESS_ROOT_RADIX: usize = 8;
 const PROCESS_SLOT_PCB: usize = 1;
@@ -105,9 +115,9 @@ const USER_HEAP_LIMIT: usize = 0x7000_0000;
 const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
 const PROCESS_COPY_TEMP_WINDOW_SIZE: usize = 0x0100_0000;
 const PROCESS_ZERO_TEMP_BASE: usize = PROCESS_COPY_TEMP_BASE + PROCESS_COPY_TEMP_WINDOW_SIZE;
-// The copy window below is also the largest image that can be staged at once.
-// Keep the static backing buffer at that effective limit: making it larger only
-// inflates Nanami's BSS (and can make the init ELF exceed A9N's load capacity).
+// Input reads now stream through the process-copy mapping cache.
+// Preserve the legacy input-size limit without enlarging this static buffer:
+// extra backing inflates BSS and can exceed A9N's init-image load capacity.
 const PROCESS_SPAWN_MEMORY_MAX_BYTES: usize = PROCESS_COPY_TEMP_WINDOW_SIZE;
 static mut PROCESS_MEMORY_IMAGE_BUFFER: [u8; PROCESS_SPAWN_MEMORY_MAX_BYTES] =
     [0; PROCESS_SPAWN_MEMORY_MAX_BYTES];
@@ -190,6 +200,7 @@ pub struct Alpha {
     managed_buffers: crate::nanami_core::communication::buffers::Buffers,
     managed_events: crate::nanami_core::communication::events::Events,
     event_directory_ready: bool,
+    sealed_capability_root: Option<CapabilityDescriptor>,
 }
 
 enum FaultDisposition {
@@ -355,6 +366,7 @@ impl Alpha {
             managed_buffers: crate::nanami_core::communication::buffers::Buffers::new(),
             managed_events: crate::nanami_core::communication::events::Events::new(),
             event_directory_ready: false,
+            sealed_capability_root: None,
         })
     }
 
@@ -393,7 +405,9 @@ impl Alpha {
                     .unwrap_or("")
                     .split_whitespace()
                     .next()
-                    .is_some_and(|directive| matches!(directive, "@process" | "@import"))
+                    .is_some_and(|directive| {
+                        matches!(directive, "@process" | "@placement" | "@import")
+                    })
                 {
                     continue;
                 }
@@ -719,6 +733,12 @@ impl Alpha {
             nanami_uapi::os::OS_REQUEST_PROCESS_FORK => {
                 response_from_detail_result(self.handle_raw_task_create(request, false))
             }
+            nanami_uapi::os::OS_REQUEST_PROCESS_SEAL_CAPABILITIES => {
+                response_from_status_result(self.handle_process_seal_capabilities(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_PRIVATE_WRITE => {
+                response_from_detail_result(self.handle_process_private_write(request))
+            }
             OS_REQUEST_PROCESS_SPAWN_MEMORY => {
                 response_from_detail_result(self.handle_process_spawn_memory_request(request))
             }
@@ -756,6 +776,12 @@ impl Alpha {
             OS_REQUEST_PROCESS_MEMORY_WRITE => {
                 response_from_status_result(self.handle_process_memory_copy_request(request, true))
             }
+            nanami_uapi::os::OS_REQUEST_PROCESS_MEMORY_READ_VECTOR => response_from_status_result(
+                self.handle_process_memory_vector_request(request, false),
+            ),
+            nanami_uapi::os::OS_REQUEST_PROCESS_MEMORY_WRITE_VECTOR => response_from_status_result(
+                self.handle_process_memory_vector_request(request, true),
+            ),
             OS_REQUEST_PROCESS_MEMORY_CLONE => {
                 response_from_status_result(self.handle_process_memory_clone_request(request))
             }

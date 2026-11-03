@@ -234,3 +234,79 @@ fn zero_capacity_and_invalid_output_range_do_not_advance_the_cursor() {
     );
     compare(&mut actual, &mut expected, inode, 0, next, 3);
 }
+
+fn live_before(raw_entry: usize) -> usize {
+    (0..raw_entry).filter(|number| number % 7 != 3).count()
+}
+
+#[test]
+fn backward_seeks_revalidate_after_mutation_and_handle_reuse() {
+    let (mut actual, inode) = fixture(1024);
+    let (mut expected, _) = fixture(1024);
+    let first = live_before(64 * 8);
+    compare(&mut actual, &mut expected, inode, 0, first, 5);
+    compare(&mut actual, &mut expected, inode, 0, 4, 3);
+    compare(&mut actual, &mut expected, inode, 0, first, 5);
+    actual.disk[1][..4].fill(0);
+    expected.disk[1][..4].fill(0);
+    directory::invalidate(&mut actual);
+    let reads = actual.reads;
+    compare(&mut actual, &mut expected, inode, 0, first + 2, 2);
+    assert!(
+        actual.reads - reads > 1,
+        "a generation change invalidates the prefix count"
+    );
+    actual.handles[0].inode = 9;
+    let reads = actual.reads;
+    compare(&mut actual, &mut expected, inode, 0, first + 3, 2);
+    assert!(
+        actual.reads - reads > 1,
+        "a reused handle must not reuse another inode's checkpoint"
+    );
+}
+
+#[test]
+fn failed_backward_seek_read_preserves_the_stream() {
+    let (mut actual, inode) = fixture(1024);
+    let (mut expected, _) = fixture(1024);
+    let first = live_before(64 * 8);
+    compare(&mut actual, &mut expected, inode, 0, first, 5);
+    let mut bytes = [0xa5u8; 2 * vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES];
+    let session = ClientSession {
+        shm_local: bytes.as_mut_ptr() as Word,
+        shm_size: bytes.len(),
+    };
+    actual.fail_read = Some(65);
+    assert_eq!(
+        directory::read_directory(&mut actual, session, inode, first + 2, 2, 0, 0),
+        Err(OS_RESPONSE_INVALID_DESCRIPTOR)
+    );
+    assert!(bytes.iter().all(|&byte| byte == 0xa5));
+    actual.fail_read = None;
+    compare(&mut actual, &mut expected, inode, 0, first + 3, 2);
+}
+
+#[test]
+fn mixed_seeks_rollbacks_deleted_entries_and_generations_match_the_full_scan_oracle() {
+    let (mut actual, inode) = fixture(192);
+    let (mut expected, _) = fixture(192);
+    let mut seed = 0x12345678u32;
+    for step in 0..2048 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let handle = step % MAX_HANDLES;
+        let start = if step % 97 == 0 {
+            usize::MAX
+        } else {
+            (seed as usize >> 8) % 200
+        };
+        let limit = seed as usize % 17;
+        if step % 113 == 0 {
+            let inode = if step % 226 == 0 { 0u32 } else { 1u32 };
+            actual.disk[1][..4].copy_from_slice(&inode.to_le_bytes());
+            expected.disk[1][..4].copy_from_slice(&inode.to_le_bytes());
+            directory::invalidate(&mut actual);
+            actual.handles[handle].inode = 7 + step as u32;
+        }
+        compare(&mut actual, &mut expected, inode, handle, start, limit);
+    }
+}

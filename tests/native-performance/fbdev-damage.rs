@@ -23,6 +23,8 @@ use framebuffer::Rect;
 mod damage;
 #[path = "fbdev-reference.rs"]
 mod reference;
+#[path = "fbdev-capture-baseline.rs"]
+mod baseline;
 
 fn capture(
     source: &[u32],
@@ -186,4 +188,51 @@ fn benchmark_idle_and_sparse_fbdev_capture() {
         pixels,
         600 * 800 * 600
     );
+}
+
+#[test]
+fn capture_preserves_damage_order_and_bytes_on_wide_surfaces() {
+    for width in [0, 1, 31, 32, 33, 1023, 1024, 1025, 2049] {
+        for offset in 0..2 {
+            let height = 33;
+            let stride = width + 3;
+            let mut source = vec![0u32; stride * height + 8];
+            let mut expected = source.clone();
+            let mut actual = source.clone();
+            for frame in 0..12 {
+                for row in 0..height {
+                    for column in 0..width {
+                        if (column / 32 + row / 16 + frame) % 3 == 0 {
+                            source[offset + row * stride + column] ^= 0x89ab_cdef;
+                        }
+                    }
+                }
+                let mut before = Vec::new();
+                let mut after = Vec::new();
+                unsafe {
+                    baseline::capture(
+                        source.as_ptr().add(offset) as usize,
+                        expected.as_mut_ptr().add(offset) as usize,
+                        stride,
+                        width,
+                        height,
+                        |rect| before.push(rect),
+                    );
+                    damage::capture(
+                        source.as_ptr().add(offset) as usize,
+                        actual.as_mut_ptr().add(offset) as usize,
+                        stride,
+                        width,
+                        height,
+                        |rect| after.push(rect),
+                    );
+                }
+                assert_eq!(
+                    actual, expected,
+                    "width={width} offset={offset} frame={frame}"
+                );
+                assert_eq!(after, before, "width={width} offset={offset} frame={frame}");
+            }
+        }
+    }
 }

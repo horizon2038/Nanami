@@ -1,3 +1,4 @@
+use super::framebuffer_info::{write_fb_fix_screeninfo, write_fb_var_screeninfo};
 use super::{
     align_up_word, arm_clock_timer, honoka, map_request_error, refresh_clock, write_target_memory,
     LinuxFile, Runtime, Word, EACCES, EBADF, EFAULT, EINVAL, EIO, ENODEV, ENOMEM, ENOTTY,
@@ -5,7 +6,6 @@ use super::{
     LINUX_FBIOPAN_DISPLAY, LINUX_FBIOPUT_VSCREENINFO, LINUX_FB_FIX_SCREENINFO_BYTES,
     LINUX_FB_VAR_SCREENINFO_BYTES, LINUX_PAGE_SIZE, LINUX_PROT_READ, LINUX_PROT_WRITE,
 };
-use super::framebuffer_info::{write_fb_fix_screeninfo, write_fb_var_screeninfo};
 use crate::common::framebuffer_size::FramebufferSize;
 
 pub(super) fn sys_framebuffer_read(
@@ -169,7 +169,8 @@ pub(super) fn present_graphics_session(
 }
 
 pub(super) fn notify_graphics_session(session: crate::state::GraphicsSession) -> Result<(), i32> {
-    nanami_runtime::ipc::notification_notify(session.present_notification).map_err(map_request_error)
+    nanami_runtime::ipc::notification_notify(session.present_notification)
+        .map_err(map_request_error)
 }
 
 pub(super) fn present_mapped_framebuffers(runtime: &Runtime) {
@@ -188,7 +189,10 @@ pub(super) fn sys_framebuffer_ioctl(
     argument: Word,
 ) -> Result<Word, i32> {
     let session = graphics_session(runtime, file.resource)?;
-    let size = FramebufferSize { width: session.width, height: session.height };
+    let size = FramebufferSize {
+        width: session.width,
+        height: session.height,
+    };
     match request {
         LINUX_FBIOGET_FSCREENINFO => {
             if argument == 0 {

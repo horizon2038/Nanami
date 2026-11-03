@@ -32,6 +32,10 @@ pub(super) struct CapabilityDirectory {
 }
 
 impl CapabilityDirectory {
+    pub(super) fn contains_descriptor(&self, descriptor: CapabilityDescriptor) -> bool {
+        crate::nanami_utils::descriptor::is_within_node_namespace(descriptor, self.spine[0])
+    }
+
     pub fn new(root: CapabilityDescriptor) -> Self {
         Self {
             spine: [root, 0, 0, 0],

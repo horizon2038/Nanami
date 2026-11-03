@@ -1,5 +1,46 @@
 # Alter/Linux dynamic-loader regression
 
+## Read-only private fork sharing
+
+`fork-readonly.c` tests a two-MiB private read-only mapping through fork,
+PROT_NONE restoration, child write upgrades and a descendant fork. Parent
+contents must remain unchanged. It also detaches with a shared-VM peer parked
+in read and another peer running without syscalls; the parked read must complete
+exactly once, only after data is written. Build with `signals-x86_64.S` and
+`capability-sealing-x86_64.S`, install as
+`/alter/linux/bin/nanami-fork-readonly` in a separate test rootfs, and run:
+
+```sh
+python3 -B tests/alter-linux/qemu-smoke.py --image IMAGE --network \
+  --smp 4 --program nanami-fork-readonly --program nanami-cap-seal
+```
+
+Repeat with `--smp 1`. Require a successful initial-process exit, not just child
+creation. Host `core-process` tests include production sharing/detach with real
+ownership indices and aliased backing. `linux-private-memory` tests production
+quiescence, acknowledged-stop cleanup and preservation of handled waits.
+
+## Native capability isolation
+
+`capability-sealing.c` calls A9N's native CapabilityCall directly, independently
+of Linux syscall emulation. Every legacy top-level descriptor must return
+InvalidDescriptor in the initial guest, an ordinary fork child, a shared-VM
+child, and after exec. The fixture also checks Linux mmap/mprotect/munmap,
+private fork writes, shared-VM writes, and complete child exit/wait status.
+The child first attempts a missing executable and must continue with ENOENT;
+after its successful self-exec, the parent's two-MiB read-only mapping must
+remain intact. This also checks bulk exec retirement with surviving aliases.
+Build with `signals-x86_64.S` and `capability-sealing-x86_64.S`, install as
+`/alter/linux/bin/nanami-cap-seal`, and run:
+
+```sh
+python3 tests/alter-linux/qemu-smoke.py --image IMAGE --smp 4 --program nanami-cap-seal
+```
+
+The self-exec path inside the guest is `/bin/nanami-cap-seal`. An unsealed
+baseline must fail with status 10, so a passing process-exit test alone is not
+mistaken for evidence that native capability access was actually removed.
+
 ## Permission changes and Tiny Core userspace
 
 `file-mapping.c` exercises ordinary-file read-only `MAP_SHARED` through the real
@@ -165,6 +206,10 @@ Repeat with `--smp 1` to cover same-core scheduling as well.
 - Memory/events: physical sharing across aliases/fork/SCM_RIGHTS, protection
   faults, retained anonymous PROT_NONE through fork/remap, checked copyin/out,
   memfd EOF SIGBUS/truncate/regrowth/seals, futex wake, timerfd/epoll and signalfd.
+  The copy checks warm Alpha's alias before read-only/PROT_NONE transitions;
+  a denied eventfd read must not consume its queued value. Keep fixture
+  basenames within the legacy launch metadata's 24-byte UTF-8 limit; the host
+  runner rejects empty/overlong names before starting QEMU.
 - Namespace: rooted relative/absolute links, link-before-`..` semantics,
   `O_NOFOLLOW`, inline/block-backed links, loops, dirfds after rename,
   mkdirat/symlinkat/readlinkat/linkat/renameat/fchdir, and root-escape rejection.
@@ -758,6 +803,8 @@ fixed-work QEMU benchmark are documented in
 
 `desktop-syscalls.c` and `desktop-syscalls-x86_64.S` exercise the real 64-bit
 Linux syscall ABI without libc or FPU: root-only setresuid/setresgid validation,
+getresuid/getresgid contiguous/reversed outputs, null and protected-page error
+ordering (including unaligned cross-page words),
 prctl task names/procfs/no_new_privs, live ext2 fstatfs and virtual statfs,
 sysinfo layout/padding/canaries/live RAM/uptime and checked cross-page copyout,
 fadvise64's six hints, invalid FD/length/advice errors and pipe error precedence,
@@ -780,10 +827,18 @@ files, /proc metadata and a missing-hosts fallback through a symlink. The
 fixture restores any temporarily renamed hosts file before checking results.
 
 `desktop-performance.c` times three samples of 512 successful and 512 missing
-newfstatat calls against the same directory, followed by the existing AF_UNIX
-workload. It validates every return value, includes guest-memory copying and
+newfstatat calls against the same directory, followed by AF_UNIX read/write,
+send/recvmsg and EOF-recvmsg loops of 2,048 iterations. Before timing it checks
+unaligned msghdr outputs across protected pages, whole-u64 versus flags failure
+order, untouched input pointers/padding and successful retry of queued payload.
+It validates every return value, includes guest-memory copying and
 the entire emulated syscall path, and samples monotonic time only outside
 each fixed-work loop. It is not a whole-desktop FPS benchmark.
+
+The `--tinycore-perf` runner waits for the captured report's final
+`DESKTOP-PERFORMANCE-PASS`, not its preceding summary prefix, before quitting
+QEMU. Host predicate regressions run without booting a VM:
+`python3 -B -m unittest discover -s tests/negoto -p test_qemu_smoke.py`.
 
 The application probe also runs `desktop-pointer.c`, an integer-only X11
 client that connects to the real Xfbdev server and issues QueryPointer. The
@@ -808,9 +863,22 @@ QEMU smoke runner uses a private snapshot and does not modify the input image.
 ## Process creation and ELF snapshot cache
 
 `process-performance.c` measures complete fork/wait and fork/exec/wait loops;
+it also checks fixed-work getresuid/copyout loops with zero, 128 and 256 extra
+PROT_NONE VMAs. getpid and getuid controls distinguish basic syscall and POSIX
+credential-query work from checked copyout. These loops run before fork/exec;
+VMA creation and removal are outside each timed loop, and the scaling tests do
+not change the configured mapping limit.
+Additional eight-fork/wait loops keep 128 or 256 fragmented PROT_NONE VMAs
+live during fork. Each child verifies that copyout into an inherited unbacked
+reservation fails with EFAULT before exiting. These cases include the same
+validation work in both timing variants; they do not replace the ordinary
+fork/exec or copyout controls.
 `exec-cache.c` executes small integer-only Linux ELFs, then changes their bytes,
 hardlinks, replaces their pathname and truncates them to check cache freshness.
 Both are included by the Tiny Core builder's `--with-tests` option. Run them
 together with `qemu-smoke.py --tinycore-process-perf` (also reports Alpha-only
 construction and Negoto create timings). See
 [the measurement notes](../native-performance/tinycore-desktop.md).
+`qemu-smoke.py --tinycore-startup-perf` separately measures OCI create/start
+through a real X11 terminal's fresh readiness marker, including three complete
+startup/forced-stop/delete cycles with the same container ID.

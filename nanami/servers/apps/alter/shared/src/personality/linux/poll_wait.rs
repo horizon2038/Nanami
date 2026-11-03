@@ -104,7 +104,7 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
         let Some(wait) = process.readiness_wait.as_ref() else {
             continue;
         };
-        if process.pid == 0 || process.exited || runtime.is_signal_stopped(process.pid) {
+        if process.pid == 0 || process.exited {
             continue;
         }
         let expired = timer
@@ -112,6 +112,9 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
                 .deadline
                 .is_some_and(|deadline| deadline <= runtime.monotonic_ticks);
         if !expired && wait.sources & sources == 0 {
+            continue;
+        }
+        if runtime.is_signal_stopped(process.pid) {
             continue;
         }
         let (pid, pcb, personality) = (process.pid, process.pcb, process.personality);

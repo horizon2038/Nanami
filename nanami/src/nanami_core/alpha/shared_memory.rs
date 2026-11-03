@@ -37,6 +37,11 @@ impl Alpha {
             .processes
             .find_active_physical_allocation_reference(pid, source_va, pages)
             .ok_or(CapabilityError::PermissionDenied)?;
+        let end = source_va.checked_add(pages * PAGE_SIZE).ok_or(CapabilityError::InvalidArgument)?;
+        if self.processes.vm_space_mut(pid).is_some_and(|vm| vm.private_range_shared(source_va, end)) {
+            // Exporting a writable alias also requires explicit privatization.
+            return Err(CapabilityError::IllegalOperation);
+        }
         let source = self
             .processes
             .find_entry_by_pid(pid)
@@ -58,12 +63,15 @@ impl Alpha {
             .vm_space_mut(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         for page in 0..pages {
-            if vm.find_frame(source_va + page * PAGE_SIZE)
-                != Some(process_frame_descriptor(
-                    source.root_node,
-                    allocation.start_slot + page,
-                ))
-            {
+            let expected = self
+                .memory
+                .physical_frame_descriptor_from_index(allocation.base_page + page)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            // Both descriptors name the registered physical object; ordinary
+            // private RAM still records its existing child capability.
+            let child = process_frame_descriptor(source.root_node, allocation.start_slot + page);
+            let current = vm.find_frame(source_va + page * PAGE_SIZE);
+            if current != Some(expected) && current != Some(child) {
                 return Err(CapabilityError::IllegalOperation);
             }
         }
@@ -155,10 +163,9 @@ impl Alpha {
                 peer.mapped += 1;
                 self.memory.map_frame_strict(
                     peer.entry.address_space,
-                    process_frame_descriptor(
-                        peer.entry.root_node,
-                        peer.reservation.start_slot + page,
-                    ),
+                    self.memory
+                        .physical_frame_descriptor_from_index(allocation.base_page + page)
+                        .ok_or(CapabilityError::InvalidArgument)?,
                     va,
                     vm,
                 )?;
@@ -319,10 +326,10 @@ impl Alpha {
                 .vm_space_mut(mapping.entry.pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
             for page in 0..pages {
-                let frame = process_frame_descriptor(
-                    mapping.entry.root_node,
-                    mapping.reservation.start_slot + page,
-                );
+                let frame = self
+                    .memory
+                    .physical_frame_descriptor_from_index(base_page + page)
+                    .ok_or(CapabilityError::InvalidArgument)?;
                 let va = mapping.reservation.base_va + page * PAGE_SIZE;
                 // A fixed-address mapping can be ahead of the heap watermark.
                 // Reject overlap before marking the page as ours for rollback.

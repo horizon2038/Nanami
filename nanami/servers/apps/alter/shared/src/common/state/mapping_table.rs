@@ -41,6 +41,25 @@ impl MappingTable {
         ALTER_PROCESS_MAPPING_MAX
     }
 
+    // An allocated table may belong to CLONE_VM peers even when its active
+    // prefix is empty. Only initialize fresh, independently owned fork state.
+    pub(super) fn initialize_from(&mut self, source: Self) -> bool {
+        if self.address != 0 {
+            return false;
+        }
+        if source.is_empty() {
+            return true;
+        }
+        if !self.ensure() {
+            return false;
+        }
+        let entries = &*source;
+        let storage = unsafe { &mut *(self.address as *mut Storage) };
+        storage.entries[..entries.len()].copy_from_slice(entries);
+        storage.len = entries.len();
+        true
+    }
+
     pub(super) fn push(&mut self, mapping: ProcessMapping) -> bool {
         if mapping.base == 0 || !self.ensure() {
             return false;

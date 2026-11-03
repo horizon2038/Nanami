@@ -415,6 +415,34 @@ duplicate image rules, unknown options, and out-of-topology affinity fail closed
 Malformed startup entries are reported, not silently ignored. Alpha's component
 entries do not accept argv; rootfs system/session manifests retain argv support.
 
+Optional priority-class placement preferences are independent of image grants:
+
+```text
+@placement 21 2
+@placement 22 2
+```
+
+This example prefers CPU 2 for newly created priority-21/22 processes, including
+rootfs buffer spawns and raw fork/thread creation. It does not change their priority,
+grant platform/Service authority, or identify an application by its name.
+An explicit `@process ... affinity=N` wins. Otherwise the normal automatic slot
+is consumed first, preserving other processes' round-robin sequence; an absent
+preferred CPU falls back to that slot. CPU IDs are 0..63 and priorities 0..31;
+malformed or duplicate priority rules are rejected even if the CPU is absent.
+Without these declarations the existing placement behavior is retained.
+
+The checked-in x86_64 preferences group the priority-21 compatibility/session
+brokers and priority-22 VFS broker on CPU 2 when available. Guest priority-4
+tasks, rendering and device-driver placement remain automatic or explicitly
+configured. This favors Tiny Core metadata traffic; a native client on another
+CPU can instead pay more for direct bulk VFS reads. The
+[paired measurements](../../tests/native-performance/optimization-cycles.md#cycle-73-retain-configurable-metadata-broker-locality)
+preserve both outcomes. These are editable
+user-level scheduling defaults, not built-in meanings of priorities or names.
+Tune/remove the declarations for a different topology or workload; this is not a
+guarantee that one placement is fastest on every machine. No Kernel/IPC ABI,
+new RPC or CPU-time isolation is introduced.
+
 `cargo xtask build --boot-list <configuration> --boot-module <file>` selects an
 external boot configuration and packages a module as `./modules/<basename>`.
 Repeat `--boot-module` for additional files, including child configurations;
@@ -961,6 +989,62 @@ Alter reuses this facade but owns ABI-specific structures and behavior. Linux
 and FreeBSD support remains partial; a dispatched syscall may intentionally
 implement only the semantics needed by currently tested static binaries.
 Canonical syscall lists are maintained beside each personality implementation.
+
+Linux guests execute with an empty native capability namespace. Alter explicitly
+asks Alpha to seal each initially suspended Linux task before starting it;
+fork and shared-VM children inherit the restriction, and exec retains it.
+Alpha's private management roots still hold the PCB, AddressSpace, page-table
+and Frame capabilities. No memory object is deleted by sealing, and the existing
+Linux mmap/mprotect/brk and supervisor-copy paths remain available. Native
+Nanami applications and ordinary FreeBSD launches keep their existing roots.
+The empty execution root is one Alpha-owned Node, not a new per-process tree.
+This is a user-level authority boundary, not a Kernel ABI change or COW itself.
+
+The x86_64 Linux fork path additionally opts into read-only private-page sharing.
+Alpha aliases only tracked, owned R/RX/X backing; writable and PROT_NONE pages
+retain eager copies. A separate VM index records shared private backing without
+changing R/W/X bits or capability descriptors. Normal native and FreeBSD forks
+retain the zero-option eager protocol, as do production non-x86 backends.
+The opt-in supervisor must control the entire VM from before its first execution;
+sealing an already running native task does not revoke escaped capabilities.
+
+Before a privileged write or write upgrade, Alter queries Alpha and, only when
+needed, quiesces all tasks sharing that VM and detaches the affected pages.
+Opt-in fork also quiesces source VM users: a prior PTE downgrade alone does not
+prove that a running peer has discarded its old writable TLB entry. A single
+task already in the current delivered fault needs no additional stop IPC.
+Already delivered faults, parked waits and prepared/stopped tasks must not be
+suspended/resumed again: that could replay an already emulated syscall. Running
+peers use the existing synchronous Suspend, and only acknowledged stops are
+resumed. Alpha retains ownership through failed retargeting, rejects writable
+access to undetached aliases, and invalidates owner-scoped temporary copies
+before replacing child Frame capabilities. Detach copies through permanent pool
+Frames rather than caching a capability slot that it subsequently removes.
+Retired slots are recycled without freeing still-live virtual addresses.
+This requires no Kernel/IPC-fastpath change and is not writable-page COW.
+Linux shared-VM tasks use the same priority4 as ordinary Linux tasks and fork
+children. The former priority20 let a syscall-free child starve its priority4
+parent on a single CPU; the running-peer regression covers this case.
+
+Alpha keeps one physical-reference count across active mappings and deferred
+private allocations. Releasing a private mapping moves its existing ownership
+record to the deferred list; it does not release the underlying RAM reference.
+That backing can be reused only when it has no other active or deferred owner.
+This prevents a later anonymous allocation from clearing a live peer's shared
+page. Explicit shared-memory mappings retain their existing release protocol.
+
+Exec retirement for a sealed task requires exclusive VM ownership. Alpha first
+invalidates temporary copy mappings and unmaps every present old leaf, then
+clears Frame capabilities by revoking each Frame-chunk Node's contents. The
+Nodes themselves remain alive for reuse; neither generic arenas nor their
+allocation watermarks are reset. Only after all old leaves and local Frame
+aliases are gone does Alpha release physical RAM. Active allocation records
+move to the deferred chain without decrementing and rebuilding references;
+each successful release commits independently, retaining a failed suffix.
+An installation error after destructive replacement is fatal to that task,
+not an errno returned to its old instruction stream. Checked pre-installation
+rejections keep their ordinary errno behavior. Native unsealed exec retains
+its existing retirement path. No Kernel operation or IPC fastpath is changed.
 
 ### Local UNIX Socket Transport
 

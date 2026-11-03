@@ -71,6 +71,23 @@ pub fn configure_personality_syscall_reply(
     }
 }
 
+/// Configure a reply from the unmodified context delivered with this fault.
+/// Linux only changes RAX when RIP already denotes the continuation. The
+/// existing fault-reply ABI updates a register prefix, preserving the rest.
+pub fn configure_trapped_syscall_reply(
+    hardware_context: &mut HardwareContext,
+    context: LinuxSyscallContext,
+    value: isize,
+    personality: OsPersonality,
+) -> usize {
+    let same_pc = hardware_context[REG_RIP as usize] == context.program_counter;
+    let count = configure_personality_syscall_reply(hardware_context, context, value, personality);
+    if personality == OsPersonality::Linux && same_pc {
+        return 1;
+    }
+    count
+}
+
 pub fn read_syscall_context(
     pcb: Word,
     kernel_call_number: Word,

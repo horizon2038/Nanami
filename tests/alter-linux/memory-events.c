@@ -78,7 +78,15 @@ int test_main(void) {
     if (private_memory < 0) { return 30; }
     *(volatile word *)private_memory = 0x13579bdf;
     long counter = call(290, 1, 0x800, 0, 0);
-    if (counter < 0 || call(10, private_memory, 4096, 0, 0) != 0) { return 31; }
+    /* Populate Alpha's copy alias before changing this page's permissions. */
+    if (counter < 0 || call(0, counter, private_memory, 8, 0) != 8 || *(volatile word *)private_memory != 1
+        || call(10, private_memory, 4096, 1, 0) != 0) { return 46; }
+    word warm_value = 0;
+    if (call(1, counter, private_memory, 8, 0) != 8 || call(0, counter, private_memory, 8, 0) != -14
+        || call(0, counter, (word)&warm_value, 8, 0) != 8 || warm_value != 1) { return 47; }
+    if (call(10, private_memory, 4096, 3, 0) != 0) { return 48; }
+    *(volatile word *)private_memory = 0x13579bdf;
+    if (call(1, counter, (word)&warm_value, 8, 0) != 8 || call(10, private_memory, 4096, 0, 0) != 0) { return 31; }
     if (call(0, counter, private_memory, 8, 0) != -14 || call(1, 1, private_memory, 1, 0) != -14) { return 32; }
     word value = 0;
     if (call(0, counter, (word)&value, 8, 0) != 8 || value != 1) { return 33; }

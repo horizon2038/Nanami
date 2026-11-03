@@ -72,6 +72,7 @@ impl Runtime {
                 let mut stored_name = [0; ALTER_IMAGE_NAME_MAX];
                 stored_name[..image_name.len()].copy_from_slice(image_name);
                 self.managed[i] = ManagedProcess {
+                    vm_private_shared: false,
                     pid,
                     tgid: pid,
                     vm_group: pid,
@@ -248,6 +249,8 @@ impl Runtime {
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
         };
+        // EXEC_MEMORY has replaced the VM; no old private-fork alias survives.
+        process.vm_private_shared = false;
         process.program_break = 0;
         process.argument_vector = 0;
         process.argument_count = 0;

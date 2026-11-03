@@ -2,7 +2,7 @@ use super::{
     arch, clone_registers_for_fork, inherit_linux_files, map_request_error, read_register_value,
     write_guest_u32, EmulationAction, LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM,
     ENOSYS, ESRCH, LINUX_CLONE_CHILD_SETTID, LINUX_CLONE_PARENT_SETTID, LINUX_CLONE_SETTLS,
-    LINUX_CLONE_VM, LINUX_SIGCHLD, REG_FS_BASE, SYS_CLONE,
+    LINUX_CLONE_VM, LINUX_SIGCHLD, LINUX_TASK_PRIORITY, REG_FS_BASE, SYS_CLONE,
 };
 
 pub(super) fn sys_fork(
@@ -45,9 +45,23 @@ pub(super) fn sys_fork(
     };
 
     let pcb_slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
-    let child_pid = match nanami_runtime::request_process_fork(parent_pid, pcb_slot, 4)
-        .map_err(map_request_error)
-    {
+    // Mark conservatively before construction: a failed unpublished child can
+    // leave a source marker until its references are rolled back by Alpha.
+    let created = if cfg!(target_arch = "x86_64") {
+        super::private_memory::mark_shared(runtime, parent_pid);
+        super::private_memory::with_vm_quiescence(runtime, parent_pid, || {
+            nanami_runtime::request_process_fork_shared_readonly(
+                parent_pid,
+                pcb_slot,
+                LINUX_TASK_PRIORITY,
+            )
+            .map_err(map_request_error)
+        })
+    } else {
+        nanami_runtime::request_process_fork(parent_pid, pcb_slot, LINUX_TASK_PRIORITY)
+            .map_err(map_request_error)
+    };
+    let child_pid = match created {
         Ok(pid) => pid,
         Err(errno) => {
             nanami_runtime::println!(
@@ -102,6 +116,14 @@ pub(super) fn sys_fork(
         discard_spawned_child(child_pid);
         return Err(ENOMEM);
     }
+    if cfg!(target_arch = "x86_64") {
+        super::private_memory::mark_shared(runtime, child_pid);
+    }
+    // Constructor-time memory operations must not mistake this suspended task
+    // for a running peer and resume it before files/VMA/TID setup completes.
+    if let Some(child) = runtime.managed_process_mut(child_pid) {
+        child.rootfs.prepared = true;
+    }
     if let Err(error) = write_clone_tid_pointers(
         runtime,
         parent_pid,
@@ -123,24 +145,17 @@ pub(super) fn sys_fork(
         runtime.remove_process(child_pid);
         return Err(error);
     }
-    let mut i = 0usize;
-    while i < parent.mappings.len() {
-        let mapping = parent.mappings[i];
-        if mapping.base != 0
-            && !runtime.add_mapping(child_pid, mapping.base, mapping.size, mapping.prot)
-        {
-            nanami_runtime::println!(
-                "[alter/linux] fork failed stage=track mappings parent={} child={} errno={}",
-                parent_pid,
-                child_pid,
-                ENOMEM
-            );
-            super::close_process_files(runtime, child_pid);
-            discard_spawned_child(child_pid);
-            runtime.remove_process(child_pid);
-            return Err(ENOMEM);
-        }
-        i += 1;
+    if !runtime.inherit_mappings(parent_pid, child_pid) {
+        nanami_runtime::println!(
+            "[alter/linux] fork failed stage=track mappings parent={} child={} errno={}",
+            parent_pid,
+            child_pid,
+            ENOMEM
+        );
+        super::close_process_files(runtime, child_pid);
+        discard_spawned_child(child_pid);
+        runtime.remove_process(child_pid);
+        return Err(ENOMEM);
     }
     if let Err(error) = super::memfd::inherit(runtime, parent_pid, child_pid) {
         super::close_process_files(runtime, child_pid);
@@ -201,6 +216,9 @@ pub(super) fn sys_fork(
         discard_spawned_child(child_pid);
         runtime.remove_process(child_pid);
         return Err(error);
+    }
+    if let Some(child) = runtime.managed_process_mut(child_pid) {
+        child.rootfs.prepared = false;
     }
     Ok(child_pid)
 }

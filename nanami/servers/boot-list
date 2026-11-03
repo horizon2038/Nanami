@@ -2,6 +2,12 @@
 # Component format: <label> <priority> <initramfs-path>
 # Defaults for trusted initramfs images: @process <path> [priority=N] [affinity=N] [platform=0|1]
 # Labels do not grant authority. Platform metadata access is explicitly assigned.
+# Preferred CPU for a priority class: @placement <priority> <cpu>.
+# Exact @process affinity wins; absent CPUs retain ordinary round-robin.
+# Keep compatibility, namespace and VFS brokers local without pinning Linux
+# workers, rendering or device drivers. Preferences grant no authority.
+@placement 21 2
+@placement 22 2
 #
 # Keep this list minimal. It must not depend on vfs/rootfs because Alpha reads
 # it from embedded initramfs before any filesystem service exists.

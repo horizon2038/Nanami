@@ -1,5 +1,19 @@
 use nun::{CapabilityDescriptor, BYTE_BITS, WORD_BITS};
 
+/// Namespace membership only; this does not validate a capability or its rights.
+pub fn is_within_node_namespace(
+    descriptor: CapabilityDescriptor,
+    parent: CapabilityDescriptor,
+) -> bool {
+    let parent_depth = descriptor_depth(parent);
+    let depth = descriptor_depth(descriptor);
+    if parent_depth >= WORD_BITS || depth <= parent_depth || depth > WORD_BITS {
+        return false;
+    }
+    let prefix = (usize::MAX >> BYTE_BITS) & (usize::MAX << (WORD_BITS - parent_depth));
+    descriptor & prefix == parent & prefix
+}
+
 #[inline(always)]
 pub fn descriptor_depth(descriptor: CapabilityDescriptor) -> usize {
     let common_offset_bit = WORD_BITS - BYTE_BITS;

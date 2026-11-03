@@ -1,5 +1,7 @@
 #[path = "linux/clone3.rs"]
 mod clone3;
+#[path = "linux/private_memory.rs"]
+mod private_memory;
 #[path = "linux/prctl.rs"]
 mod prctl;
 #[path = "linux/statfs.rs"]
@@ -146,6 +148,9 @@ use exec_image::*;
 #[path = "linux/exec.rs"]
 mod exec;
 use exec::*;
+#[path = "linux/exec_error.rs"]
+mod exec_error;
+use exec_error::ExecError;
 
 #[path = "linux/metadata.rs"]
 mod metadata;
@@ -203,10 +208,10 @@ use clock_events::arm_clock_timer;
 mod tracing;
 use tracing::*;
 
-#[path = "linux/memory_copy.rs"]
-mod memory_copy;
 #[path = "linux/file_mapping.rs"]
 mod file_mapping;
+#[path = "linux/memory_copy.rs"]
+mod memory_copy;
 use memory_copy::*;
 
 #[path = "linux/exec_strings.rs"]
@@ -247,7 +252,7 @@ use crate::process::{
     write_syscall_return, LinuxSyscallContext, REG_FS_BASE,
 };
 use crate::state::{
-    LinuxFile, LinuxFileKind, OsPersonality, Runtime, LINUX_CWD_MAX, LINUX_FD_MAX,
+    IdentityField, LinuxFile, LinuxFileKind, OsPersonality, Runtime, LINUX_CWD_MAX, LINUX_FD_MAX,
     LINUX_PIPE_BYTES, LINUX_TERMINAL_LINE_MAX,
 };
 
@@ -260,6 +265,9 @@ mod arch_syscalls;
 mod arch_syscalls;
 
 pub use arch_syscalls::*;
+
+#[path = "linux/identity.rs"]
+mod identity;
 
 #[derive(Clone, Copy)]
 pub enum EmulationAction {
@@ -948,8 +956,10 @@ pub fn dispatch_syscall(
             context.args[2],
             0,
         ),
-        SYS_GETUID | SYS_GETEUID => map_word(posix::posix_getuid(runtime.posix_port)),
-        SYS_GETGID | SYS_GETEGID => map_word(posix::posix_getgid(runtime.posix_port)),
+        SYS_GETUID => map_word(identity::read(runtime, IdentityField::RealUser)),
+        SYS_GETEUID => map_word(identity::read(runtime, IdentityField::EffectiveUser)),
+        SYS_GETGID => map_word(identity::read(runtime, IdentityField::RealGroup)),
+        SYS_GETEGID => map_word(identity::read(runtime, IdentityField::EffectiveGroup)),
         SYS_GETRESUID => sys_getresid(
             runtime,
             native_pid,

@@ -13,6 +13,13 @@ pub fn stamp() -> Option<u64> {
     if !ENABLED {
         return None;
     }
+    local_stamp()
+}
+
+/// Local CPU counter for explicitly enabled user-level diagnostics. Callers
+/// must not compare cores or interpret ticks as nanoseconds without calibration.
+#[inline]
+pub fn local_stamp() -> Option<u64> {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         let low: u32;

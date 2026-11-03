@@ -1,16 +1,20 @@
 use crate::nanami_utils::avl::AvlTree;
 use crate::nanami_utils::static_avl::StaticAvlTree;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use nun::CapabilityDescriptor;
 
 // Bootstrap mappings are recorded before the alpha heap is available, so this
 // tracker intentionally remains fixed-size and allocation-free.
 const BOOTSTRAP_VM_FRAME_MAPS: usize = 1 << 14;
 const BOOTSTRAP_VM_PT_MAPS: usize = 256;
+// Alpha alternates between several temporary mapping windows. Remember their
+// completed leaf-table regions without another kernel depth query. This is a
+// metadata hint, not additional mapped memory or a limit on address coverage.
+const BOOTSTRAP_PT_REGIONS: usize = 8;
 
 // Both supported architectures use 4-KiB pages and 512 entries per leaf table.
-// Frame unmapping does not remove page tables. Remember only the most recently
-// mapped 2-MiB region; destroying/replacing the VmSpace discards this hint too.
+// Frame unmapping does not remove page tables. Readiness hints are local to
+// their tracker and are discarded when that address space is replaced.
 const PAGE_TABLE_REGION_SHIFT: u32 = 12 + 9;
 const NO_PAGE_TABLE_REGION: usize = usize::MAX;
 
@@ -35,7 +39,8 @@ pub trait VmTracker {
 pub struct BootstrapVmSpace {
     frame_by_va: StaticAvlTree<BOOTSTRAP_VM_FRAME_MAPS>,
     page_table_by_va: StaticAvlTree<BOOTSTRAP_VM_PT_MAPS>,
-    page_table_region: usize,
+    page_table_regions: [usize; BOOTSTRAP_PT_REGIONS],
+    next_page_table_region: usize,
 }
 
 impl BootstrapVmSpace {
@@ -43,7 +48,8 @@ impl BootstrapVmSpace {
         Self {
             frame_by_va: StaticAvlTree::new(),
             page_table_by_va: StaticAvlTree::new(),
-            page_table_region: NO_PAGE_TABLE_REGION,
+            page_table_regions: [NO_PAGE_TABLE_REGION; BOOTSTRAP_PT_REGIONS],
+            next_page_table_region: 0,
         }
     }
 }
@@ -55,7 +61,11 @@ impl VmTracker for BootstrapVmSpace {
         frame_descriptor: CapabilityDescriptor,
     ) -> Result<(), ()> {
         self.frame_by_va.insert(virtual_address, frame_descriptor)?;
-        self.page_table_region = virtual_address >> PAGE_TABLE_REGION_SHIFT;
+        let region = virtual_address >> PAGE_TABLE_REGION_SHIFT;
+        if !self.page_table_regions.contains(&region) {
+            self.page_table_regions[self.next_page_table_region] = region;
+            self.next_page_table_region = (self.next_page_table_region + 1) % BOOTSTRAP_PT_REGIONS;
+        }
         Ok(())
     }
 
@@ -81,17 +91,21 @@ impl VmTracker for BootstrapVmSpace {
     }
 
     fn page_tables_ready(&self, virtual_address: usize) -> bool {
-        self.page_table_region == virtual_address >> PAGE_TABLE_REGION_SHIFT
+        self.page_table_regions
+            .contains(&(virtual_address >> PAGE_TABLE_REGION_SHIFT))
     }
 }
 
 pub struct VmSpace {
     frame_by_va: AvlTree,
     page_table_by_va: AvlTree,
+    // Ordinary processes retain the one-region sequential-mapping hint.
     page_table_region: usize,
     // Only non-default permissions need metadata. PROT_NONE retains its Frame
     // record and allocation reference while the hardware leaf is absent.
     permissions: BTreeMap<usize, usize>,
+    // Private fork aliases, never packed into opaque descriptors or R/W/X bits.
+    shared_private: BTreeSet<usize>,
 }
 
 impl VmSpace {
@@ -101,12 +115,34 @@ impl VmSpace {
             page_table_by_va: AvlTree::new(),
             page_table_region: NO_PAGE_TABLE_REGION,
             permissions: BTreeMap::new(),
+            shared_private: BTreeSet::new(),
         }
     }
 
     pub fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
         self.permissions.remove(&virtual_address);
+        self.shared_private.remove(&virtual_address);
         self.frame_by_va.remove(virtual_address)
+    }
+
+    pub fn private_page_shared(&self, va: usize) -> bool {
+        self.shared_private.contains(&va)
+    }
+
+    pub fn mark_private_page_shared(&mut self, va: usize, shared: bool) {
+        if shared {
+            self.shared_private.insert(va);
+        } else {
+            self.shared_private.remove(&va);
+        }
+    }
+
+    pub fn shared_private_pages(&self, start: usize, end: usize) -> alloc::vec::Vec<usize> {
+        self.shared_private.range(start..end).copied().collect()
+    }
+
+    pub fn private_range_shared(&self, start: usize, end: usize) -> bool {
+        self.shared_private.range(start..end).next().is_some()
     }
 
     pub fn permissions(&self, virtual_address: usize) -> usize {
@@ -126,6 +162,22 @@ impl VmSpace {
         self.frame_by_va
             .visit_range(start, end, |va, _| pages.push((va, self.permissions(va))));
         pages
+    }
+
+    pub fn all_backed_pages(
+        &self,
+        start: usize,
+        end: usize,
+        mut predicate: impl FnMut(usize) -> bool,
+    ) -> bool {
+        if start >= end {
+            return true;
+        }
+        let mut valid = true;
+        self.frame_by_va.visit_range(start, end, |va, _| {
+            valid = valid && predicate(va);
+        });
+        valid
     }
 }
 

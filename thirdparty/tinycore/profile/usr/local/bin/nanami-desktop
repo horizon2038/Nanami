@@ -13,12 +13,8 @@ export GDK_BACKEND=x11 NO_AT_BRIDGE=1 GSETTINGS_BACKEND=memory
 # nested pointer when mapping new clients.
 export NOWARP=1
 mkdir -p /tmp/.X11-unix /root/.wmx /root/Documents /root/Pictures /root/Downloads
-ln -sf /usr/local/share/pixmaps/logo.png /root/Pictures/TinyCore.png
-# FLWM executes menu entries without arguments. Point directly at upstream ELFs;
-# the dock uses explicit BusyBox shell wrappers for its arguments and log files.
-for entry in Terminal:aterm Files:xfe Editor:editor Images:flpicsee Paint:mtpaint Calculator:galculator Clock:flit; do
-    ln -sf "/usr/local/bin/${entry#*:}" "/root/.wmx/${entry%%:*}"
-done
+# The builder installs default FLWM links to the unmodified upstream ELFs.
+# Keep guest menu/picture customizations instead of rebuilding them at startup.
 chmod 1777 /tmp/.X11-unix
 rm -f /tmp/desktop-ready /tmp/desktop-input-ok /tmp/desktop-launch-ok /tmp/desktop-info-ok /tmp/desktop-exit
 xpid=
@@ -38,19 +34,14 @@ trap cleanup EXIT INT TERM
 Xfbdev :0 -fb /dev/fb0 -mouse /dev/input/mice,3 -a 1 -t 0 -nolisten tcp -ac -noreset \
     -fp /usr/local/lib/X11/fonts/misc > /tmp/Xfbdev.log 2>&1 &
 xpid=$!
-attempt=0
 # Tiny Core's waitforX calls XOpenDisplay(":0") unconditionally and ignores
-# DISPLAY. Use the stock query client with an explicit local display instead.
-# It handles a not-yet-listening server and verifies a real X11 round trip.
-while ! xset -display "$DISPLAY" q > /tmp/waitforX.log 2>&1; do
-    attempt=$((attempt + 1))
-    if [ "$attempt" -ge 30 ] || ! kill -0 "$xpid" 2>/dev/null; then
-        cat /tmp/Xfbdev.log /tmp/waitforX.log >&2
-        exit 1
-    fi
-    sleep 0.1
-done
-hsetroot -solid '#3d6f8e' || true
+# DISPLAY. The profile's small Xlib helper retries in one process, keeping the
+# local transport, real round trip and liveness check without per-retry forks.
+if ! nanami-wait-for-x "$DISPLAY" "$xpid" > /tmp/waitforX.log 2>&1; then
+    cat /tmp/Xfbdev.log /tmp/waitforX.log >&2
+    exit 1
+fi
+xsetroot -solid '#3d6f8e' || true
 flwm_topside > /tmp/flwm.log 2>&1 &
 wmpid=$!
 printf '%s\n' "$wmpid" > /tmp/desktop-wm.pid

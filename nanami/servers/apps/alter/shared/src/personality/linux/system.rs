@@ -1,8 +1,8 @@
 use super::{
-    bounded_len, map_unit, map_word, posix, read_register_value, write_guest_u32, write_guest_u64,
-    write_register_value, write_target_memory, write_u64, LinuxSyscallContext, Runtime, Word,
-    ARCH_GET_FS, ARCH_SET_FS, EFAULT, EINVAL, EIO, ESRCH, REG_FS_BASE, SYS_PRLIMIT64,
-    UNAME_MACHINE,
+    bounded_len, map_unit, map_word, posix, read_register_value, write_guest_u32s, write_guest_u64,
+    write_register_value, write_target_memory, write_u64, IdentityField, LinuxSyscallContext,
+    Runtime, Word, ARCH_GET_FS, ARCH_SET_FS, EFAULT, EINVAL, EIO, ESRCH, REG_FS_BASE,
+    SYS_PRLIMIT64, UNAME_MACHINE,
 };
 
 pub(super) fn sys_uname(runtime: &mut Runtime, pid: Word, user_buffer: Word) -> Result<Word, i32> {
@@ -142,13 +142,11 @@ pub(super) fn sys_getresid(
     is_user: bool,
 ) -> Result<Word, i32> {
     let id = if is_user {
-        map_word(posix::posix_getuid(runtime.posix_port))?
+        map_word(super::identity::read(runtime, IdentityField::RealUser))?
     } else {
-        map_word(posix::posix_getgid(runtime.posix_port))?
+        map_word(super::identity::read(runtime, IdentityField::RealGroup))?
     } as u32;
-    write_guest_u32(runtime, pid, real_ptr, id)?;
-    write_guest_u32(runtime, pid, effective_ptr, id)?;
-    write_guest_u32(runtime, pid, saved_ptr, id)?;
+    write_guest_u32s(runtime, pid, [real_ptr, effective_ptr, saved_ptr], [id; 3])?;
     Ok(0)
 }
 

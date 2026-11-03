@@ -134,12 +134,15 @@ The desktop dependency graph is resolved explicitly by `desktop.py
 --refresh-lock`; ordinary builds never silently select newer TCZ packages.
 `desktop.py --extend-lock` pins additions while preserving existing package
 hashes and removes unreachable dependencies from the resulting lock.
-Only `xwininfo` is installed from Xorg's binary-tools package; its unrelated GL
-diagnostics and Mesa/LLVM dependency tree are not part of this desktop. GTK's
+Only `xwininfo` and `xsetroot` are installed from Xorg's binary-tools package;
+its unrelated GL diagnostics and Mesa/LLVM dependency tree are not part of this
+desktop. GTK's
 util-linux dependency contributes runtime libraries, not hardware-management
 commands or a second copy of Xlibs' `mcookie`. These selections are recorded in
-the lock/manifest. FLTK 1.3 and 1.4 runtime libraries coexist: the only omitted
-1.3 members are unversioned development symlinks, leaving the existing 1.4 aliases
+the lock/manifest. The solid desktop background uses the unchanged upstream
+`xsetroot`, avoiding an image-rendering client and its Imlib2/FreeType loading
+just to select a single color. FLTK 1.3 and 1.4 runtime libraries coexist: the
+only omitted 1.3 members are unversioned development symlinks, leaving the existing 1.4 aliases
 intact. Flit retains its original `.so.1.3` dependency.
 Official MD5 checksums are checked during pinning and every normal installation
 checks the committed SHA-256. Extensions are unpacked on the host at build
@@ -168,7 +171,12 @@ profile runs as root; it does not provide Tiny Core multi-user permissions.
 
 The profile overlays `/init`, `/etc/init.d/rcS` and the desktop startup script.
 Original rootfs versions remain under the selected build's `upstream/`;
-`manifest.json` records the replacements and desktop package lock.
+`manifest.json` records the replacements and desktop package lock. Desktop
+assembly also installs the seven default FLWM menu links under `/root/.wmx`
+and the default `/root/Pictures/TinyCore.png` alias, recording them as
+`profile_symlinks`. Guest startup does not recreate these defaults: menu and
+picture customizations survive desktop Exit/restart. Rebuilding a fresh rootfs
+installs defaults again. Console-only assembly does not install these links.
 
 - `/init` initializes the console environment, sources the profile `rcS`, then
   execs the **official Tiny Core BusyBox ash** interactively. `--smoke` instead
@@ -182,9 +190,19 @@ Original rootfs versions remain under the selected build's `upstream/`;
   so clients must retry the local socket rather than fall back to a TCP
   connection while Xfbdev is still starting. This also applies with normal
   QEMU user networking enabled, not only the no-NIC test configuration.
-  The startup loop uses stock `xset -display "$DISPLAY" q` for a real local
-  X11 round trip. The packaged `waitforX` hard-codes `:0` and ignores
-  `DISPLAY`, so it is retained upstream but not used as this profile's probe.
+  Profile-owned `nanami-wait-for-x` uses the unchanged Xlib/libc to retry the
+  local display in one process, avoiding a fork/exec of `xset` and `sleep` per
+  unsuccessful attempt. It checks server liveness, permits 30 attempts spaced
+  by 100ms, and completes a real X11 round trip before starting clients.
+  [XCloseDisplay performs a final XSync](https://xorg.freedesktop.org/archive/X11R7.5/doc/man/man3/XCloseDisplay.3.html).
+  This bounds retries, not time spent inside an unresponsive Xlib connection.
+  The packaged `waitforX` hard-codes `:0` and ignores `DISPLAY`, so both it and
+  `xset` remain unchanged upstream but are not used as this profile's probe.
+  Desktop assembly requires Clang/LLD (or `CC` pointing to Clang) to build this
+  small LP64 Linux helper against the pinned runtime libraries; no development
+  headers or additional TCZ packages are needed. Its checksum is recorded in
+  `manifest.json` under `profile_helpers`. The helper's C policy and x86-64
+  libc entry code live under `tools/`; upstream programs are not patched.
   Its `io.nanami.graphics="true"` annotation explicitly grants a window-local
   graphics session. Other bundles do not gain raw keyboard/mouse access.
   `/dev/tty0`/`tty1` are a virtual console, not host VT switching; keyboard
@@ -263,7 +281,10 @@ The desktop test first executes the file-mapping guest regression, then waits
 for the shell inside a real X terminal, sends physical USB keyboard/mouse events,
 and independently reads the command's output file through VFS. It closes that
 terminal, clicks the dock to start a new terminal, verifies another output file,
-opens Editor and the information terminal, and clicks Exit desktop.
+opens Editor and the information terminal, and clicks Exit desktop. It also
+checks the image's default menu/picture links from the real X terminal, changes
+one menu alias and the picture file, and verifies both customizations survive
+the second desktop session. This fixture is included only with `--with-tests`.
 
 `--normal-devices` keeps PS/2 enabled and adds xtask's virtio-net user-network
 device. This covers cold-start X clients while networking is available, not

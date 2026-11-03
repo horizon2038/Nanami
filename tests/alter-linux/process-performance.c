@@ -18,14 +18,33 @@ static void report(const char *name, word ns) {
     output[length++] = '\n';
     call(1, 1, (word)output, length, 0);
 }
-static int copyout_performance(void) {
-    for (int fragmented = 0; fragmented < 2; ++fragmented) {
-        if (fragmented != 0) {
-            for (word i = 0; i < 128; ++i) {
-                word address = 0x500000000UL + i * 8192;
-                if (linux_call(9, address, 4096, 0, 2 | 0x10 | 0x20, -1, 0) != (long)address) { return 30; }
+static int syscall_controls(void) {
+    for (int credentials = 0; credentials < 2; ++credentials) {
+        for (int sample = 0; sample < 3; ++sample) {
+            word begin = now();
+            for (int i = 0; i < 2048; ++i) {
+                long value = call(credentials ? 102 : 39, 0, 0, 0, 0);
+                if (credentials) {
+                    if (value != 0) { return 33; }
+                } else if (value <= 0) { return 34; }
             }
+            report(credentials ? "PROCESS-PERF getuid-2048-ns=" : "PROCESS-PERF getpid-2048-ns=", now() - begin);
         }
+    }
+    return 0;
+}
+static int copyout_performance(void) {
+    const word vma_counts[] = {0, 128, 256};
+    for (word mode = 0; mode < sizeof(vma_counts) / sizeof(vma_counts[0]); ++mode) {
+        word count = vma_counts[mode];
+        for (word i = 0; i < count; ++i) {
+            word address = 0x500000000UL + i * 8192;
+            if (linux_call(9, address, 4096, 0, 2 | 0x10 | 0x20, -1, 0) != (long)address) { return 30; }
+        }
+        const char *label;
+        if (count == 0) { label = "PROCESS-PERF copyout-normal-ns="; }
+        else if (count == 128) { label = "PROCESS-PERF copyout-128-vmas-ns="; }
+        else { label = "PROCESS-PERF copyout-256-vmas-ns="; }
         for (int sample = 0; sample < 3; ++sample) {
             word start = now();
             for (int i = 0; i < 2048; ++i) {
@@ -33,15 +52,51 @@ static int copyout_performance(void) {
                 if (call(118, (word)&ids[0], (word)&ids[1], (word)&ids[2], 0) != 0
                     || ids[0] != 0 || ids[1] != 0 || ids[2] != 0) { return 31; }
             }
-            report(fragmented ? "PROCESS-PERF copyout-128-vmas-ns=" : "PROCESS-PERF copyout-normal-ns=", now() - start);
+            report(label, now() - start);
+        }
+        for (word i = 0; i < count; ++i) {
+            if (call(11, 0x500000000UL + i * 8192, 4096, 0, 0) != 0) { return 32; }
         }
     }
-    for (word i = 0; i < 128; ++i) {
-        if (call(11, 0x500000000UL + i * 8192, 4096, 0, 0) != 0) { return 32; }
+    return 0;
+}
+static int fragmented_fork_performance(void) {
+    const word counts[] = {128, 256};
+    for (word mode = 0; mode < sizeof(counts) / sizeof(counts[0]); ++mode) {
+        word count = counts[mode];
+        for (word i = 0; i < count; ++i) {
+            word address = 0x500000000UL + i * 8192;
+            if (linux_call(9, address, 4096, 0, 2 | 0x10 | 0x20, -1, 0) != (long)address) { return 40; }
+        }
+        for (int sample = 0; sample < 3; ++sample) {
+            word begin = now();
+            for (int iteration = 0; iteration < 8; ++iteration) {
+                long child = call(57, 0, 0, 0, 0);
+                if (child < 0) { return 41; }
+                if (child == 0) {
+                    /* Unbacked PROT_NONE reservations must survive fork. */
+                    unsigned int effective = 99, saved = 99;
+                    long result = call(118, 0x500000000UL, (word)&effective, (word)&saved, 0);
+                    call(60, result == -14 ? 0 : 43, 0, 0, 0);
+                    return 44;
+                }
+                int status = -1;
+                if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 42; }
+            }
+            report(count == 128 ? "PROCESS-PERF fork-128-vmas-8-ns=" : "PROCESS-PERF fork-256-vmas-8-ns=", now() - begin);
+        }
+        for (word i = 0; i < count; ++i) {
+            if (call(11, 0x500000000UL + i * 8192, 4096, 0, 0) != 0) { return 45; }
+        }
     }
     return 0;
 }
 int test_main(void) {
+    /* Isolate syscall/copyout work before fork/exec changes the process tree. */
+    int controls = syscall_controls();
+    if (controls != 0) { return controls; }
+    int copied = copyout_performance();
+    if (copied != 0) { return copied; }
     for (int exec = 0; exec < 2; ++exec) {
         for (int sample = 0; sample < 3; ++sample) {
             word begin = now();
@@ -63,8 +118,8 @@ int test_main(void) {
             report(exec ? "PROCESS-PERF fork-exec-8-ns=" : "PROCESS-PERF fork-8-ns=", now() - begin);
         }
     }
-    int copied = copyout_performance();
-    if (copied != 0) { return copied; }
+    int fragmented = fragmented_fork_performance();
+    if (fragmented != 0) { return fragmented; }
     static const char pass[] = "PROCESS-PERFORMANCE-PASS\n";
     call(1, 1, (word)pass, sizeof(pass) - 1, 0);
     return 0;

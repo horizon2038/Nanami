@@ -6,6 +6,9 @@ extern crate self as nanami_runtime;
 use std::cell::RefCell;
 type Word = usize;
 const EIO: i32 = 5;
+mod guest_views {
+    pub(super) fn invalidate(_: &super::Runtime, _: usize) {}
+}
 pub use nanami_uapi::os::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY};
 #[macro_export]
 macro_rules! println {

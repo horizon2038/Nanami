@@ -7,11 +7,14 @@ impl Alpha {
         source_pid: usize,
         destination_pid: usize,
     ) -> Result<(), CapabilityError> {
-        let pages = self
+        let vm = self
             .processes
             .vm_space_mut(source_pid)
-            .ok_or(CapabilityError::InvalidArgument)?
-            .backed_pages(0, usize::MAX);
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if vm.has_uncertain_mappings(0, usize::MAX) {
+            return Err(CapabilityError::Fatal);
+        }
+        let pages = vm.backed_pages(0, usize::MAX);
         let fresh = self
             .processes
             .vm_space_mut(destination_pid)
@@ -71,11 +74,14 @@ impl Alpha {
         if (base_va | target_va | size_bytes) & (PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
-        let mut pages = self
+        let vm = self
             .processes
             .vm_space_mut(source_pid)
-            .ok_or(CapabilityError::InvalidArgument)?
-            .backed_pages(base_va, end);
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if vm.has_uncertain_mappings(base_va, end) {
+            return Err(CapabilityError::Fatal);
+        }
+        let mut pages = vm.backed_pages(base_va, end);
         if self.processes.memory_owner_pid(source_pid)
             == self.processes.memory_owner_pid(destination_pid)
             && target_va > base_va

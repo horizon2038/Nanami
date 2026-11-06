@@ -106,6 +106,10 @@ pub struct VmSpace {
     permissions: BTreeMap<usize, usize>,
     // Private fork aliases, never packed into opaque descriptors or R/W/X bits.
     shared_private: BTreeSet<usize>,
+    // A capability error may follow a PTE update but precede its shootdown ACK.
+    // Separate from R/W/X: unknown presence must neither grant checked access
+    // nor allow backing retirement. Nodes are allocated only on error.
+    uncertain_mappings: BTreeSet<usize>,
 }
 
 impl VmSpace {
@@ -116,12 +120,14 @@ impl VmSpace {
             page_table_region: NO_PAGE_TABLE_REGION,
             permissions: BTreeMap::new(),
             shared_private: BTreeSet::new(),
+            uncertain_mappings: BTreeSet::new(),
         }
     }
 
     pub fn forget_frame(&mut self, virtual_address: usize) -> Option<CapabilityDescriptor> {
         self.permissions.remove(&virtual_address);
         self.shared_private.remove(&virtual_address);
+        self.uncertain_mappings.remove(&virtual_address);
         self.frame_by_va.remove(virtual_address)
     }
 
@@ -145,8 +151,36 @@ impl VmSpace {
         self.shared_private.range(start..end).next().is_some()
     }
 
+    /// Confirmed access only. Zero also covers an uncertain PTE; callers must
+    /// use frame_may_be_present rather than infer absence from permissions.
     pub fn permissions(&self, virtual_address: usize) -> usize {
+        if self.mapping_is_uncertain(virtual_address) {
+            return 0;
+        }
         self.permissions.get(&virtual_address).copied().unwrap_or(7)
+    }
+
+    pub fn mapping_is_uncertain(&self, virtual_address: usize) -> bool {
+        self.uncertain_mappings.contains(&virtual_address)
+    }
+
+    pub fn has_uncertain_mappings(&self, start: usize, end: usize) -> bool {
+        self.uncertain_mappings.range(start..end).next().is_some()
+    }
+
+    pub fn mark_mapping_uncertain(&mut self, virtual_address: usize) {
+        self.uncertain_mappings.insert(virtual_address);
+    }
+
+    pub fn confirm_unmapped(&mut self, virtual_address: usize) {
+        self.uncertain_mappings.remove(&virtual_address);
+        self.set_permissions(virtual_address, 0);
+    }
+
+    pub fn frame_may_be_present(&self, virtual_address: usize) -> bool {
+        self.mapping_is_uncertain(virtual_address)
+            || (self.find_frame(virtual_address).is_some()
+                && self.permissions.get(&virtual_address).copied().unwrap_or(7) != 0)
     }
 
     pub fn set_permissions(&mut self, virtual_address: usize, permissions: usize) {

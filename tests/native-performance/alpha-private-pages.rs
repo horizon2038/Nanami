@@ -1,7 +1,7 @@
 #![allow(dead_code, private_interfaces)]
 extern crate alloc;
 extern crate self as nun;
-use std::{collections::BTreeMap, ptr};
+use std::{cell::RefCell, collections::BTreeMap, ptr};
 pub type Word = usize;
 pub type CapabilityDescriptor = usize;
 pub mod capability_call {
@@ -58,10 +58,57 @@ fn process_frame_descriptor(root: usize, slot: usize) -> usize {
 fn process_frame_chunk_descriptor(root: usize, chunk: usize) -> usize {
     root * 4096 + chunk
 }
+#[derive(Clone, Copy)]
+enum UnmapFailure {
+    Before,
+    After,
+}
+#[derive(Default)]
+struct Kernel {
+    ptes: BTreeMap<(usize, usize), (usize, usize)>,
+    unmaps: usize,
+    fail_unmap: Option<UnmapFailure>,
+}
+thread_local! { static KERNEL: RefCell<Kernel> = RefCell::new(Kernel::default()); }
 mod arch {
     pub mod node {
         pub fn copy(_: usize, _: usize, _: usize) -> Result<(), crate::CapabilityError> {
             Ok(())
+        }
+    }
+    pub mod address_space {
+        use super::super::*;
+        pub fn map(
+            space: usize,
+            frame: usize,
+            va: usize,
+            attribute: capability_call::address_space::Attribute,
+        ) -> Result<(), CapabilityError> {
+            KERNEL.with_borrow_mut(|kernel| {
+                if kernel.ptes.contains_key(&(space, va)) {
+                    return Err(CapabilityError::IllegalOperation);
+                }
+                kernel.ptes.insert((space, va), (frame, attribute.bits()));
+                Ok(())
+            })
+        }
+        pub fn unmap(space: usize, frame: usize, va: usize) -> Result<(), CapabilityError> {
+            KERNEL.with_borrow_mut(|kernel| {
+                kernel.unmaps += 1;
+                if matches!(kernel.fail_unmap, Some(UnmapFailure::Before)) {
+                    return Err(CapabilityError::Fatal);
+                }
+                if let Some(&(mapped_frame, _)) = kernel.ptes.get(&(space, va)) {
+                    assert_eq!(mapped_frame, frame);
+                }
+                // Current HALs remove an already empty leaf idempotently;
+                // a later shootdown error still requires ownership retention.
+                kernel.ptes.remove(&(space, va));
+                if matches!(kernel.fail_unmap, Some(UnmapFailure::After)) {
+                    return Err(CapabilityError::Fatal);
+                }
+                Ok(())
+            })
         }
     }
 }
@@ -82,6 +129,8 @@ struct Memory {
     published: Vec<(usize, Vec<u8>)>,
     fail_allocate: Option<usize>,
     fail_map: Option<usize>,
+    fail_after_map: bool,
+    fail_frame_record: bool,
 }
 impl Memory {
     fn allocate_process_frame(
@@ -106,17 +155,27 @@ impl Memory {
     }
     fn map_frame_strict(
         &mut self,
-        _: usize,
+        space: usize,
         frame: usize,
         va: usize,
         vm: &mut vm_space::VmSpace,
     ) -> Result<(), CapabilityError> {
-        if self.fail_map == Some(self.published.len()) {
+        let fails = self.fail_map == Some(self.published.len());
+        if fails && !self.fail_after_map {
             return Err(CapabilityError::Fatal);
         }
         let page = self.initializing;
         self.frames.insert(frame, page);
+        arch::address_space::map(
+            space,
+            frame,
+            va,
+            capability_call::address_space::Attribute::ALL,
+        )?;
         self.published.push((va, self.pages[&page].to_vec()));
+        if fails || self.fail_frame_record {
+            return Err(CapabilityError::Fatal);
+        }
         vm.record_frame(va, frame).unwrap();
         Ok(())
     }
@@ -128,6 +187,7 @@ struct Alpha {
 }
 impl Alpha {
     fn new() -> Self {
+        KERNEL.with(|kernel| *kernel.borrow_mut() = Kernel::default());
         let mut processes = ProcessManager::new_alpha(1, 2, 99, 3, 4096, &[], 4).unwrap();
         for pid in [1, 2] {
             processes
@@ -209,33 +269,121 @@ impl Alpha {
             bytes,
         }
     }
-    fn handle_mapping_release_request(
-        &mut self,
-        request: OsRequestEvent,
-    ) -> Result<(), CapabilityError> {
+    fn invalidate_process_copy_mappings(&mut self, _: usize) -> Result<(), CapabilityError> {
         self.rollbacks += 1;
-        for va in (request.arg0..request.arg0 + request.arg1).step_by(PAGE_SIZE) {
-            self.processes
-                .vm_space_mut(request.arg2)
-                .unwrap()
-                .forget_frame(va);
-            if self
-                .processes
-                .find_active_physical_allocation_reference(request.arg2, va, 1)
-                .is_some()
-            {
-                let (allocation, _) =
-                    self.processes
-                        .release_physical_allocation_reference(request.arg2, va, 1)?;
-                self.processes
-                    .defer_physical_allocation_for_pid(request.arg2, allocation);
-            }
-        }
         Ok(())
     }
+    fn release_shared_memory(
+        &mut self,
+        _: nanami_core::process::ProcessEntry,
+        _: nanami_core::process::SharedMemoryReservation,
+    ) -> Result<(), CapabilityError> {
+        panic!("private constructor tests do not release shared objects");
+    }
 }
+#[path = "../../nanami/src/nanami_core/alpha/mapping_protection.rs"]
+mod mapping_protection;
+#[path = "../../nanami/src/nanami_core/alpha/mapping_release.rs"]
+mod mapping_release;
 #[path = "../../nanami/src/nanami_core/alpha/memory_pages.rs"]
 mod memory_pages;
+
+#[test]
+fn constructor_map_error_cannot_release_a_live_leaf_hidden_by_old_prot_none() {
+    for failure in [UnmapFailure::Before, UnmapFailure::After] {
+        let mut a = Alpha::new();
+        a.processes
+            .vm_space_mut(2)
+            .unwrap()
+            .set_permissions(0x80000, 0);
+        a.memory.fail_map = Some(0);
+        a.memory.fail_after_map = true;
+        KERNEL.with_borrow_mut(|kernel| kernel.fail_unmap = Some(failure));
+        assert!(a.map_process_heap_pages_at(2, 0x80000, 1).is_err());
+        assert!(a
+            .processes
+            .find_active_physical_allocation_reference(2, 0x80000, 1)
+            .is_some());
+        assert!(a
+            .processes
+            .vm_space_mut(2)
+            .unwrap()
+            .mapping_is_uncertain(0x80000));
+        assert!(a
+            .processes
+            .releasable_deferred_physical_allocations_for_pid(2)
+            .is_empty());
+        KERNEL.with_borrow_mut(|kernel| kernel.fail_unmap = None);
+        a.handle_mapping_release_request(OsRequestEvent {
+            identifier: 2,
+            code: 0,
+            arg0: 0x80000,
+            arg1: PAGE_SIZE,
+            arg2: 2,
+            arg3: nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES,
+        })
+        .unwrap();
+        assert!(!a
+            .processes
+            .vm_space_mut(2)
+            .unwrap()
+            .mapping_is_uncertain(0x80000));
+        assert!(a
+            .processes
+            .find_active_physical_allocation_reference(2, 0x80000, 1)
+            .is_none());
+        KERNEL.with_borrow(|kernel| assert!(kernel.ptes.is_empty()));
+    }
+}
+
+#[test]
+fn legacy_constructor_records_actual_default_access_before_reservation_protection() {
+    let mut a = Alpha::new();
+    a.processes
+        .vm_space_mut(2)
+        .unwrap()
+        .set_permissions(0x80000, 0);
+    a.map_process_heap_pages_at(2, 0x80000, 1).unwrap();
+    assert_eq!(a.processes.vm_space_mut(2).unwrap().permissions(0x80000), 7);
+    let space = a.processes.memory_entry(2).unwrap().address_space;
+    let frame = a.process_frame_for_page(2, 0x80000).unwrap();
+    a.protect_process_page(2, space, 0x80000, frame, 0).unwrap();
+    KERNEL.with_borrow(|kernel| {
+        assert_eq!(kernel.unmaps, 1);
+        assert!(kernel.ptes.is_empty());
+    });
+}
+
+#[test]
+fn pending_destination_without_frame_metadata_cannot_be_reallocated() {
+    let mut a = Alpha::new();
+    a.processes
+        .vm_space_mut(2)
+        .unwrap()
+        .mark_mapping_uncertain(0x80000);
+    assert_eq!(
+        a.map_process_heap_pages_at(2, 0x80000, 1),
+        Err(CapabilityError::Fatal)
+    );
+    assert_eq!(a.memory.next, 0);
+}
+
+#[test]
+fn post_map_frame_record_error_cannot_grant_checked_access_or_retire_backing() {
+    let mut a = Alpha::new();
+    a.memory.fail_frame_record = true;
+    KERNEL.with_borrow_mut(|kernel| kernel.fail_unmap = Some(UnmapFailure::Before));
+    assert!(a.map_process_heap_pages_at(2, 0x80000, 1).is_err());
+    assert_eq!(a.processes.vm_space_mut(2).unwrap().permissions(0x80000), 0);
+    assert!(a
+        .processes
+        .find_active_physical_allocation_reference(2, 0x80000, 1)
+        .is_some());
+    assert!(a
+        .processes
+        .releasable_deferred_physical_allocations_for_pid(2)
+        .is_empty());
+}
 #[test]
 fn copies_initialized_prefix_and_only_zeroes_the_suffix_before_publication() {
     for bytes in [0, 1, 4095, 4096, 4097, 8192] {

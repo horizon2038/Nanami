@@ -52,22 +52,58 @@ impl ProcessMapping {
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/mapping_table.rs"]
 mod mapping_table;
 use mapping_table::MappingTable;
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/page_window.rs"]
+mod read_window;
+
+#[test]
+fn mapping_generations_follow_shared_vm_mutations_but_not_fork_snapshots() {
+    let mut source = MappingTable::EMPTY;
+    assert_eq!(source.generation(), 0);
+    assert!(source.push(ProcessMapping {
+        base: 4096,
+        size: 4096,
+        prot: 3
+    }));
+    let first = source.generation();
+    assert_ne!(first, 0);
+    let alias = source;
+    let mut fork = MappingTable::EMPTY;
+    assert!(fork.initialize_from(source));
+    assert_ne!(fork.generation(), first);
+    source.invalidate_views();
+    assert_ne!(source.generation(), first);
+    assert_eq!(alias.generation(), source.generation());
+    let second = source.generation();
+    source.clear();
+    assert_ne!(source.generation(), second);
+    let old = source.generation();
+    source.release();
+    assert!(source.ensure());
+    assert_ne!(source.generation(), old);
+    source.release();
+    fork.release();
+}
 struct ManagedProcess {
     mappings: MappingTable,
+    vm_group: Word,
 }
 struct Runtime {
     process: ManagedProcess,
     child: ManagedProcess,
+    read_window: read_window::ReadWindow,
 }
 impl Runtime {
     fn new() -> Self {
         Self {
             process: ManagedProcess {
                 mappings: MappingTable::EMPTY,
+                vm_group: 1,
             },
             child: ManagedProcess {
                 mappings: MappingTable::EMPTY,
+                vm_group: 2,
             },
+            read_window: read_window::ReadWindow::new(),
         }
     }
     fn managed_process(&self, pid: Word) -> Option<&ManagedProcess> {
@@ -95,6 +131,106 @@ impl Drop for Runtime {
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/mappings.rs"]
 mod mappings;
+
+#[derive(Default)]
+struct LeaseEffects {
+    grants: usize,
+}
+impl read_window::LeaseEffects for LeaseEffects {
+    fn grant(&mut self, _: Word, _: Word, _: Word) -> Result<(), read_window::GrantError> {
+        self.grants += 1;
+        Ok(())
+    }
+    fn release(&mut self, _: Word) -> Result<(), ()> {
+        Ok(())
+    }
+}
+impl read_window::Effects for LeaseEffects {
+    fn read(&mut self, _: Word, _: Word, destination: &mut [core::mem::MaybeUninit<u8>]) {
+        for byte in destination {
+            byte.write(7);
+        }
+    }
+}
+fn cached_read(r: &Runtime, pid: Word, address: Word, effects: &mut LeaseEffects) -> bool {
+    if !r.memory_access_allowed(pid, address, 1, 1) {
+        return false;
+    }
+    let process = r.managed_process(pid).unwrap();
+    r.read_window.copy_into(
+        process.vm_group,
+        process.mappings.generation(),
+        pid,
+        address,
+        &mut [core::mem::MaybeUninit::uninit(); 1],
+        effects,
+    )
+}
+
+#[test]
+fn metadata_edits_revalidate_cached_input_after_protection_and_replacement() {
+    let mut r = Runtime::new();
+    let mut effects = LeaseEffects::default();
+    assert!(r.add_mapping(1, 0x10000, 8192, 3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    let generation = r.process.mappings.generation();
+    for page in 0..128 {
+        let base = 0x100000 + page * 8192;
+        assert!(r.add_mapping(1, base, 4096, 3));
+        assert!(r.protect_mapping(1, base, 4096, 1));
+        assert!(r.remove_mapping(1, base, 4096));
+        assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    }
+    assert_ne!(r.process.mappings.generation(), generation);
+    let previous = effects.grants;
+    assert!(r.protect_mapping(1, 0x10000, 4096, 0));
+    assert!(!cached_read(&r, 1, 0x10000, &mut effects));
+    assert!(r.protect_mapping(1, 0x10000, 4096, 3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert_eq!(effects.grants, previous + 1);
+    assert!(r.remove_mapping(1, 0x10000, 4096));
+    assert!(r.add_mapping(1, 0x10000, 4096, 3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert_eq!(effects.grants, previous + 2);
+}
+
+#[test]
+fn vm_peer_and_pre_pte_failure_invalidation_do_not_depend_on_metadata_changes() {
+    let mut r = Runtime::new();
+    let mut effects = LeaseEffects::default();
+    assert!(r.add_mapping(1, 0x10000, 4096, 3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    r.child.mappings = r.process.mappings;
+    r.child.vm_group = r.process.vm_group;
+    assert!(cached_read(&r, 2, 0x10000, &mut effects));
+    assert_eq!(effects.grants, 1);
+    let generation = r.process.mappings.generation();
+    // Called before the fallible hardware operation. Even if it fails and
+    // leaves logical metadata unchanged, no old alias may satisfy the retry.
+    r.child.mappings.invalidate_views();
+    assert_ne!(r.process.mappings.generation(), generation);
+    assert_eq!(r.mapping_prot(1, 0x10000, 4096), Some(3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert_eq!(effects.grants, 2);
+    assert!(r.protect_mapping(2, 0x10000, 4096, 1));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert_eq!(effects.grants, 3);
+}
+
+#[test]
+fn resetting_a_touching_stack_invalidates_its_whole_removed_entry() {
+    let mut r = Runtime::new();
+    let mut effects = LeaseEffects::default();
+    assert!(r.add_mapping(1, 0x10000, 0x3000, 3));
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert!(r.reset_stack_mapping(1, 0x13000, 4096, 3));
+    assert_eq!(r.mapping_at(1, 0x10000), None);
+    assert!(cached_read(&r, 1, 0x10000, &mut effects));
+    assert_eq!(
+        effects.grants, 2,
+        "removed metadata requires fresh Alpha validation"
+    );
+}
 
 #[test]
 fn ordinary_fork_copies_only_live_vmas_into_independent_storage() {

@@ -255,6 +255,28 @@ fn write_u32_to_target(r: &mut Runtime, pid: Word, pointer: Word, value: u32) ->
 }
 mod guest_memory {
     use super::*;
+    pub(super) fn copyout_owned(
+        r: &Runtime,
+        pid: Word,
+        pointer: Word,
+        source: &[u8],
+    ) -> Result<(), i32> {
+        copyout_from(r, pid, pointer, source.as_ptr() as Word, source.len())
+    }
+    pub(super) fn copyin_owned(
+        r: &Runtime,
+        pid: Word,
+        pointer: Word,
+        destination: &mut [core::mem::MaybeUninit<u8>],
+    ) -> Result<(), i32> {
+        copyin_into(
+            r,
+            pid,
+            pointer,
+            destination.as_mut_ptr() as Word,
+            destination.len(),
+        )
+    }
     pub(super) fn copyout_many(
         r: &Runtime,
         pid: Word,
@@ -268,6 +290,18 @@ mod guest_memory {
             result?;
         }
         Ok(())
+    }
+    pub(super) fn copyout_owned_many<const N: usize>(
+        r: &Runtime,
+        pid: Word,
+        buffers: &[(Word, &[u8]); N],
+    ) -> Result<(), i32> {
+        let transfers = buffers.map(|(target, source)| ProcessMemoryTransfer {
+            target,
+            local: source.as_ptr() as Word,
+            bytes: source.len(),
+        });
+        copyout_many(r, pid, &transfers)
     }
 }
 unsafe fn write_u32(pointer: Word, value: u32) {
@@ -1410,24 +1444,114 @@ fn recvmsg_batches_result_fields_without_allocation_or_padding_writes() {
         );
         assert_eq!(
             r.output_requests.get() - before,
-            2,
-            "payload plus one ordered metadata request"
+            1,
+            "one ordered request for payload and metadata"
         );
         assert_eq!(largest, 0);
     }
 }
 
 #[test]
+fn recvmsg_payload_fault_does_not_write_metadata_or_consume_the_packet() {
+    let mut r = Runtime::new();
+    let [a, b] = pair(&mut r, 1);
+    assert_eq!(send(&mut r, a, b"abc"), EmulationAction::Return(3));
+    let socket = r.linux_file(10, b as Word).unwrap().resource;
+    let mut bytes = [0; 3];
+    let mut control = [0; 24];
+    let mut iov = [Iov {
+        pointer: bytes.as_mut_ptr() as Word,
+        len: bytes.len(),
+    }];
+    let mut msg = header(&mut iov, &mut control);
+    msg.name_len = 99;
+    msg.flags = 123;
+    r.bad_write = bytes.as_mut_ptr() as Word + 1;
+    let before = r.output_requests.get();
+    assert_eq!(
+        call(
+            &mut r,
+            10,
+            SYS_RECVMSG,
+            [b as Word, &mut msg as *mut _ as Word, 0, 0, 0, 0]
+        ),
+        EmulationAction::Return(-(EFAULT as isize))
+    );
+    assert_eq!(r.output_requests.get() - before, 1);
+    assert_eq!(bytes, [0; 3]);
+    assert_eq!((msg.name_len, msg.control_len, msg.flags), (99, 24, 123));
+    assert_eq!(r.unix_sockets.get(socket).unwrap().queued_bytes, 3);
+    assert_eq!(r.unix_sockets.get(socket).unwrap().packets[0].offset, 0);
+}
+
+#[test]
+fn recvmsg_keeps_large_payload_chunk_fault_order() {
+    let mut r = Runtime::new();
+    let [a, b] = pair(&mut r, 1);
+    let payload = [7; 64];
+    assert_eq!(
+        send(&mut r, a, &payload),
+        EmulationAction::Return(payload.len() as isize)
+    );
+    let socket = r.linux_file(10, b as Word).unwrap().resource;
+    let mut bytes = [0; 64];
+    let mut control = [0; 24];
+    let mut iov = [Iov {
+        pointer: bytes.as_mut_ptr() as Word,
+        len: bytes.len(),
+    }];
+    let mut msg = header(&mut iov, &mut control);
+    msg.name_len = 99;
+    msg.flags = 123;
+    // Header input is 56 bytes. Use a 56-byte chunk, then fail in its suffix.
+    r.posix_shm_size = 56;
+    r.bad_write = bytes.as_mut_ptr() as Word + 60;
+    let before = r.output_requests.get();
+    assert_eq!(
+        call(
+            &mut r,
+            10,
+            SYS_RECVMSG,
+            [b as Word, &mut msg as *mut _ as Word, 0, 0, 0, 0]
+        ),
+        EmulationAction::Return(-(EFAULT as isize))
+    );
+    assert_eq!(r.output_requests.get() - before, 2);
+    assert_eq!(&bytes[..56], &payload[..56]);
+    assert_eq!(&bytes[56..], &[0; 8]);
+    assert_eq!((msg.name_len, msg.control_len, msg.flags), (99, 24, 123));
+    assert_eq!(
+        r.unix_sockets.get(socket).unwrap().queued_bytes,
+        payload.len()
+    );
+    r.bad_write = Word::MAX;
+    let before = r.output_requests.get();
+    assert_eq!(
+        call(
+            &mut r,
+            10,
+            SYS_RECVMSG,
+            [b as Word, &mut msg as *mut _ as Word, 0, 0, 0, 0]
+        ),
+        EmulationAction::Return(payload.len() as isize)
+    );
+    assert_eq!(r.output_requests.get() - before, 3);
+    assert_eq!(bytes, payload);
+    assert_eq!((msg.name_len, msg.control_len, msg.flags), (0, 0, 0));
+    assert_eq!(r.unix_sockets.get(socket).unwrap().queued_bytes, 0);
+}
+
+#[test]
 fn recvmsg_metadata_faults_preserve_whole_field_order_and_the_queued_packet() {
     for (bad_offset, expected_name, expected_control, attempts) in [
-        (8, 99, 24, 2),
-        (10, 99, 24, 2),
-        (40, 0, 24, 2),
-        (43, 0, 24, 2),
-        (44, 0, 24, 2),
-        (47, 0, 24, 2),
-        (48, 0, 0, 2),
-        (51, 0, 0, 2),
+        (8, 99, 24, 1),
+        (10, 99, 24, 1),
+        (40, 0, 24, 1),
+        (43, 0, 24, 1),
+        (44, 0, 24, 1),
+        (47, 0, 24, 1),
+        (48, 0, 0, 1),
+        (51, 0, 0, 1),
     ] {
         let mut r = Runtime::new();
         let [a, b] = pair(&mut r, 1);

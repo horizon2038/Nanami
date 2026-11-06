@@ -4,6 +4,31 @@ use a9n_abi::CapabilityDescriptor;
 
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
+#[path = "timer/counter.rs"]
+mod counter;
+pub use counter::MonotonicReader;
+
+/// Optional source metadata, never a device/IRQ ownership transfer. Native
+/// clients must explicitly map and validate the source before reading it.
+pub fn timer_service_counter_source(
+    timer_service_port: CapabilityDescriptor,
+    kind: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, base, period) = call_port(
+        timer_service_port,
+        TIMER_SERVICE_REQUEST_COUNTER_SOURCE,
+        kind,
+        0,
+        0,
+        0,
+        2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((base, period))
+}
+
 pub fn timer_service_sleep_milliseconds(
     timer_service_port: CapabilityDescriptor,
     milliseconds: Word,

@@ -3,11 +3,754 @@
 The ongoing evidence, acceptance rules and rejected experiments are recorded in
 [Nanami / Alter optimization cycles](optimization-cycles.md).
 
-Cycle97 is paused at the user's request. The working tree retains a sealed-exec
-bulk-retirement candidate and destructive-exec error handling. Native1264,
-ASan153, ARM checks, SMP1/SMP4 ownership tests and two complete GUI sessions
-pass, but its timing comparison was interrupted. Accepted cycle96 remains the
-performance baseline; do not claim a cycle97 speedup or release acceptance.
+Temporary image retention: after completing cycle N, delete generated boot
+images and their backing rootfs from cycle N-2 and earlier. Retain only the
+newest validated candidate and the latest accepted working fallback (or the
+two latest accepted images when no candidate is retained), without
+duplicate copies under older cycle directories. Keep small measurement logs
+and artifact hashes; never delete user input images or files used by a live VM.
+When intervening cycles are rejected or diagnostic-only, the predecessor means
+the last accepted working image, not an unverified newer directory number.
+Retaining an experimental candidate does not make it the default or establish
+its performance claim; never discard the accepted fallback for an unverified one.
+
+Also review task-owned temporary files under `/private/tmp` at each cycle
+closure and after long build/test batches. Wait for measured VMs and their
+owning jobs to finish before inventory or deletion. Remove completed disposable
+media and obsolete scratch outputs, not unknown applications' files, official
+inputs, active files, retained runtime generations or small reproducibility
+evidence. This is housekeeping during ongoing work, not an unattended timer.
+
+Optimization follows Rob Pike's measurement rules: first measure the actual
+workload and establish that a component dominates its critical path; only then
+tune that component. Source-level suspicion, call counts, translated-block
+weights, smaller binaries and favorable microbenchmarks are not elapsed-time
+attribution. A five-percent cycle target never authorizes speculative tuning.
+Keep failed observations and validate any later change against the original
+end-to-end workload, including paint and input readiness.
+
+Cycle165 rejects that profiler for normal-runtime cost attribution. Eight
+matched boots preserve every original gate, but count/time recording shifts
+click-to-ping mean by+46.24%/+51.15%; loaded-off also fails RTT stability.
+Executed-prefix guarding and decoded-ELF checks improve coverage correctness,
+not timing validity. No syscall-cost ranking, speed change or Kernel change
+is admitted. All eight initial images remain visibly incomplete after ping;
+later actual keyboard navigation works, not evidence of100ms full readiness.
+Diagnostic media and duplicate VM dirs are removed after verified backups.
+See [cycle165 evidence](optimization-cycles.md#cycle-165-reject-the-syscall-profiler-after-matched-perturbation-controls).
+
+Cycle164 validates a host-only syscall-pairing prototype with known Linux
+scope calls, then observes7770 paired returns in Files' current image. Separate
+exec address spaces and194 ambiguous replacements in another AS remain explicit.
+Unsupported-prefix coverage and matched perturbation admission are still
+required: no syscall-cost/dominance or speedup claim is accepted. Production
+runtime/Kernel unchanged. See
+[cycle164 evidence](optimization-cycles.md#cycle-164-syscall-pairing-prototype-validates-observed-coverage-not-runtime-costs).
+
+Cycle163 records the missing visual endpoint with four fresh normal-runtime
+boots. Both timeline runs remain visibly incomplete after first ping; their
+500ms-request frames (actual apertures about2.67--2.79s after press) show the
+menus/tree/list/status, and later real keyboard navigation reaches/usr/local.
+These are observations, not exact full-readiness times or a speedup. No new
+optimization is selected. See
+[cycle163 evidence](optimization-cycles.md#cycle-163-first-ping-precedes-visible-completion-and-later-real-input-works).
+
+Cycle162 withdraws the proposed scalar write-input trial before a runtime build
+or VM test. Its measured source half is only about3.3% of whole launch, not a
+dominant component. Restore only the new call-site/test edits; retain earlier
+work. Normal Alter remains953f. No performance claim or new accepted candidate;
+identify a dominant real launch interval before selecting another optimization.
+
+Cycle161 identifies the cold Root POSIX writes: all1228calls/18686bytes in
+each of six profiled cohort boots use one observed description and OPEN path
+`/alter/linux/tinycore/rootfs/root/.config/xfe/xferc_42`. No unknown destinations,
+errors or accounting gaps. All original/FD gates pass9/9 plus the separate pilot.
+But count-only raw median differs-10.75%, failing the predeclared global5%
+measurement gate: retain destination evidence, NOT newly accepted timing or
+speedup. No filename-specific bypass/preseed/buffering; production/Kernel stay
+unchanged. The proposed cold-write input trial is withdrawn in162: prior157's
+valid costs do not establish whole-launch dominance, and161's failed timing
+cannot strengthen the case. Diagnostic pair/ten duplicate VM dirs removed;
+accepted118/107 retained. See
+[cycle161 evidence](optimization-cycles.md#cycle-161-root-writes-target-one-configuration-file-but-the-global-timing-gate-fails).
+
+Cycle160 uses ONE identical diagnostic ELF/image, unarmed/count/timed across
+nine fresh boots. All original/report gates and predeclared5% measurement
+gates pass. Scoped lookup-copy time supplies at most4.543%/4.272% upper bounds
+against observed raw/Xlib client intervals, including some out-of-interval
+clock-copy work. It does not dominate; do NOT tune this communication path.
+No view grants/releases in36 complete phases. This neither explains159's
+normal/private difference nor revives rejected candidate158. Production/Kernel
+unchanged. Next identify FD/destination lifetimes in the already-measured cold
+Root POSIX-write path instead of guessing from descriptor kind or optimizing
+small warm-copy costs. Diagnostic pair and nine duplicate VM dirs removed;
+accepted118/107 retained. See
+[cycle160 evidence](optimization-cycles.md#cycle-160-identical-elf-control-validates-timing-and-rejects-lookup-copy-tuning).
+
+Cycle159 checks that candidate's communication phase with12 fresh boots and
+scoped view counters. All original/report gates pass. No view grants/releases
+occur in any of48 raw/Xlib phases, so mapping churn INSIDE those intervals is
+not supported. However normal-before count-only raw median differs-6.01%,
+outside the PREDECLARED absolute5% probe gate: do not use the timing profile
+to select a speed hack, or call that negative difference a gain. Normal versus
+private code-layout/inactive instrumentation remains confounded. Production
+and Kernel unchanged; candidate158 remains rejected. Preserve original gates;
+isolate measurement effects with an identical diagnostic ELF unarmed/armed
+before relying on elapsed attribution. Eight diagnostic images and12 duplicate
+VM directories removed after verified backup; accepted118/107 retained. See
+[cycle159 evidence](optimization-cycles.md#cycle-159-communication-view-churn-is-absent-but-the-probe-control-fails).
+
+Cycle158 tests the measured write-input read-view candidate in eight balanced
+before/after real Files runs. All original launch/RTT and file-mapping gates
+pass, but mean launch improves4.91% while pooled raw128 median regresses6.37%,
+outside the PREDECLARED5% communication gate. Root improves14.82%, which does
+not justify accepting the whole-system tradeoff. Reject the candidate, restore
+both production functions/tests and reproduce the exact normal Alter953f hash.
+No new optimization is retained; Kernel stays clean/unbuilt. Next measure the
+raw phase's actual view-grant/release work and initial-paint interference before
+choosing a change; cache pressure is only a hypothesis. Diagnostic media and
+duplicate VM directories removed; accepted118/107 retained. See
+[cycle158 evidence](optimization-cycles.md#cycle-158-write-input-view-reuse-improves-launch-but-fails-the-communication-gate).
+
+Cycle157 lowers hot-loop probe disturbance with same-actor counter/timer rate
+brackets and classifies Root writes. Both whole/local5% measurement gates pass.
+All1228 writes are POSIX,18686bytes: source-read73/72ms, provider75/75ms, neither
+dominates the other. No pure-IPC or memcpy claim. This selects a bounded
+existing-helper trial, not a promise of5% whole-system gain. See
+[cycle157 evidence](optimization-cycles.md#cycle-157-low-disturbance-write-decomposition-before-selecting-a-change).
+
+Cycle156 correlates that window-tree scope with all Alter events. Six original
+Files launch/RTT runs pass after rejecting an earlier UART-interleaved cohort.
+Read-mode Root write handling takes156--159ms: about68% of Root syscall
+handling, but only28% of the scoped wall interval and roughly7% of whole launch.
+Receive/handling each account for about47/49%; receive is NOT pure IPC and
+handling is NOT exclusive CPU. The whole-launch read mean differs+0.97% from
+normal, but Root itself grows6.60%: the whole-workload gate hides material
+local measurement disturbance. Do not tune from those raw costs yet. Lower
+probe disturbance, then measure write descriptor kinds/source-read/provider
+stages before choosing a change. No production/Kernel change. Eight diagnostic
+images, one initramfs and11 duplicate VM log directories removed after verified
+backup; accepted118/107 retained. See the
+[cycle156 evidence](optimization-cycles.md#cycle-156-root-scoped-write-handling-is-a-candidate-but-probe-disturbance-matters).
+
+Cycle155 partitions actual resource creation with nested bookkeeping. Six
+original Files runs and all four actual hook-coverage/partition gates pass.
+The disjoint union covers almost all create. Visual takes2.2ms, fonts27--29ms,
+cursors41ms; window-tree work excluding those selected children takes510ms.
+That is87.4--87.7% OF CREATE, about23.1% of observed whole launch, NOT88% of
+startup or exclusive CPU. Counts alone mislead:1122 cursor calls cost much
+less elapsed time than one root call. Loaded-control/read means differ
+-1.30/+0.44% from coarse baseline, not exact tax/significance with two runs
+per mode. Next correlate this window-tree scope with Alter syscall/service
+paths before tuning. No production/Kernel change; two diagnostic images and
+one initramfs removed,118/107 retained. See the
+[cycle155 evidence](optimization-cycles.md#cycle-155-window-tree-work-dominates-resource-creation-not-whole-startup).
+
+Cycle154 measures interposable Xlib synchronous reply handling INSIDE the
+actual create phase, using same-process clock/counter brackets. Six original
+Files runs pass. Both timed boots see36 create calls out of84 pre-run calls,
+about98ms inclusive elapsed, only16.55--16.82% of create. Roughly485--496ms is
+NOT IN THIS HOOK; that complement is not pure CPU, and other XCB/send/wait
+paths remain unclassified. No speculative IPC tuning follows. Added loaded-
+control/read means differ+0.61/+2.51% from coarse-only baseline, not exact tax
+or significance with two runs per mode. No production/Kernel changes; two
+diagnostic images and one initramfs removed,118/107 retained. See the
+[cycle154 evidence](optimization-cycles.md#cycle-154-interposable-synchronous-replies-are-a-minority-of-gui-resource-creation).
+
+Cycle153 partitions the later Files startup with five clock samples around
+FXApp init/create/run entry. Six original cold-launch/RTT runs pass, with real
+wrapper coverage verified. Init takes288--301ms, intervening main work293ms,
+create581--591ms (about26.5% of observed launch), then154--164ms to ping. This
+is distributed inclusive elapsed time, NOT exclusive client CPU or IPC.
+Loaded-control/read means differ+1.26/+0.50% from none; only two boots per mode,
+not exact tax or zero-overhead proof. Next separate client work from waiting
+inside create before tuning. No production/Kernel change; two diagnostic
+images and one initramfs removed,118/107 retained. See the
+[cycle153 evidence](optimization-cycles.md#cycle-153-files-startup-is-distributed-and-window-creation-is-the-largest-coarse-body).
+
+Cycle152 measures first post-relocation audit consistency to pre-main with a
+dependency-free GNU audit module that requests no binding/PLT callbacks.
+An official-Linux fixture detects a known150ms constructor; native/model
+sanitizer checks pass. Five real Files boots preserve all original gates.
+Post-linker cleanup/constructors/startup take34--35ms, about1.6% of observed
+launch: do not tune this small phase. Pre-main to guest-observed ping takes
+1.329--1.339s, a larger NEXT measurement scope, not exclusive main CPU or proof
+of an IPC/Kernel bottleneck. Loaded-control/read means differ+0.21/-2.14% from
+none, not an optimization or zero-overhead proof with so few observations.
+No production/Kernel changes; two diagnostic images and one initramfs removed,
+accepted118/107 preserved. See the
+[cycle152 evidence](optimization-cycles.md#cycle-152-post-linker-startup-is-small-and-the-later-inclusive-scope-is-large).
+
+Cycle151 fixes lost measurement records: the native GUI fixture previously
+printed only the last nonempty line per poll. It now forwards every newly
+completed appended line without replaying unchanged content;11 native tests
+and four real Files runs pass. Stock glibc2.42 loader statistics, calibrated
+after all original RTT gates, measure about40--41ms, only1.88--1.93% of the
+observed launch. Library loading is93% of that small loader scope, NOT93% of
+application startup. No loader/runtime optimization follows. Kernel unchanged;
+four temporary media removed, accepted118/107 retained. See the
+[cycle151 evidence](optimization-cycles.md#cycle-151-lossless-measurement-records-and-a-small-runtime-linker-startup-span).
+
+The log-bridge regression can be run with `cargo test --manifest-path
+tests/native-performance/Cargo.toml --offline --test appended-lines --
+--test-threads=1` (as one command).
+
+Frozen118/107 images retain the old native fixture. Multi-line diagnostics in
+a private clone must install the rebuilt `negoto-smoke` as well as any observer;
+rebuilding only a host runner does not update a rootfs-loaded test executable.
+
+Cycle150 validates an external host-stack sampler before considering its
+observations. Four original Files runs pass; requested2s/7ms sampling has
+mean launch2.192s versus2.111s controls (+3.82%). This is not zero-overhead or
+statistical proof. Both reports include the post-ping screenshot, so reject
+whole-launch attribution despite the sub5% observed mean difference. CPU2's
+233 observations per report are distributed across host waits, MMU/TB work,
+locks and unresolved JIT code; none identifies a dominating guest component.
+No production/Kernel changes. Two temporary media deleted after hashes,
+accepted118/107 retained. See the
+[cycle150 evidence](optimization-cycles.md#cycle-150-coarse-host-stack-sampling-does-not-isolate-the-launch-critical-path).
+
+Cycle149 runs the same frozen Tiny Core Files/Xfbdev/FLWM/wbar binaries and
+observer under both normal Nanami and an official Linux kernel. Four fresh
+boots in N/L/L/N order pass the original launch/ping/raw/Xlib gates. Mean
+click-to-observed-ping is2.104s on Nanami and0.668s on Linux, a3.152x whole-OS
+ratio, NOT an optimization gain or component attribution. Linux's primary
+800x600 framebuffer, PS/2 input and ext4-backed disk access differ from
+Nanami's nested display, USB input and user-level storage stack. Only two
+observations per OS, with100ms relay/10ms host polling. These are not full
+paint/input-ready measurements or a universal QEMU floor. No runtime tuning
+follows. Failed setup pilots remain excluded; all temporary media/initramfs
+deleted after hashes, accepted118/107 retained. See the
+[cycle149 evidence](optimization-cycles.md#cycle-149-same-application-linux-gui-reference-shows-a-whole-os-gap-not-a-bottleneck).
+
+Cycle148 rejects fine-grained host boundary tracing as a basis for five-percent
+optimization decisions. Across ten original Files runs, both a register-aware
+prototype and a no-register coarse revision show mean measured launch times
+about5.4/5.3% above their own no-plugin controls. These small samples do not
+establish exact overhead, but low perturbation is unproven. Coarse IRET targets
+remain explicitly unknown. No Kernel/runtime optimization follows from these
+biased profiles. All original gates pass, two diagnostic media deleted,
+118/107 retained. See the
+[cycle148 evidence](optimization-cycles.md#cycle-148-cpu-boundary-tracing-perturbs-launch-at-the-scale-of-target-gains).
+
+Cycle147 uses two passive host CPU snapshots around the original Files
+click-to-ping workload, without guest hooks or stopping QEMU. Five same-image
+runs take2.101--2.162s. Two counter runs consume2.357/2.327s across four TCG
+threads, averaging1.095/1.106 host cores; CPU2 occupancy is67.04/67.26%.
+CPU2 also hosts Files, Alter and POSIX: these counters do not distinguish
+their execution, guest Kernel time, or the cause of unscheduled time.
+The counter window extends only3.513/3.538ms beyond the original scope;
+controls show no large perturbation, not proof of zero overhead.
+No runtime tuning follows. Kernel unchanged/unbuilt, two diagnostic media
+deleted,118/107 retained. See the
+[cycle147 evidence](optimization-cycles.md#cycle-147-passive-host-cpu-time-is-not-component-attribution).
+
+Cycle146 records the whole Alpha actor, not another selected helper. Repeated
+Files traces place399.843/390.750ms in all Alpha handler bodies during the
+launch interval, only18.24/17.66% of clone-to-ping. Actual Files-owned native18
+requests account for338.402/329.129ms; other guests/pump/native clients remain
+separate. These are wall spans, not exclusive CPU or pure IPC. Preserve the
+first unusably interleaved output; revised post-timing open then mmap barriers
+serialize the dumps without new protocol. No runtime optimization follows.
+Both sources and normal Alpha/init restored; all temporary media deleted,
+118/107 retained. See the
+[cycle146 evidence](optimization-cycles.md#cycle-146-all-alpha-request-bodies-cover-only-about-eighteen-percent-of-launch).
+
+Cycle145 adds VFS-side attribution and repeats the actual Files workload.
+Matched VFS bodies take309.415/311.907ms, about14% of clone-to-ping; selected
+block-device waits147.210/145.023ms are only6--7% of that whole interval.
+Residual is not exclusive CPU. Strictly demultiplex one complete VFS dump
+that interrupted an Alter line; preserve the raw parse failure. Separate50
+direct mapping/statfs requests that were outside144's selected gateway hooks,
+requiring their exact ABI rather than relaxing time/count bounds. All original
+tests pass; no optimization follows. Five source snapshots/archive and normal
+binaries restored, four media removed,118/107 retained. See the
+[cycle145 evidence](optimization-cycles.md#cycle-145-vfs-service-and-backend-spans-are-not-the-overwhelming-launch-cost).
+
+Cycle144 correlates POSIX provider records with Files' actual serialized
+Alter intervals, rather than assigning Alter's native badge to a Linux PID.
+Selected VFS calls account for401.337/375.924ms out of442.453/416.356ms in
+matched POSIX handlers. That is about91% of those handlers, but only17--18%
+of clone-to-ping, and includes backend/transport/scheduling/probe time.
+Neither VFS CPU nor one overwhelming whole-launch bottleneck is established.
+No optimization follows. Restore all26 source snapshots and normal binaries,
+remove four diagnostic media, retain118/107. The current normal POSIX binary
+differs from the retained seed, so these are not cross-cycle gain comparisons.
+See the [cycle144 evidence](optimization-cycles.md#cycle-144-posix-provider-time-mostly-lies-inside-vfs-calls-not-one-proven-whole-launch-bottleneck).
+
+Cycle143 covers the missing namespace gateway. Repeated complete Files traces
+place142.262/137.172ms inside posix_path_request and only7.871/6.702ms in the
+outer helper. The gateway is95% of that helper, but the entire helper is only
+6.14/6.64% of clone-to-ping. Do not tune outer string/descriptor staging or
+call the gateway pure IPC/provider CPU. Preserve the slower first profile.
+Restore all12 files and normal953f; delete four media, retain118/107. Next
+correlate actual caller intervals with service-side processing/backend waits,
+without treating Alter's native badge as a Linux guest PID. See the
+[cycle143 evidence](optimization-cycles.md#cycle-143-namespace-staging-is-small-gateway-time-is-not-yet-provider-cpu-time).
+
+Cycle142 partitions selected helper/provider spans inside Files' syscall
+bodies. Two traces show copyin/out195--199ms, selected POSIX313--342ms and
+selected standalone Alpha235--236ms, with312--319ms still residual. Nested
+Alpha105--108ms is already inside copy spans. Source review identifies an
+unmeasured namespace::request_path / posix_path_request boundary; residual
+is not pure local CPU and selected POSIX is not all provider traffic. No
+tuning follows. Restore all11 files and normal953f, delete four media, retain
+118/107. Next time that actual path-resolution boundary before deciding on a
+cache/transport change. See the
+[cycle142 evidence](optimization-cycles.md#cycle-142-selected-guest-memory-and-provider-spans-do-not-identify-one-dominant-helper).
+
+Cycle141 expands timing to all Alter actor events. Two complete traces
+partition clone-to-ping2.023/2.020s into dispatch57.29/57.67%, receive38.58/
+38.29%, readiness/signal pump2.20% and between-probe bookkeeping. Files'
+syscalls account for50.37/50.90%; Xfbdev's syscall bodies are only2.67%.
+These are inclusive wall spans, not CPU shares or pure IPC cost. Preserve
+the first driver's130 exit caused by fixed-width log-label truncation and
+the unchanged complete raw trace; corrected predicates and repeated run pass.
+No tuning follows yet. Restore sole main.rs and normal953f, remove four media,
+retain118/107. Next measure common frontend/provider spans within Files'
+dispatches. See the
+[cycle141 evidence](optimization-cycles.md#cycle-141-all-alter-events-account-for-the-launch-interval).
+
+Cycle140 measures Alpha's initialized-page constructor without self IPC or
+Kernel changes. Two complete Files profiles record241.478/237.242ms across
+378 calls, split among allocation52ms, destination aliases64ms, source alias/
+initialization69--71ms and target publication38--41ms. That is about11% of
+first-constructor-to-ping, with non-negligible probe overhead, not a dominant
+whole-launch cause. No tuning follows. Restore all three diagnostic files and
+exact normal Alpha96bc/initba776, remove four media, retain118/107. Next
+broaden critical-path attribution instead of subdividing a small fraction
+indefinitely. See the
+[cycle140 evidence](optimization-cycles.md#cycle-140-alpha-initialized-placement-is-distributed-not-a-dominant-launch-cause).
+
+Cycle139 splits actual private file mmap into disjoint wall phases. Repeated
+profiles place237.698/242.595ms in placement/stream initialization, about63%
+of the143 completely marked private mappings but only11% of clone-to-ping.
+Source preparation is61.933/63.950ms and protection34.215/33.816ms. The
+2.883--3.462ms copy subtotal covers only Alter's snapshot memcpy, not Alpha's
+page initialization. The old74.496ms pcre2 spike does not recur; do not invent
+its cause or an11x gain. No tuning follows yet. Restore all seven files and
+normal953f, delete four diagnostic media, retain118/107. Next measure the
+manager-side placement work with a calibrated non-recursive clock. See the
+[cycle139 evidence](optimization-cycles.md#cycle-139-private-file-mmap-phase-time-placement-is-largest-but-not-the-whole-launch).
+
+Cycle138 associates existing, already-copied path bytes and syscall results
+with selected dispatch wall spans. Two actual Files runs pass without lost
+records. Shared-object-related dispatch takes558.672/433.343ms; font paths
+101.560/105.297ms, and all1,228 config writes total only176.129/165.534ms.
+Do not tune fonts or buffering from counts. One identical pcre2 mmap takes
+74.496/6.598ms with no code change; this unexplained variation narrows the
+next measurement to file-source preparation versus mapping/protection, not
+an optimization claim or a proven storage/cache/IPC cause. Restore all four
+temporary files and normal953f; retain only118/107 media. See the
+[cycle138 evidence](optimization-cycles.md#cycle-138-startup-path-identities-and-a-variable-mmap-not-a-speedup).
+
+Cycle137 measures selected Alter handler wall spans during real Files startup.
+Three profiles cover parent clone to first ping in 2.286/2.277/2.447s. The
+actual creating clone takes 43.597/46.507/58.541ms; the largest child syscall
+group, mmap, takes 413.394/435.610/434.435ms (17.75--19.13% of that interval).
+Another 1.037--1.125s lies outside the selected handler union. These gaps mix
+guest execution, other processes, waits, transport and probe overhead; neither
+the gaps nor the handler spans are exclusive CPU time. No single dominant
+cause is established, so no tuning follows. Preserve the third run's original
+clock-line parsing failure and explicit whitespace-only recovery. Restore
+the sole temporary production file and exact normal Alter ELF; remove all
+four diagnostic media and retain118/107. See the
+[cycle137 evidence](optimization-cycles.md#cycle-137-selected-alter-handler-time-does-not-establish-a-dominant-launch-cause).
+
+Cycle136 obtains repeated coarse user-level time evidence without VM stops.
+From actual native input receipt to the observer's ping timestamp, Honoka
+spends90.29%/90.35% inside receive/reply-receive; fbdev capture is5.98%/6.02%,
+composition2.60%/2.45%, present0.74%/0.66%. This is inclusive wall time, not
+CPU accounting or pure IPC cost. The compositor mostly waits for events; its
+large execution-count weights did not identify a dominant launch-time cause.
+Do not tune it from those weights. Restore all four temporary files and exact
+normal ELF, retain raw records/failures, and next trace other-process startup
+and observer discovery. See the
+[cycle136 evidence](optimization-cycles.md#cycle-136-coarse-user-level-time-rules-out-honoka-as-the-dominant-launch-phase).
+
+Cycle135 rejects repeated-QMP-stop residency sampling for the launch workload.
+Both ordinary controls pass at2.269/2.226s click-to-ping, but the diagnostic
+hits its512-sample budget, spends2.879s stopped/inspecting in9.675s, and never
+observes Files. The observer exits9; the timeout screenshot still shows the
+desktop and wbar, not desktop termination. The cause is unresolved. Preserve
+the failure, withdraw the sampler/QMP changes exactly, and retain only small
+evidence. No time-share attribution or optimization follows from this run.
+Next use coarse, bounded user-level timing without repetitive VM stops. See
+the [cycle135 evidence](optimization-cycles.md#cycle-135-random-time-residency-sampler-rejected).
+
+Cycle134 adds host-only QEMU TCG diagnostic tooling. The controlled Files run
+completes, and exact whole-block byte matching attributes large execution
+weights to Honoka's fbdev capture and color blending. These are not CPU-time
+percentages: metadata is bounded and translation weights are not retired
+instructions or critical-path latency. No dominant time bottleneck or speedup
+is established, and no production optimization is made. See the
+[cycle134 evidence](optimization-cycles.md#cycle-134-bounded-launch-execution-diagnosis-not-time-attribution).
+
+The optional diagnostic sources are `tcg-profile.c` / `tcg-profile-test.c`
+(installed QEMU 11 API 7 and GLib headers) and `tcg_profile.py` /
+`test_tcg_profile.py` (Python standard library). The host plugin uses bounded
+per-vCPU inline counters and a private control socket. Its controller requires
+QMP stop acknowledgement and confirmed paused status before every snapshot.
+It is not enabled by the ordinary runner, and instrumented timings must not
+be compared with ordinary timings. Native API-model tests also run with
+ASan/UBSan; the cycle record preserves exact commands and a real VM validation.
+
+Cycle133 rejects direct final-attribute publication in fresh private forks.
+Despite fewer target-page calls and21 successful normal VMs, Files launch rises
+7.49% pooled and fork gains do not repeat across cohorts. Restore all eight
+prototype files exactly, then isolate only constructor uncertainty/default-
+permission correctness fixes and four actual-handler regressions. Three fail
+against the old constructor; final native1,377/17 ignored, selected ASan224/5
+ignored, x86/ARM checks and three final safety boots pass. Remove all four
+temporary media; retain118/107 and small evidence. No speedup or runtime image
+promotion is claimed. See the
+[cycle133 evidence](optimization-cycles.md#cycle-133-unpublished-fork-final-permissions-rejected-constructor-safety-retained).
+
+Cycle132 retains a user-level safety prerequisite: failed MAP/UNMAP can leave
+an uncertain PTE after a fallible SMP shootdown. Track that state separately
+from permissions and require acknowledged cleanup before backing reuse. Three
+actual-handler regressions fail before the fix; native1,373/17 ignored,
+selected ASan220/5 ignored, x86/ARM checks and all21 normal VM gates pass.
+Performance is not equivalent: opposite launch cohorts disagree, one candidate
+boot has a large RTT increase, and three cleanup submeasurements regress in
+both independent controls. Retain the correctness fix in source without
+promoting a runtime image or claiming a speedup. Delete the three comparison
+media; accepted118/fallback107 remain. See the
+[cycle132 evidence](optimization-cycles.md#cycle-132-uncertain-pte-accounting-safety-prerequisite).
+
+Cycle131 does not adopt range-preserving page leases. Twelve new regression
+tests, native1,370/17 ignored, selected ASan113/2 ignored and x86/ARM checks
+pass, but the uninterrupted launch cohort is1.29% slower. Manual review
+interrupts the second cohort; after explicit resume, run only the previously
+unrun final sample, preserving the multi-hour gap and original interrupted
+driver status. Favorable pooled launch numbers are descriptive, not repeated
+improvement proof. Restore all five authored files and exact normal ELF;
+native1,358/17 and selected ASan101/2 pass. Delete the four comparison media;
+retain accepted118/fallback107 and small evidence. See the
+[cycle131 evidence](optimization-cycles.md#cycle-131-range-preserving-private-page-leases-not-adopted).
+
+Cycle130 rejects bounded readiness writeback after ten successful VM runs.
+Although the executed pre-scan 616-byte copy is removed, Files click-to-ping
+increases 1.02% pooled and raw X11 elapsed time increases 8.28%; the smaller
+copy is not a demonstrated system gain. Restore all three authored files,
+the exact normal ELF, 1,358 native tests and 133 selected ASan tests. Delete
+all four comparison image/rootfs files after terminal/open-file/hash checks;
+accepted118/fallback107 remain. See the
+[cycle130 evidence](optimization-cycles.md#cycle-130-bounded-readiness-writeback-rejected).
+
+Cycle129 adds optional, bounded observer failure evidence and full-loop mocked
+tests. All36 Tiny Core host tests plus native ASan/UBSan pass; default RTT and
+no-RTT observer ELFs remain byte-identical. Four diagnostic ABBA boots complete
+without reproducing128's failure, which remains unresolved, not cured or
+replaced by these results. Diagnostic timings are excluded from performance
+claims; no runtime optimization is adopted. Four temporary image/rootfs files
+are deleted; accepted118/fallback107 remain unchanged. See the
+[cycle129 evidence](optimization-cycles.md#cycle-129-bounded-observer-failure-evidence).
+
+Cycle128 finds an actual signal-pump copy before empty/exited-task checks:
+generated code loses a 560-byte pre-check copy and stack use falls 1816->824
+bytes. Three new regression tests pass, along with 1,361 native and 99 ASan
+tests, but the runtime comparison remains inconclusive: after two mapping
+pilots and four complete launch boots, the fifth launch observer exits9
+without a completion marker despite a painted Files window. Preserve this
+failure rather than replacing it or advertising the favorable first cohort.
+Both source files and normal ELF are restored; all four temporary image/rootfs
+files are deleted. Accepted118/fallback107 remain unchanged. See the
+[cycle128 evidence](optimization-cycles.md#cycle-128-signal-pump-snapshot-removal-inconclusive).
+
+Cycle127 rejects the unflagged, local POSIX-buffer adapter after 18 successful
+VM runs. Files click-to-ping improves 3.73% across eight launch boots, but raw
+X11 elapsed time increases 5.97% pooled; the reversed cohorts and independent
+protocol/process controls remain mixed, with repeated slower native cleanup
+submeasurements. This is not a demonstrated overall gain or a causal diagnosis.
+The candidate's seven adapter tests pass, then all authored production changes
+are restored exactly; the original ELF, 1,358 native tests and 80 ASan tests are
+verified again. All four comparison image/rootfs files are deleted, preserving
+only accepted118/fallback107 and small evidence. See the
+[cycle127 evidence](optimization-cycles.md#cycle-127-unflagged-local-posix-buffer-adapter-rejected).
+
+Cycle126 keeps the original2s response workload and adds an explicit10s
+observer settle for16 interleaved/reversed, uninstrumented policy-comparison
+boots. Cold launch improves in all four comparisons (pooled4.04%), but this is
+not an enabled production policy or a5%/100ms result. The prior raw penalty
+does not reproduce at2s; waiting10s does not uniformly improve response.
+Default RTT and no-RTT observer ELFs stay byte-identical; the two sleep-constant
+bytes are the only early/late ELF differences. All eight temporary disk/rootfs
+files are deleted; only accepted118/107 and small evidence remain. See the
+[cycle126 evidence](optimization-cycles.md#cycle-126-original-and-later-post-startup-response-controls).
+
+Cycle125 uses temporary phase counters in four same-ELF diagnostic boots.
+Every raw phase has zero software-lease misses, evictions and invalidations;
+the five POSIX file-copy adapter sites are inactive in both raw/Xlib phases.
+One Xlib phase has one successful first write-page grant. These counters do
+not identify124's latency cause or establish a performance gain. Restore the
+normal sources/ELF and delete all four diagnostic image/rootfs files; keep
+only validated118 and fallback107 plus small evidence. See the
+[cycle125 evidence](optimization-cycles.md#cycle-125-rawxlib-software-copy-cache-phase-counters).
+
+Cycle124 compares the two POSIX I/O policies in one identical Alter ELF,
+selected before the Tiny Core root context. Complete disks differ by one env
+byte only. Two reversed cohorts improve Files click-to-ping by5.32%/6.82%,
+but raw X11 medians regress5.50%/12.17%; Xlib's earlier regression does not
+reproduce. No runtime policy is retained. Eight ordinary boots and a separate
+default-mode mapping pilot finish0. Production sources/ELF are restored and
+all four comparison image/rootfs files are deleted; keep validated118 and
+fallback107 plus small evidence. See the
+[cycle124 evidence](optimization-cycles.md#cycle-124-same-elf-early-posix-io-policy-diagnostic-only).
+
+Cycle123 rejects a local typed POSIX-buffer adapter as well: Files launch
+improves4.73%, but raw/Xlib128-query medians regress5.99%/9.08%. Five actual
+VMs pass. Six common helper bodies match under strict symbolic instruction
+comparison; their inlining loss is not demonstrated. Restore all prototype
+files and the exact normal ELF, and delete all four comparison image/rootfs
+files. A one-ELF runtime-policy comparison is the next diagnostic to audit,
+not a verified optimization. See the
+[cycle123 evidence](optimization-cycles.md#cycle-123-local-typed-posix-buffers-and-generated-code-rejected).
+
+Cycle122 finds missing small-copy reuse in POSIX file I/O, but rejects global
+workspace widening. V1 Files launch improves6.62%/4.19% in two reversed cohorts,
+while Xlib round trips regress6.75%/5.41%; a reordered V2 improves launch only
+0.79% and still regresses Xlib6.45%. Fourteen actual VMs pass. Restore all six
+prototype/profiler files and the exact normal Alter ELF; retain source/ELF/log
+evidence, not the eight generated image/rootfs files. The next local typed-I/O
+boundary remains a hypothesis, not a performance claim. See the
+[cycle122 evidence](optimization-cycles.md#cycle-122-posix-workspace-copy-coverage-rejected).
+
+Cycle121 rejects manager-owned pool Frames for sealed private mmap pages.
+Seven actual VM runs pass, including mapping/protection and read-only-fork
+isolation, but ordinary ABBA Files click-to-ping rises from2167.036ms to
+2227.844ms (+2.81%). The lower raw X11 median is not a launch gain.
+Restore all ten prototype source/test files and the exact pre-cycle Alpha/init
+ELFs; keep the rejected patch and small evidence, not its image/rootfs files.
+The five diagnostic/comparison files are deleted; validated118 and fallback107
+remain. See the [cycle121 evidence](optimization-cycles.md#cycle-121-sealed-private-pool-frames-rejected).
+
+Cycle120 separates post-startup X11 request/reply work from the first-window
+ping. The test-only observer's `APP_OBSERVER_STEADY_RTT` build compares raw
+QueryPointer with the same request through unchanged Xlib, after a two-second
+settle. Default observer builds remain byte-identical. Four ordinary ABBA boots
+give128-request medians29.868/61.854ms for Nanami raw/Xlib and10.625/15.470ms
+for ordinary Linux. A separate client-filtered diagnostic counts approximately
+two versus six client syscalls per request; it is not a pure IPC measurement,
+launch-speed improvement, or100ms full-readiness result. Framing/partial-I/O
+host tests are included in the Tiny Core test suite. All diagnostic image pairs
+and generated initrds are deleted; only validated118 and fallback107 remain.
+See the [cycle120 evidence](optimization-cycles.md#cycle-120-separate-raw-and-xlib-x11-round-trips).
+
+Cycle115 isolates reusable RAM file-cache backing with guest aliases disabled.
+Two reversed ordinary comparisons reduce fork/exec medians5.68%/5.60%, but actual
+Files launch changes only-0.66% and native Xfe/BusyBox lifecycle controls regress
+in both cohorts. Reject this default-policy change and restore the exact control
+ELF; preserve all21 metrics, raw samples, cross-backend checks and ten actual
+boots, including two GUI sessions. Delete both rejected comparison image/rootfs
+pairs after VM closure; retain only114's validated default-off full-alias candidate
+and107's accepted fallback. See the
+[cycle115 evidence](optimization-cycles.md#cycle-115-isolate-reusable-ram-cache-backing-without-guest-aliases).
+
+Cycle116 rejects a more precise shared-RAM child-cap copy-alias invalidator.
+All ten actual boots pass, but Files improves only2.64%, while ordinary fork
+and Negoto creation regress in both process cohorts. Restore the exact Alpha
+runtime and retain one general child-alias cleanup-failure/retry regression;
+restored native1358/17 ignored and serial selected ASan186/2 ignored pass.
+No Kernel/IPC or runtime policy change is accepted. See the
+[cycle116 evidence](optimization-cycles.md#cycle-116-invalidate-only-retired-child-cap-copy-aliases-rejected)
+for all21 controls, artifact identities and deletion of the rejected image pair.
+
+The cycle97 pause is historical: the user subsequently committed the work as
+`acaa38a` (Nanami0.7.2) and resumed optimization. Its interrupted ordinary timing
+comparison still does not establish a cycle97 speedup. Cycle96 remains the
+frozen performance reference for that comparison.
+
+Cycle98 measures actual dock-to-viewable-window latency, not only fork/exec
+loops. Build the desktop image with `--with-tests`, then use
+`tests/negoto/qemu-smoke.py --tinycore-app-launch-perf files --normal-devices
+--smp 4 --image PATH`. The event-driven Xlib observer is test-only. Repeat in
+both orders; its VFS/host polling cannot resolve a single small percentage
+difference. See the cycle notes for observer overhead, normal images and the
+separate AF_UNIX receive comparison. Kernel and IPC fastpath remain unchanged.
+
+Cycles99--100 reuse bounded read-only RAM leases for small syscall inputs,
+first in owned scratch and then in typed owned UNIX payload buffers. The latter
+uses `Vec::spare_capacity_mut()` without scratch staging or publishing failed
+input. Current permission checks, large checked transfers, ordered faults and
+transactional socket queues remain intact. Cycle100's matched protocol medians
+fall34.50% for plain UNIX and31.35% for recvmsg; unchanged controls include
+regressions. Files' coarse event-loop gate improves only3.45% on average and
+still takes about2.87s. Neither that gate nor these protocol gains establish
+the requested100ms fully painted, input-responsive launch target. See the
+[cycle100 evidence](optimization-cycles.md#cycle-100-copy-small-unix-inputs-into-typed-owned-buffers).
+
+Cycle101 rejects range-only read-lease invalidation: a model's129→1 grants
+does not translate into a repeatable launch gain, and several ordinary controls
+regress. Restore the exact cycle100 executable and retain general protection,
+replacement, VM-peer and stack-reset cache regressions. Restored native1292 and
+selected ASan122 pass; Kernel/IPC and the accepted runtime remain unchanged.
+
+Cycle102 rejects byte-verified reuse of existing private read-only file pages.
+Two ordinary comparisons pass all functional probes, but Files' elapsed mean
+changes by+0.28%/+7.92%; avoiding construction work does not establish a launch
+gain. Remove the experimental user-level API and restore the exact cycle100
+Alpha/init/Alter executables. Restored native1292/17 ignored, ASan172/2 ignored
+and ARM checks pass. Delete diagnostic and rejected image/rootfs files after
+VM closure; retain only the working baseline and small evidence, not another
+large copy of identical accepted bytes. The100ms paint/input goal remains unmet.
+
+Cycle103 isolates the current Xfe launch before choosing another memory change.
+One opt-in diagnostic captures7,327 syscalls from the first Xfe syscall to the
+observer's nonce-validated ping: time/clock_gettime account for1,479 calls
+(20.19% of calls, not latency). Cached file initialization spans only4.36% of
+that local-counter interval. Handler spans include descheduling; the residual
+is not an IPC-cost estimate. Restore all diagnostic sources and the exact
+cycle100 Alter ELF. Next assess an optional timer-owner-provided native counter
+reader with fresh RPC fallback, not stale clock caching or guest MMIO authority.
+No runtime optimization or new5% gain is claimed for this diagnostic cycle.
+
+Cycle104 adds an optional native timer-owner counter reader. On a running wide
+x86 HPET, Alter validates a separate Uncached mapping and the service's clock
+epoch/units, then reads fresh hardware for each clock query. Legacy, narrow,
+PIT and unsupported providers retain fresh RPC fallback. No guest MMIO,
+device-programming authority, cached NOW value, TSC interpolation or Kernel
+change is introduced; alarms and notifications remain service-owned.
+
+Both independent ordinary protocol comparisons lower all eight pooled medians;
+large-directory enumeration falls6.32% and11.55%. Files' coarse host gate falls
+6.71% in the first cohort but is flat (+0.006%) in the reversed default-build
+comparison, so its apparent launch gain is not reproducible. The ping interval
+also includes the observer's clock-query overhead, not only Xfe responsiveness.
+The process controls retain regressions, including copyout128-VMA+5.15%.
+Thirty normal-device boots, two raw Linux time-ABI boots, native1307/17 ignored,
+selected ASan71/1 ignored and cross-backend checks pass. Retain this measured
+clock-path reduction without claiming a uniform5% gain or the100ms paint/input
+target. See the [cycle104 evidence](optimization-cycles.md#cycle-104-read-fresh-native-timer-counters-with-service-fallback).
+
+Cycle105 reuses bounded writable private-RAM views for small Linux copyout,
+while retaining current permission checks, generation invalidation, owned
+sources, ordered faults and the checked-copy fallback. Shared/COW/device
+backing is excluded; no writable authority is added to sealed Linux guests.
+FreeBSD translation does not issue the new view requests. Read/write windows
+share lease management without sharing their native VA ranges.
+
+Both V2 and final default comparisons pass: copyout falls about74--77%, plain
+UNIX about56--60%, small-directory enumeration39--45%, and stat38--65% (the
+larger stat figure includes an unusually slow before median). Keep all21
+process metrics, eight protocol metrics and six frame controls: recvmsg gains
+do not repeat, and Negoto creation regresses5.25%/9.18%. Final native1319/17
+ignored, selected ASan247/4 ignored, cross-backend checks and both two-session
+GUI runs pass. All46 normal-device runs across this cycle's variants pass.
+Kernel and IPC fastpath remain unchanged.
+
+Files' coarse host gate falls10.16%/14.23%, but its ping-endpoint screenshots
+still show incomplete painting. This is not the100ms fully painted,
+input-responsive launch target. See the [cycle105 evidence](optimization-cycles.md#cycle-105-reuse-bounded-writable-private-ram-views-for-checked-copyout)
+for every control, raw sample, artifact and retention decision.
+
+Cycle106 fixes a real Honoka notification-coalescing bug: OR-ed scalar IDs
+could route two surface updates to a third window. Opaque handles now carry
+disjoint live low-bit hints plus a non-wrapping generation. Existing producers
+still work, owner/exact-handle control checks remain, and unrelated fbdev
+surfaces are not captured. The old real-Compositor pixel regression fails;
+native1323/17 ignored, selected ASan46/2 ignored, both architecture checks,
+four actual GUI sessions across SMP1/SMP4 and all14 normal-device boots pass.
+
+Keep this as a correctness fix, not a measured5% speed gain. Files' coarse
+gate is flat (-0.17%), ping worsens6.43%, and its second after-image screenshot
+still has unfinished panels. All process/protocol/frame controls and contrary
+evidence remain in the [cycle106 notes](optimization-cycles.md#cycle-106-make-honoka-present-hints-safe-under-notification-coalescing).
+The100ms fully painted, input-responsive launch goal is not achieved.
+
+Cycle107 keeps recvmsg payload/result sources typed through a bounded owned
+write vector. Prepare/revalidate all leases before any store; an eviction or
+failed preparation keeps the original ordered checked batch, field/padding
+boundaries and queue-commit behavior. No Kernel/user ABI or guest authority
+changes. Native1330/17 ignored, selected ASan101/2 ignored, cross-build checks,
+all27 ordinary boots and six actual GUI sessions pass.
+
+Two independent comparisons lower recvmsg56.08%/56.96% and EOF writeback
+73.55%/74.23%. General copyout instead regresses about2--5%; plain UNIX is
+flat/4.10% slower and repeat Negoto creation8.11% slower. Files' coarse host
+gate stays flat (+0.37%/-0.41%), with unfinished ping-endpoint images in both
+cohorts. Keep every raw control in the [cycle107 notes](optimization-cycles.md#cycle-107-retain-typed-owned-vectors-through-small-recvmsg-writeback).
+This is a repeated communication-path gain, not a uniform system speedup or
+the100ms paint/input target.
+
+Cycle108 tests pure cache lookup/effectful installation separation without
+compiler attributes. Although generated cache-hit calls disappear, eight
+matched boots show normal copyout effectively flat (-0.08%), fragmented
+copyout only1.2--1.5% shorter and recvmsg2.44% shorter, with contrary directory
+and process controls. Reject the extraction, restore/rebuild the exact107
+ELF and remove108's generated images. Keep all measurements in the
+[cycle108 notes](optimization-cycles.md#cycle-108-reject-lookupinstall-extraction-after-a-matched-comparison).
+No five-percent system gain or completed paint/input launch is established.
+
+Cycle109 adds opt-in launch observation, not a speedup or a new ready gate:
+
+```sh
+python3 -B tests/negoto/qemu-smoke.py --image IMAGE --normal-devices --smp 4 \
+  --tinycore-app-launch-perf files --app-launch-ready ping --app-launch-timeline
+```
+
+The original press-to-ping measurement stays intact; release-command bounds
+are additional fields. Post-ping PNGs use actual capture timestamps, followed
+by a real keyboard directory-change challenge. Inspect the images: a fixed
+wait, stable picture or sent keys must never stand in for a painted/input PASS.
+Both observed boots still have incomplete ping frames, populated listings by
+the200ms capture, and visible /usr/local navigation after keyboard input.
+Temporary framebuffer timing is removed and production rebuilds identically
+to107. Ten runner tests and diagnostic-native1330/17 ignored pass. Details and
+all twelve inspected frames are in the
+[cycle109 notes](optimization-cycles.md#cycle-109-observe-post-ping-paint-and-real-keyboard-response).
+The100ms fully painted/input-ready launch goal remains unmet.
+
+Cycle110 rejects pre-generated Fontconfig caches after eight ordinary matched
+boots. A version-matched2.16.2/cache-9 generator is reproducible, and the target
+loads all97 cached fonts before GUI startup, but Files is effectively flat
+(-0.20%), cold desktop startup regresses2.93%, and warm startup regresses0.45%.
+Keep the11-tested HMP period-key correction, not a new cache build dependency.
+All candidate/diagnostic images and extracted tool trees are removed after
+closure; working106/107 pairs and small evidence remain. See the
+[cycle110 notes](optimization-cycles.md#cycle-110-reject-pre-generated-fontconfig-caches-after-cold-startup-comparisons).
+
+Cycle111 rules out two more suspected startup costs in one diagnostic Files
+launch: all 10,720 observed syscall faults carry inline register context
+(zero legacy fallbacks), and post-handler readiness plus signal processing
+accounts for about 1.47% of the observed local elapsed interval. This is not
+a speedup or an IPC-cost estimate. Remove the temporary instrumentation and
+its image/rootfs after recording the raw counters; normal Alter rebuilds
+byte-identically to107, and working106/107 remain the only retained pairs.
+See the [cycle111 notes](optimization-cycles.md#cycle-111-check-inline-fault-context-and-event-tail-cost).
+
+Cycle112 repeats the detailed Xfe profile on the current accepted code, after
+the clock and recvmsg changes. mmap now contributes41.10% of captured dispatch
+ticks; cached/streamed page initialization contributes11.57% of the entire
+observed interval. Clock calls remain frequent but take only0.55% of that
+interval. These are diagnostic elapsed spans, not CPU fractions or a new
+speed comparison. Restore all probes exactly and remove their image pair;
+see the [cycle112 notes](optimization-cycles.md#cycle-112-refresh-the-current-xfe-workload-and-audit-snapshot-lifetime).
+
+Cycle113 prototypes reclaimable, read-only file-snapshot storage behind the
+default-off `NANAMI_IMMUTABLE_SNAPSHOTS=1` switch. Publication follows complete
+I/O, version validation and read-only protection; eviction retires rather than
+overwrites backing. Failed construction/retirement retains ownership without
+serving a cache hit. Default and enabled native1338/17 ignored, enabled ASan175/2
+ignored, cross-backend checks and four QEMU boots pass. No guest private aliases
+or copy elision are connected yet, and no speedup is claimed. Delete the
+validation image/rootfs after closure; accepted106/107 remain the working pairs.
+See the [cycle113 notes](optimization-cycles.md#cycle-113-prototype-reclaimable-read-only-snapshot-storage).
+
+Cycle114 connects experimental R/RX private file aliases to those RAM snapshots,
+with unique-extent/page accounting, explicit RAM reference units, detach-before-
+write and whole-object release validation. It remains default-off. Final native
+1357/17 ignored, selected ASan191/2 ignored, cross-backend checks and all34 QEMU
+boots across three variants pass. Final Files timing improves only0.79% with
+10ms host observation; earlier cohorts improve4.31--6.72%, while the unchanged
+200ms observer is flat/slightly worse. Do not claim a repeatable5% launch win.
+Fork/exec improves about27%, but fragmented-fork controls retain regressions.
+Keep the final validated experimental image and107's stable fallback, deleting
+the two-generations-old106 pair and all superseded comparison/diagnostic images.
+The next comparison isolates RAM backing from aliasing: Alpha's permanent-pool
+copy-window ownership differs from PID-scoped child aliases. This is a code-
+based lead, not an isolated causal result. See the
+[cycle114 notes](optimization-cycles.md#cycle-114-connect-private-file-snapshot-aliases-and-isolate-their-cost).
 
 Cycle96 enables opt-in private read-only fork sharing for sealed x86 Linux
 guests. Legacy Native/FreeBSD forks and non-x86 backends retain eager copying.
@@ -553,6 +1296,17 @@ PID limit and never replace current-Frame or permission validation.
 Owned/shared RAM buffers record permanent Alpha pool Frame aliases, allowing
 the bounded copy cache to reuse those aliases after guest mappings are released.
 Ordinary private RAM and MMIO/framebuffer child aliases retain PID-scoped cleanup.
+`linux-read-window` separately tests Alter's bounded64-page supervisor read
+leases: fresh content, VM-owner/generation changes, boundaries, eviction and
+uncertain-install/failed-release quarantine. `linux-guest-copy` checks current
+permission preflight and checked fallbacks. Alpha lifecycle tests exercise the
+real grant handler's authority, pinning and partial-failure cleanup; reservation
+tests ensure high fixed-VA leases do not pollute ordinary heap allocation holes.
+Actual protection, replacement and fork isolation are checked by the80-page
+Tiny Core mapping probe, with1/4-core read-only-fork/source-first-reaping tests.
+See [cycle99](optimization-cycles.md#cycle-99-bounded-supervisor-read-leases-for-small-syscall-inputs)
+for matched timings and the distinction between event-loop and fully painted,
+input-responsive application readiness.
 Namespace checks classify already-resolved internal descriptors only; they do
 not establish capability validity, rights or object identity. Real-memory tests
 cover bootstrap/normal namespaces and process-arena reset. The shared-memory

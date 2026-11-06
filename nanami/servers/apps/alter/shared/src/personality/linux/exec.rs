@@ -81,6 +81,7 @@ pub(super) fn sys_execve(
         crate::common::dynamic::prepare_in_root(runtime, &loaded, root).map_err(map_load_error)?;
     let preferred_image_base = preferred_exec_image_base(personality, &loaded.metadata);
     let exec_elf = current_elf_metadata_from_loaded(&loaded.metadata, preferred_image_base);
+    super::guest_views::invalidate(runtime, pid);
     if let Err(error) =
         nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
     {

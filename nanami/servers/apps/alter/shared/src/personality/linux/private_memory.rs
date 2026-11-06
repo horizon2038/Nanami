@@ -32,6 +32,7 @@ pub(super) fn with_private_write<T>(
         return operation();
     }
     with_vm_quiescence(runtime, pid, || {
+        super::guest_views::invalidate(runtime, pid);
         nanami_runtime::request_process_private_write(pid, address, bytes, OS_PRIVATE_WRITE_DETACH)
             .map_err(map_request_error)?;
         operation()

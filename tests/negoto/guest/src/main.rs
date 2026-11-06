@@ -10,6 +10,7 @@ use nanami_runtime::{ipc, Word, OS_RESPONSE_OK};
 use serde_json::{json, Value};
 #[path = "../../../../nanami/servers/apps/negoto/src/files.rs"]
 mod files;
+mod appended_lines;
 mod frame_capture;
 mod process_perf;
 mod framebuffer {
@@ -449,10 +450,9 @@ fn tinycore_applications(client: &Client, files: &files::Files, timer: Word) {
     for turn in 0..6000 {
         if let Ok(pointer) = files.read(&format!("{root}pointer-probe.log")) {
             if pointer != previous_pointer {
-                if let Some(line) = pointer
+                for line in appended_lines::complete_appended_lines(&previous_pointer, &pointer)
                     .split(|byte| *byte == b'\n')
-                    .rev()
-                    .find(|line| !line.is_empty())
+                    .filter(|line| !line.is_empty())
                 {
                     nanami_runtime::println!("{}", String::from_utf8_lossy(line));
                 }

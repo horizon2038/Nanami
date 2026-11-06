@@ -42,12 +42,11 @@ fn copy_in(
         while done < count {
             let chunk = (count - done).min(runtime.posix_shm_size);
             let initialized = data.len();
-            copyin_into(
+            guest_memory::copyin_owned(
                 runtime,
                 pid,
                 message.bases[index].checked_add(done).ok_or(EFAULT)?,
-                unsafe { data.as_mut_ptr().add(initialized) } as Word,
-                chunk,
+                &mut data.spare_capacity_mut()[..chunk],
             )
             .map_err(|_| EFAULT)?;
             // Expose bytes only after copyin succeeded; failed transfers never
@@ -71,12 +70,11 @@ fn copy_out(runtime: &Runtime, pid: Word, message: &Message, data: &[u8]) -> Res
         let mut done = 0;
         while done < count {
             let chunk = (count - done).min(runtime.posix_shm_size);
-            copyout_from(
+            guest_memory::copyout_owned(
                 runtime,
                 pid,
                 message.bases[index].checked_add(done).ok_or(EFAULT)?,
-                data[copied..].as_ptr() as Word,
-                chunk,
+                &data[copied..copied + chunk],
             )
             .map_err(|_| EFAULT)?;
             copied += chunk;
@@ -388,6 +386,38 @@ fn receive(
         output_flags |= MSG_CTRUNC;
     }
     let output = (|| {
+        // The usual X11 receive has one bounded iovec, one queued packet and
+        // no address/rights output. Keep borrowing that payload, and append
+        // the result fields to the same ordered checked-copy request. Bound
+        // it to one original chunk so a later EFAULT keeps scalar prefix
+        // behavior; larger/scattered/ancillary messages retain the old path.
+        if let Some(header) = message.header {
+            if message.name == 0
+                && files.is_empty()
+                && message.count == 1
+                && queued != 0
+                && queued <= runtime.posix_shm_size
+            {
+                let packet = socket(runtime, file.resource)?
+                    .packets
+                    .front()
+                    .ok_or(EAGAIN)?;
+                if queued <= packet.data.len() - packet.offset {
+                    return write_receive_result(
+                        runtime,
+                        pid,
+                        header,
+                        0,
+                        0,
+                        output_flags as u32,
+                        Some((
+                            message.bases[0],
+                            &packet.data[packet.offset..packet.offset + queued],
+                        )),
+                    );
+                }
+            }
+        }
         copy_queued_payload(runtime, pid, file.resource, message, queued)?;
         if context.number == SYS_RECVFROM {
             write_address(runtime, pid, source, message.name, message.name_len)?;
@@ -427,13 +457,14 @@ fn receive(
                 write_target_memory(runtime, pid, message.control, control_len)
                     .map_err(|_| EFAULT)?;
             }
-            write_result_header(
+            write_receive_result(
                 runtime,
                 pid,
                 header,
                 address_len as u32,
                 control_len,
                 output_flags as u32,
+                None,
             )?;
         }
         Ok(())
@@ -483,43 +514,37 @@ fn receive(
     }
 }
 
-fn write_result_header(
-    runtime: &mut Runtime,
+fn write_receive_result(
+    runtime: &Runtime,
     pid: Word,
     header: Word,
     address_len: u32,
     control_len: Word,
     flags: u32,
+    payload: Option<(Word, &[u8])>,
 ) -> Result<(), i32> {
-    use nanami_runtime::ProcessMemoryTransfer;
-    let control_len = control_len as u64;
-    // One request, retaining whole-field preflight and exact store order.
-    super::guest_memory::copyout_many(
-        runtime,
-        pid,
-        &[
-            ProcessMemoryTransfer {
-                target: header + 8,
-                local: &address_len as *const _ as Word,
-                bytes: 4,
-            },
-            ProcessMemoryTransfer {
-                target: header + 40,
-                local: &control_len as *const _ as Word,
-                bytes: 8,
-            },
-            ProcessMemoryTransfer {
-                target: header + 48,
-                local: &flags as *const _ as Word,
-                bytes: 4,
-            },
-        ],
-    )
+    let address_len = address_len.to_ne_bytes();
+    let control_len = (control_len as u64).to_ne_bytes();
+    let flags = flags.to_ne_bytes();
+    let fields = [
+        (header + 8, &address_len[..]),
+        (header + 40, &control_len[..]),
+        (header + 48, &flags[..]),
+    ];
+    if let Some(payload) = payload {
+        super::guest_memory::copyout_owned_many(
+            runtime,
+            pid,
+            &[payload, fields[0], fields[1], fields[2]],
+        )
+    } else {
+        super::guest_memory::copyout_owned_many(runtime, pid, &fields)
+    }
 }
 
 fn empty_receive(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Word, i32> {
     if let Some(header) = message.header {
-        write_result_header(runtime, pid, header, 0, 0, 0)?;
+        write_receive_result(runtime, pid, header, 0, 0, 0, None)?;
     }
     Ok(0)
 }

@@ -39,9 +39,11 @@ window. Clicking the blue desktop opens FLWM's menu; `Terminal` starts another
 aterm. The bottom dock provides Terminal, Files, Editor, Images, Paint,
 Calculator, Tiny Core information and Exit desktop. The blue desktop's
 menu also offers Clock. Menu entries link directly to the upstream ELF programs;
-dock buttons run `nanami-app` through BusyBox explicitly for their arguments and
-log files. Neither path relies on the unsupported FLRun spawn path or on Kernel
-script-interpreter loading.
+dock buttons source `nanami-app` in the BusyBox shell already started by wbar,
+preserving their arguments and log files without another shell exec or dynamic
+loader startup. The shared script then execs the upstream application. Neither
+path relies on the unsupported FLRun spawn path or on Kernel script-interpreter
+loading.
 Closing any terminal leaves the desktop running. Choose **Exit desktop** to
 stop the session and remove the Negoto execution context. The console profile is also included in the
 desktop disk:
@@ -254,6 +256,8 @@ python3 tests/negoto/qemu-smoke.py --tinycore-desktop --smp 4 --normal-devices \
   --image thirdparty/tinycore/build-desktop/nanami-tinycore.img
 python3 tests/negoto/qemu-smoke.py --tinycore-apps --smp 4 --normal-devices \
   --image thirdparty/tinycore/build-desktop/nanami-tinycore.img
+python3 tests/negoto/qemu-smoke.py --tinycore-app-launch-perf files --smp 4 --normal-devices \
+  --image thirdparty/tinycore/build-desktop/nanami-tinycore.img
 ```
 
 `--with-tests` additionally requires Clang and LLD to build integer-only Linux
@@ -304,6 +308,19 @@ for each. Titles must identify the actual application rather than a startup
 error dialog. The native probe reads independent progress/result files and
 verifies desktop Exit and context cleanup. It is a launch/render smoke test,
 not a claim that every upstream feature has been tested.
+
+`--tinycore-app-launch-perf` accepts `terminal`, `files` or `editor`. Rebuild
+with `--desktop --image --with-tests` to include its test-only `/bin/aw` Xlib
+observer. Each invocation starts a fresh VM, clicks the actual dock launcher,
+and measures host elapsed time until the matching new X11 window is viewable.
+The observer subscribes to window events; it does not repeatedly scan the
+client's widgets, modify the application, or accept an existing matching window.
+The PNG is retained after complete encoding. This is a first-window latency,
+not an assertion that all content is painted or the OCI session was reclaimed.
+VFS readback (100 ms) and host polling (200 ms) limit timing resolution; compare
+repeated matched runs in both orders, not a single small percentage difference.
+Do not run builds or other VMs concurrently. The separate desktop test covers
+real input, Exit, resource cleanup and a second session.
 
 Fluff and Dillo were evaluated but are not included in the standard profile:
 Fluff requires inotify and otherwise presents an initialization error; Dillo's

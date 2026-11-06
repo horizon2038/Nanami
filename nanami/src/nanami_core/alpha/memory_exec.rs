@@ -23,7 +23,12 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?
             .backed_pages(0, usize::MAX);
         for (va, permissions) in pages {
-            if permissions == 0 {
+            if permissions == 0
+                && !self
+                    .processes
+                    .vm_space_mut(pid)
+                    .is_some_and(|vm| vm.mapping_is_uncertain(va))
+            {
                 continue;
             }
             let frame = self
@@ -31,7 +36,12 @@ impl Alpha {
                 .vm_space_mut(pid)
                 .and_then(|vm| vm.find_frame(va))
                 .ok_or(CapabilityError::Fatal)?;
-            arch::address_space::unmap(target.address_space, frame, va)?;
+            if let Err(error) = arch::address_space::unmap(target.address_space, frame, va) {
+                if let Some(vm) = self.processes.vm_space_mut(pid) {
+                    vm.mark_mapping_uncertain(va);
+                }
+                return Err(error);
+            }
         }
         // REVOKE clears each Node's contents but retains that Node itself.
         // Existing chunk descriptors/arena reservations remain reusable.

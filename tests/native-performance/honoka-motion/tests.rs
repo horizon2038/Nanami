@@ -383,6 +383,62 @@ fn fbdev_capture_allocation_failure_keeps_the_existing_full_redraw_path() {
     compositor.detach_logical_framebuffer(18, 1).unwrap();
 }
 
+#[test]
+fn coalesced_present_notifications_update_both_surfaces_not_an_unrelated_window() {
+    let (mut compositor, pixels) = setup();
+    let second = compositor.create_window(18, 510, 80, 200, 100).unwrap();
+    let third = compositor.create_window(18, 20, 400, 160, 100).unwrap();
+    let surfaces = [(1, 400), (second, 200), (third, 160)].map(|(id, stride)| {
+        let (source, _) = compositor
+            .attach_logical_framebuffer_to_process(18, id, 19)
+            .unwrap();
+        (source, stride)
+    });
+    compositor.render_if_needed();
+    let unnotified_pixel = pixels[435 * 800 + 29];
+    for (index, &(source, stride)) in surfaces.iter().enumerate() {
+        unsafe {
+            (source as *mut u32)
+                .add(5 * stride + 5)
+                .write(0x123450 + index as u32);
+        }
+    }
+    // Model A9N's OR coalescing, including clients that mint a low-32-bit ID.
+    let identifier = honoka_api::HONOKA_NOTIFICATION_PRESENT | 1 | (second & 0xffff_ffff);
+    compositor.invalidate_presented_logical_framebuffer(identifier & 0xffff_ffff);
+    compositor.render_if_needed();
+    assert_eq!(pixels[115 * 800 + 89], 0x123450, "first surface lost");
+    assert_eq!(pixels[115 * 800 + 519], 0x123451, "second surface lost");
+    assert_eq!(
+        pixels[435 * 800 + 29], unnotified_pixel,
+        "unnotified surface was captured"
+    );
+    // Full-handle callers and unrelated high category bits retain the same hint.
+    compositor.invalidate_presented_logical_framebuffer(
+        honoka_api::HONOKA_NOTIFICATION_PRESENT | honoka_api::HONOKA_NOTIFICATION_INPUT | third,
+    );
+    compositor.render_if_needed();
+    assert_eq!(pixels[435 * 800 + 29], 0x123452);
+}
+
+#[test]
+fn a_reused_present_hint_does_not_make_a_stale_control_handle_valid() {
+    let (mut compositor, _pixels) = setup();
+    compositor.destroy_window(18, 1).unwrap();
+    let replacement = compositor.create_window(18, 80, 80, 400, 300).unwrap();
+    assert_ne!(replacement, 1);
+    assert!(compositor.window_content_size(18, 1).is_err());
+    assert!(compositor.destroy_window(18, 1).is_err());
+    assert!(compositor.window_content_size(19, replacement).is_err());
+    assert_eq!(
+        compositor.window_content_size(18, replacement).unwrap(),
+        (400, 300)
+    );
+    // Late notifications are harmless hints for the current window in that bit.
+    compositor.invalidate_presented_logical_framebuffer(1);
+    assert!(compositor.window_content_size(18, replacement).is_ok());
+}
+
 fn compare(events: &[InputEvent], drag: bool) -> Vec<framebuffer::Rect> {
     let (mut batched, pixels) = setup();
     let (mut reference, expected) = setup();

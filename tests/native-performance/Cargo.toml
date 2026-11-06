@@ -28,6 +28,10 @@ name = "linux-guest-copy"
 path = "linux-guest-copy.rs"
 
 [[test]]
+name = "linux-read-window"
+path = "linux-read-window.rs"
+
+[[test]]
 name = "linux-private-memory"
 path = "linux-private-memory.rs"
 
@@ -406,6 +410,18 @@ path = "desktop-tools.rs"
 [[test]]
 name = "service-events"
 path = "service-events.rs"
+
+[[test]]
+name = "native-clock"
+path = "native-clock.rs"
+
+[[test]]
+name = "linux-guest-views"
+path = "linux-guest-views.rs"
+
+[[test]]
+name = "appended-lines"
+path = "appended-lines.rs"
 
 [dependencies]
 nanami-ui = { path = "../../nanami/servers/libs/nanami-ui" }

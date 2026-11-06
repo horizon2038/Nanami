@@ -26,8 +26,8 @@ struct FileSnapshot {
 }
 
 /// mmap uses a fresh identity from its own FD. Only fill on a whole-file read,
-/// never prefetch a large file for a small mapping. Returned bytes are private,
-/// immutable Alter snapshots; guests receive copies, not shared writable aliases.
+/// never prefetch a large file for a small mapping. Alter owns the snapshots:
+/// guests receive copies, or private readonly aliases of opt-in immutable RAM.
 pub fn file_mapping_source(
     runtime: &mut Runtime,
     fd: Word,
@@ -193,37 +193,42 @@ fn load_file_snapshot(
         None
     };
     let (image, allocation_size) = if let Some(slot) = cache_slot {
-        let previous = runtime.image_cache.entry(slot);
-        let allocation = match previous.filter(|entry| entry.capacity >= size) {
-            Some(entry) => (entry.address, entry.capacity),
-            None => {
-                // Alpha may defer physical-page reuse after mapping release.
-                // Reuse each cache buffer in place, and grow geometrically so
-                // eviction and failed reads cannot accumulate unbounded RAM.
-                let capacity = runtime.image_cache.allocation_capacity(slot, size);
-                let allocation =
-                    nanami_runtime::request_heap(capacity).map_err(|_| LoadError::Io)?;
-                if allocation.1 < size {
-                    let _ = nanami_runtime::request_mapping_release(allocation.0, allocation.1);
-                    return Err(LoadError::Io);
-                }
-                if let Some(entry) = previous {
-                    if nanami_runtime::request_mapping_release(entry.address, entry.capacity)
-                        .is_err()
-                    {
+        if super::image_cache::IMMUTABLE_STORAGE {
+            create_immutable_snapshot(runtime, slot, size)?
+        } else {
+            let previous = runtime.image_cache.entry(slot);
+            let allocation = match previous.filter(|entry| entry.capacity >= size) {
+                Some(entry) => (entry.address, entry.capacity),
+                None => {
+                    // Alpha may defer physical-page reuse after mapping release.
+                    // Reuse each cache buffer in place, and grow geometrically so
+                    // eviction and failed reads cannot accumulate unbounded RAM.
+                    let capacity = runtime.image_cache.allocation_capacity(slot, size);
+                    let allocation =
+                        nanami_runtime::request_heap(capacity).map_err(|_| LoadError::Io)?;
+                    if allocation.1 < size {
                         let _ = nanami_runtime::request_mapping_release(allocation.0, allocation.1);
                         return Err(LoadError::Io);
                     }
+                    if let Some(entry) = previous {
+                        if nanami_runtime::request_mapping_release(entry.address, entry.capacity)
+                            .is_err()
+                        {
+                            let _ =
+                                nanami_runtime::request_mapping_release(allocation.0, allocation.1);
+                            return Err(LoadError::Io);
+                        }
+                    }
+                    allocation
                 }
-                allocation
-            }
-        };
-        // Retain allocation ownership on I/O/parse failure without allowing
-        // the partially overwritten buffer to be used as a content hit.
-        runtime
-            .image_cache
-            .insert(slot, 0, allocation.0, 0, allocation.1, None);
-        allocation
+            };
+            // Retain allocation ownership on I/O/parse failure without allowing
+            // the partially overwritten buffer to be used as a content hit.
+            runtime
+                .image_cache
+                .insert(slot, 0, allocation.0, 0, allocation.1, None);
+            allocation
+        }
     } else {
         let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter { .. }) {
             (
@@ -269,6 +274,14 @@ fn load_file_snapshot(
     })();
     let metadata = result?;
     if let Some(slot) = cache_slot {
+        if super::image_cache::IMMUTABLE_STORAGE {
+            // Publish only after a complete fill/version recheck and readonly
+            // protection. A failed/partial protection leaves identity zero
+            // and its exact allocation owned, but unusable as a cache hit.
+            let owner = nanami_runtime::get_self_pid().map_err(|_| LoadError::Io)?;
+            nanami_runtime::request_process_mapping_protect(owner, image, allocation_size, 1)
+                .map_err(|_| LoadError::Io)?;
+        }
         runtime
             .image_cache
             .insert(slot, identity, image, size, allocation_size, metadata);
@@ -277,6 +290,35 @@ fn load_file_snapshot(
         address: image,
         metadata,
     })
+}
+
+fn create_immutable_snapshot(
+    runtime: &mut Runtime,
+    slot: usize,
+    size: Word,
+) -> Result<(Word, Word), LoadError> {
+    let capacity = runtime.image_cache.allocation_capacity(slot, size);
+    if let Some(previous) = runtime.image_cache.entry(slot).copied() {
+        // Release can fail after unmapping a prefix. Invalidate before that
+        // call, retain the exact owner record on failure, and retry retirement
+        // before allocating/refilling anything. PT_INTERP's live main entry
+        // was excluded by replacement(), so it cannot be retired here.
+        runtime.image_cache.invalidate(slot);
+        nanami_runtime::request_mapping_release(previous.address, previous.capacity)
+            .map_err(|_| LoadError::Io)?;
+        runtime.image_cache.remove(slot);
+    }
+    // Unlike request_heap, this RAM object's release drops our physical
+    // reference immediately. Future readonly aliases must hold independent
+    // references; they may outlive this cache entry without permitting refill
+    // of their backing. No guest alias is introduced by this constructor.
+    let address = nanami_runtime::request_memory_create(capacity).map_err(|_| LoadError::Io)?;
+    // request_memory_create returns zeroed, page-aligned storage. In particular
+    // the partial final file page cannot expose an earlier snapshot's suffix.
+    runtime
+        .image_cache
+        .insert(slot, 0, address, 0, capacity, None);
+    Ok((address, capacity))
 }
 
 fn read_image(runtime: &mut Runtime, fd: Word, image: Word, size: Word) -> Result<(), LoadError> {

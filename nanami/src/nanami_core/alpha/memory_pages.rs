@@ -58,14 +58,14 @@ impl Alpha {
             let end = base
                 .checked_add(bytes)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            if self
+            let vm = self
                 .processes
                 .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?
-                .backed_pages(base, end)
-                .first()
-                .is_some()
-            {
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if vm.has_uncertain_mappings(base, end) {
+                return Err(CapabilityError::Fatal);
+            }
+            if !vm.backed_pages(base, end).is_empty() {
                 return Err(CapabilityError::InvalidArgument);
             }
             let (root, space, slot) = self.processes.reserve_process_heap_at(
@@ -135,12 +135,18 @@ impl Alpha {
                     .vm_space_mut(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
                 if let Err(error) = self.memory.map_frame_strict(address_space, frame, va, vm) {
-                    // A failed MAP may have installed a leaf. Keep its Frame
-                    // tracked so rollback must confirm UNMAP before reuse.
+                    // An error can follow leaf installation or Frame insertion.
+                    // Mark unknown presence before fallible metadata recording;
+                    // ownership also identifies backing without a Frame record.
+                    vm.mark_mapping_uncertain(va);
                     vm.record_frame(va, frame)
                         .map_err(|_| CapabilityError::Fatal)?;
                     return Err(error);
                 }
+                // Materializing a PROT_NONE reservation publishes ALL access.
+                // Record that fact before protection can accept an equal-value
+                // no-op; old reservation metadata is not the new leaf's rights.
+                vm.set_permissions(va, 7);
             }
             Ok(())
         })();

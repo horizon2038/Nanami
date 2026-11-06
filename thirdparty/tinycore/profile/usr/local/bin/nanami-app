@@ -1,5 +1,7 @@
 #!/bin/sh
 # Dock commands with arguments/log files; applications remain upstream ELFs.
+# wbar already starts sh -c. Source this script there instead of execing another
+# shell; the selected application's exec replaces that launcher shell directly.
 export DISPLAY=unix/:0
 application=$1
 if [ -z "$application" ]; then

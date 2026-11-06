@@ -56,6 +56,8 @@ mod allocation_index;
 
 #[path = "alpha-mapping-release.rs"]
 mod mapping_release_tests;
+#[path = "alpha-mapping-protection.rs"]
+mod mapping_protection_tests;
 
 #[path = "alpha-checked-memory.rs"]
 mod checked_memory_tests;

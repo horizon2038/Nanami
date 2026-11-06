@@ -8,6 +8,122 @@ fn reserve(manager: &mut ProcessManager, pid: usize, pages: usize) -> SharedMemo
 }
 
 #[test]
+fn containing_shared_reservation_checks_entire_nonempty_range_and_owner() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    install(&mut manager, 2, 202);
+    let a = reserve(&mut manager, 1, 3);
+    let b = reserve(&mut manager, 1, 1);
+    assert_eq!(
+        manager.shared_memory_containing_range(1, a.base_va, 3 * 4096),
+        Some(a)
+    );
+    assert_eq!(
+        manager.shared_memory_containing_range(1, a.base_va + 1, 3 * 4096 - 1),
+        Some(a)
+    );
+    assert_eq!(
+        manager.shared_memory_containing_range(1, b.base_va, 4096),
+        Some(b)
+    );
+    for (start, size) in [
+        (a.base_va, 0),
+        (a.base_va - 1, 1),
+        (a.base_va, 3 * 4096 + 1),
+        (usize::MAX, 2),
+    ] {
+        assert!(manager
+            .shared_memory_containing_range(1, start, size)
+            .is_none());
+    }
+    assert!(manager
+        .shared_memory_containing_range(2, a.base_va, 1)
+        .is_none());
+    assert!(manager
+        .shared_memory_containing_range(99, a.base_va, 1)
+        .is_none());
+    manager.recycle_shared_memory(1, a);
+    assert!(manager
+        .shared_memory_containing_range(1, a.base_va, 1)
+        .is_none());
+}
+
+#[test]
+fn shared_reference_unit_changes_only_after_successful_unique_canonicalization() {
+    for pages in [1, 2, 512] {
+        let mut manager = manager();
+        install(&mut manager, 1, 201);
+        let old = reserve(&mut manager, 1, pages);
+        assert!(!old.has_page_references());
+        manager
+            .register_physical_allocation(1, old.base_va, old.start_slot, 0x800, pages)
+            .unwrap();
+        manager.canonicalize_shared_memory(1, old).unwrap();
+        let current = manager
+            .shared_memory_reservation(1, old.base_va, pages)
+            .unwrap();
+        assert_eq!(current.has_page_references(), pages > 1);
+        manager.canonicalize_shared_memory(1, current).unwrap();
+        if pages > 1 {
+            assert_eq!(
+                manager.canonicalize_shared_memory(1, old),
+                Err(CapabilityError::InvalidArgument)
+            );
+        }
+        assert_eq!(
+            manager
+                .physical_pages_in_range(1, old.base_va, old.base_va + pages * 4096)
+                .len(),
+            pages
+        );
+    }
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    install(&mut manager, 2, 202);
+    let r = reserve(&mut manager, 1, 2);
+    for pid in 1..=2 {
+        manager
+            .register_physical_allocation(pid, r.base_va, r.start_slot, 0x800, 2)
+            .unwrap();
+    }
+    assert_eq!(
+        manager.canonicalize_shared_memory(1, r),
+        Err(CapabilityError::IllegalOperation)
+    );
+    assert_eq!(manager.shared_memory_reservation(1, r.base_va, 2), Some(r));
+    assert!(!r.has_page_references());
+}
+
+#[test]
+fn shared_overlap_lookup_distinguishes_containment_touching_and_crossing_ranges() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    let r = manager
+        .reserve_shared_memory_at(1, 3, SLOTS, 0x2000)
+        .unwrap();
+    for (start, bytes) in [
+        (0x2000, 1),
+        (0x3000, 4096),
+        (0x1000, 8192),
+        (0x4000, 8192),
+        (0x1000, 0x6000),
+    ] {
+        assert_eq!(
+            manager.shared_memory_overlapping_range(1, start, bytes),
+            Some(r)
+        );
+    }
+    for (start, bytes) in [(0, 8192), (0x5000, 1), (0x2000, 0), (usize::MAX, 2)] {
+        assert!(manager
+            .shared_memory_overlapping_range(1, start, bytes)
+            .is_none());
+    }
+    assert!(manager
+        .shared_memory_overlapping_range(2, 0x2000, 4096)
+        .is_none());
+}
+
+#[test]
 fn repeated_mixed_sizes_reuse_slots_and_virtual_space() {
     let mut manager = manager();
     install(&mut manager, 1, 201);
@@ -109,6 +225,46 @@ fn exec_reap_and_failed_spawn_discard_reservations_and_holes() {
         assert_eq!(r.start_slot, 10);
         assert_eq!(r.base_va, 0x200000 + 10 * 4096);
     }
+}
+
+#[test]
+fn fixed_high_address_release_reuses_slots_without_poisoning_default_allocations() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    let before = manager.find_entry_by_pid(1).unwrap();
+    let high = manager
+        .reserve_shared_memory_at(1, 1, SLOTS, 0x20_0000_0000)
+        .unwrap();
+    manager.recycle_shared_memory(1, high);
+    let normal = reserve(&mut manager, 1, 1);
+    assert_eq!(normal.start_slot, high.start_slot);
+    assert_eq!(normal.base_va, before.user_heap_next_va);
+    manager.recycle_shared_memory(1, normal);
+    assert_eq!(reserve(&mut manager, 1, 1), normal);
+    // Explicit high-address reservations remain usable after recycling too.
+    assert_eq!(
+        manager
+            .reserve_shared_memory_at(1, 1, SLOTS, high.base_va)
+            .unwrap()
+            .base_va,
+        high.base_va
+    );
+}
+
+#[test]
+fn fixed_release_straddling_the_limit_only_returns_in_arena_virtual_pages() {
+    let mut manager = manager();
+    install(&mut manager, 1, 201);
+    let limit = manager.find_entry_by_pid(1).unwrap().user_heap_limit_va;
+    let fixed = manager
+        .reserve_shared_memory_at(1, 3, SLOTS, limit - 4096)
+        .unwrap();
+    manager.recycle_shared_memory(1, fixed);
+    let normal = reserve(&mut manager, 1, 1);
+    assert_eq!(normal.base_va, limit - 4096);
+    let next = reserve(&mut manager, 1, 1);
+    assert_eq!(next.base_va, 0x200000);
+    assert!(next.base_va + 4096 <= limit);
 }
 
 #[test]

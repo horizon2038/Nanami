@@ -277,6 +277,7 @@ def main():
         payload = []
         if args.with_tests:
             if args.desktop:
+                desktop.build_window_observer(output / "overlay/tinycore/rootfs")
                 for name, source in [("nanami-desktop-test", "desktop-apps.sh"),
                                      ("nanami-desktop-links-test", "desktop-links.sh")]:
                     script = output / "overlay/tinycore/rootfs/usr/local/bin" / name

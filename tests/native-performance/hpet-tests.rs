@@ -43,6 +43,19 @@ fn device(wide: bool) -> Box<[u64; 512]> {
 }
 
 #[test]
+fn optional_counter_source_requires_running_wide_owner() {
+    let _memory = device(true);
+    let mut timer = hpet::prepare(16).unwrap();
+    assert_eq!(timer.counter_source(), None);
+    timer.start().unwrap();
+    assert_eq!(timer.counter_source(), Some((0x1000, 10_000_000)));
+    let _memory = device(false);
+    let mut timer = hpet::prepare(16).unwrap();
+    timer.start().unwrap();
+    assert_eq!(timer.counter_source(), None);
+}
+
+#[test]
 fn clock_read_alone_does_not_enable_interrupts() {
     let mut mmio = device(true);
     let mut timer = hpet::prepare(16).unwrap();

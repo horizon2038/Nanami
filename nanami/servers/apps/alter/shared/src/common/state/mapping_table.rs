@@ -1,10 +1,27 @@
 //! Lazy, compact VMA metadata. Runtime owns the allocation; process snapshots
 //! borrow it, and CLONE_VM aliases share its active length as well as its entries.
 use super::{ProcessMapping, Word, ALTER_PROCESS_MAPPING_MAX};
-use core::{alloc::Layout, ops::Deref};
+use core::{
+    alloc::Layout,
+    cell::Cell,
+    ops::Deref,
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+// Never reuse a cache generation, including when a table allocation is reused
+// after exec. Exhaustion returns zero, which disables cached views safely.
+static NEXT_GENERATION: AtomicUsize = AtomicUsize::new(1);
+fn next_generation() -> Word {
+    NEXT_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            next.checked_add(1)
+        })
+        .unwrap_or(0)
+}
 
 struct Storage {
     len: usize,
+    generation: Cell<Word>,
     entries: [ProcessMapping; ALTER_PROCESS_MAPPING_MAX],
 }
 
@@ -20,10 +37,29 @@ impl MappingTable {
         self.address != 0 && self.address == other.address
     }
 
+    pub fn generation(&self) -> Word {
+        if self.address == 0 {
+            return 0;
+        }
+        unsafe { (*(self.address as *const Storage)).generation.get() }
+    }
+
+    /// Also used when private backing changes without changing the VMA list.
+    pub fn invalidate_views(&self) {
+        if self.address != 0 {
+            unsafe {
+                (*(self.address as *const Storage))
+                    .generation
+                    .set(next_generation());
+            }
+        }
+    }
+
     pub(super) fn ensure(&mut self) -> bool {
         if self.address == 0 {
             // Zero initializes the shared length and the word-only VMA entries.
             self.address = unsafe { alloc::alloc::alloc_zeroed(Layout::new::<Storage>()) } as Word;
+            self.invalidate_views();
         }
         self.address != 0
     }
@@ -70,6 +106,7 @@ impl MappingTable {
         }
         storage.entries[storage.len] = mapping;
         storage.len += 1;
+        storage.generation.set(next_generation());
         true
     }
 
@@ -80,6 +117,7 @@ impl MappingTable {
         // active prefix moves; empty capacity is never scanned or copied.
         storage.entries.copy_within(index + 1..storage.len, index);
         storage.len -= 1;
+        storage.generation.set(next_generation());
     }
 
     pub(super) fn clear(&mut self) {
@@ -87,6 +125,7 @@ impl MappingTable {
             unsafe {
                 (*(self.address as *mut Storage)).len = 0;
             }
+            self.invalidate_views();
         }
     }
 }

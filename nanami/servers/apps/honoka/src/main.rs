@@ -198,7 +198,7 @@ fn handle_notification(
     compositor: &mut Compositor,
 ) -> usize {
     if is_present_notification(identifier) {
-        compositor.invalidate_presented_logical_framebuffer(present_window_id(identifier));
+        compositor.invalidate_presented_logical_framebuffer(identifier);
     }
     if is_timer_notification(identifier) {
         compositor.reap_dead_windows();
@@ -231,10 +231,6 @@ fn is_timer_notification(identifier: nanami_runtime::Word) -> bool {
 
 fn is_present_notification(identifier: nanami_runtime::Word) -> bool {
     (identifier & nanami_client::gfx::honoka::HONOKA_NOTIFICATION_PRESENT) != 0
-}
-
-fn present_window_id(identifier: nanami_runtime::Word) -> nanami_runtime::Word {
-    identifier & 0xffff_ffff
 }
 
 fn render_until_idle(compositor: &mut Compositor) {

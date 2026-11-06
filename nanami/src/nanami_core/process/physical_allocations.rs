@@ -52,6 +52,64 @@ impl ReferenceCounts {
 }
 
 impl PhysicalAllocations {
+    /// Canonicalize a uniquely owned extent before installing page aliases.
+    /// Reserve all metadata first: an allocation failure must leave its single
+    /// whole-extent reference intact. No physical memory is released here.
+    pub(super) fn split_unique_extent(
+        &mut self,
+        pid: usize,
+        allocation: ProcessPhysicalAllocation,
+    ) -> Result<(), ()> {
+        let pages = allocation.page_count;
+        if pages == 0
+            || allocation.base_va % super::USER_PAGE_SIZE != 0
+            || pages
+                .checked_mul(super::USER_PAGE_SIZE)
+                .and_then(|bytes| allocation.base_va.checked_add(bytes))
+                .is_none()
+            || allocation.start_slot.checked_add(pages).is_none()
+            || allocation.base_page.checked_add(pages).is_none()
+            || self.find(AllocationState::Active, pid, allocation.base_va, pages)
+                != Some(allocation)
+            || self.count(allocation) != 1
+        {
+            return Err(());
+        }
+        if pages == 1 {
+            return Ok(());
+        }
+        let mut additional = [0usize; REFERENCE_PARTITIONS];
+        for offset in 0..pages {
+            let key = (allocation.base_page + offset, 1);
+            if self.references.get(key).is_some() {
+                return Err(());
+            }
+            additional[ReferenceCounts::partition(key)] += 1;
+        }
+        self.nodes.try_reserve(pages - 1).map_err(|_| ())?;
+        for (partition, count) in self.references.partitions.iter_mut().zip(additional) {
+            partition.try_reserve(count)?;
+        }
+        // The existing active PID index already has capacity for this owner.
+        // Request-local PhysicalPageReference handles must not survive this
+        // rewrite; callers collect their page references after canonicalizing.
+        self.take(AllocationState::Active, pid, allocation.base_va, pages)
+            .ok_or(())?;
+        for offset in 0..pages {
+            self.insert(
+                AllocationState::Active,
+                pid,
+                ProcessPhysicalAllocation {
+                    base_va: allocation.base_va + offset * super::USER_PAGE_SIZE,
+                    start_slot: allocation.start_slot + offset,
+                    base_page: allocation.base_page + offset,
+                    page_count: 1,
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Move this owner's complete active chain without changing references or
     /// allocating replacement records. Deferred tails may already own aliases.
     pub(super) fn defer_all(&mut self, pid: usize) {
@@ -365,6 +423,27 @@ struct Index<K> {
     len: usize,
 }
 impl<K: Key> Index<K> {
+    fn try_reserve(&mut self, additional: usize) -> Result<(), ()> {
+        let required = self
+            .len
+            .checked_add(additional)
+            .and_then(|len| len.checked_mul(2))
+            .ok_or(())?;
+        if required <= self.slots.len() {
+            return Ok(());
+        }
+        let capacity = required.checked_next_power_of_two().ok_or(())?.max(16);
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(capacity).map_err(|_| ())?;
+        slots.resize(capacity, None);
+        let old = core::mem::replace(&mut self.slots, slots);
+        self.len = 0;
+        for (key, value) in old.into_iter().flatten() {
+            self.insert(key, value);
+        }
+        Ok(())
+    }
+
     fn locate(&self, key: K) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
@@ -525,6 +604,84 @@ mod tests {
             base_page: physical,
             page_count: pages,
         }
+    }
+
+    #[test]
+    fn splitting_unique_extent_preserves_every_page_without_releasing_backing() {
+        for pages in [1, 2, 512] {
+            let mut allocations = PhysicalAllocations::default();
+            let original = sample(4096, 100, pages);
+            let neighbor = sample(4096 * (pages + 1), 100 + pages, 1);
+            allocations.insert(Active, 1, neighbor);
+            allocations.insert(Active, 1, original);
+            allocations.split_unique_extent(1, original).unwrap();
+            let references = allocations.page_references(1, 4096, 4096 * (pages + 1));
+            assert_eq!(references.len(), pages);
+            for (offset, reference) in references.iter().enumerate() {
+                let page = reference.allocation;
+                assert_eq!(
+                    fields(page),
+                    [
+                        4096 + offset * 4096,
+                        original.start_slot + offset,
+                        100 + offset,
+                        1
+                    ]
+                );
+                assert_eq!(allocations.count(page), 1);
+            }
+            assert_eq!(
+                allocations.find(Active, 1, neighbor.base_va, 1).map(fields),
+                Some(fields(neighbor))
+            );
+            // A peer's one-page reference prevents source-first final release.
+            allocations.insert(Active, 2, references[0].allocation);
+            assert!(!allocations.take(Active, 1, 4096, 1).unwrap().1);
+            assert!(allocations.take(Active, 2, 4096, 1).unwrap().1);
+        }
+    }
+
+    #[test]
+    fn splitting_rejects_shared_deferred_mismatched_and_overflowed_extents() {
+        for invalid in 0..9 {
+            let mut allocations = PhysicalAllocations::default();
+            let original = sample(4096, 100, 2);
+            allocations.insert(Active, 1, original);
+            let mut requested = original;
+            let mut owner = 1;
+            match invalid {
+                0 => allocations.insert(Active, 2, original),
+                1 => {
+                    allocations.defer(1, original.base_va, 2).unwrap();
+                }
+                2 => owner = 2,
+                3 => requested.start_slot += 1,
+                4 => requested.base_va += 1,
+                5 => requested.page_count = 0,
+                6 => requested.page_count = usize::MAX,
+                7 => requested.base_page = usize::MAX,
+                _ => allocations.insert(Active, 2, sample(8192, 101, 1)),
+            }
+            let refs = reference_slots(&allocations);
+            let nodes = allocations.nodes.len();
+            assert!(allocations.split_unique_extent(owner, requested).is_err());
+            assert_eq!(reference_slots(&allocations), refs);
+            assert_eq!(allocations.nodes.len(), nodes);
+            assert_eq!(
+                allocations.count(original),
+                if invalid == 0 { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
+    fn impossible_index_reservation_leaves_existing_references_unchanged() {
+        let mut index = Index::<usize>::default();
+        index.insert(7, 11);
+        let before = index.slots.clone();
+        assert!(index.try_reserve(usize::MAX).is_err());
+        assert_eq!(index.slots, before);
+        assert_eq!(index.len, 1);
     }
 
     #[test]

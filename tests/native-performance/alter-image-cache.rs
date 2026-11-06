@@ -42,8 +42,39 @@ struct Backend {
     fail_read: bool,
     fail_stat: bool,
     fail_release: bool,
+    fail_create: bool,
+    fail_protect: bool,
+    reclaimable_creates: usize,
+    protection_attempts: Vec<(Word, Word, Word, Word)>,
+    release_attempts: Vec<(Word, Word)>,
+    peak_live_bytes: usize,
 }
 thread_local! { static BACKEND: RefCell<Backend> = RefCell::new(Backend::default()); }
+pub fn get_self_pid() -> Result<Word, RequestError> {
+    Ok(18)
+}
+pub fn request_process_mapping_protect(
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    permissions: Word,
+) -> Result<(), RequestError> {
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        backend
+            .protection_attempts
+            .push((pid, address, bytes, permissions));
+        assert_eq!(pid, 18);
+        assert_eq!(permissions, 1);
+        assert!(backend.allocations.iter().any(|(buffer, released)| {
+            !released && buffer.as_ptr() as Word == address && buffer.len() == bytes
+        }));
+        if backend.fail_protect {
+            return Err(RequestError::Transport);
+        }
+        Ok(())
+    })
+}
 pub fn request_heap(bytes: Word) -> Result<(Word, Word), RequestError> {
     BACKEND.with(|b| {
         let mut b = b.borrow_mut();
@@ -54,9 +85,31 @@ pub fn request_heap(bytes: Word) -> Result<(Word, Word), RequestError> {
         Ok((address, capacity))
     })
 }
+pub fn request_memory_create(bytes: Word) -> Result<Word, RequestError> {
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        if backend.fail_create {
+            return Err(RequestError::Transport);
+        }
+        assert_eq!(bytes % 4096, 0);
+        let mut allocation = vec![0; bytes].into_boxed_slice();
+        let address = allocation.as_mut_ptr() as Word;
+        backend.allocations.push((allocation, false));
+        backend.reclaimable_creates += 1;
+        let live = backend
+            .allocations
+            .iter()
+            .filter(|(_, released)| !released)
+            .map(|(bytes, _)| bytes.len())
+            .sum();
+        backend.peak_live_bytes = backend.peak_live_bytes.max(live);
+        Ok(address)
+    })
+}
 pub fn request_mapping_release(address: Word, size: Word) -> Result<(), RequestError> {
     BACKEND.with(|b| {
         let mut b = b.borrow_mut();
+        b.release_attempts.push((address, size));
         if b.fail_release {
             return Err(RequestError::Transport);
         }
@@ -246,7 +299,7 @@ fn same_size_content_update_and_path_replacement_reload() {
     assert_ne!(load(&mut r).address, changed.address);
 }
 #[test]
-fn lru_eviction_reuses_capacity_and_keeps_the_current_main_image_alive() {
+fn lru_eviction_keeps_the_current_main_image_alive() {
     let mut shm = [0; 4096];
     let mut r = fixture(&mut shm);
     let first = load(&mut r);
@@ -263,8 +316,13 @@ fn lru_eviction_reuses_capacity_and_keeps_the_current_main_image_alive() {
     BACKEND.with(|b| {
         let b = b.borrow();
         assert!(!b.allocations[0].1);
-        assert!(!b.allocations[1].1);
-        assert_eq!(b.allocations.len(), image_cache::ENTRIES);
+        assert_eq!(b.allocations[1].1, image_cache::IMMUTABLE_STORAGE);
+        let expected_allocations = if image_cache::IMMUTABLE_STORAGE {
+            image_cache::ENTRIES + 1
+        } else {
+            image_cache::ENTRIES
+        };
+        assert_eq!(b.allocations.len(), expected_allocations);
         assert_eq!(
             b.allocations
                 .iter()
@@ -314,11 +372,20 @@ fn large_library_churn_cannot_expand_the_original_snapshot_byte_budget() {
     }
     BACKEND.with(|b| {
         let b = b.borrow();
+        let expected_allocations = if image_cache::IMMUTABLE_STORAGE {
+            image_cache::ENTRIES + 5
+        } else {
+            image_cache::MAX_RETAINED_BYTES / image_cache::MAX_IMAGE_BYTES
+        };
+        assert_eq!(b.allocations.len(), expected_allocations);
         assert_eq!(
-            b.allocations.len(),
+            b.allocations
+                .iter()
+                .filter(|(_, released)| !released)
+                .count(),
             image_cache::MAX_RETAINED_BYTES / image_cache::MAX_IMAGE_BYTES
         );
-        assert!(!b.allocations.iter().any(|(_, released)| *released));
+        assert!(b.peak_live_bytes <= image_cache::MAX_RETAINED_BYTES);
     });
 }
 
@@ -425,8 +492,20 @@ fn repeated_cache_eviction_does_not_accumulate_released_alpha_allocations() {
     }
     BACKEND.with(|b| {
         let b = b.borrow();
-        assert_eq!(b.allocations.len(), image_cache::ENTRIES);
-        assert!(!b.allocations.iter().any(|(_, released)| *released));
+        let expected_allocations = if image_cache::IMMUTABLE_STORAGE {
+            100
+        } else {
+            image_cache::ENTRIES
+        };
+        assert_eq!(b.allocations.len(), expected_allocations);
+        assert_eq!(
+            b.allocations
+                .iter()
+                .filter(|(_, released)| !released)
+                .count(),
+            image_cache::ENTRIES
+        );
+        assert!(b.peak_live_bytes <= image_cache::MAX_RETAINED_BYTES);
     });
 }
 #[test]
@@ -544,4 +623,218 @@ fn non_elf_file_mappings_cache_bytes_but_exec_still_rejects_them() {
     let reads = BACKEND.with(|b| b.borrow().reads);
     assert!(loader::load_interpreter_elf_image(&mut r, b"/elf", 0).is_err());
     BACKEND.with(|b| assert_eq!(b.borrow().reads, reads));
+}
+
+fn fill_small_cache(runtime: &mut state::Runtime) -> Word {
+    let mut first = 0;
+    for version in 1..=image_cache::ENTRIES {
+        BACKEND.with(|backend| {
+            let mut backend = backend.borrow_mut();
+            backend.identity = version << 32 | 7;
+            backend.bytes[8000] = 0x5a;
+        });
+        let address = load(runtime).address;
+        if version == 1 {
+            first = address;
+        }
+    }
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        backend.identity = (image_cache::ENTRIES + 1) << 32 | 7;
+        backend.bytes[8000] = 0x42;
+    });
+    first
+}
+
+#[test]
+fn published_backing_is_retired_not_overwritten_by_immutable_eviction() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    let first = fill_small_cache(&mut runtime);
+    let replacement = load(&mut runtime);
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        let (old, retired) = &backend.allocations[0];
+        assert_eq!(old.as_ptr() as Word, first);
+        if image_cache::IMMUTABLE_STORAGE {
+            assert!(*retired);
+            // The mock retains retired bytes to model another physical owner.
+            // The source VA is unmapped in production; do not read it there.
+            // A later RAM object may reuse that VA with different backing.
+            assert_eq!(old[8000], 0x5a);
+            assert_eq!(backend.release_attempts, [(first, old.len())]);
+        } else {
+            // Baseline control: the legacy unshared heap buffer is refilled.
+            assert!(!*retired);
+            assert_eq!(replacement.address, first);
+            assert_eq!(old[8000], 0x42);
+            assert!(backend.release_attempts.is_empty());
+        }
+    });
+    assert_eq!(
+        unsafe { *((replacement.address + 8000) as *const u8) },
+        0x42
+    );
+}
+
+#[test]
+fn immutable_file_padding_is_zero_and_cache_capacity_is_page_rounded() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    let image = load(&mut runtime);
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        let (bytes, released) = &backend.allocations[0];
+        assert!(!released);
+        assert_eq!(bytes.len(), image.size.next_multiple_of(4096));
+        assert_eq!(bytes.len(), runtime.image_cache.entry(0).unwrap().capacity);
+        let padding = &bytes[image.size..];
+        if image_cache::IMMUTABLE_STORAGE {
+            assert!(padding.iter().all(|byte| *byte == 0));
+            assert_eq!(backend.reclaimable_creates, 1);
+            assert_eq!(
+                backend.protection_attempts,
+                [(18, image.address, bytes.len(), 1)]
+            );
+        } else {
+            // Old mmap explicitly supplies its zero suffix to Alpha; it never
+            // exposes this heap-buffer padding as guest file contents.
+            assert!(padding.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(backend.reclaimable_creates, 0);
+            assert!(backend.protection_attempts.is_empty());
+        }
+    });
+}
+
+#[test]
+fn immutable_protection_failure_keeps_an_unpublished_owned_snapshot() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    BACKEND.with(|backend| backend.borrow_mut().fail_protect = true);
+    let result = loader::load_interpreter_elf_image(&mut runtime, b"/elf", 0);
+    if image_cache::IMMUTABLE_STORAGE {
+        assert!(result.is_err());
+        assert!(runtime.image_cache.get(1 << 32 | 7, 8193).is_none());
+        let owner = runtime.image_cache.entry(0).unwrap();
+        assert_eq!((owner.identity, owner.size, owner.capacity), (0, 0, 12288));
+        BACKEND.with(|backend| {
+            let backend = backend.borrow();
+            assert!(!backend.allocations[0].1);
+            assert_eq!(backend.protection_attempts.len(), 1);
+            assert_eq!(backend.opens, backend.closes);
+        });
+        BACKEND.with(|backend| backend.borrow_mut().fail_protect = false);
+        load(&mut runtime);
+        assert!(runtime.image_cache.get(1 << 32 | 7, 8193).is_some());
+    } else {
+        assert!(result.is_ok());
+        BACKEND.with(|backend| assert!(backend.borrow().protection_attempts.is_empty()));
+    }
+}
+
+#[test]
+fn failed_immutable_retirement_rejects_hits_retains_ownership_and_retries() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    let first = fill_small_cache(&mut runtime);
+    BACKEND.with(|backend| backend.borrow_mut().fail_release = true);
+    if image_cache::IMMUTABLE_STORAGE {
+        for attempt in 1..=2 {
+            assert!(loader::load_interpreter_elf_image(&mut runtime, b"/elf", 0).is_err());
+            assert!(runtime.image_cache.get(1 << 32 | 7, 8193).is_none());
+            let owner = runtime.image_cache.entry(0).unwrap();
+            assert_eq!(
+                (owner.identity, owner.address, owner.capacity),
+                (0, first, 12288)
+            );
+            BACKEND.with(|backend| {
+                let backend = backend.borrow();
+                assert_eq!(backend.reclaimable_creates, image_cache::ENTRIES);
+                assert_eq!(backend.release_attempts.len(), attempt);
+                assert!(!backend.allocations[0].1);
+                assert_eq!(backend.opens, backend.closes);
+            });
+        }
+        BACKEND.with(|backend| backend.borrow_mut().fail_release = false);
+        load(&mut runtime);
+        BACKEND.with(|backend| {
+            let backend = backend.borrow();
+            assert!(backend.allocations[0].1);
+            assert_eq!(backend.release_attempts.len(), 3);
+            assert_eq!(backend.reclaimable_creates, image_cache::ENTRIES + 1);
+        });
+    } else {
+        // No retirement is attempted for a same-capacity legacy refill.
+        assert_eq!(load(&mut runtime).address, first);
+        BACKEND.with(|backend| assert!(backend.borrow().release_attempts.is_empty()));
+    }
+}
+
+#[test]
+fn failed_immutable_creation_does_not_publish_or_lose_an_owner_record() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    BACKEND.with(|backend| backend.borrow_mut().fail_create = true);
+    if image_cache::IMMUTABLE_STORAGE {
+        assert!(loader::load_interpreter_elf_image(&mut runtime, b"/elf", 0).is_err());
+        assert!(runtime.image_cache.entry(0).is_none());
+        BACKEND.with(|backend| {
+            let backend = backend.borrow();
+            assert!(backend.allocations.is_empty());
+            assert_eq!(backend.opens, backend.closes);
+        });
+        BACKEND.with(|backend| backend.borrow_mut().fail_create = false);
+        load(&mut runtime);
+        BACKEND.with(|backend| assert_eq!(backend.borrow().reclaimable_creates, 1));
+    } else {
+        load(&mut runtime);
+        BACKEND.with(|backend| assert_eq!(backend.borrow().reclaimable_creates, 0));
+    }
+}
+
+#[test]
+fn failed_fill_stays_owned_until_its_entry_is_selected_for_replacement() {
+    let mut shm = [0; 4096];
+    let mut runtime = fixture(&mut shm);
+    BACKEND.with(|backend| backend.borrow_mut().fail_read = true);
+    assert!(loader::load_interpreter_elf_image(&mut runtime, b"/elf", 0).is_err());
+    let failed = runtime.image_cache.entry(0).unwrap().address;
+    assert_eq!(runtime.image_cache.entry(0).unwrap().identity, 0);
+    BACKEND.with(|backend| backend.borrow_mut().fail_read = false);
+    // Empty LRU entries can be filled first; this failed owner still counts
+    // against admission. Once chosen as victim it must retire, not refill.
+    for version in 2..=image_cache::ENTRIES {
+        BACKEND.with(|backend| backend.borrow_mut().identity = version << 32 | 7);
+        load(&mut runtime);
+    }
+    BACKEND.with(|backend| {
+        backend.borrow_mut().identity = (image_cache::ENTRIES + 1) << 32 | 7;
+    });
+    let image = load(&mut runtime);
+    BACKEND.with(|backend| {
+        let backend = backend.borrow();
+        if image_cache::IMMUTABLE_STORAGE {
+            assert!(backend.allocations[0].1);
+            assert_eq!(backend.reclaimable_creates, image_cache::ENTRIES + 1);
+        } else {
+            assert_eq!(image.address, failed);
+            assert!(!backend.allocations[0].1);
+        }
+        assert_eq!(backend.opens, backend.closes);
+    });
+}
+
+#[test]
+fn immutable_mapping_admission_requires_a_live_complete_owned_range() {
+    let mut cache = image_cache::ImageCache::new();
+    cache.insert(0, (7 << 32) | 3, 0x10000, 5003, 8192, None);
+    assert_eq!(cache.immutable_range(0x10000, 8192), image_cache::IMMUTABLE_STORAGE);
+    assert_eq!(cache.immutable_range(0x11000, 4096), image_cache::IMMUTABLE_STORAGE);
+    for (address, bytes) in [(0x10000, 0), (0xffff, 1), (0x10000, 8193), (usize::MAX, 2)] {
+        assert!(!cache.immutable_range(address, bytes));
+    }
+    cache.invalidate(0);
+    assert!(!cache.immutable_range(0x10000, 4096));
+    cache.remove(0);
+    assert!(!cache.immutable_range(0x10000, 4096));
 }

@@ -1,6 +1,7 @@
 //! Timer SDK regression tests: badges are coalesced hints, not timer IDs.
 #![allow(dead_code)]
 extern crate self as a9n_abi;
+extern crate self as nanami_runtime;
 use std::{cell::RefCell, collections::VecDeque};
 pub type Word = usize;
 pub type CapabilityDescriptor = usize;
@@ -15,6 +16,8 @@ pub enum RequestError {
 }
 #[derive(Default)]
 struct State {
+    counter: Option<(Word, Word, Word)>,
+    counter_request: Option<(Word, Word, u8)>,
     bound: Word,
     requested_slot: Word,
     fires_during_rpc: bool,
@@ -25,15 +28,20 @@ struct State {
 }
 thread_local! { static STATE: RefCell<State> = RefCell::default(); }
 pub fn call_port(
-    _: Word,
+    port: Word,
     code: Word,
     delay: Word,
     source_slot: Word,
-    _: Word,
-    _: Word,
-    _: u8,
+    arg2: Word,
+    arg3: Word,
+    words: u8,
 ) -> Result<(Word, Word, Word), RequestError> {
     STATE.with_borrow_mut(|s| {
+        if code == timer::TIMER_SERVICE_REQUEST_COUNTER_SOURCE {
+            assert_eq!((source_slot, arg2, arg3), (0, 0, 0));
+            s.counter_request = Some((port, delay, words));
+            return Ok(s.counter.unwrap_or((2, 0, 0)));
+        }
         if code == timer::TIMER_SERVICE_REQUEST_MONOTONIC_TICKS {
             return Ok((0, s.now, 1000));
         }
@@ -45,6 +53,12 @@ pub fn call_port(
         }
         Ok((0, 0, 0))
     })
+}
+pub fn request_mmio(_: Word, _: Word) -> Result<(Word, Word), RequestError> {
+    Err(RequestError::Protocol)
+}
+pub fn request_mapping_release(_: Word, _: Word) -> Result<(), RequestError> {
+    Err(RequestError::Protocol)
 }
 pub mod ipc {
     use super::*;
@@ -72,6 +86,28 @@ pub mod ipc {
 mod timer;
 const TIMER: Word = timer::TIMER_NOTIFICATION_IDENTIFIER_BIT;
 const IRQ: Word = 1 << 16;
+
+#[test]
+fn optional_counter_query_uses_two_register_words_and_preserves_metadata() {
+    STATE.with_borrow_mut(|s| {
+        *s = State::default();
+        s.counter = Some((0, 0xfed00000, 10_000_000));
+    });
+    assert_eq!(
+        timer::timer_service_counter_source(24, timer::TIMER_COUNTER_SOURCE_HPET64),
+        Ok((0xfed00000, 10_000_000))
+    );
+    STATE.with_borrow(|s| assert_eq!(s.counter_request, Some((24, 1, 2))));
+}
+
+#[test]
+fn legacy_counter_query_does_not_disguise_an_error_as_a_source() {
+    STATE.with_borrow_mut(|s| *s = State::default());
+    assert_eq!(
+        timer::timer_service_counter_source(24, timer::TIMER_COUNTER_SOURCE_HPET64),
+        Err(RequestError::Status(2))
+    );
+}
 fn setup(events: &[(Word, Word)]) {
     STATE.with_borrow_mut(|s| {
         *s = State {

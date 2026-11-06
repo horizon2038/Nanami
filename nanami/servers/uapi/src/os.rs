@@ -104,6 +104,22 @@ pub const OS_REQUEST_PROCESS_SEAL_CAPABILITIES: Word = 0x1030;
 /// DETACH requires the reaper to have quiesced every task sharing the VM.
 /// Successful detach preserves bytes and R/W/X; only backing becomes private.
 pub const OS_REQUEST_PROCESS_PRIVATE_WRITE: Word = 0x1031;
+/// Borrow one sealed child's readable private RAM page at a caller-chosen VA.
+/// (target PID, target page VA, local page VA, 0); no Frame descriptor is returned.
+/// The trusted native supervisor retains the ordinary management Frame copy.
+/// The page is pinned until MAPPING_RELEASE, not a live address-space view.
+/// The supervisor must invalidate its cached view after backing/protection changes.
+pub const OS_REQUEST_PROCESS_READ_VIEW: Word = 0x1032;
+/// Borrow one currently writable, unshared private RAM page from a sealed child.
+/// Same arguments/lifetime as READ_VIEW; the trusted supervisor must invalidate
+/// before backing/protection changes. Never grants guest mapping authority.
+pub const OS_REQUEST_PROCESS_WRITE_VIEW: Word = 0x1033;
+/// Map native caller-owned immutable RAM into a sealed supervised task privately.
+/// (target PID, destination VA, page-rounded bytes, descriptor VA) -> ().
+/// Descriptor: [source VA, R/RX permissions]. Source must be owned read-only RAM;
+/// it cannot be refilled while aliases live. DETACH precedes every private write.
+/// On error, release any installed destination prefix; never fallback-copy over it.
+pub const OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT: Word = 0x1034;
 pub const OS_PRIVATE_WRITE_QUERY: Word = 0;
 pub const OS_PRIVATE_WRITE_DETACH: Word = 1;
 /// PROCESS_FORK arg3 opt-in. Only sealed tasks may share private R/RX backing.

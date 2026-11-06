@@ -146,6 +146,34 @@ pub fn private_readonly_fork() {
     rt::request_process_map_initialized_at(source, BASE, BYTES, scratch, BYTES).unwrap();
     rt::request_process_mapping_protect(source, BASE, BYTES, 1).unwrap();
     rt::request_process_seal_capabilities(source).unwrap();
+    // Untimed, real page-table regression. Source stays suspended; native
+    // aliases must not grant guest write permission or outlive invalidation.
+    const READ_VIEW: usize = 0x6_0000_0000;
+    const WRITE_VIEW: usize = READ_VIEW + 4096;
+    assert!(rt::request_process_write_view(source, BASE, WRITE_VIEW).is_err());
+    rt::request_process_mapping_protect(source, BASE, 4096, 3).unwrap();
+    rt::request_process_read_view(source, BASE, READ_VIEW).unwrap();
+    rt::request_process_write_view(source, BASE, WRITE_VIEW).unwrap();
+    unsafe {
+        core::ptr::write_volatile(WRITE_VIEW as *mut usize, 0x8877_6655_4433_2211);
+    }
+    assert_eq!(
+        unsafe { core::ptr::read_volatile(READ_VIEW as *const usize) },
+        0x8877_6655_4433_2211
+    );
+    rt::request_process_memory_read(source, BASE, shm, 8).unwrap();
+    assert_eq!(
+        unsafe { core::ptr::read_volatile(shm as *const usize) },
+        0x8877_6655_4433_2211
+    );
+    unsafe {
+        core::ptr::write_volatile(WRITE_VIEW as *mut usize, 0x3333_3333_3333_3333);
+    }
+    rt::request_mapping_release(READ_VIEW, 4096).unwrap();
+    rt::request_mapping_release(WRITE_VIEW, 4096).unwrap();
+    rt::request_process_mapping_protect(source, BASE, 4096, 1).unwrap();
+    assert!(rt::request_process_write_view(source, BASE, WRITE_VIEW).is_err());
+    rt::println!("PRIVATE-PAGE-VIEWS-PASS writable=true readonly-refused=true cleanup=true");
     for round in 0..4 {
         let mut costs = [0usize; 2];
         for (mode, cost) in costs.iter_mut().enumerate() {
@@ -205,13 +233,18 @@ pub fn private_readonly_fork() {
     rt::request_process_kill(source, 0).unwrap();
     rt::request_process_reap(source).unwrap();
     rt::request_process_memory_read(survivor, BASE, shm, 8).unwrap();
-    assert_eq!(unsafe { core::ptr::read_volatile(shm as *const usize) }, 0x3333_3333_3333_3333);
+    assert_eq!(
+        unsafe { core::ptr::read_volatile(shm as *const usize) },
+        0x3333_3333_3333_3333
+    );
     rt::request_process_private_write(survivor, BASE, 4096, rt::OS_PRIVATE_WRITE_DETACH).unwrap();
     rt::request_process_memory_write(survivor, BASE, scratch, 8).unwrap();
     rt::request_process_kill(survivor, 0).unwrap();
     rt::request_process_reap(survivor).unwrap();
     rt::request_mapping_release(scratch, BYTES).unwrap();
-    rt::println!("PRIVATE-READONLY-FORK-PASS ram=true guarded-write=true isolation=true source-reap=true");
+    rt::println!(
+        "PRIVATE-READONLY-FORK-PASS ram=true guarded-write=true isolation=true source-reap=true"
+    );
 }
 
 /// Untimed regression: two aliases in the final owner must free RAM once.

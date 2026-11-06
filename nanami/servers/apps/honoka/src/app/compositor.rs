@@ -15,6 +15,8 @@ use crate::profile::Profile;
 
 #[path = "fbdev_damage.rs"]
 mod fbdev_damage;
+#[path = "present_windows.rs"]
+mod present_windows;
 #[path = "resize.rs"]
 mod resize;
 #[path = "shell_icon.rs"]
@@ -34,6 +36,7 @@ const SHELL_PATH: &[u8] = b"/bin/shell";
 const SHELL_PRIORITY: Word = 16;
 const TITLE_TEXT_MAX: usize = nanami_client::gfx::honoka::HONOKA_WINDOW_TITLE_BYTES;
 const DEFAULT_WALLPAPER_PNM: &[u8] = include_bytes!("../../assets/wallpapers/default.pnm");
+const _: () = assert!(MAX_WINDOWS <= present_windows::HINT_BITS);
 
 #[derive(Clone, Copy)]
 struct PnmImage<'a> {
@@ -128,7 +131,7 @@ pub struct Compositor {
     background: Option<BackgroundCache>,
     info_panel: InfoPanel,
     windows: [Window; MAX_WINDOWS],
-    next_window_id: Word,
+    next_window_generation: Word,
     cursor_x: i32,
     cursor_y: i32,
     dragging_window: Option<usize>,
@@ -180,7 +183,7 @@ impl Compositor {
             background,
             info_panel,
             windows: [Window::EMPTY; MAX_WINDOWS],
-            next_window_id: 1,
+            next_window_generation: 0,
             // The wallpaper logo occupies the exact screen center and is almost the same color as
             // the pointer. Start over the darker right-hand area so the cursor is visible before
             // the first mouse event arrives.
@@ -297,18 +300,18 @@ impl Compositor {
         }
     }
 
-    pub fn invalidate_presented_logical_framebuffer(&mut self, window_id: Word) {
+    pub fn invalidate_presented_logical_framebuffer(&mut self, identifier: Word) {
         if self.dragging_window.is_some() {
             return;
         }
-
-        if window_id == 0 {
-            self.drain_presented_logical_framebuffers();
-            return;
-        }
-
-        if let Some(index) = self.find_window_by_id(window_id) {
-            self.drain_window_damage(index);
+        // Treat notifications as a set of hints, never as an exact window ID.
+        // This also works with existing clients that mint only the low 32 bits.
+        let hints = identifier & present_windows::HINT_MASK;
+        for index in 0..MAX_WINDOWS {
+            let window = self.windows[index];
+            if window.used && (hints == 0 || window.id & hints != 0) {
+                self.drain_window_damage(index);
+            }
         }
     }
 
@@ -354,11 +357,18 @@ impl Compositor {
             TITLE_BAR_HEIGHT + 32,
             self.framebuffer.screen().height as i32,
         );
-        let id = self.next_window_id;
-        self.next_window_id = self.next_window_id.wrapping_add(1);
         let input_notify_slot = self
             .available_input_notification_slot()
             .ok_or(nanami_runtime::RequestError::Unsupported)?;
+        let live_hints = self
+            .windows
+            .iter()
+            .filter(|window| window.used)
+            .fold(0, |mask, window| mask | window.id);
+        let (id, next_generation) =
+            present_windows::allocate(self.next_window_generation, live_hints)
+                .ok_or(nanami_runtime::RequestError::Unsupported)?;
+        self.next_window_generation = next_generation;
         self.windows[index] = Window {
             used: true,
             owner_pid,

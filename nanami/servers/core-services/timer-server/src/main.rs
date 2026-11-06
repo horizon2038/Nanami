@@ -161,6 +161,16 @@ fn handle_request(
                 Err(e) => (map_request_error_to_status(e), 0, 0),
             }
         }
+        nanami_client::timer::TIMER_SERVICE_REQUEST_COUNTER_SOURCE => {
+            // Discovery must not expose a pre-start/reset epoch to clients.
+            if let Err(error) = refresh_clock(state, timer, irq_desc) {
+                return (map_request_error_to_status(error), 0, 0);
+            }
+            match arch::counter_source(timer, request.arg0) {
+                Some((base, period)) => (nanami_runtime::OS_RESPONSE_OK, base, period),
+                None => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+            }
+        }
         nanami_client::timer::TIMER_SERVICE_REQUEST_ALARM_TICKS => {
             match set_alarm(
                 state,

@@ -178,6 +178,29 @@ fn sealed_exec_unmaps_then_bulk_clears_chunks_before_releasing_ram() {
 }
 
 #[test]
+fn sealed_exec_does_not_treat_an_uncertain_pte_as_prot_none() {
+    let mut a = Alpha::new();
+    a.page(0, 100, 3);
+    a.processes
+        .vm_space_mut(1)
+        .unwrap()
+        .mark_mapping_uncertain(PAGE_SIZE);
+    assert_eq!(
+        a.processes.vm_space_mut(1).unwrap().permissions(PAGE_SIZE),
+        0
+    );
+    a.retire().unwrap();
+    CALLS.with(|calls| {
+        let calls = calls.borrow();
+        assert!(calls
+            .events
+            .iter()
+            .any(|call| *call == Call::Unmap(PAGE_SIZE)));
+        assert_eq!(calls.freed.len(), 1);
+    });
+}
+
+#[test]
 fn active_and_deferred_aliases_release_once_but_never_free_a_peers_backing() {
     for peer in [false, true] {
         let mut a = Alpha::new();

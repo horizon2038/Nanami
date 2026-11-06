@@ -49,6 +49,8 @@ use netlink::*;
 
 #[path = "linux/guest_memory.rs"]
 mod guest_memory;
+#[path = "linux/guest_views.rs"]
+mod guest_views;
 use guest_memory::*;
 
 #[path = "linux/network_packet.rs"]

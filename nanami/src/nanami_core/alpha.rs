@@ -1,7 +1,7 @@
 mod boot;
-mod capability_sealing;
 #[cfg(target_arch = "x86_64")]
 mod boot_trace;
+mod capability_sealing;
 mod checked_memory;
 mod control_requests;
 mod domain_manifest;
@@ -11,12 +11,13 @@ mod mapping_protection;
 mod mapping_release;
 mod memory_clone;
 mod memory_copy;
+mod memory_exec;
 mod memory_init;
 mod memory_pages;
 mod memory_private;
-mod memory_exec;
 mod memory_requests;
 mod memory_retirement;
+mod memory_snapshot;
 mod memory_staging;
 mod mmio;
 mod process_policy;
@@ -739,6 +740,9 @@ impl Alpha {
             nanami_uapi::os::OS_REQUEST_PROCESS_PRIVATE_WRITE => {
                 response_from_detail_result(self.handle_process_private_write(request))
             }
+            nanami_uapi::os::OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT => {
+                response_from_status_result(self.handle_process_private_snapshot(request))
+            }
             OS_REQUEST_PROCESS_SPAWN_MEMORY => {
                 response_from_detail_result(self.handle_process_spawn_memory_request(request))
             }
@@ -790,6 +794,12 @@ impl Alpha {
             }
             OS_REQUEST_PROCESS_MAP_ANONYMOUS => {
                 response_from_details_result(self.handle_process_map_anonymous_request(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_READ_VIEW => {
+                response_from_status_result(self.handle_process_read_view_request(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_WRITE_VIEW => {
+                response_from_status_result(self.handle_process_page_view_request(request, true))
             }
             OS_REQUEST_NANAMI_CONTROL => {
                 response_from_status_result(self.handle_nanami_control_request(request))

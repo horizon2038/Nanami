@@ -56,11 +56,7 @@ impl Alpha {
                     .ok_or(CapabilityError::Fatal)?;
                 // Materializing a reservation must not grant access if a later
                 // allocation or protection update fails.
-                arch::address_space::unmap(entry.address_space, frame, va)?;
-                self.processes
-                    .vm_space_mut(pid)
-                    .ok_or(CapabilityError::Fatal)?
-                    .set_permissions(va, 0);
+                self.protect_process_page(pid, entry.address_space, va, frame, 0)?;
                 frame
             };
             let old = self
@@ -101,21 +97,33 @@ impl Alpha {
             .processes
             .vm_space_mut(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let old = vm.permissions(va);
         if permissions & 2 != 0 && vm.private_page_shared(va) {
             return Err(CapabilityError::IllegalOperation);
         }
+        // Do not accept an equal-permission no-op until both leaf removal and
+        // its shootdown are confirmed. Failed cleanup leaves ownership pinned.
+        if vm.mapping_is_uncertain(va) {
+            arch::address_space::unmap(address_space, frame, va)?;
+            vm.confirm_unmapped(va);
+        }
+        let old = vm.permissions(va);
         if old == permissions {
             return Ok(());
         }
         if old != 0 {
-            arch::address_space::unmap(address_space, frame, va)?;
+            if let Err(error) = arch::address_space::unmap(address_space, frame, va) {
+                vm.mark_mapping_uncertain(va);
+                return Err(error);
+            }
             vm.set_permissions(va, 0);
         }
         if permissions != 0 {
             let attributes = nun::capability_call::address_space::Attribute::from_bits(permissions)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            arch::address_space::map(address_space, frame, va, attributes)?;
+            if let Err(error) = arch::address_space::map(address_space, frame, va, attributes) {
+                vm.mark_mapping_uncertain(va);
+                return Err(error);
+            }
             vm.set_permissions(va, permissions);
         }
         Ok(())

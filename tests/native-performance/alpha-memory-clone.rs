@@ -112,6 +112,49 @@ impl Alpha {
 mod production;
 
 #[test]
+fn cloning_an_uncertain_source_fails_before_copying_or_allocating() {
+    let mut a = Alpha::new();
+    a.page(1, 0x1000, 11, 3);
+    a.processes
+        .vm_space_mut(1)
+        .unwrap()
+        .mark_mapping_uncertain(0x1000);
+    assert_eq!(a.clone_process_vm(1, 2), Err(CapabilityError::Fatal));
+    assert_eq!(
+        a.clone_backed_memory(1, 0x1000, 2, 0x5000, PAGE_SIZE),
+        Err(CapabilityError::Fatal)
+    );
+    assert!(a.allocations.is_empty());
+    assert!(a.copies.is_empty());
+    assert!(a.protections.is_empty());
+    assert!(a
+        .processes
+        .vm_space_mut(2)
+        .unwrap()
+        .backed_pages(0, usize::MAX)
+        .is_empty());
+}
+
+#[test]
+fn bounded_clone_does_not_quarantine_an_unrelated_source_range() {
+    let mut a = Alpha::new();
+    a.page(1, 0x1000, 11, 3);
+    a.page(1, 0x2000, 22, 3);
+    a.processes
+        .vm_space_mut(1)
+        .unwrap()
+        .mark_mapping_uncertain(0x2000);
+    a.clone_backed_memory(1, 0x1000, 2, 0x5000, PAGE_SIZE)
+        .unwrap();
+    assert_eq!(a.data[&(2, 0x5000)][0], 11);
+    assert!(a
+        .processes
+        .vm_space_mut(1)
+        .unwrap()
+        .mapping_is_uncertain(0x2000));
+}
+
+#[test]
 fn contiguous_private_snapshot_uses_one_constructor_and_preserves_every_permission() {
     let mut a = Alpha::new();
     for (i, permission) in [5, 3, 0, 7].into_iter().enumerate() {

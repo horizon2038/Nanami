@@ -7,6 +7,12 @@ pub const MAX_RETAINED_BYTES: Word = 16 * 1024 * 1024;
 // More small-file slots within the original byte budget; large images bypass it.
 pub const MAX_IMAGE_BYTES: Word = 2 * 1024 * 1024;
 const PAGE_BYTES: Word = 4096;
+// Experimental prerequisite for readonly private mappings. Keep the ordinary
+// in-place heap policy until the complete copy-reduction path is validated.
+pub const IMMUTABLE_STORAGE: bool = match option_env!("NANAMI_IMMUTABLE_SNAPSHOTS") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => false,
+};
 
 #[derive(Clone, Copy)]
 pub struct CachedImage {
@@ -65,7 +71,25 @@ impl ImageCache {
             .sum()
     }
 
+    pub fn immutable_range(&self, address: Word, bytes: Word) -> bool {
+        IMMUTABLE_STORAGE
+            && bytes != 0
+            && self.entries.iter().flatten().any(|image| {
+                image.identity != 0
+                    && address >= image.address
+                    && address
+                        .checked_add(bytes)
+                        .zip(image.address.checked_add(image.capacity))
+                        .is_some_and(|(end, limit)| end <= limit)
+            })
+    }
+
     pub fn allocation_capacity(&self, index: usize, size: Word) -> Word {
+        if IMMUTABLE_STORAGE {
+            // A published snapshot is retired, never refilled in place. Its
+            // reclaimable RAM object needs no geometric heap-growth reserve.
+            return size.next_multiple_of(PAGE_BYTES);
+        }
         let requested = match self.entry(index) {
             Some(previous) if previous.capacity >= size => return previous.capacity,
             Some(_) => size.next_power_of_two(),
@@ -97,6 +121,21 @@ impl ImageCache {
 
     pub fn entry(&self, index: usize) -> Option<&CachedImage> {
         self.entries[index].as_ref()
+    }
+
+    /// Retain ownership after a failed/partial release, but never serve a hit
+    /// from a mapping whose publication or retirement has not completed.
+    pub fn invalidate(&mut self, index: usize) {
+        if let Some(entry) = self.entries[index].as_mut() {
+            entry.identity = 0;
+            entry.size = 0;
+            entry.metadata = None;
+        }
+    }
+
+    /// Only after successful release of the recorded allocation.
+    pub fn remove(&mut self, index: usize) {
+        self.entries[index] = None;
     }
 
     pub fn insert(

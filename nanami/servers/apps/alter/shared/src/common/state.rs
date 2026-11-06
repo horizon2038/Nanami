@@ -19,6 +19,8 @@ pub use job_control::{JobControlError, ProcessJobControl, TerminalControl};
 mod mapping_table;
 #[path = "state/mappings.rs"]
 mod mappings;
+#[path = "state/page_window.rs"]
+pub mod page_window;
 pub use mapping_table::MappingTable;
 #[path = "state/poll_objects.rs"]
 pub mod poll_objects;
@@ -499,6 +501,8 @@ impl GraphicsSession {
 }
 
 pub struct Runtime {
+    pub read_window: page_window::ReadWindow,
+    pub write_window: page_window::WriteWindow,
     /// Accepted fault whose reply has not yet been sent. Not a runnable task.
     pub current_fault_pid: Word,
     pub ptys: pty::Ptys,
@@ -517,6 +521,7 @@ pub struct Runtime {
     pub terminal_shm_size: Word,
     pub terminal_input_notification_id: Word,
     pub timer_port: Word,
+    pub clock_reader: nanami_client::timer::MonotonicReader,
     pub clock_deadline: Option<Word>,
     pub readiness_changes: Word,
     pub framebuffer_deadline: Option<Word>,
@@ -577,6 +582,8 @@ impl Runtime {
         terminal_shm_size: Word,
     ) -> Self {
         Self {
+            read_window: page_window::ReadWindow::new(),
+            write_window: page_window::WriteWindow::new(),
             current_fault_pid: 0,
             terminal_controls: [TerminalControl::EMPTY; ALTER_MANAGED_PROCESS_MAX],
             ptys: pty::Ptys::new(),
@@ -594,6 +601,7 @@ impl Runtime {
             terminal_shm_size,
             terminal_input_notification_id: 0,
             timer_port: 0,
+            clock_reader: nanami_client::timer::MonotonicReader::new(),
             clock_deadline: None,
             readiness_changes: 0,
             framebuffer_deadline: None,

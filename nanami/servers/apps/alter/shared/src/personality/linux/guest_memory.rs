@@ -2,6 +2,7 @@ use super::{
     map_request_error, Runtime, Word, EFAULT, EINVAL, LINUX_IOVEC_LEN, LINUX_IOV_MAX,
     LINUX_MSGHDR_LEN,
 };
+use core::mem::MaybeUninit;
 
 pub(super) fn read_linux_msghdr(
     runtime: &mut Runtime,
@@ -73,8 +74,38 @@ pub(super) fn copyin_into(
     if !runtime.memory_access_allowed(pid, user_ptr, len, 1) {
         return Err(EFAULT);
     }
+    if super::guest_views::copy_into_scratch(runtime, pid, user_ptr, destination, len) {
+        return Ok(());
+    }
     nanami_runtime::request_process_memory_read_checked(pid, user_ptr, destination, len)
         .map_err(|_| EFAULT)
+}
+
+/// Initialize an owned buffer directly. Small inputs may use read leases;
+/// larger inputs keep the original single checked transfer, without staging
+/// through scratch or splitting into page-sized requests.
+pub(super) fn copyin_owned(
+    runtime: &Runtime,
+    pid: Word,
+    user_ptr: Word,
+    destination: &mut [MaybeUninit<u8>],
+) -> Result<(), i32> {
+    if destination.is_empty() {
+        return Ok(());
+    }
+    if !runtime.memory_access_allowed(pid, user_ptr, destination.len(), 1) {
+        return Err(EFAULT);
+    }
+    if super::guest_views::copy_into_owned(runtime, pid, user_ptr, destination) {
+        return Ok(());
+    }
+    nanami_runtime::request_process_memory_read_checked(
+        pid,
+        user_ptr,
+        destination.as_mut_ptr() as Word,
+        destination.len(),
+    )
+    .map_err(|_| EFAULT)
 }
 
 pub(super) fn write_target_memory(
@@ -99,8 +130,38 @@ pub(super) fn copyout_from(
     if len == 0 {
         return Ok(());
     }
+    if super::guest_views::copy_from_scratch(runtime, pid, user_ptr, source, len) {
+        return Ok(());
+    }
     nanami_runtime::request_process_memory_write_checked(pid, user_ptr, source, len)
         .map_err(|_| EFAULT)
+}
+
+/// A typed owned source permits small copyout without exposing an arbitrary
+/// raw source VA to the local writer. Larger or ineligible ranges keep the
+/// original single permission-checked transfer.
+pub(super) fn copyout_owned(
+    runtime: &Runtime,
+    pid: Word,
+    user_ptr: Word,
+    source: &[u8],
+) -> Result<(), i32> {
+    if !runtime.memory_access_allowed(pid, user_ptr, source.len(), 2) {
+        return Err(EFAULT);
+    }
+    if source.is_empty() {
+        return Ok(());
+    }
+    if super::guest_views::copy_from_owned(runtime, pid, user_ptr, source) {
+        return Ok(());
+    }
+    nanami_runtime::request_process_memory_write_checked(
+        pid,
+        user_ptr,
+        source.as_ptr() as Word,
+        source.len(),
+    )
+    .map_err(|_| EFAULT)
 }
 
 pub(super) fn write_target_memory_from(
@@ -117,6 +178,28 @@ pub(super) fn write_target_memory_from(
         nanami_runtime::request_process_memory_write(pid, user_ptr, source, len)
             .map_err(map_request_error)
     })
+}
+
+/// Keep typed owned buffers through the optional bounded write view. Prepare
+/// every lease before storing; on any miss/failure retain the original single
+/// checked vector, including its whole-field preflight and ordered EFAULT prefix.
+pub(super) fn copyout_owned_many<const N: usize>(
+    runtime: &Runtime,
+    pid: Word,
+    buffers: &[(Word, &[u8]); N],
+) -> Result<(), i32> {
+    if buffers.iter().all(|(target, source)| {
+        !source.is_empty() && runtime.memory_access_allowed(pid, *target, source.len(), 2)
+    }) && super::guest_views::copy_from_owned_many(runtime, pid, buffers)
+    {
+        return Ok(());
+    }
+    let transfers = buffers.map(|(target, source)| nanami_runtime::ProcessMemoryTransfer {
+        target,
+        local: source.as_ptr() as Word,
+        bytes: source.len(),
+    });
+    copyout_many(runtime, pid, &transfers)
 }
 
 /// Preserve ordered scalar fault behavior when personality preflight fails.
@@ -202,12 +285,18 @@ pub(super) fn write_guest_u32s<const N: usize>(
             .windows(2)
             .all(|pair| pair[0].checked_add(core::mem::size_of::<u32>()) == Some(pair[1]));
     if contiguous
-        && copyout_from(
+        && copyout_owned(
             runtime,
             pid,
             pointers[0],
-            values.as_ptr() as Word,
-            core::mem::size_of_val(&values),
+            // Every u32 byte is initialized and the array has no padding.
+            // Keep this borrow tied to the owned values, not an opaque VA.
+            unsafe {
+                core::slice::from_raw_parts(
+                    values.as_ptr().cast::<u8>(),
+                    core::mem::size_of_val(&values),
+                )
+            },
         )
         .is_ok()
     {

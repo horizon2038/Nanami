@@ -51,9 +51,6 @@ impl Alpha {
             );
             return Err(CapabilityError::PermissionDenied);
         }
-        let exact_allocation = self
-            .processes
-            .find_active_physical_allocation_reference(target_pid, base_va, page_count);
         let entry = self
             .processes
             .memory_entry(target_pid)
@@ -64,6 +61,20 @@ impl Alpha {
         {
             return self.release_shared_memory(entry, reservation);
         }
+        // A RAM reservation remains one releasable object after its backing
+        // becomes page-counted. Partial/cross-object releases must not route
+        // through private-page retirement and leave a broken live reservation.
+        if self
+            .processes
+            .shared_memory_overlapping_range(target_pid, base_va, mapped_size)
+            .is_some()
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        // Shared-object release never consumes this private-extent lookup.
+        let exact_allocation = self
+            .processes
+            .find_active_physical_allocation_reference(target_pid, base_va, page_count);
 
         // Validate the complete range before changing any PTE or allocation reference.
         let mut allocations = Vec::new();
@@ -102,12 +113,15 @@ impl Alpha {
                 let present = self
                     .processes
                     .vm_space_mut(target_pid)
-                    .is_some_and(|vm| vm.find_frame(va).is_some() && vm.permissions(va) != 0);
+                    .is_some_and(|vm| vm.frame_may_be_present(va));
                 if let Err(e) = if present {
                     arch::address_space::unmap(entry.address_space, frame, va)
                 } else {
                     Ok(())
                 } {
+                    if let Some(vm) = self.processes.vm_space_mut(target_pid) {
+                        vm.mark_mapping_uncertain(va);
+                    }
                     info!(
                         "[map.err] unmap target={:>3} va={:#018x} frame={:#018x} slot={} err={:?}",
                         target_pid, va, frame, slot, e

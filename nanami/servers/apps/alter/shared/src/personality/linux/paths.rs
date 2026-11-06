@@ -14,16 +14,13 @@ pub(super) fn read_c_string(runtime: &mut Runtime, pid: Word, user_ptr: Word) ->
         let page_remaining = (LINUX_PAGE_SIZE - (source & (LINUX_PAGE_SIZE - 1))) as usize;
         // Most paths terminate near the start: avoid copying an entire page.
         let chunk = ::core::cmp::min(max - copied, page_remaining).min(128.max(copied));
-        if !runtime.memory_access_allowed(pid, source, chunk, 1) {
-            return Err(EFAULT);
-        }
-        nanami_runtime::request_process_memory_read_checked(
+        super::guest_memory::copyin_into(
+            runtime,
             pid,
             source,
             runtime.posix_shm + copied as Word,
             chunk as Word,
-        )
-        .map_err(|_| EFAULT)?;
+        )?;
 
         let end = copied + chunk;
         while copied < end {

@@ -634,6 +634,7 @@ pub fn close_process_files(runtime: &mut Runtime, pid: Word) {
 }
 
 pub fn close_process_files_checked(runtime: &mut Runtime, pid: Word) -> Result<(), i32> {
+    super::guest_views::invalidate(runtime, pid);
     super::pty::session_exit(runtime, pid);
     super::futex::exit(runtime, pid);
     let mut first_error = None;

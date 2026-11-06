@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -81,6 +82,58 @@ class ArchiveTests(unittest.TestCase):
 
 
 class DesktopTests(unittest.TestCase):
+    def test_x11_latency_framing_and_partial_io_without_an_x_server(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "x11-latency-test"
+            flags = ["-ffunction-sections", "-Wl,--gc-sections"]
+            if sys.platform == "darwin":
+                flags = ["-Wl,-dead_strip"]
+            for seconds in (None, 0, 2, 10, 60):
+                with self.subTest(settle_seconds=seconds):
+                    defines = []
+                    if seconds is not None:
+                        defines = [f"-DAPP_OBSERVER_RTT_SETTLE_SECONDS={seconds}"]
+                    subprocess.run([
+                        "cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *flags, *defines,
+                        str(build.REPO / "tests/native-performance/desktop-x11-latency.c"),
+                        "-o", str(executable),
+                    ], check=True)
+                    subprocess.run([str(executable)], check=True, timeout=10)
+
+    def test_x11_latency_settle_rejects_invalid_compile_time_bounds(self):
+        for seconds in (-1, 61):
+            with self.subTest(settle_seconds=seconds):
+                result = subprocess.run([
+                    "cc", "-std=c11", "-fsyntax-only",
+                    f"-DAPP_OBSERVER_RTT_SETTLE_SECONDS={seconds}",
+                    str(build.REPO / "tests/native-performance/desktop-x11-latency.c"),
+                ], capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("observer settle must be between zero and sixty seconds", result.stderr)
+
+    def test_window_observer_title_rules_without_an_x_server(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "window-observer-test"
+            flags = ["-ffunction-sections", "-Wl,--gc-sections"]
+            if sys.platform == "darwin":
+                flags = ["-Wl,-dead_strip"]
+            subprocess.run([
+                "cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", *flags,
+                str(build.REPO / "tests/native-performance/desktop-window-observer.c"),
+                "-o", str(executable),
+            ], check=True)
+            subprocess.run([str(executable)], check=True, timeout=10)
+
+    def test_window_observer_failure_evidence_without_an_x_server(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / "window-observer-trace-test"
+            subprocess.run([
+                "cc", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror",
+                str(build.REPO / "tests/native-performance/desktop-observer-trace.c"),
+                "-o", str(executable),
+            ], check=True)
+            subprocess.run([str(executable)], check=True, timeout=10)
+
     def test_readiness_retry_policy_with_mocked_xlib_and_process_liveness(self):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "wait-for-x-test"
@@ -90,26 +143,32 @@ class DesktopTests(unittest.TestCase):
             subprocess.run([str(executable)], check=True, timeout=10)
 
     def test_readiness_builder_records_provenance_and_links_pinned_runtime(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "usr/local/bin").mkdir(parents=True)
-            (root / "usr/local/lib").mkdir()
-            (root / "lib").mkdir()
-            xlib = root / "usr/local/lib/libX11.so.6.4.0"
-            xlib.write_bytes(b"pinned Xlib")
-            (xlib.parent / "libX11.so.6").symlink_to(xlib.name)
-            (root / "lib/libc.so.6").write_bytes(b"pinned libc")
-            def compile_helper(command, **options):
-                self.assertTrue(options["check"])
-                self.assertIn("--target=x86_64-unknown-linux-gnu", command)
-                self.assertIn(str(xlib.resolve()), command)
-                self.assertIn("-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined", command)
-                Path(command[-1]).write_bytes(b"profile ELF")
-            with mock.patch.object(desktop.subprocess, "run", side_effect=compile_helper):
-                result = desktop.build_readiness(root)
-            self.assertEqual(result, {"usr/local/bin/nanami-wait-for-x": hashlib.sha256(b"profile ELF").hexdigest()})
-            with self.assertRaises(ValueError):
-                desktop.build_readiness(root)
+        for builder, destination, source in [
+            (desktop.build_readiness, "usr/local/bin/nanami-wait-for-x", "wait-for-x.c"),
+            (desktop.build_window_observer, "bin/aw", "desktop-window-observer.c"),
+        ]:
+            with self.subTest(destination=destination), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "usr/local/bin").mkdir(parents=True)
+                (root / "bin").mkdir()
+                (root / "usr/local/lib").mkdir()
+                (root / "lib").mkdir()
+                xlib = root / "usr/local/lib/libX11.so.6.4.0"
+                xlib.write_bytes(b"pinned Xlib")
+                (xlib.parent / "libX11.so.6").symlink_to(xlib.name)
+                (root / "lib/libc.so.6").write_bytes(b"pinned libc")
+                def compile_helper(command, **options):
+                    self.assertTrue(options["check"])
+                    self.assertIn("--target=x86_64-unknown-linux-gnu", command)
+                    self.assertIn(str(xlib.resolve()), command)
+                    self.assertTrue(any(Path(item).name == source for item in command))
+                    self.assertIn("-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined", command)
+                    Path(command[-1]).write_bytes(b"profile ELF")
+                with mock.patch.object(desktop.subprocess, "run", side_effect=compile_helper):
+                    result = builder(root)
+                self.assertEqual(result, {destination: hashlib.sha256(b"profile ELF").hexdigest()})
+                with self.assertRaises(ValueError):
+                    builder(root)
 
     def test_readiness_builder_refuses_destination_aliases_before_compiling(self):
         for relative in [None, "usr", "usr/local", "usr/local/bin"]:
@@ -372,9 +431,17 @@ class DesktopTests(unittest.TestCase):
                   if line.startswith("t: ") and not line[3:].startswith("/")]
         self.assertEqual(len(labels), len(set(labels)))
         self.assertEqual(labels, ["Terminal", "Files", "Editor", "Images", "Paint", "Calculator", "Tiny Core information", "Exit desktop"])
-        commands = [line for line in config.splitlines() if line.startswith("c: /bin/busybox sh ")]
-        self.assertEqual(len(commands), len(labels))
-        self.assertTrue(all(line.startswith("c: /bin/busybox sh /usr/local/bin/nanami-app ") for line in commands))
+        commands = [line[3:] for line in config.splitlines() if line.startswith("c: ")][1:]
+        self.assertEqual(commands, [
+            ". /usr/local/bin/nanami-app terminal",
+            ". /usr/local/bin/nanami-app files > /tmp/xfe.log 2>&1",
+            ". /usr/local/bin/nanami-app editor > /tmp/editor.log 2>&1",
+            ". /usr/local/bin/nanami-app images > /tmp/flpicsee.log 2>&1",
+            ". /usr/local/bin/nanami-app paint > /tmp/mtpaint.log 2>&1",
+            ". /usr/local/bin/nanami-app calculator > /tmp/galculator.log 2>&1",
+            ". /usr/local/bin/nanami-app information",
+            ". /usr/local/bin/nanami-app exit",
+        ])
 
     def test_clients_require_unix_transport_even_before_x_is_ready(self):
         startup = (build.HERE / "profile/usr/local/bin/nanami-desktop").read_text()

@@ -18,10 +18,20 @@ parser.add_argument("--normal-devices", action="store_true",
                     help="match xtask's default PS/2 and virtio-net user network")
 parser.add_argument("--net", choices=["none", "user"],
                     help="override networking when isolating normal-device regressions")
+parser.add_argument("--tcg-threads", choices=["single", "multi"],
+                    help="explicit TCG threading for emulator-mode comparisons; otherwise use QEMU's default")
+parser.add_argument("--app-launch-ready", choices=["viewable", "ping"], default="viewable",
+                    help="launch completion gate: first window, or an advertised EWMH event-loop response")
+parser.add_argument("--app-launch-timeline", action="store_true",
+                    help="diagnostic Files screenshots and real keyboard challenge after ping; not a painted/readiness assertion")
 profile = parser.add_mutually_exclusive_group()
 profile.add_argument("--tinycore", action="store_true", help="test the Tiny Core Alter boot profile")
 profile.add_argument("--tinycore-desktop", action="store_true", help="test the real Xfbdev/FLWM desktop")
+profile.add_argument("--tinycore-file-mapping", action="store_true",
+                     help="run the desktop prelude through the real file/copyin mapping regression, without GUI assertions")
 profile.add_argument("--tinycore-apps", action="store_true", help="test installed GUI applications with real X windows")
+profile.add_argument("--tinycore-app-launch-perf", choices=["terminal", "files", "editor"],
+                     help="measure a real dock click through an independently observed viewable X11 window")
 profile.add_argument("--tinycore-perf", action="store_true", help="measure fixed AF_UNIX round-trip workloads")
 profile.add_argument("--tinycore-process-perf", action="store_true", help="measure Alpha creation, Negoto prepare and Linux fork/exec separately")
 profile.add_argument("--tinycore-startup-perf", action="store_true", help="measure real OCI create/start through an X11 terminal connection")
@@ -29,6 +39,10 @@ profile.add_argument("--ram-sharing-reuse", action="store_true", help="check pri
 profile.add_argument("--ram-alias-retirement", action="store_true", help="check RAM reclamation when its final owner holds two aliases")
 profile.add_argument("--private-readonly-fork", action="store_true", help="verify real RO-fork RAM savings and privileged-write isolation")
 args = parser.parse_args()
+if args.app_launch_ready != "viewable" and not args.tinycore_app_launch_perf:
+    parser.error("--app-launch-ready requires --tinycore-app-launch-perf")
+if args.app_launch_timeline and (args.tinycore_app_launch_perf != "files" or args.app_launch_ready != "ping"):
+    parser.error("--app-launch-timeline requires --tinycore-app-launch-perf files --app-launch-ready ping")
 if not args.image.is_file():
     parser.error("--image must be a regular test image")
 repo = pathlib.Path(__file__).resolve().parents[2]
@@ -52,6 +66,8 @@ if args.net == "user" or (args.net is None and args.normal_devices):
     at = command.index("-nic")
     command[at:at + 2] = ["-netdev", "user,id=net0", "-device",
                          "virtio-net-pci,netdev=net0,addr=5,disable-legacy=off,disable-modern=on"]
+if args.tcg_threads is not None:
+    command += ["-accel", f"tcg,thread={args.tcg_threads}"]
 with (logs / "qemu.log").open("w") as diagnostics:
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=diagnostics)
     try:
@@ -60,8 +76,8 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 raise RuntimeError("QEMU exited; see qemu.log")
             text = serial.read_text(errors="replace") if serial.exists() else ""
             plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
-            if ("NEGOTO-SMOKE-FAIL" in plain or "FATAL FAULT" in plain
-                    or ((args.tinycore_desktop or args.tinycore_startup_perf) and ("[proc.err] spawn failed" in plain
+            if ("NEGOTO-SMOKE-FAIL" in plain or "FATAL FAULT" in plain or "[view.err]" in plain
+                    or ((args.tinycore_desktop or args.tinycore_file_mapping or args.tinycore_startup_perf or args.tinycore_app_launch_perf) and ("[proc.err] spawn failed" in plain
                                                  or "[shm.err] share rollback" in plain))
                     or re.search(r"\bPANIC\b|\bpanic(?:ked)?\b", plain, re.IGNORECASE)):
                 raise RuntimeError("Guest regression failed; see serial.log")
@@ -85,6 +101,7 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 if not select.select([process.stdout], [], [], 5)[0]:
                     raise RuntimeError("QEMU monitor timed out")
                 data += os.read(process.stdout.fileno(), 4096)
+            return data
 
         def click_at(x, y, click=True):
             for _ in range(30):
@@ -97,9 +114,47 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 y -= dy
                 time.sleep(0.1)
             if click:
+                pressed = time.monotonic_ns()
                 send("mouse_button 1")
                 time.sleep(0.1)
+                release_begin = time.monotonic_ns()
                 send("mouse_button 0")
+                return pressed, release_begin, time.monotonic_ns()
+
+        def screenshot_at(path):
+            # HMP can acknowledge before PNG encoding/writing finishes.
+            begin = time.monotonic_ns()
+            send(f"screendump {path} -f png")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if path.exists() and path.read_bytes().endswith(b'IEND\xaeB`\x82'):
+                    return begin, time.monotonic_ns()
+                time.sleep(0.05)
+            raise RuntimeError("application screenshot did not finish")
+
+        def launch_timeline(ready_at, pressed):
+            # Diagnostic only: these samples are not a completion predicate.
+            # Record actual capture bounds, not the requested delay as truth.
+            for delay_ms in (200, 500, 1000, 2000):
+                time.sleep(max(0, (ready_at + delay_ms * 1_000_000 - time.monotonic_ns()) / 1e9))
+                path = logs / f'app-launch-files-after-ping-{delay_ms}ms.png'
+                begin, end = screenshot_at(path)
+                print(f'APP-LAUNCH-TIMELINE phase=after-ping requested-ms={delay_ms} capture-begin-ns={begin - pressed} capture-end-ns={end - pressed} screenshot={path.name}', flush=True)
+            # Real emulated keyboard input goes through Honoka, evdev and X11.
+            # A later screenshot is evidence to inspect, never an input PASS.
+            challenge = time.monotonic_ns()
+            send('sendkey ctrl-l 40')
+            time.sleep(0.2)
+            send('sendkey ctrl-a 40')
+            time.sleep(0.1)
+            for character in '/usr/local\n':
+                send(f'sendkey {keys.get(character, character)} 40')
+                time.sleep(0.1)
+            sent = time.monotonic_ns()
+            time.sleep(1)
+            path = logs / 'app-launch-files-keyboard-challenge.png'
+            begin, end = screenshot_at(path)
+            print(f'APP-LAUNCH-TIMELINE phase=keyboard-challenge input-begin-ns={challenge - pressed} input-end-ns={sent - pressed} capture-begin-ns={begin - pressed} capture-end-ns={end - pressed} screenshot={path.name}', flush=True)
 
         def dock_at(label):
             # 800x600 guest at host (82,110), centered 32px icons / 8px gaps.
@@ -134,7 +189,15 @@ with (logs / "qemu.log").open("w") as diagnostics:
                  and ("[              honoka] online" in text
                       or "[              honoka] initial render done" in text))
         time.sleep(2)
-        keys = {"/": "slash", "-": "minus", "\n": "ret"}
+        if args.tinycore_app_launch_perf:
+            # The initial monitor prompt can precede the first response. Query
+            # twice and retain both raw responses, before any timed click.
+            cpu_info = send("info cpus") + send("info cpus")
+            (logs / "vcpu-threads.txt").write_bytes(cpu_info)
+            # Darwin QEMU can report getpid() for every CPU's thread_id.
+            # Preserve raw data, but do not infer host concurrency from it.
+            print(f"APP-TCG-REQUEST mode={args.tcg_threads or 'default'}", flush=True)
+        keys = {"/": "slash", "-": "minus", ".": "dot", "\n": "ret"}
         guest = "/alter/linux/bin/negoto-smoke"
         if args.ram_sharing_reuse:
             guest = "/alter/linux/bin/ram-share-smoke --ram-sharing-reuse"
@@ -144,9 +207,9 @@ with (logs / "qemu.log").open("w") as diagnostics:
             guest = "/alter/linux/bin/ram-share-smoke --private-readonly-fork"
         if args.tinycore:
             guest += " --tinycore"
-        if args.tinycore_desktop:
+        if args.tinycore_desktop or args.tinycore_file_mapping:
             guest += " --tinycore-desktop"
-        if args.tinycore_apps:
+        if args.tinycore_apps or args.tinycore_app_launch_perf:
             guest += " --tinycore-apps"
         if args.tinycore_perf:
             guest += " --tinycore-perf"
@@ -158,9 +221,14 @@ with (logs / "qemu.log").open("w") as diagnostics:
         for character in guest + "\n":
             send(f"sendkey {keys.get(character, character)} 40")
             time.sleep(0.25)
+        if args.tinycore_file_mapping:
+            marker = "TINYCORE-FILE-MAPPING-PASS"
+            wait_for(lambda text: marker in text)
+            print(f"PASS {marker} (smp={args.smp}; no GUI assertion)", flush=True)
+            raise SystemExit(0)
         if args.private_readonly_fork:
             marker = "PRIVATE-READONLY-FORK-PASS ram=true guarded-write=true isolation=true"
-            wait_for(lambda text: re.search(re.escape(marker) + r"(?: source-reap=true)?\r?\n", text))
+            wait_for(lambda text: re.search(re.escape(marker) + r" source-reap=true\r?\n", text))
             for line in checked_serial().splitlines():
                 if "PRIVATE-RO-RAM " in line or line.startswith("PRIVATE-READONLY-FORK-PASS "):
                     print(line, flush=True)
@@ -202,6 +270,37 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 if line.startswith("FRAME-PERF "):
                     print(line, flush=True)
             print(text.split("TINYCORE-PERFORMANCE-PASS", 1)[1], flush=True)
+            raise SystemExit(0)
+
+        if args.tinycore_app_launch_perf:
+            label = args.tinycore_app_launch_perf
+            wait_for(lambda text: "TINYCORE-APPLICATIONS-READY" in text)
+            click_at(300, 300)
+            keys.update({">": "shift-dot", "&": "shift-7", " ": "spc"})
+            observer_mode = " ping" if args.app_launch_ready == "ping" else ""
+            command_text = f"/bin/aw {label}{observer_mode} &\n"
+            for character in command_text:
+                send(f"sendkey {keys.get(character, character)} 40")
+                time.sleep(0.25)
+            wait_for(lambda text: f"APP-OBSERVER-READY {label}\n" in text.replace("\r\n", "\n"))
+            completion = f"APP-WINDOW-READY {label}"
+            if args.app_launch_ready == "ping":
+                completion = f"APP-EVENTLOOP-REPLY {label}"
+            assert completion not in checked_serial(), "stale window observation"
+            pressed, release_begin, released = click_at(*dock_at(label.capitalize()))
+            wait_for(lambda text: re.search(r"(?m)^" + re.escape(completion) + r"(?: ping-roundtrip-ns=\d+)?\r?\n", text))
+            ready_at = time.monotonic_ns()
+            elapsed = ready_at - pressed
+            screenshot = logs / f'app-launch-{label}.png'
+            screenshot_at(screenshot)
+            print(f"APP-LAUNCH-PERF application={label} host-ns={elapsed} release-command-begin-ns={release_begin - pressed} release-command-end-ns={released - pressed} host-from-release-ack-ns={ready_at - released} native-observer-poll-ms=100 host-poll-ms=200 window={args.app_launch_ready}", flush=True)
+            if args.app_launch_ready == "ping":
+                print(next(line for line in checked_serial().splitlines() if line.startswith(completion)), flush=True)
+            if args.app_launch_timeline:
+                launch_timeline(ready_at, pressed)
+            # This cold-launch measurement ends with the VM, not an OCI-reuse
+            # assertion. The independent desktop regression covers cleanup.
+            print(f"APP-LAUNCH-PERFORMANCE-PASS application={label}", flush=True)
             raise SystemExit(0)
 
         if args.tinycore_apps:

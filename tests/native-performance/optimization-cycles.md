@@ -14,6 +14,36 @@ separately rather than hiding a regression behind a weighted synthetic score.
 Same-core handler counter samples include descheduling; they are diagnostic
 stage timings, not proof of expensive IPC transport or application speedup.
 
+Follow Rob Pike's measurement rules: establish an actual dominant critical-path
+component before tuning. Code suspicion, call counts, translated-block weights,
+binary size and favorable isolated microbenchmarks do not establish elapsed-time
+dominance. The five-percent cycle target is not permission for speculative
+changes. Keep failures and contradictory controls, account for measurement
+perturbation, and validate later changes against real paint/input readiness.
+
+## Generated-image retention
+
+At each cycle boundary, retain at most two usable boot-image/rootfs generations:
+the latest validated candidate and the previous working fallback. Once a new
+generation passes validation, delete the generation that is now two steps old,
+including its corresponding generated rootfs. Rejected candidates and completed
+diagnostic images/initrds do not become retained generations; delete those at
+the end of their cycle as well.
+
+Resolve exact generated paths and check for live VM/file users before deletion.
+Never delete an image still in use, the last working fallback, or downloaded
+source inputs. Keep small measurement logs, manifests, hashes and reconstruction
+scripts. Record the deleted paths; do not equate APFS clone logical sizes with
+physical disk space recovered.
+
+At each cycle closure and after long build/test batches, also inspect task-owned
+`/private/tmp` artifacts for obsolete generated media and scratch build outputs.
+Do not perform heavy inventory or deletion during measured VMs. Wait for owning
+jobs to terminate, resolve exact targets and check process/open-file usage.
+Preserve unknown applications' files, official inputs, retained usable runtime
+generations and small logs/source/components needed for reproduction. This
+housekeeping runs as part of ongoing work, not an unattended scheduled cleanup.
+
 ## Opt-in stage profiling
 
 Build with `NANAMI_EXEC_PROFILE=1` to log Alpha's exec teardown,
@@ -12517,22 +12547,7953 @@ Alter5a9a57ce94ed9c9353e83d698f0291fe25bc163e2e26571c7ba5c6bd13500cee.
 Final functional imagefd3a03e26a00f449a3db92d08deeb364b566681af1874728b694182ac4cf512b.
 Kernel remains312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
 
+## Cycle 98: actual application launch and bounded recvmsg writeback
 
+The cycle97 pause above is historical. The user subsequently committed the
+work in acaa38a, released Nanami0.7.2, resumed optimization, and specifically
+reported slow Tiny Core application launches. Those actions do not complete
+the interrupted cycle97 timing comparison or establish its speedup.
 
+Measure actual dock clicks through an independently observed new, viewable
+X11 window. The application, launcher, libraries and Kernel are unchanged.
+The test-only observer rejects an existing matching window and verifies its
+title, dimensions and IsViewable state. Viewability is not full paint or
+application readiness. Each measured launch uses a fresh snapshot VM; the
+independent two-session desktop test covers Exit and reuse instead.
+Visual inspection of final V2's first-window PNG confirms this limitation:
+the Xfe title/frame is mapped, but its client area is not yet fully painted
+and the initial terminal still overlaps it. Do not call3.161s a usable-desktop
+or fully initialized file-manager time. Later measurements must separate
+first mapping from an independently verified interactive/content-ready state.
 
+The first observer repeatedly walked the widget tree and materially perturbed
+the workload. A temporary per-PID diagnostic measured4200 observer syscalls
+in its window. Caching the matching window alone still used3876 calls. The
+retained event-driven observer instead subscribes to root creation/reparent
+events and per-window structure/name changes, scans the initial tree only
+before arming, and uses575 calls in the diagnostic. Do not present the shorter
+result as a Nanami speedup. Preserve the earlier v1/v2 launch measurements and
+failed WM_CLASS-based observer, rather than silently replacing their results.
 
+Temporary APP profile hooks in syscall_profile.rs and prctl.rs were archived,
+then restored byte-for-byte to their committed originals. Normal0.7.2 Alpha,
+Alter and init were rebuilt with profiling variables unset. Normal comparison
+serial logs reject app/exec/Alter profiling output. The diagnostic interval
+includes positioning the mouse and background clients, not just app execution;
+handler ticks include service waits and descheduling, not exclusive CPU time.
+Files' own diagnostic totals include185 mmap calls,5 exec attempts and718
+recvmsg calls. The profile does not support blaming only fork or IPC transport.
 
+QEMU threading was separately checked. Darwin's HMP thread_id can be getpid(),
+so identical info-cpus identifiers do not prove single-thread TCG. A private
+diagnostic plugin using pthread_threadid_np observed four distinct real host
+threads in both default and explicit multi modes. Explicit single mode failed
+the AP boot diagnostic. No xtask/default threading or Kernel change is made;
+the plugin is absent from all normal timings. Retain the corrected inference
+and the failed single/QOM-property observations in the evidence directory.
 
+Runtime change: a bounded one-iovec, one-packet recvmsg without address/rights
+output combines its borrowed payload and three result fields in the existing
+ordered checked-copy vector request. This reduces two output requests to one,
+without a new service operation, memory grant, staging copy or payload allocation.
+Only one original payload chunk is eligible. Larger/scattered/ancillary
+receives retain their old path; EFAULT preserves whole-field store order and
+the queued packet. Ordinary read/write tests the absent header first in V2,
+avoiding the extra eligibility checks seen in the first prototype.
 
+Both normal comparisons use four-core default TCG, normal PS/2/network devices,
+identical guest fixtures, sequential snapshot boots and no concurrent builds.
+Each protocol boot contains three checked samples per metric. V1 runs ABBA;
+the final header-first V2 runs BAAB in a separate directory. Do not pool the
+two different candidate binaries. Pooled medians within each comparison, ms
+(negative elapsed-time change is faster):
 
+| Workload | V1 before / after | Change | Final V2 before / after | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Directory small,64 | 440.557 /439.740 | -0.19% | 422.224 /427.891 | +1.34% |
+| Directory large,64 | 78.764 /78.064 | -0.89% | 76.740 /77.521 | +1.02% |
+| BusyBox ls,8 | 1958.037 /1945.102 | -0.66% | 1883.364 /1878.269 | -0.27% |
+| Stat,512 | 112.914 /112.573 | -0.30% | 110.431 /110.829 | +0.36% |
+| Missing stat,512 | 77.401 /81.038 | +4.70% | 75.406 /74.325 | -1.43% |
+| Plain UNIX round trip,2048 | 362.723 /390.301 | +7.60% | 365.735 /371.193 | +1.49% |
+| recvmsg round trip,2048 | 750.804 /648.559 | -13.62% | 732.116 /638.503 | -12.79% |
+| EOF recvmsg,2048 | 425.928 /430.605 | +1.10% | 418.578 /435.179 | +3.97% |
 
+Keep all controls, including the slower plain and EOF results. Final V2's
+last recvmsg sample is758.818ms, and its last EOF group446.257--471.700ms;
+do not remove them as outliers. This is a targeted receive-work reduction,
+not a uniform system, syscall or application-startup improvement.
 
+First-window Files launch ABBA (V1) is2.978/3.171/3.181/3.380 seconds:
+before/after means3.179/3.176s, effectively unchanged. Final V2 Files is3.161s
+in one additional run. V1 Terminal and Editor also launch,1.326s and1.339s,
+but have no matched baseline here. VFS relay polls at100ms and the host at200ms;
+these samples cannot establish a small launch-percentage difference. The
+application-launch complaint is not resolved by this change.
 
+Validation: full native1266 passed,17 ignored; checked-copy/UNIX ASan48 passed;
+Alter aarch64 check, three runner tests,33 Tiny Core packaging tests and twelve
+observer title assertions pass. X event/attribute LP64 layouts are checked
+against the local Xlib headers. Real protocol probes also exercise metadata
+fields crossing protected pages and retry the still-queued packet after EFAULT.
+Final four-core normal-device regression passes two complete desktop sessions,
+real input, Terminal/Editor/Information launching, changed menu links, Exit and
+restart cleanup (serial nanami-negoto-qemu-ksy4syll). No guest panic, spawn
+failure or SHM rollback is accepted. The final first-window Files run is
+nanami-negoto-qemu-9sup11a_; its early PNG is not a content-ready assertion.
 
+Evidence: /private/tmp/nanami-opt-cycle98.p7I4qT contains normal0.7.2 baseline,
+V1 and final V2 images/ELFs, preparation/full-partition comparison logs, raw
+launch/protocol JSONL, build/test logs and the rejected V1 source snapshot.
+v2/after.img is the final candidate; neither the user's original rootfs nor
+the frozen cycle96/97 images was edited. Earlier observer and TCG diagnostics
+are under /private/tmp/nanami-opt-app-launch.8ceTsI,
+/private/tmp/nanami-opt-app-launch-v2.ww52Hi and
+/private/tmp/nanami-opt-app-tcg.949Qj3/profile.
 
+Artifact SHA-256: before image
+2cf0263cebee5980b40633e36a3dd8188d8833e6c99c49ad01bb3b506929f589;
+final V2 image0e414f87df892a622c38ce9956be8bc4ed1f826ee5575f083a80170dc6261ea8;
+normal0.7.2 Alpha983700480d9be60874e0cf15ddda27b099ba075c5ae62263f7563d988cc293dd,
+init55d77cd50280222c0b922498221273a905890529f8283d1980ce0d3534e0e4d8,
+final Alter73f1799f5646074e8bc224611930c1927816a09e8ab1d32617b6612b3ef37bc7.
+The extracted Kernel matches312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88;
+its worktree is clean. The packaging builder produces an observer binary
+byte-identical to the measured normal helper31d33144d2ef256f67684f6bdcef668fac82a2ee1756d73c762c01161e98bf01.
+All runners exit successfully; lsof finds no remaining users of the three
+cycle98 boot images after final cleanup.
 
+Continue from actual launch latency. The general direct-final-permission map
+API was already tested and rejected in cycle1; fewer map operations alone are
+not new evidence. Larger checked guest-copy or mmap-source improvements must
+preserve current authority, permissions, detach, VM-peer and retirement rules.
+No such cache/lease API is implemented in this cycle. The broader goal remains
+active; no version bump, commit, release or Kernel/IPC-fastpath change is made.
 
+## Cycle 99: bounded supervisor read leases for small syscall inputs
 
+Small reads into Alter's owned POSIX scratch now reuse at most64 one-page
+read-only RAM leases (256KiB of backing, plus bookkeeping). The cache stores
+mapping leases, not input bytes: every use samples current memory, after the
+personality's current read-permission check. Shared-VM owners use globally
+unique mapping generations; mapping/protection changes, detach, exec and
+retirement invalidate eligibility. Failed release or ambiguous installation is
+quarantined rather than overwritten or forgotten. Larger copies and arbitrary
+raw destinations retain the original checked-copy request.
 
+Alpha's new user-level request0x1032 grants only a current readable private
+RAM page to its authorized unsealed supervisor for a sealed guest. It pins the
+ordinary physical ownership reference until confirmed release. The trusted
+supervisor receives a management Frame copy; Linux's sealed execution root
+does not receive it. Shared reservations and unknown/MMIO mappings are excluded.
+Normal/WB RAM alias consistency remains a user responsibility, not a Kernel
+device-classification policy. Read leases default on for x86_64; other backends
+retain checked copies unless explicitly enabled for validation.
 
+An initial candidate exposed a real allocator bug: releasing a fixed high VA
+inserted it into the ordinary heap's reusable-hole index. A later SHM allocation
+could select that out-of-arena hole and fail. Reusable VA holes are now clipped
+to the default arena; capability slots still recycle independently. The failed
+first GUI/mapping runs are retained as failures, not included in timing samples.
 
+Final V4 comparison: four-core normal-device TCG, sequential snapshot boots,
+identical ordinary fixtures, no concurrent builds/tests. Files ABBA controls
+3.184521/3.169716s and candidates2.758202/2.753048s yield means3.177119 versus
+2.755625s (13.27% lower elapsed time). The observer requires a fresh viewable
+Files window and its matching EWMH ping reply. Ping round trips are357.824/
+355.801ms before,214.379/222.687ms after. These gates do **not** establish
+completed painting or input responsiveness; the early screenshot still shows
+partial repaint. VFS100ms/host200ms polling also prevents a100ms acceptance
+claim. Native-equivalent application readiness remains unresolved.
+
+Protocol BAAB, pooled medians of six samples per group, milliseconds:
+
+| Workload | Before | After | Elapsed change |
+| --- | ---: | ---: | ---: |
+| Directory small,64 |419.7035|420.086|+0.09%|
+| Directory large,64 |75.882|71.9195|-5.22%|
+| BusyBox ls,8 |1864.5635|1675.3125|-10.15%|
+| Stat,512 |109.501|78.512|-28.30%|
+| Missing stat,512 |74.160|41.6885|-43.79%|
+| Plain UNIX,2048 |364.9085|368.884|+1.09%|
+| recvmsg,2048 |613.3605|386.542|-36.98%|
+| EOF recvmsg,2048 |415.443|189.786|-54.32%|
+
+Keep the slower directory-small/plain-UNIX controls. This is not evidence of a
+uniform5% system gain. All11 V4 boots pass, including the enhanced80-page
+mapping/eviction/protection/fork probe on candidate SMP1/4 and control SMP4.
+
+Validation before the following cycle: native1282 pass/17 ignored; selected
+core/mapping/copy/lease ASan190 pass/4 ignored; Alpha/Alter AArch64 checks;
+packaging33 pass; runner3 pass. Normal-default x86 additionally passes protocol,
+two full desktop sessions and all five application-window/input checks. Its
+Files gate is2.772103s (ping239.908ms). A stale dedicated RAM-test executable
+initially fell through to an absent BusyBox bundle before running its test;
+rebuilding **only** /alter/linux/bin/ram-share-smoke fixes the artifact mismatch.
+The current executable passes actual read-only-fork write rejection, private
+detach/isolation and source-first-reaping on SMP1 and SMP4. The runner now
+requires the complete source-reap=true footer, not an older partial predicate.
+
+Current evidence is /private/tmp/nanami-opt-cycle99.SayJZI, with final test
+serial directories nanami-negoto-qemu-iwkykbhc (SMP1) and
+nanami-negoto-qemu-g2bhk7ur (SMP4). At the user's cleanup request, old cycle
+images (including96--98 and V4 comparison images) were deleted; their historical
+hashes above are provenance, **not** claims that those paths still exist.
+Small V4 logs/JSONL remain. The final image/rootfs were moved forward by keeping
+their byte-identical cycle100 baseline and deleting the redundant cycle99 copies.
+The baseline with the refreshed dedicated RAM fixture is cycle100/before.img:
+SHA-25614cb867a8445261b0ff799c7486079bb31efd9754e58760c098ff224f0c7c354;
+Alter15c91e2ba32d43fdd53012cac4343db5d018eb64122741d1838d8a95ec6822f6;
+Alpha a8f906eb291b8320d0f485ba1f2555141cbcb9de12b59bbba8946f989fb3dd21;
+init54d1b2097f9773335a26f6eb320717fc94845d1625a0f5c8dc28973f699d6ed5.
+Kernel and IPC fastpath remain unchanged. Only immediate comparison artifacts
+are retained while needed; this cycle does not bump a version or create a commit.
+
+## Cycle 100: copy small UNIX inputs into typed owned buffers
+
+The cycle99 scratch-only cache missed `unix_message::copy_in`: it already
+copied directly into a packet Vec, but its raw destination intentionally stayed
+on Alpha's checked-copy path. Add a typed `&mut [MaybeUninit<u8>]` input helper
+and borrow `Vec::spare_capacity_mut()` instead. Small eligible reads use the
+existing bounded leases, with current permission preflight and fresh volatile
+sampling. Publish Vec length only after success; no packet, ancillary right or
+uninitialized byte becomes visible on failure. No additional cache, protocol,
+staging copy or guest authority is introduced. Arbitrary raw pointers still
+cannot opt into owned-buffer caching. Large input chunks keep their original
+size and one checked request rather than being split into page-sized RPCs.
+
+Comparison artifacts: /private/tmp/nanami-opt-cycle100.D7nQOn. Only Alter differs
+between before.img and after.img; Alpha, init, the refreshed dedicated RAM
+fixture and ordinary performance fixtures are identical. Normal four-core TCG
+and normal devices, one VM at a time, no concurrent builds/tests/hashing.
+Files uses ABBA and protocols use BAAB, three samples per metric per boot.
+All ten boots pass: candidate enhanced mapping SMP1, four Files launches,
+four protocol workloads and two complete desktop sessions in one SMP4 boot.
+
+Pooled protocol medians (six per group), milliseconds; retain **all** samples:
+
+| Workload | Before | After | Elapsed change |
+| --- | ---: | ---: | ---: |
+| Directory small,64 |432.4015|430.8935|-0.35%|
+| Directory large,64 |75.639|74.127|-2.00%|
+| BusyBox ls,8 |1811.814|1826.106|+0.79%|
+| Stat,512 |79.490|81.313|+2.29%|
+| Missing stat,512 |42.5615|43.416|+2.01%|
+| Plain UNIX,2048 |369.2725|241.889|-34.50%|
+| recvmsg,2048 |385.177|264.4385|-31.35%|
+| EOF recvmsg,2048 |188.544|195.9985|+3.95%|
+
+Plain UNIX before medians are368.232/373.173ms, after257.486/239.967ms;
+recvmsg before385.016/385.992ms, after278.478/255.189ms. Both gains repeat
+across the reversed runs. Slower controls, especially the first candidate's
+EOF group202.573--212.178ms, are not removed. This is a targeted input-path
+improvement, not a uniform5% whole-system result.
+
+Files ABBA: before2.971564/2.969069s, after2.755510/2.979881s. Means2.970316
+versus2.867696s (3.45% lower), but100ms VFS/200ms host polling cannot establish
+a small launch improvement reliably. Ping mean254.5725→225.7565ms. This is
+still an event-loop gate, **not** completed painting and tested input readiness.
+Do not claim the100ms application-launch requirement has been met. Broad
+startup improvement remains the next priority, not further socket-only claims.
+
+Final validation: native1289 pass/17 ignored; copy/lease/UNIX ASan63 pass;
+Alter AArch64 check; packaging33 pass; runner4 pass. New cases cover typed
+permission preflight despite a would-be hit, fresh changed input, exact owned
+destination, raw-pointer fallback, large single-request fallback, failed Vec
+initialization and a second-page failure that must not report a complete buffer.
+Existing real protocol probes preserve later-iovec/protected-page EFAULT and
+retry behavior. Desktop serial nanami-negoto-qemu-rg920gxk verifies actual
+input, Terminal/Editor/Information, Exit and same-boot restart; its second-session
+Information screenshot also shows the verification command executed. This is
+functional GUI evidence, not a timed100ms proof.
+
+SHA-256: before image14cb867a8445261b0ff799c7486079bb31efd9754e58760c098ff224f0c7c354;
+after image f46e44eb50b92ec04fab7a2a5da1af21d33fcbd4c0266aedf70212827987a1c0;
+after Alter a4274749a4e45727c91315116ae87f258e971dfa5ae1a10cc5f5c3a0ae53e3fa.
+The extracted Kernel still matches
+312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88,
+and its worktree is clean. Comparison driver exited0 and no QEMU process remains.
+The older cycle99 final image/rootfs copies were removed after byte-for-byte
+comparison against cycle100/before. At cycle100 completion, this immediate
+before/after pair and small evidence logs were retained, subject to the user's
+two-generation retention rule. No version bump, commit or Kernel/IPC change is made.
+
+## Cycle 101: reject range-only read-lease invalidation
+
+The cycle100 source advances the VM-wide read generation on every metadata
+mutation, including unrelated new mappings. Test a bounded range-only candidate:
+Runtime rejects overlapping cache entries before PTE edits and metadata changes;
+exec/storage reuse and private-backing changes still advance globally unique
+generations. Invalidated leases stay pinned until confirmed eviction/cleanup.
+The generic model reduces grants129→1 across128 unrelated add/protect/remove
+sequences. Page-boundary, overflow, VM-owner, shared-VM and unchanged-metadata
+partial-failure cases pass. This work-count result is **not** a startup speedup.
+
+Normal-device SMP1/SMP4 enhanced mapping probes both pass, followed by Files
+ABBA, protocol BAAB and two desktop sessions in one SMP4 boot: all11 runs exit0.
+One VM runs at a time, with no concurrent builds/tests/hashing. Before is the
+accepted cycle100 image f46e44; only Alter differs in the candidate. Three samples
+per protocol metric per boot; pooled medians of six per group, milliseconds:
+
+| Workload | Before | Candidate | Elapsed change |
+| --- | ---: | ---: | ---: |
+| Directory small,64 |428.2185|427.379|-0.20%|
+| Directory large,64 |75.145|74.8365|-0.41%|
+| BusyBox ls,8 |1780.911|1825.9085|+2.53%|
+| Stat,512 |78.751|79.5805|+1.05%|
+| Missing stat,512 |42.515|44.3165|+4.24%|
+| Plain UNIX,2048 |241.1805|248.255|+2.93%|
+| recvmsg,2048 |261.7235|257.6855|-1.54%|
+| EOF recvmsg,2048 |186.6995|186.6065|-0.05%|
+
+Files before3.178972/2.977937s, candidate2.970168/2.983750s. The mean3.078454
+versus2.976959s (-3.30%) depends on the slow first control, not a repeated
+launch improvement. Before ping404.295/237.334ms versus254.116/262.113ms also
+does not repeat a gain in both directions. Keep every sample; do not remove
+the slow control or treat100/200ms polling and ping as a100ms paint/input gate.
+The added range-observer responsibility has no demonstrated real benefit here,
+so reject the candidate rather than retain it on a model-only result.
+
+Restore all four production files byte-for-byte from source-before snapshots:
+mapping_table.rs, mappings.rs, read_window.rs and linux/vm.rs. Remove the
+candidate-only readiness fixture and range API test. Retain three general
+production-metadata/cache regressions: permission/replacement invalidation,
+CLONE_VM plus pre-PTE invalidation without logical metadata changes, and the
+whole touching stack entry. Their copy effects model Alpha validation; they
+are not hardware/TLB proofs. Actual candidate mapping and GUI tests above are
+functional evidence for that binary, not speed evidence for restored code.
+
+Candidate native1293/17 ignored, ASan123/2 ignored and ARM checking pass.
+After restoration, native1292/17 ignored, ASan122/2 ignored and ARM checking
+pass. Rebuilding the normal x86 Alter produces **exactly** the accepted cycle100
+ELF a4274749a4e45727c91315116ae87f258e971dfa5ae1a10cc5f5c3a0ae53e3fa.
+The candidate ELF is4d4dd01513fb32d9303fa727c9931c73fb4596dfb842dc5a2d2446ebceb0e190;
+candidate image e82c6fe7159c0f70fd795fe765ccfab48496970a132c81445ea3960d0608bcb2.
+Extracted Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88
+and its clean worktree confirm no Kernel/IPC change. The GUI serial directory is
+nanami-negoto-qemu-na2ut014; no QEMU process remains after driver completion.
+
+Evidence: /private/tmp/nanami-opt-cycle101.zznFLd keeps small logs, results.jsonl,
+the candidate ELF and source-before/source-candidate snapshots. After verified
+closure, its rejected image/rootfs and cycle100/before.img plus before-rootfs.img
+(the cycle99/N-2 artifacts) were deleted. Only the accepted cycle100/after.img
+and after-rootfs.img remain as the next baseline. Historical hashes
+are provenance, not claims that removed image paths still exist.
+
+Next investigate the actual file-mmap sequence before designing provenance
+reuse. Cycle78 found repeated whole-file R and fixed R/RX/RW construction, with
+cached initialization far larger than metadata work in its elapsed mmap spans.
+Sealed Linux execution roots now remove guest Frame remapping authority, but
+that alone does not prove immutable provenance: file version/offset, prior
+writes/protection, MAP_FIXED dirty-page replacement, VM peers, failed PTE edits,
+exec/reap and source lifetime still matter. Do not retain or alias mutable
+ImageCache buffers as immutable snapshots. Also measure whether read-view pins
+conservatively inhibit first read-only-fork sharing before changing refcount
+policy. This cycle establishes no new5% gain; the100ms launch goal stays active.
+
+## Cycle 102: reject byte-verified private read-only mapping reuse
+
+First observe one real Files launch without changing its mmap behavior. A
+temporary Xfe-only sequence probe records552 contiguous events (0--551),
+including131 private file mappings. The same-identity/size/affine-offset analysis
+finds62 current read-only fixed overlaps totaling12,972,032 bytes. This measures
+construction work, not exclusive CPU time, immutable provenance or a speedup.
+Remove the probe before either ordinary comparison. The diagnostic serial is
+nanami-negoto-qemu-d4yb2a0n; keep the analyzer, raw events and source snapshot.
+
+Test an opt-in user-level request, not a shared file-cache alias. An authorized
+unsealed reaper quiesces its sealed guest's VM peers; Alpha checks exact private
+RAM ownership, current R/RX metadata, unique physical references and absence
+of shared reservations. It compares existing bytes with the normal-RAM source
+prefix plus zero suffix before retaining backing and reinstalling permissions.
+Different bytes or ineligible pages use the existing construction path. The
+mutable ImageCache buffer is never mapped directly into a guest. A separate
+diagnostic reports372 successful reuses and no declines across process
+lifetimes; these counts do not establish a launch improvement.
+
+V1 always withdraws and restores permissions. V2 avoids the redundant withdrawal
+when changed permissions already force UNMAP/MAP, keeps it for equal metadata,
+and uses scalar volatile word/byte comparison rather than a new SIMD-dependent
+memcmp path. It also leaves zero-byte/beyond-EOF initialization on the existing
+fallback. Both remain experimental and default-off while measured.
+
+Each variant runs the same11-boot normal-device comparison: SMP1/SMP4 enhanced
+file-mapping probes, Files ABBA, protocol BAAB and two complete desktop sessions
+in one SMP4 boot. All22 boots pass. There is one VM at a time and no concurrent
+builds, tests or hashing. Before is the accepted cycle100 image; candidate
+Alpha/init/Alter differ. Keep all six samples per protocol metric per group.
+Pooled medians below are milliseconds; changes are elapsed time, not speed:
+
+| Workload | V1 before | V1 candidate | Change | V2 before | V2 candidate | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Directory small,64 |470.034|513.5005|+9.25%|464.1575|462.4025|-0.38%|
+| Directory large,64 |78.531|84.493|+7.59%|78.985|82.097|+3.94%|
+| BusyBox ls,8 |1879.780|2060.782|+9.63%|1884.3485|1817.163|-3.57%|
+| Stat,512 |86.958|89.6485|+3.09%|86.071|85.812|-0.30%|
+| Missing stat,512 |45.4705|45.9415|+1.04%|44.3205|44.6065|+0.65%|
+| Plain UNIX,2048 |255.541|265.0105|+3.71%|258.9495|254.449|-1.74%|
+| recvmsg,2048 |280.848|274.8375|-2.14%|277.653|270.0325|-2.74%|
+| EOF recvmsg,2048 |198.5115|196.9865|-0.77%|210.445|196.1125|-6.81%|
+
+V1 Files before2.962977/2.978196s versus2.982436/2.975291s: mean2.970586
+versus2.978863s (+0.28%). V2 before3.173614/2.974019s versus2.965807/3.668976s:
+mean3.073816 versus3.317392s (+7.92%). The first V2 pair's apparent gain does
+not repeat in reverse order; keep its slow candidate and every control. The
+100ms VFS/200ms host observer and ping still do not measure completed painting
+and tested input readiness. Neither variant establishes a startup gain, a5%
+system improvement or the requested100ms application launch.
+
+Reject the entire candidate, including request0x1033, its SDK wrapper, Alpha
+module/dispatch and frontend opt-in. Archive both implementations, then restore
+all five edited source/test files byte-for-byte from pre-cycle snapshots and
+remove the added module. Do not leave a default-off protocol without demonstrated
+benefit. Existing dirty work and accepted optimizations remain intact.
+
+Both candidates pass native1296/17 ignored, selected ASan176/2 ignored and
+Alpha/Alter ARM checks. These unit tests model protection effects, not actual
+hardware TLB behavior; the real-image mapping and GUI probes are separate
+functional evidence. After restoration, native1292/17 ignored, selected
+ASan172/2 ignored and both ARM checks pass. Rebuilt artifacts match the accepted
+cycle100 bytes exactly:
+
+- Alpha: a8f906eb291b8320d0f485ba1f2555141cbcb9de12b59bbba8946f989fb3dd21.
+- Init:54d1b2097f9773335a26f6eb320717fc94845d1625a0f5c8dc28973f699d6ed5,
+  also compared byte-for-byte with the retained image's FAT entry.
+- Alter: a4274749a4e45727c91315116ae87f258e971dfa5ae1a10cc5f5c3a0ae53e3fa.
+
+V1 image098d638dea8a4a86a9740ff453dbe9bbb1969f97260961068a9c1bb4214aa0d9;
+V2 image71e2167bd461c75acdb8b89f6e25238490f4ec6b72cc7c4ab8562c5b71019fae.
+The two GUI serial directories are nanami-negoto-qemu-iytlrho2 and
+nanami-negoto-qemu-zd27l56y. Drivers exit0 and QEMU closure is checked before
+deletion. Small results, comparison-metrics.json, ELFs, source snapshots and
+diagnostics remain in /private/tmp/nanami-opt-cycle102.6ht6uG. Delete its
+diagnostic/candidate images, rootfs and obsolete patch snapshots; the existing
+cycle100 after.img/after-rootfs.img remain the sole working baseline, without
+a duplicate clone. No Kernel, IPC fastpath, FPU, version or commit changes ship.
+
+## Cycle 103: isolate Xfe's current syscall and file-mapping workload
+
+Previous cycle102 is progress: two real comparisons reject byte-verified mapping
+reuse and restore exact accepted bytes. Change the measurement boundary before
+trying another file-page construction cache. This cycle is diagnostic only;
+the100ms fully painted, input-responsive application goal remains active.
+
+Temporarily instrument only the first process whose managed image name is xfe.
+Collect bounded per-syscall counts/dispatch spans and eight file-mmap stage
+totals. Start at that process's first syscall, not at the earlier launcher
+activation/fork/exec. A test-only observer invokes ordinary getpid with an
+ignored argument after its nonce-validated EWMH ping. In the opt-in diagnostic
+build only, this flushes the counters after the measured endpoint without
+changing getpid's result. The launcher, Xfe, X server and their libraries remain
+unmodified. This is not a new Linux syscall or a production ABI/hook.
+
+Use the frozen cycle100 image/rootfs and replace only diagnostic Alter and the
+test observer in a private clone. e2fsck passes all five checks, both extracted
+ELFs compare equal to their build outputs, and the installed rootfs partition
+compares equal in full. The first65MiB of the disk, including unchanged init
+and Kernel, compare equal to the accepted image. Run one normal-device SMP4 VM,
+without concurrent own builds/tests/hashing. Its driver11681 exits0; serial
+nanami-negoto-qemu-tv03p1am contains one complete profile,51 distinct syscall
+rows, all eight stages and no checked error/unsupported-syscall line. The first
+diagnostic build fails because the lightweight FaultProcess lacks image-name
+fields; correct the probe to inspect managed state and retain both build logs.
+
+The observed PID42 interval is2,103,338,000 local counter ticks. Its7,327
+syscalls total1,076,021,000 handler ticks. These are elapsed spans on Alter's
+core, including descheduling/service waits, not exclusive CPU time. No new
+counter-frequency or cross-core synchronization calibration is established;
+do not relabel ticks as nanoseconds. The unaccounted interval also includes
+guest execution, X11 work, other processes and scheduling. It is **not** an
+estimate of Kernel IPC overhead or evidence against the existing fastpath.
+
+| Syscall | Calls | Handler ticks |
+| --- | ---: | ---: |
+| read |497|91936000|
+| write |1228|150827000|
+| poll |599|31427000|
+| mmap |151|346148000|
+| recvmsg |1283|64427000|
+| time |657|35355000|
+| clock_gettime |822|93297000|
+| openat |593|94514000|
+| newfstatat |372|71709000|
+
+The raw JSON retains all51 syscall rows, not only the table above. time plus
+clock_gettime account for1,479 calls (20.1856% of calls) and128,652,000 handler
+ticks. This does not mean20% of launch time or prove a5% potential improvement.
+
+| File-mmap stage | Calls | Ticks | Logical bytes | % of observed interval |
+| --- | ---: | ---: | ---: | ---: |
+| file-stat |134|4988000|33043740|0.2371%|
+| reserve |131|27739000|32976896|1.3188%|
+| preflight |131|305000|32976896|0.0145%|
+| source |131|39012000|30646292|1.8548%|
+| cached-init |123|91800000|19095148|4.3645%|
+| stream-init |8|117946000|11551144|5.6076%|
+| hardware-protect |131|31359000|32976896|1.4909%|
+| metadata-commit |131|1436000|32976896|0.0683%|
+
+File-stat includes shared delegation, while the other stages cover private
+construction. Outer mmap includes anonymous/shared operations too. Do not add
+nested intervals or compare populations as if they were exclusive CPU samples.
+This current single-application profile differs from cycle78's whole-desktop
+aggregate: cached initialization alone is not an order-of-magnitude explanation
+for current launch latency. The observer's diagnostic host/ping times are not
+normal performance samples; ping still does not prove completed paint/input.
+
+Next inspect a native local clock reader. refresh_clock currently queries
+timer-service for every time/clock_gettime call. USB already reads the timer
+owner's wide HPET counter without programming timers, but the device-manager's
+counter query explicitly authorizes only the selected USB process. Do **not**
+weaken that PID check or pretend Alter can reuse the existing authorization.
+An optional counter-source description must come from the timer owner after
+the counter starts, keep the same epoch/nanosecond units, decline narrow or
+unsupported backends, and preserve fresh service-RPC fallback. No stale time,
+unverified TSC interpolation, Linux guest device mapping or new IRQ/comparator
+authority is permitted. This is a candidate to implement and measure, not an
+accepted optimization or proof of its eventual launch benefit.
+
+Archive and restore all four diagnostic source files exactly: fault.rs,
+syscall_profile.rs, linux/vm.rs and desktop-window-observer.c. Rebuild normal
+Alter and verify exact accepted a4274749a4e45727c91315116ae87f258e971dfa5ae1a10cc5f5c3a0ae53e3fa
+bytes. Restored native1292/17 ignored and Alter AArch64 checking pass. The A9N
+worktree remains clean; no production, Kernel, IPC fastpath, FPU, authority,
+version, commit or release change ships in this cycle.
+
+Evidence: /private/tmp/nanami-opt-cycle103.aYCbTB retains raw logs, analyzer,
+launch-profile.json, source snapshots and the two diagnostic ELFs. Image hash
+8c6cefd396b101c1fa301951d4f0d1af8506e356b5b9a92b226b2bb0a5b98cb8;
+Alter b1724be231301dd8c5a1973feeab1cabd7e38c7c72bbdb2e5e126de15812abec;
+observer939f50d779a95e01cd8c3ebd2c390c8f6672a8a2b8f16f0eefc7e226b37e38a9.
+After terminal driver and empty QEMU process checks, delete the diagnostic
+image/rootfs rather than accumulating large profiling artifacts. Keep only
+the existing working baseline and small evidence under the retention policy.
+
+## Cycle 104: read fresh native timer counters with service fallback
+
+Cycle103 identifies1,479 time/clock_gettime calls in one real Xfe launch.
+Remove their repeated synchronous clock queries on supported hardware without
+caching current time or changing Linux clock semantics. Add optional user-level
+timer request0x4006: kind1 describes an already-running64-bit HPET with physical
+block base and femtoseconds per counter cycle. The timer owner starts/refreshes
+its clock before replying. Old providers, narrow HPET, PIT and unsupported
+backends decline; scheduling, comparators, IRQ handling and alarm/interval
+notifications remain in timer-service. Do not weaken DriverManager's existing
+USB-only discovery authorization. This separate optional request grants no
+device mapping, programming or IRQ authority.
+
+The native SDK reader explicitly creates an existing Uncached MMIO mapping,
+validates its physical/virtual extent, HPET capabilities, period and enabled
+state, and brackets the initial local reading between fresh service samples.
+Only matching absolute nanosecond epoch/units enable subsequent fresh hardware
+reads. Use a bounded high/low/high read and wide integer conversion; never
+interpolate an unverified CPU counter or return a TTL-cached NOW value. A failed,
+disabled, backward or incoherent source releases its alias and returns a fresh
+service sample. Optional discovery occurs once per live provider binding;
+an unavailable initial service remains retryable. Provider/counter lifetime
+must be stable: rebind even in the same capability slot requires a new reader.
+Its adapter never writes hardware, but the existing native mapping API does
+not promise a read-only PTE. Do not use generic protection to accidentally
+replace Uncached with Normal/WB. Failed release remains accounted by Alpha.
+
+Alter owns this reader as a trusted native supervisor. Linux guests retain
+their sealed empty execution capability roots and receive no device alias.
+Enable the supported x86 reader by default; NANAMI_ALTER_LOCAL_CLOCK=0 selects
+the prior RPC path. Non-x86 stays on RPC. No Kernel, IPC fastpath, FPU, liba9n,
+guest authority, version, commit or release change is made.
+
+First prove selection in one opt-in diagnostic Files boot: serial directory
+nanami-negoto-qemu-be27gd7z contains local=true epoch-checked=true. Remove that
+trace before normal timing. Temporarily install the existing raw Linux time.c
+fixture and pass SMP1/SMP4 time/time-copyout, unaligned/EFAULT, second-advance,
+relative/absolute REALTIME/MONOTONIC/BOOTTIME sleeps and invalid-input checks.
+Their serial directories are nanami-alter-test-uf7ga_zx and
+nanami-alter-test-zdc817s3. Restore the full ordinary rootfs after these tests;
+the extra clock fixture is not present during either timing comparison.
+
+The timer owner is boot-loaded as ./bin/hpet-server from initramfs.cpio,
+not from /bin/hpet-server in the rootfs. Replace exactly that archive record,
+verify the other21 records are identical, then rebuild init. Retain the
+accepted cycle100 Alpha bytes. Check extracted init and Alter, the complete
+rootfs partition, and all five e2fsck passes before testing. A source-proof
+trace is not a substitute for installing the new owner in the actual archive.
+
+Run one VM at a time, without concurrent own builds/tests/hashing. The first
+opt-in ordinary comparison comprises13 boots: mapping and read-only-fork at
+SMP1/4, Files ABBA, protocols BAAB and two complete desktop sessions in one SMP4
+boot. All pass. Then compile with no NANAMI_ALTER_LOCAL_CLOCK environment flag
+and the supported default enabled. The resulting ELF differs from the opt-in
+ELF, so repeat the full functional set and reverse timing order: Files BAAB,
+protocols ABBA, process BAAB and two GUI sessions. All17 default-build boots
+pass. Both desktop runs include actual Terminal/Editor/Information launch,
+input, Exit/restart and cleanup; their serial directories are
+nanami-negoto-qemu-iavmd3qu and nanami-negoto-qemu-mgn7kszq.
+
+Protocol table values are pooled median milliseconds, six samples per group
+per cohort. Keep every cold/warm sample, including the slow first cohort
+candidate UNIX outlier; percentages are elapsed-time changes, not speed ratios.
+
+| Workload | Opt-in before | Opt-in after | Change | Default before | Default after | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Directory small,64 |455.288|453.2415|-0.45%|470.621|440.947|-6.31%|
+| Directory large,64 |84.7565|79.3985|-6.32%|86.273|76.3045|-11.55%|
+| BusyBox ls,8 |1885.807|1881.2905|-0.24%|1901.402|1862.233|-2.06%|
+| Stat,512 |89.973|83.0095|-7.74%|84.7385|83.1225|-1.91%|
+| Missing stat,512 |44.8345|43.504|-2.97%|44.721|44.454|-0.60%|
+| Plain UNIX,2048 |265.963|257.3605|-3.23%|256.469|248.023|-3.29%|
+| recvmsg,2048 |293.293|266.939|-8.99%|264.5065|263.184|-0.50%|
+| EOF recvmsg,2048 |205.984|193.7185|-5.95%|196.135|191.5395|-2.34%|
+
+All eight protocol medians decrease in both cohorts; only large-directory
+enumeration exceeds5% in both. Guest elapsed measurements include clock-query
+measurement overhead, scheduling and other services, not exclusive handler
+CPU time. The native process probes retain their unchanged direct timer RPC
+measurement path. Do not attribute every difference to an IPC fastpath change.
+
+Files' first host samples are before3.1771965/2.975434625s versus
+after2.976318542/2.763266209s: mean3.0763155625→2.8697923755s (-6.71%).
+The reversed default cohort is before2.980262042/2.761324583s versus
+after2.969112667/2.772808917s: mean2.8707933125→2.870960792s (+0.006%).
+The first apparent startup improvement does **not** repeat. The100ms VFS and
+200ms host polling gates cannot resolve precise small changes. Guest ping
+means fall240.4425→162.005ms and236.589→158.902ms, but that interval includes
+the observer's own clock-query cost and scheduling, not exclusively Xfe's
+event loop. Neither a ping nor this host gate proves complete painting and
+tested input readiness. The requested100ms launcher-to-painted/input-ready
+application target is still unmet; no general5% system gain is established.
+
+The default process BAAB comparison retains all21 metrics, including their
+regressions. Six samples per group, except twelve for Negoto creation; values
+are pooled median milliseconds. These additional controls were not run in the
+first opt-in cohort, so do not claim a repeated process gain.
+
+| Workload | Before | Default after | Elapsed change |
+| --- | ---: | ---: | ---: |
+| Linux getpid,2048 |42.0685|41.2325|-1.99%|
+| Linux getuid,2048 |42.305|42.401|+0.23%|
+| Linux copyout normal |181.4865|188.393|+3.81%|
+| Linux copyout128 VMAs |175.921|184.989|+5.15%|
+| Linux copyout256 VMAs |177.905|183.7415|+3.28%|
+| Linux fork,8 |15.782|15.041|-4.70%|
+| Linux fork/exec,8 |760.1645|748.147|-1.58%|
+| Linux fork128 VMAs,8 |16.579|16.5725|-0.04%|
+| Linux fork256 VMAs,8 |15.287|15.24|-0.31%|
+| Alpha spawn/reap,8 |24.469|23.9335|-2.19%|
+| Alpha breakdown spawn |2.7125|2.6085|-3.83%|
+| Alpha breakdown kill/reap |0.4455|0.4495|+0.90%|
+| Negoto create |7.492|6.3335|-15.46%|
+| Alpha Xfe spawn |5.505|5.369|-2.47%|
+| Alpha Xfe kill/reap |0.7385|0.646|-12.53%|
+| Alpha BusyBox lifecycle,8 |29.933|26.663|-10.92%|
+| Alpha BusyBox prepare |3.7245|3.2995|-11.41%|
+| Alpha BusyBox source release |0.457|0.477|+4.38%|
+| Alpha Xfe lifecycle,3 |32.08|31.159|-2.87%|
+| Alpha Xfe prepare |13.7445|13.1015|-4.68%|
+| Alpha Xfe source release |0.9915|0.919|-7.31%|
+
+Retain the fresh-clock implementation for the repeated, bounded clock/protocol
+benefit and validated fallback semantics, not as the missing order-of-magnitude
+launch fix. Copyout controls still need investigation; they have not improved
+merely because clock sampling avoids a service request. Next isolate the
+remaining unmodified Xfe/loader/X11 work with bounded diagnostics and a more
+precise paint/input endpoint instead of repeatedly tuning a construction path
+that ordinary launch comparisons already rejected.
+
+Final default native1307/17 ignored and selected ASan71/1 ignored pass. Twelve
+new reader cases cover fresh hardware, legacy/failure fallback, retryable
+initial absence, provider replacement, metadata/mapping/epoch/units validation,
+disabled/backward counters and bounded coherent reads. Owner-export and actual
+SDK two-word marshalling/status tests also pass. An initial full native build
+fails when timer.rs is included by the standalone SDK test; fix its module
+path explicitly, retain that failure log, then pass the whole suite. Forced
+enabled clock-handler tests and default AArch64 Alter, AArch64 timer, x86 PIT
+and FreeBSD checks pass. These mocks are not actual device/TLB proofs; real
+source-selection/time-ABI/functional image tests are separate evidence.
+
+Final default artifact hashes:
+
+- Image c7cf0b42687f2d23dcc01ddabe4239828c7c522b0d5215ae607f519a99e0e1e1.
+- Rootfs776a19b0879014cda323cc7fb946d0576d038ddf4aeb9578c5c654d8fc070193.
+- Alter01994c27e923368767399ddea144c7dca6996d67e5991a465b1d9c88daac0a5d.
+- Init f701320a41cc8c9d33b38f12546cffecfb43a53df18727d1f08aa0bdd2cfb9a6.
+- HPET owner cc5d66434a399c14003f7a7ce45892678ec966c10409ebd3afa3cfa0bff565e5.
+- Initramfs55c1b56961de1728568d6c2b05e8a8bd74c7bc8cd749916734a3a7c535e5e5ec.
+- Unchanged Alpha a8f906eb291b8320d0f485ba1f2555141cbcb9de12b59bbba8946f989fb3dd21.
+- Unchanged Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88;
+  A9N worktree remains clean.
+
+The first opt-in image hash is adcabd46c14fe516104a11933a563556bd8d313180068b265108c3c6e739f278;
+its Alter hash fa4039c8481c099e68afe8ebb6b16d24ae0c7b750a178c1c4c6ec8a6cdee198b.
+These are provenance for that cohort, not identical final-build bytes or claims
+that a superseded large image is retained. Source-proof image
+5295b066c3287cca2c0f769d72cf32d2e2aaa92cd2ceb3fc25805d86b2646b26 is diagnostic only.
+
+Evidence lives in /private/tmp/nanami-opt-cycle104.zdzDj4: first and default
+results.jsonl, both protocol/Files comparison-metrics.json, default process
+raw samples/analyzer, build/test logs and small executable/source snapshots.
+After terminal driver64654 and empty QEMU process checks, keep only this
+cycle's after.img/rootfs.img and the immediately preceding accepted cycle100
+after.img/after-rootfs.img. Intermediate cycles101--103 were rejected/diagnostic;
+their images and rootfs, plus this cycle's trace/fixture/opt-in variants and
+temporary patch rootfs copies, are already deleted. Do not delete the sole
+verified predecessor just to match directory numbers. No user input image or
+live VM backing file is removed.
+
+## Cycle 105: reuse bounded writable private-RAM views for checked copyout
+
+Cycle104's fresh clock reader does not remove the repeated user-level memory
+service work on small outputs. Add optional request0x1033, PROCESS_WRITE_VIEW,
+alongside the existing read view. The existing unsealed trusted native reaper
+may borrow a sealed child's currently readable/writable, non-COW private RAM
+page. Verify exact active one-page ownership, current backing and permissions;
+exclude MMIO, explicit shared reservations, R-only/W-only/PROT_NONE pages and
+private-fork shared markers. Map only R/W, never X. Do not raise the source's
+permissions, detach fork backing, return a Frame descriptor or add a capability
+to the guest's sealed execution root. Alpha still owns allocation, authority,
+mapping and reference accounting. No Kernel or IPC fastpath change is made.
+
+Generalize the existing bounded lease implementation into page_window.rs.
+Separate read/write windows have 64 aliases each and non-overlapping native
+VAs, but share acquisition, eviction, failed-cleanup quarantine and owner
+release. Use the shared logical VM generation, including backing/protection
+changes, exec and VM peers. A zero/exhausted generation disables reuse. Pins
+hold backing until confirmed release; they do not follow later mappings at the
+same VA. This is not a snapshot or atomic multi-byte write guarantee.
+
+Every copyout still checks current guest permissions. Only owned scratch or
+a typed borrowed initialized native source uses local stores. Arbitrary raw
+source VAs keep the original checked Alpha request; never reinterpret them as
+Rust slices. Prepare every page of an at-most4KiB output before storing any
+byte, including a two-page crossing. On preparation failure, use the original
+single checked request, not split per-page retries. Unknown installation or
+failed release keeps the alias tracked and unusable. Large transfers, shared
+buffers and ineligible pages retain checked copies. Scalar EFAULT prefixes,
+socket queue commits and fault ordering remain unchanged.
+
+V1 routes scratch and typed UNIX payload outputs through these views. Its
+eight normal-device boots alternate process ABBA and protocols BAAB against
+accepted104. All pass. Protocol changes are small-directory-46.00%,
+large-directory-3.77%, ls-18.62%, stat-40.86%, missing-stat+1.79%, plain-UNIX
+-58.26%, recvmsg-8.00% and EOF-recvmsg-0.81%. Keep the contrary controls:
+copyout256-VMA+1.44%, fork/exec+3.34%, fragmented128-VMA fork+5.20%,
+Negoto-create+9.22%, and zero-damage frame controls+4.57%/+18.59%.
+All other raw samples and metrics remain in the V1 JSON files; this is not the
+final artifact or a repeated gain for every workload.
+
+Source inspection explains why V1 barely changes the copyout control: the
+fixture uses getresuid, whose coalesced u32 array still travels as an opaque
+source VA. V2 keeps its initialized, padding-free u32 array as a typed byte
+borrow and calls copyout_owned. No extra staging copy, new syscall or guest
+fixture substitution is introduced. Bad-pointer fallback still performs the
+original ordered scalar stores. An actual helper test covers both a view hit
+and the valid prefix before EFAULT.
+
+After V2 passes, enable writable views by default for supported x86 Linux;
+NANAMI_GUEST_WRITE_VIEWS=0 opts out. Other architectures retain checked copies.
+A final review finds that FreeBSD translates some calls through Linux handlers:
+without a personality guard this would add repeatedly denied view requests to
+unsealed FreeBSD tasks. Restrict the new adapter to live Linux tasks. Three
+tests include the actual adapter and force the feature on: FreeBSD makes zero
+view requests, live Linux attempts one denied request, and invalid owned bounds,
+unknown/exited tasks and oversized sources make none. This prevents an extra
+legacy communication path rather than merely checking that fallback compiles.
+Existing read-view policy is not broadened in this cycle.
+
+Real-image verification
+
+First replace only the untimed ram-share-smoke fixture in a private functional
+rootfs. With the new Alpha, verify actual native R/W aliases see the same bytes
+as a read alias and an authorized read of the suspended source. Reject a write
+view before and after readonly protection; release both aliases before the
+existing RO-fork RAM check. SMP1/SMP4 prove exactly4MiB savings, guarded writes,
+isolation and a child surviving source-root reap. The enhanced-view serials are
+nanami-negoto-qemu-oyu2yuso and nanami-negoto-qemu-fvrq5j80. File-mapping
+SMP1/SMP4 also pass. Restore the full ordinary rootfs and its disk partition,
+check exact pre-fixture hashes, and delete the closed functional rootfs.
+The enhanced native fixture is not used in ordinary timing images.
+
+V2 and final default each run17 normal-device boots: mapping and RO-fork at
+SMP1/SMP4, four Files launches, four protocol boots, four process boots and two
+complete desktop sessions in one SMP4 boot. Reverse all timing orders in the
+default cohort: Files ABBA→BAAB, protocols ABBA→BAAB and process BAAB→ABBA.
+All34 boots pass. Including the initial four functional and eight V1 boots,
+all46 runs complete successfully. One VM runs at a time, without concurrent
+own builds, tests or hashing. GUI serials nanami-negoto-qemu-c1yyhtem and
+nanami-negoto-qemu-iqayiju8 verify real input, Terminal/Editor/Information launch,
+Exit/restart and cleanup through both sessions, not merely a mapped window.
+
+The final no-environment default ELF differs from opt-in V2, so measure its
+actual bytes rather than treating the source's constant-value change as binary
+identity. Alpha/init are unchanged between105 variants. Before boot, verify
+the extracted Alter/init, the full rootfs partition and all five e2fsck passes.
+An initial disk copy remains live longer than observation; poll that exact
+handle, then reapply init and compare it after terminal copy completion. No
+partially copied disk is used for a test. Preserve the initial failed native
+test: its foreign source literal inferred i32 rather than u8; explicitly type
+the fixture bytes and rerun the suites.
+
+Protocol timings
+
+| Workload | V2 before ms | V2 after ms | Change | Default before ms | Default after ms | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| directory-small-64 | 516.854 | 284.2205 | -45.01% | 459.475 | 281.9335 | -38.64% |
+| directory-large-64 | 81.335 | 83.169 | +2.25% | 84.046 | 78.5325 | -6.56% |
+| busybox-ls-8 | 1988.4345 | 1673.71 | -15.83% | 1927.631 | 1683.7665 | -12.65% |
+| stat-512 | 141.583 | 49.676 | -64.91% | 83.4325 | 51.721 | -38.01% |
+| missing-stat-512 | 46.021 | 44.849 | -2.55% | 45.465 | 45.5185 | +0.12% |
+| unix-2048 | 272.4035 | 109.999 | -59.62% | 252.0155 | 110.8655 | -56.01% |
+| unix-recvmsg-2048 | 312.529 | 279.5855 | -10.54% | 271.9775 | 280.155 | +3.01% |
+| unix-recvmsg-eof-2048 | 219.117 | 203.3155 | -7.21% | 198.512 | 204.881 | +3.21% |
+
+All values are pooled medians, six samples per image group per cohort. Negative
+percentages mean less elapsed time, not equivalent speed ratios. Small directory,
+ls, stat and plain UNIX gains repeat and exceed5% in both V2 and default.
+Large-directory and recvmsg/EOF improvements do not repeat. Keep missing-stat,
+all slow samples and the final recvmsg regressions. The unusually slow V2
+before-stat median also remains; do not use its64.91% reduction alone as the
+stable effect size. The default stat reduction is38.01%.
+
+Process timings
+
+| Workload | V2 before ms | V2 after ms | Change | Default before ms | Default after ms | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| linux/getpid-2048 | 44.6225 | 44.5825 | -0.09% | 46.0375 | 41.1595 | -10.60% |
+| linux/getuid-2048 | 41.983 | 42.4105 | +1.02% | 44.4835 | 41.4415 | -6.84% |
+| linux/copyout-normal | 192.247 | 46.266 | -75.93% | 193.625 | 44.56 | -76.99% |
+| linux/copyout-128-vmas | 187.6925 | 48.232 | -74.30% | 182.318 | 45.2335 | -75.19% |
+| linux/copyout-256-vmas | 188.915 | 50.028 | -73.52% | 182.6775 | 45.8015 | -74.93% |
+| linux/fork-8 | 16.147 | 17.3065 | +7.18% | 16.636 | 16.1325 | -3.03% |
+| linux/fork-exec-8 | 782.5845 | 834.9215 | +6.69% | 755.0435 | 747.5115 | -1.00% |
+| linux/fork-128-vmas-8 | 17.2285 | 15.692 | -8.92% | 16.1 | 15.8055 | -1.83% |
+| linux/fork-256-vmas-8 | 16.5895 | 15.592 | -6.01% | 15.0245 | 14.4715 | -3.68% |
+| native/alpha-spawn-reap-8/ns | 25.712 | 29.1505 | +13.37% | 32.3805 | 23.2775 | -28.11% |
+| native/alpha-breakdown/spawn-ns | 2.593 | 2.945 | +13.58% | 2.8715 | 2.518 | -12.31% |
+| native/alpha-breakdown/kill-reap-ns | 0.4645 | 0.549 | +18.19% | 0.5665 | 0.426 | -24.80% |
+| native/negoto-create/ns | 7.722 | 8.1275 | +5.25% | 8.1365 | 8.8835 | +9.18% |
+| native/alpha-xfe/spawn-ns | 5.8515 | 5.197 | -11.19% | 5.5155 | 5.1905 | -5.89% |
+| native/alpha-xfe/kill-reap-ns | 0.726 | 0.6445 | -11.23% | 0.698 | 0.6 | -14.04% |
+| native/alpha-lifecycle-busybox-8/ns | 29.5255 | 27.632 | -6.41% | 28.706 | 26.7935 | -6.66% |
+| native/alpha-lifecycle-busybox-8/prepare-ns | 3.543 | 3.291 | -7.11% | 3.5835 | 3.3575 | -6.31% |
+| native/alpha-lifecycle-busybox-8/source-release-ns | 0.5145 | 0.436 | -15.26% | 0.455 | 0.464 | +1.98% |
+| native/alpha-lifecycle-xfe-3/ns | 33.2355 | 32.0565 | -3.55% | 31.6965 | 31.6965 | +0.00% |
+| native/alpha-lifecycle-xfe-3/prepare-ns | 14.0885 | 13.4955 | -4.21% | 13.4535 | 13.6265 | +1.29% |
+| native/alpha-lifecycle-xfe-3/source-release-ns | 0.964 | 0.9485 | -1.61% | 0.9405 | 0.972 | +3.35% |
+
+There are21 process metrics, not30. Each group has six samples except Negoto's
+twelve; retain cold and warm samples. Copyout decreases about74--77% across
+both cohorts, around3.8--4.3 times lower elapsed time for that bounded workload,
+not a fourfold system or application improvement. Fork/exec and native Alpha
+results are mixed; V2's regressions do not disappear from the record just
+because the final order is favorable. Negoto creation remains+5.25%/+9.18%.
+Native probes use their unchanged direct timer RPC measurement; guest timing
+includes measurement, scheduling and other service work, not exclusive CPU.
+Removing memory-validation/mapping/copy work does not imply the Kernel's IPC
+fastpath was slow or has changed.
+
+Unchanged native framebuffer controls
+
+| Workload | V2 before ms | V2 after ms | Change | Default before ms | Default after ms | Change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| workload-0/algorithm-before-true | 64.19 | 65.471 | +2.00% | 63.9705 | 64.1315 | +0.25% |
+| workload-0/algorithm-before-false | 66.775 | 64.0085 | -4.14% | 62.2745 | 63.2355 | +1.54% |
+| workload-1/algorithm-before-true | 63.6405 | 65.3245 | +2.65% | 63.3195 | 63.3145 | -0.01% |
+| workload-1/algorithm-before-false | 62.6735 | 64.03 | +2.16% | 62.968 | 63.3545 | +0.61% |
+| workload-2/algorithm-before-true | 121.558 | 123 | +1.19% | 123.337 | 123.341 | +0.00% |
+| workload-2/algorithm-before-false | 122.5945 | 122.6135 | +0.02% | 122.917 | 122.128 | -0.64% |
+
+These six controls exercise unchanged reference/current fbdev capture algorithms
+inside each image. The algorithm-before label is separate from the image group.
+Each control retains eight samples per group, including outliers. Their results
+are not evidence of GPU acceleration or a uniform whole-system gain.
+
+Files' V2 host samples are before2.756859459/3.181752s versus
+after2.555729875/2.77978975s: mean2.9693057295→2.6677598125s (-10.16%).
+Default before2.761435875/3.201175958s versus after2.553227834/2.560843625s:
+mean2.9813059165→2.5570357295s (-14.23%). The direction repeats in reversed
+order, but VFS100ms/host200ms polling prevents a precise small-percentage claim.
+Ping means145.7485→91.9845ms and157.261→100.298ms include the observer's own
+clock-query/copyout cost and scheduling, not only the client's event loop.
+
+Inspect both V2 after screenshots, not only PASS lines: their toolbar still
+contains stale terminal pixels and blank widgets at the ping endpoint. These
+are direct counterevidence to complete painting. Neither this host gate,
+a sub100ms ping nor correct scalar-copy tests prove the requested100ms
+launcher-to-fully-painted-and-input-ready application. That goal remains
+active. Next measure an actual paint/input endpoint and the remaining Xfe,
+X11 and producer-to-compositor notification work; do not declare completion
+from a narrower gate.
+
+Final verification and retention
+
+Final native1319 passed/17 ignored, forced-enabled actual-adapter3 passed,
+selected forced-enabled ASan247 passed/4 ignored, AArch64 Alpha/Alter checks
+and x86 FreeBSD checking pass. The Alpha AArch64 check uses the matching user
+target for compilation only, not an ARM runtime/link proof. Cache/ownership
+mocks do not prove TLB behavior by themselves; real SMP aliases, protection,
+RO-fork and ordinary GUI tests provide separate evidence. Kernel worktree
+is clean and extracted Kernel bytes remain unchanged.
+
+Final default hashes:
+
+- Image5fce7be357af361b92f98809d5838e7b7133ec4cf5ed37edec76e23849a00173.
+- Rootfs95d6af645bed710dcb95016e57c30fec043c53f9de7f7101dcee094aebf33a8c.
+- Alter b2978febb0c315bded12176e186c1d49365704b255633525952e4890b2484552.
+- Alpha dd4263ebde56755539d2e95b16f65896007781e27f392ec8318b253e7c69c9cc.
+- Init2ea1390d6fccb10046969853ba2423b6cdfa63717060e6f798ea1ed46f9ce6fe.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+- Unchanged HPET owner/archive: cc5d66434a399c14003f7a7ce45892678ec966c10409ebd3afa3cfa0bff565e5
+  /55c1b56961de1728568d6c2b05e8a8bd74c7bc8cd749916734a3a7c535e5e5ec.
+
+Historical V1 image d777d2b7eb6d80060d432f20e0def794bff6b9d36b80455048f8dcfdf35cf720,
+Alter b46ed64bd50338a93bc1368071e3cbb5f3c42c4605a28b3f620185ca3951c4d7.
+Historical V2 image9519d7c9b9986e655b996afa7c43a84fe57034e216709aa42b63b0c634c214f1,
+Alter0c71b8a24f5e0a2607a22e85e3018d88687c22806948d0e522d2677aecd6f360.
+These hashes identify superseded measurements, not retained large-image copies.
+
+Evidence in /private/tmp/nanami-opt-cycle105.AqzrM9 includes raw results/logs,
+V1 pilot process/protocol JSON, V2/default process/protocol/Files JSON with every
+sample, analyzers, build/test logs, small ELFs and pre-cycle source snapshots.
+Driver91457 is terminal0 and QEMU closure is checked before cleanup. Keep only
+accepted105 after.img/rootfs.img and accepted104 after.img/rootfs.img as its
+predecessor. Delete the older cycle100 after.img/after-rootfs.img, closed
+functional/opt-in images and patch rootfs snapshots; retain their small evidence.
+No user input image is removed. No Kernel, IPC fastpath, FPU, version,
+commit or release change is made. This cycle is retained for the repeatable
+bounded copy/communication gains, not a claim that all workloads improve.
+
+## Cycle 106: make Honoka present hints safe under notification coalescing
+
+The actual A9N notification core ORs pending identifiers. Honoka previously
+decoded the resulting low word as one scalar window ID: notifications for
+windows1 and2 could become an update for unrelated window3. Native damage
+queues have a periodic recovery scan, but fbdev captures have no damage queue
+and are excluded from that timer scan. This is a concrete missed-update path,
+not evidence that all application startup latency comes from notifications.
+
+Add a pixel regression using the real Compositor and three fbdev surfaces.
+Publish distinct pixels to all three, notify only the first two with the
+actual OR operation, and require both notified pixels to appear without
+capturing the third. The old implementation fails with first-surface color
+0x888888 instead of0x123450. The corrected unrelated-surface fixture compares
+against its pre-update pixel, not an assumed zero background. Preserve the
+failed run in before-coalesced-regression.log.
+
+Keep the existing opaque Word handle and producer messages. Live windows
+receive disjoint one-hot hints in their low16 bits. Bits16--47 distinguish
+successive allocations; never wrap into PRESENT/INPUT flags or reuse a full
+control handle. Refuse create on generation exhaustion. The existing one-Word
+next-ID field becomes the generation counter; there is no extra field per
+window or shared-memory allocation. A free hint is selected from current live
+handles, independently of the z-order array position.
+
+Honoka receives a set of low16 hint bits, not one object ID, and drains only
+selected live windows. Existing full-handle and low32-bit badge producers both
+work without recompilation. An explicit zero-hint present rechecks all surfaces.
+The current bounded16-window scan has the same asymptotic bound as the old
+lookup; unrelated fbdev surfaces are not captured. Control RPCs still require
+the exact full handle and owner PID. A stale queued hint can cause a harmless
+recheck after bit reuse, not authorize an old destroy/resize/control request.
+Periodic native-queue draining and drag policy remain unchanged. No new RPC,
+Kernel ABI, IPC fastpath, capability authority or FPU behavior is added.
+
+Tests and ordinary GUI verification:
+
+- Native1323 pass,17 ignored; selected framebuffer/fbdev/Compositor ASan46 pass,
+  two ignored. The four added tests cover OR-coalesced pixels and non-target
+  isolation, stale control handles/ownership,16 disjoint live hints and legacy
+  low-word minting, and non-wrapping generation exhaustion.
+- Release x86 Honoka and AArch64 compile checks pass. Before packaging, compare
+  the extracted Honoka executable, check all five ext2 passes and compare the
+  entire rootfs partition after patching. Only /bin/honoka changes from accepted105;
+  retain the original zero inode timestamps and all frozen ordinary fixtures.
+- Four real GUI sessions pass: two sequential sessions in each SMP1/SMP4 boot.
+  Require actual input, terminal commands/links, Editor and Information launch,
+  Exit, restart and session cleanup, not only a mapped window.
+- All14 normal-device boots pass. Driver90207 is terminal0; empty QEMU/build
+  process checks precede post-run hashes and retention cleanup. Do not start
+  another VM, build, native test or hash job during these measurements.
+
+### Ordinary comparisons against accepted105
+
+Files and process group order is after/before/before/after. Protocol order is
+before/after/after/before. Keep all cold/warm samples and outliers: six samples
+per protocol/process metric,12 for Negoto creation, eight per frame control.
+The frame algorithm-before flag is an internal algorithm control, not the
+before/after image group. comparison-metrics.json retains every raw sample.
+
+| Metric | Before median (ms) | After median (ms) | Elapsed change |
+| --- | ---: | ---: | ---: |
+| directory-small-64 | 266.9515 | 264.6590 | -0.86% |
+| directory-large-64 | 73.4370 | 74.7775 | +1.83% |
+| busybox-ls-8 | 1565.2620 | 1545.5370 | -1.26% |
+| stat-512 | 48.1465 | 47.0215 | -2.34% |
+| missing-stat-512 | 43.0705 | 42.9600 | -0.26% |
+| unix-2048 | 107.4060 | 107.2310 | -0.16% |
+| unix-recvmsg-2048 | 260.6870 | 258.0405 | -1.02% |
+| unix-recvmsg-eof-2048 | 190.3835 | 195.3600 | +2.61% |
+
+| Metric | Before median (ms) | After median (ms) | Elapsed change |
+| --- | ---: | ---: | ---: |
+| linux/getpid-2048 | 40.0375 | 41.1485 | +2.77% |
+| linux/getuid-2048 | 40.6105 | 40.0980 | -1.26% |
+| linux/copyout-normal | 43.1405 | 42.2080 | -2.16% |
+| linux/copyout-128-vmas | 44.1475 | 44.8350 | +1.56% |
+| linux/copyout-256-vmas | 45.2490 | 45.1805 | -0.15% |
+| linux/fork-8 | 14.5445 | 13.6790 | -5.95% |
+| linux/fork-exec-8 | 732.8140 | 723.3930 | -1.29% |
+| linux/fork-128-vmas-8 | 13.7280 | 13.4270 | -2.19% |
+| linux/fork-256-vmas-8 | 13.9355 | 14.0925 | +1.13% |
+| native/alpha-spawn-reap-8/ns | 22.0635 | 22.7935 | +3.31% |
+| native/alpha-breakdown/spawn-ns | 2.4300 | 2.5760 | +6.01% |
+| native/alpha-breakdown/kill-reap-ns | 0.3890 | 0.4000 | +2.83% |
+| native/negoto-create/ns | 6.7175 | 6.8265 | +1.62% |
+| native/alpha-xfe/spawn-ns | 5.1190 | 5.0690 | -0.98% |
+| native/alpha-xfe/kill-reap-ns | 0.6070 | 0.5985 | -1.40% |
+| native/alpha-lifecycle-busybox-8/ns | 26.8500 | 26.3120 | -2.00% |
+| native/alpha-lifecycle-busybox-8/prepare-ns | 3.4180 | 3.2715 | -4.29% |
+| native/alpha-lifecycle-busybox-8/source-release-ns | 0.4410 | 0.4425 | +0.34% |
+| native/alpha-lifecycle-xfe-3/ns | 29.4785 | 30.3150 | +2.84% |
+| native/alpha-lifecycle-xfe-3/prepare-ns | 12.7645 | 13.2215 | +3.58% |
+| native/alpha-lifecycle-xfe-3/source-release-ns | 0.8820 | 0.9590 | +8.73% |
+
+| Metric | Before median (ms) | After median (ms) | Elapsed change |
+| --- | ---: | ---: | ---: |
+| workload-0/algorithm-before-true | 61.8385 | 63.0400 | +1.94% |
+| workload-0/algorithm-before-false | 61.8000 | 62.2670 | +0.76% |
+| workload-1/algorithm-before-true | 61.7830 | 61.7995 | +0.03% |
+| workload-1/algorithm-before-false | 61.4750 | 61.5735 | +0.16% |
+| workload-2/algorithm-before-true | 120.2995 | 120.6805 | +0.32% |
+| workload-2/algorithm-before-false | 120.6955 | 119.6230 | -0.89% |
+
+These mostly unchanged controls do not establish a system speedup. In
+particular, retain getpid+2.77%, copyout128-VMA+1.56%, ordinary Alpha spawn+6.01%,
+Xfe source release+8.73% and EOF-recvmsg+2.61%. Do not select fork-5.95% as a
+new optimization result when its implementation has not changed. This cycle
+fixes a proven display-notification bug; it does not meet the5% speed aim.
+
+Files' coarse host samples before are2592346875/2598782458ns, after
+2603969542/2578441250ns. Means are2.5955646665s and2.591205396s (-0.17%),
+effectively flat at100ms VFS and200ms host polling resolution. Ping means
+83.9085ms and89.303ms worsen6.43%; keep that regression rather than omitting
+it. These intervals also include observer execution and clock-query overhead.
+
+Visually inspect all four ping-endpoint PNGs. After1 (e21jeyte), before1
+(pujygyq8) and before2 (9wsy9qtp) show the directory tree, toolbar and populated
+/root listing. After2 (5yo6j4sb) still has blank/narrow unfinished panels.
+Thus neither one good screenshot nor a nonce-validated ping proves complete
+painting. This is direct counterevidence to a fully painted completion gate,
+not a claim that the old implementation is always visibly broken. The100ms
+actual launcher-to-painted-and-input-ready target remains unmet. Keep the
+full goal active; improve that measurement boundary before attributing a
+single-window launch gain to this fix.
+
+### Artifacts and retention
+
+Accepted candidate hashes:
+
+- Image803bdd8c9bfad6d20a5d2d3140b3c1c6e4009dd979b79a8a3dfa967ba9f74665.
+- Rootfsade0470bb3fd93de29a01becb9e2cd9a461f102f90b8612ecc71b05231f64b18.
+- Honoka22b24235913fd0473928edc9a1c9064381939e3b8192b44647b2815a3a0dd6f0.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88,
+  byte-identical to105. The Kernel worktree is clean.
+
+Alpha/init/Alter/HPET owner and boot archive retain accepted105 bytes.
+Evidence lives in /private/tmp/nanami-opt-cycle106.t6RPzn: all14 raw logs,
+results.jsonl, comparison-metrics.json and its analyzer, the old failing
+regression, native/ASan/build logs, small executable/source snapshots and
+artifact hashes. GUI serial/screenshot directories are recorded per run in
+results.jsonl; SMP1 is3_yl2vq1 and SMP4 kfmljtjj.
+
+After all VMs close and exact-target lsof checks find no open files, remove
+cycle104 after.img/rootfs.img as the two-accepted-generations-old pair. Retain
+only accepted105 and106 image/rootfs pairs plus small evidence. No user input
+image, live VM backing file, Kernel, version, commit or release is changed.
+
+## Cycle 107: retain typed owned vectors through small recvmsg writeback
+
+Cycle105's writable RAM views accelerate owned single-buffer outputs, but the
+usual recvmsg result still erases its owned sources into raw transfer VAs.
+Its payload and three result fields therefore enter the checked-copy service
+on every receive. Preserve the queue-owned payload borrow and initialized
+name-length, control-length and flags byte arrays through the common guest-copy
+helper instead. Do not infer ownership from arbitrary raw native addresses.
+
+The optional vector path accepts at most four buffers and4096 total bytes.
+Check current logical write permission for every range, the live Linux
+personality and the shared VM generation. Prepare every page before the first
+store. A later acquisition in the same four-way set can evict an earlier hit:
+recheck every prepared slot's ready/owner/generation/page identity before
+writing. Keep the state borrow through ordered stores. Decline on preparation,
+uncertain installation, invalidation, capacity, overflow or conflicting reuse,
+without writing a byte through this attempt. Failed leases retain the existing
+tracked/quarantined cleanup behavior.
+
+A declined attempt converts the still-live owned borrows to the original
+ordered checked WRITE_VECTOR. Do not retry per-field local stores after a
+partial attempt, split large outputs into4KiB RPCs, change whole-field permission
+preflight or discard the valid error prefix. Existing raw-pointer copy helpers
+and the single-buffer view implementation stay intact. FreeBSD translation
+does not request writable Linux views; non-x86 keeps the checked path by default.
+No new Kernel or user ABI, guest capability, MMIO mapping or FPU behavior is added.
+
+Only successful payload/metadata completion commits the socket receive.
+Retain SCM_RIGHTS rollback, descriptor limits, MSG_PEEK, truncation and stream
+barriers. Write only the designated4/8/4 metadata bytes, not msghdr input fields
+or padding. A stack-backed bounded descriptor/fragment plan replaces repeated
+service-side validation/copy work without adding heap allocation. This does not
+promise atomic vectors, snapshots or atomic multi-byte stores.
+
+### Verification and failure detection
+
+- Native1330 pass,17 ignored. Selected forced-enabled ASan101 pass,two ignored.
+  Release x86 Alter and FreeBSD/AArch64 compile checks pass; these are not ARM
+  runtime claims.
+- Seven new regressions exercise overlapping output order and hot reuse,
+  preparation failure before an earlier field/page prefix, eviction of a
+  previously prepared hit, budgets/generation/overflow, owned vector hits
+  without transport/scratch/padding writes, logical/physical failure prefixes
+  with the original checked batch, and oversized one-batch fallback.
+- The actual native adapter retains the FreeBSD/no-view assertion. Existing
+  UNIX tests still cover allocation denial, rights, queue retention, whole-field
+  faults, large payload chunks and untouched padding.
+- In a separate temporary mutant, remove only final lease revalidation.
+  The new same-set collision test fails with exit101. This proves the test
+  detects that unsafe optimization; it is not a claim that the old checked-copy
+  implementation corrupted memory. The shipping source retains the check.
+- Ordinary protocol boots execute the real Linux mprotect/EFAULT regression:
+  an unaligned msghdr crosses a read-only second page at offsets44/48. Require
+  the exact payload/metadata prefix, unchanged padding and queued packet retry
+  before timing. Both cohorts pass with their original frozen fixture.
+- Both cohorts pass all27 normal-device boots:14 then13. Three GUI boots
+  provide six actual sessions across SMP1/SMP4, including input/terminal
+  commands, links, Editor, Information, Exit, restart and cleanup.
+- No own build, native test or hash job runs during a VM. Drivers47200/4235
+  are terminal0; QEMU closure is checked before final hashes and cleanup.
+
+### Independent ordinary comparisons against accepted106
+
+The exact default-built candidate is used in both cohorts, without extra
+diagnostic or opt-in flags. First protocol order is after/before/before/after,
+with process/Files before/after/after/before. Repeat reverses those orders.
+Keep every cold/warm sample and outlier: six per ordinary metric,12 for Negoto
+creation and eight per frame control. The frame algorithm-before flag describes
+the internal reference algorithm, not the image group.
+
+| Metric | First before / after (ms) | First change | Repeat before / after (ms) | Repeat change |
+| --- | ---: | ---: | ---: | ---: |
+| directory-small-64 | 263.8465 / 261.8385 | -0.76% | 264.3115 / 262.4655 | -0.70% |
+| directory-large-64 | 75.7880 / 70.7895 | -6.60% | 72.3915 / 73.6105 | +1.68% |
+| busybox-ls-8 | 1539.7945 / 1532.7355 | -0.46% | 1534.5225 / 1535.5710 | +0.07% |
+| stat-512 | 48.3020 / 46.9360 | -2.83% | 46.9655 / 46.5435 | -0.90% |
+| missing-stat-512 | 44.2450 / 41.9010 | -5.30% | 42.1620 / 42.2795 | +0.28% |
+| unix-2048 | 105.9045 / 105.8355 | -0.07% | 104.5520 / 108.8385 | +4.10% |
+| unix-recvmsg-2048 | 258.1425 / 113.3655 | -56.08% | 260.5660 / 112.1510 | -56.96% |
+| unix-recvmsg-eof-2048 | 188.1930 / 49.7800 | -73.55% | 192.3830 / 49.5830 | -74.23% |
+
+| Metric | First before / after (ms) | First change | Repeat before / after (ms) | Repeat change |
+| --- | ---: | ---: | ---: | ---: |
+| linux/getpid-2048 | 41.2975 / 40.7525 | -1.32% | 41.0350 / 42.3555 | +3.22% |
+| linux/getuid-2048 | 41.0940 / 40.1990 | -2.18% | 40.7050 / 41.0295 | +0.80% |
+| linux/copyout-normal | 42.8195 / 43.7735 | +2.23% | 42.4760 / 44.1260 | +3.88% |
+| linux/copyout-128-vmas | 43.8235 / 45.0355 | +2.77% | 43.7125 / 45.1590 | +3.31% |
+| linux/copyout-256-vmas | 44.9505 / 47.1010 | +4.78% | 44.9220 / 46.7550 | +4.08% |
+| linux/fork-8 | 14.2105 / 15.0525 | +5.93% | 13.2550 / 13.4315 | +1.33% |
+| linux/fork-exec-8 | 719.1160 / 718.6010 | -0.07% | 723.1735 / 714.6485 | -1.18% |
+| linux/fork-128-vmas-8 | 13.3400 / 14.0295 | +5.17% | 13.2815 / 13.6985 | +3.14% |
+| linux/fork-256-vmas-8 | 12.9125 / 13.6335 | +5.58% | 13.9885 / 13.3305 | -4.70% |
+| native/alpha-spawn-reap-8/ns | 21.9650 / 22.0475 | +0.38% | 21.8940 / 23.4375 | +7.05% |
+| native/alpha-breakdown/spawn-ns | 2.3315 / 2.5480 | +9.29% | 2.4220 / 2.5030 | +3.34% |
+| native/alpha-breakdown/kill-reap-ns | 0.4090 / 0.4095 | +0.12% | 0.4090 / 0.4305 | +5.26% |
+| native/negoto-create/ns | 6.6370 / 6.5635 | -1.11% | 6.7295 / 7.2750 | +8.11% |
+| native/alpha-xfe/spawn-ns | 5.9560 / 4.9495 | -16.90% | 5.1645 / 5.3675 | +3.93% |
+| native/alpha-xfe/kill-reap-ns | 0.6480 / 0.6125 | -5.48% | 0.6095 / 0.6195 | +1.64% |
+| native/alpha-lifecycle-busybox-8/ns | 27.0955 / 27.3500 | +0.94% | 27.0825 / 28.1935 | +4.10% |
+| native/alpha-lifecycle-busybox-8/prepare-ns | 3.3540 / 3.1475 | -6.16% | 3.3230 / 3.3925 | +2.09% |
+| native/alpha-lifecycle-busybox-8/source-release-ns | 0.4560 / 0.4330 | -5.04% | 0.4325 / 0.4370 | +1.04% |
+| native/alpha-lifecycle-xfe-3/ns | 32.3205 / 29.4465 | -8.89% | 31.4265 / 29.3145 | -6.72% |
+| native/alpha-lifecycle-xfe-3/prepare-ns | 14.1085 / 12.6945 | -10.02% | 13.7450 / 12.5940 | -8.37% |
+| native/alpha-lifecycle-xfe-3/source-release-ns | 0.9860 / 0.8925 | -9.48% | 0.9465 / 0.9085 | -4.01% |
+
+| Metric | First before / after (ms) | First change | Repeat before / after (ms) | Repeat change |
+| --- | ---: | ---: | ---: | ---: |
+| workload-0/algorithm-before-true | 62.3660 / 61.4250 | -1.51% | 62.2725 / 62.8055 | +0.86% |
+| workload-0/algorithm-before-false | 61.0795 / 61.1775 | +0.16% | 62.2550 / 61.1740 | -1.74% |
+| workload-1/algorithm-before-true | 61.3845 / 61.2110 | -0.28% | 61.6035 / 61.6275 | +0.04% |
+| workload-1/algorithm-before-false | 60.8610 / 61.0555 | +0.32% | 61.1820 / 61.1355 | -0.08% |
+| workload-2/algorithm-before-true | 121.1835 / 118.7325 | -2.02% | 119.2155 / 119.5745 | +0.30% |
+| workload-2/algorithm-before-false | 118.6980 / 119.2160 | +0.44% | 119.6125 / 118.6990 | -0.76% |
+
+Retain the targeted reduction: recvmsg falls56.08%/56.96%, EOF metadata
+writeback73.55%/74.23%. Plain UNIX is flat in the first comparison and4.10%
+slower in repeat. The large-directory and missing-stat gains do not repeat;
+do not count them as wins from this change.
+
+Also retain the consistent small copyout regressions: normal+2.23%/+3.88%,
+128-VMA+2.77%/+3.31%,256-VMA+4.78%/+4.08%. Ordinary fork is+5.93%/+1.33%;
+fragmented256-VMA fork reverses+5.58% to-4.70%. Repeat Negoto-create+8.11%,
+native Alpha spawn/reap+7.05% and its other contrary controls remain in the
+table and raw JSON. The unchanged Alpha/Kernel implementations do not make
+those measurements disappear or establish their cause. Do not claim a
+uniform5% system improvement or an unchanged-cost ordinary copyout path.
+
+A post-run, read-only code-generation check finds a concrete next lead.
+The baseline ELF has no separate writable Cache::acquire symbol, while the
+candidate introduces it; candidate WriteWindow::copy_from calls it, although
+the single-buffer Rust source was unchanged. This is evidence of changed
+inlining, not yet proof of the measured regression's cause. Evaluate a small
+hot-lookup/cold-install separation without compiler-extension attributes;
+do not dismiss the copyout slowdown as noise or assert the proposed fix works
+before a matched comparison.
+
+Files' first coarse host means are2.474479875s before and2.483533500s after
+(+0.37%). Repeat is2.381134021s before and2.371304854s after (-0.41%): effectively
+flat at100ms native VFS and200ms host polling resolution. First ping means
+86.782ms/85.501ms (-1.48%), repeat90.0465ms/79.531ms (-11.68%); they include
+observer execution and clock-query overhead, not only application work.
+
+Inspect all eight ping-endpoint PNGs, retaining incomplete frames. In first
+cohort only after1 (23jkch47) has the populated toolbar/tree/root listing;
+before1 c2bu_ykc shows stale terminal pixels, after2 o0ro9gbb and before2
+xyvk037e have unfinished panels. In repeat, after1 tr25b49p, before1 sxt3bed7,
+before2 y6pfmin9 and after2 nyxxx0pc are all incomplete. A viewable window and
+nonce-validated ping therefore remain inadequate proof of completed painting.
+
+This cycle is retained for the repeated, substantial communication-path gain,
+with measured tradeoffs explicitly recorded. The100ms actual launcher-to-painted
+and input-ready application target is not achieved. Keep the full goal active;
+a stronger paint/input measurement and further user-level optimization remain
+necessary. Do not convert these microbench results into a completed system goal.
+
+### Artifacts and retention
+
+Default candidate hashes:
+
+- Image7c620a237861780a0cc7c3dca8b3b94b7453919f593c0d503ea361b4e8e14c6a.
+- Rootfs61ef4c1d6c4035a054c4055de6ceb97d378b5bf3f895c71eebb551c32e540027.
+- Alter00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88,
+  byte-identical to106; Kernel worktree remains clean.
+
+Only /bin/alter-linux changes from the accepted106 rootfs. Preserve zero inode
+timestamps and all ordinary fixture/client bytes. Ext2's five passes, full
+rootfs partition comparison and extracted Alter comparison pass before timing.
+Alpha/init, Honoka, HPET owner and the boot archive remain accepted106 bytes.
+
+Evidence in /private/tmp/nanami-opt-cycle107.oHKsmp includes both result sets,
+comparison-metrics.json files with all samples and analyzers, all raw logs,
+eight source/test snapshots plus message-before.md, native/ASan/cross-build logs,
+the negative mutant regression and small executables. GUI directories are
+recorded in results.jsonl: first SMP1 y7tnk0hj/SMP4 u_gy9q8l, repeat SMP4
+4uowc25y. No observation timeout is treated as a stopped job or used to
+restart an existing driver.
+
+After all VMs close, validate exact generated targets and lsof before deleting
+cycle105 after.img/rootfs.img. Retain accepted106 and107 image/rootfs pairs,
+small logs, hashes and executables. No user input image is removed. No Kernel,
+IPC fastpath, FPU, version, commit or release change is made.
+## Cycle 108: reject lookup/install extraction after a matched comparison
+
+### Hypothesis and implementation examined
+
+Cycle107's generated writable cache acquire became out-of-line, despite the
+unchanged scalar Rust source. Test whether removing that hit-path call
+recovers its repeated2--5% copyout regression. Do not assume that a changed
+symbol proves causation.
+
+A first wrapper/install split is remerged by LLVM and retains the acquire
+calls. Save that small source/ELF as rejected intermediate evidence rather
+than timing an unsubstantiated improvement. A second variant separates pure
+Cache::lookup(&State, owner, generation, page) from effectful install.
+Each existing copy caller composes them with Option::or_else. No compiler
+attributes, new API, guest rights, cache replacement policy or Kernel change
+is introduced. All owner/generation checks, uncertain-grant quarantine,
+release retry and pre-store vector revalidation remain.
+
+The second variant's Release ELF has no separate lookup/acquire symbol;
+scalar copy_from calls install only after a lookup miss. The scalar
+function grows from1004 to1570 bytes, while acquire572 bytes is replaced by
+install435 bytes. Removing calls is verified, but improved runtime cost
+still needs measurement. Do not ship extra code solely for this codegen.
+
+### Verification and all measured controls
+
+Native1330 passed/17 ignored, forced-write-view ASan101 passed/2 ignored,
+x86 Linux Release and FreeBSD/AArch64 checks pass. The candidate's rootfs
+only replaces /bin/alter-linux from107, preserving modes and zero inode
+timestamps. Ext2 checks, complete rootfs-partition comparison, extracted
+Alter comparison and byte-identical Kernel comparison pass before any VM.
+
+Eight sequential normal-device SMP4 boots pass with unchanged fixtures.
+Protocol order is after/before/before/after; process is
+before/after/after/before. Keep all six cold/warm samples per ordinary
+metric, twelve Negoto-create and eight per frame control. No builds, tests
+or hashing overlap a VM. Frozen protocol boots retain the actual mprotect
+recvmsg fault/padding/queue-preservation regression, not only mock checks.
+
+| Category / workload | Before median (ms) | Candidate median (ms) | Elapsed change |
+| --- | ---: | ---: | ---: |
+| protocol/directory-small-64 | 263.8845 | 262.1190 | -0.67% |
+| protocol/directory-large-64 | 70.8535 | 74.0560 | +4.52% |
+| protocol/busybox-ls-8 | 1537.0665 | 1540.8410 | +0.25% |
+| protocol/stat-512 | 47.1215 | 46.6575 | -0.98% |
+| protocol/missing-stat-512 | 42.6905 | 42.5535 | -0.32% |
+| protocol/unix-2048 | 107.8195 | 108.7515 | +0.86% |
+| protocol/unix-recvmsg-2048 | 114.2300 | 111.4385 | -2.44% |
+| protocol/unix-recvmsg-eof-2048 | 50.5070 | 50.1205 | -0.77% |
+| process/linux/getpid-2048 | 40.3625 | 39.7630 | -1.49% |
+| process/linux/getuid-2048 | 39.5555 | 39.8520 | +0.75% |
+| process/linux/copyout-normal | 43.1270 | 43.0925 | -0.08% |
+| process/linux/copyout-128-vmas | 44.5545 | 43.8855 | -1.50% |
+| process/linux/copyout-256-vmas | 46.1565 | 45.5805 | -1.25% |
+| process/linux/fork-8 | 14.0150 | 13.7760 | -1.71% |
+| process/linux/fork-exec-8 | 704.7015 | 705.1825 | +0.07% |
+| process/linux/fork-128-vmas-8 | 14.5475 | 13.2755 | -8.74% |
+| process/linux/fork-256-vmas-8 | 13.2195 | 13.0915 | -0.97% |
+| process/native/alpha-spawn-reap-8/ns | 21.8305 | 21.7550 | -0.35% |
+| process/native/alpha-breakdown/spawn-ns | 2.3955 | 2.3925 | -0.13% |
+| process/native/alpha-breakdown/kill-reap-ns | 0.4265 | 0.3775 | -11.49% |
+| process/native/negoto-create/ns | 6.2715 | 6.5585 | +4.58% |
+| process/native/alpha-xfe/spawn-ns | 5.0865 | 4.9815 | -2.06% |
+| process/native/alpha-xfe/kill-reap-ns | 0.6055 | 0.5945 | -1.82% |
+| process/native/alpha-lifecycle-busybox-8/ns | 25.3195 | 26.7415 | +5.62% |
+| process/native/alpha-lifecycle-busybox-8/prepare-ns | 3.0830 | 3.3235 | +7.80% |
+| process/native/alpha-lifecycle-busybox-8/source-release-ns | 0.3980 | 0.4570 | +14.82% |
+| process/native/alpha-lifecycle-xfe-3/ns | 29.1595 | 30.0880 | +3.18% |
+| process/native/alpha-lifecycle-xfe-3/prepare-ns | 12.4160 | 12.7300 | +2.53% |
+| process/native/alpha-lifecycle-xfe-3/source-release-ns | 0.8665 | 0.9135 | +5.42% |
+| frame_controls/workload-0/algorithm-before-true | 61.6575 | 61.8005 | +0.23% |
+| frame_controls/workload-0/algorithm-before-false | 62.9355 | 61.2605 | -2.66% |
+| frame_controls/workload-1/algorithm-before-true | 62.0725 | 61.4790 | -0.96% |
+| frame_controls/workload-1/algorithm-before-false | 62.0855 | 60.7955 | -2.08% |
+| frame_controls/workload-2/algorithm-before-true | 118.9130 | 118.8520 | -0.05% |
+| frame_controls/workload-2/algorithm-before-false | 119.3120 | 118.1820 | -0.95% |
+
+### Decision and retained state
+
+Reject this candidate. Normal copyout changes only-0.08%;128/256-VMA copyout
+changes-1.50%/-1.25%, and recvmsg-2.44%/EOF-0.77%. This does not establish
+recovery of107's2--5% regression or the5% cycle target. Directory-large
+instead regresses4.52%, Negoto-create4.58%, and native BusyBox lifecycle
+5.62%; retain these contrary controls. The isolated fork128-VMA-8.74%
+result and unchanged Alpha kill/reap-11.49% are not evidence that cache-hit
+extraction improves process creation.
+
+Restore page_window.rs byte-for-byte from the accepted107 snapshot, rebuild
+the restored production source and compare its ELF byte-for-byte to107's
+00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+The restored build comparison passes. No speculative extraction remains in
+production. No additional GUI launch claim or Files timing is made for this
+withdrawn candidate; the full100ms painted/input-ready objective remains
+unmet. Next, measure the real application startup path and strengthen the
+paint/input endpoint rather than repeating this disproven call-cost lead.
+
+### Artifacts and cleanup
+
+Keep /private/tmp/nanami-opt-cycle108.Jh9b2i/comparison-metrics.json with
+all raw samples, results.jsonl and eight boot logs; also native/ASan/cross
+logs, restored-build.log, both candidate sources/ELFs and source snapshot.
+The withdrawn candidate hashes were:
+
+- Image bd9dcf9a0a4d3f89aabb5bb742bdbefdf00e97df8ecdb44e3dc557bcf8caa0e5.
+- Rootfs 56b1a48ebe9e9072cfc6368b2800d63f5e23434c6afff9dc1722dd49dfe6563b.
+- Alter 014be710f39c4350f8152c4ece4c8e3c8781f255b5d2ad993c6e0d5a3e49fa35.
+- Kernel 312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+After the driver exits0 and QEMU is absent, exact-path lsof returns1 with no
+users. Delete only108's generated after.img/rootfs.img, leaving its small
+evidence. The latest accepted working image/rootfs pairs remain106 and107;
+a rejected experiment must not displace the working fallback. Kernel,
+IPC fastpath, FPU, versions, commit and release are unchanged.
+
+## Cycle 109: observe post-ping paint and real keyboard response
+
+### Retained measurement changes
+
+Cycle108 rejected a micro-path extraction after eight matched boots. Move to
+the actual launcher/application path rather than repeating the call-cost lead.
+The existing viewable/nonce-ping endpoints repeatedly captured unfinished
+panels, so they cannot prove the requested fully painted/input-ready startup.
+
+Add opt-in --app-launch-timeline, restricted to Files/ping mode. Preserve the
+original host-ns timestamp starting before mouse press. Also record bounds
+around sending mouse release and the press-to-release hold; do not silently
+shift the old metric by about100ms to improve the number. Capture post-ping
+screenshots requested at200/500/1000/2000ms, recording actual capture start/end
+rather than pretending the requested delay is the observation time. PNG
+completion still requires its trailer, not merely an HMP acknowledgement.
+
+After those snapshots, send real QEMU keyboard input Ctrl-L, Ctrl-A,
+/usr/local and Enter. Xfe's existing help strings identify Ctrl-L as clearing
+its location bar; no client, launcher or application binary is modified.
+Capture the response for inspection. This challenge passes through Honoka,
+evdev and X11, not a synthetic application callback. Sent keys alone do not
+assert success: the diagnostic emits no input/paint PASS. Fixed sleeps and
+image stability are not completion predicates. Background status bytes still
+change after the initial directory list is drawn.
+
+Ten tests compile the runner's actual AST functions/predicate/guard without
+starting a VM. They cover the old complete report predicate, opt-in restriction,
+press/release command bounds, non-click movement, incomplete PNG timeout,
+acknowledgement-before-PNG completion and actual-versus-requested capture times.
+
+### Temporary user-level frame diagnostic and two real observations
+
+To check the proposed frame-notification starvation explanation, temporarily
+aggregate current framebuffer deadline lateness in Alter's existing timer
+handler. Use its already refreshed clock, no new clock RPC/MMIO sample, and
+print once per second instead of per frame. The opt-in diagnostic preserves
+frame scheduling, notifications, guest permissions and timer ownership.
+Native1330 passed/17 ignored with diagnostic enabled; x86 Release builds.
+Packaging changes only Alter, passes ext2/full-partition/extracted-ELF checks,
+and keeps the exact accepted Kernel. No own builds/tests/hashing overlap a VM.
+
+Both normal-device SMP4 observations complete their real Files launch, all
+five diagnostic captures and keyboard challenge. Inspect all twelve PNGs:
+
+| Observation | Press to ping (ms) | Release-command bounds from press (ms) | Ping frame | +200ms frame | Keyboard response |
+| --- | ---: | ---: | --- | --- | --- |
+| Temporary frame diagnostic, gx85njl9 | 2386.349708 | 104.984125--105.019000 | title/stale terminal | toolbar/tree/root listing | /usr/local title, location and seven-item listing |
+| Unchanged production107, 27l_u200 | 2553.244875 | 110.095958--110.121083 | incomplete panels/list | toolbar/tree/root listing | /usr/local title, location and seven-item listing |
+
+Diagnostic200ms actual capture spans2586.491792--2638.764000ms from press;
+normal spans2757.261125--2809.310292ms. These are observations after coarse
+100ms native/200ms host marker polling, not exact first-paint timestamps.
+At500/1000/2000ms, both show the populated root list; its status byte count
+updates later. Both final keyboard captures visibly navigate to /usr/local.
+The input challenge deliberately occurs later, so it proves this run can
+respond, not that input was already usable at the earlier200ms image.
+
+Retain all22 frame buckets and serial ordering in observation-metrics.json.
+The first desktop-start bucket reports162.323ms maximum lateness before
+TINYCORE-APPLICATIONS-READY. Around Xfe fork pid42 through observer ping,
+the buckets report59/53/60 presentations over roughly one second each, with
+maximum lateness36.200333/51.594666/2.632333ms. Later input-era buckets show
+55/57/58/60 counts, maxima41.125666/53.323666/59.644666/4.015ms. There is
+jitter and missed60Hz phases, but no multi-second gap in this trace. It does
+not substantiate complete frame-notification starvation as the primary cause
+of the approximately2.4--2.6s pre-ping startup. Do not infer exclusive CPU
+time, rule out every presentation issue, or compare the two single-run times
+as a performance improvement.
+
+The diagnostic VM itself returns0. Its wrapper initially fails a post-run
+literal '[fb.timing]' check because the real logger pads the field. Inspect
+the saved completed log using whitespace-tolerant matching, record that
+parser failure and run only the still-unexecuted normal case. Do not rerun
+the completed diagnostic or treat an observation error as a live VM failure.
+
+### Restoration, evidence and retention
+
+Remove the temporary clock_events.rs instrumentation byte-for-byte, rebuild
+without NANAMI_FB_TIMING, and compare production Alter exactly to accepted107
+00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+This comparison passes. Only test-runner observation/tests and these notes
+remain from109; no new timing/profiling code remains in production.
+
+Keep /private/tmp/nanami-opt-cycle109.lx9PsT with observation-metrics.json,
+observations.jsonl, both completed timeline logs, analyzer, wrapper/parser
+failure evidence,10 runner tests, native/build/package/restoration logs,
+source snapshots and small diagnostic ELF. Image captures reside in the two
+QEMU log directories named in observations.jsonl. Temporary hashes were:
+
+- Image b30894b241f970bd07343c281bc5a95ca10304b4a6ebb4d6a24f0f298ef69144.
+- Rootfs20b83769adb4909d23802fe0cd97409a6ad38de3c8ef72520e1d758ef3041d3e.
+- Alter21647ceeab5a4dcc0d02002c7cab7320437b50fd7a35c5fc5de707f8a128d0ba.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88,
+  byte-identical, Kernel worktree clean.
+
+After both VMs close, validate exact targets and empty lsof before deleting
+only109's generated diagnostic image/rootfs. Keep working106/107 image/rootfs
+pairs and small evidence; no user input image is removed. No speedup is
+claimed for this measurement cycle, and the full100ms painted/input-ready
+objective remains unmet. Kernel, IPC fastpath, FPU, guest authority, versions,
+commit and release are unchanged. Next analysis must address the real
+pre-ping application startup path; do not add opportunistic presentation
+work to every syscall based on a starvation hypothesis this trace did not prove.
+
+A concrete next cold-start lead is verified in the accepted107 ext2 image:
+/var/cache is empty, /usr/local/var/cache does not exist, and neither
+/root/.cache nor /root/.fontconfig exists. Its packaged fonts.conf explicitly
+lists /var/cache/fontconfig, XDG fontconfig and ~/.fontconfig as cache paths.
+The host has fc-cache2.18.2, but neither target-format compatibility nor cache
+path/mtime validity has been established. Investigate reproducible build-time
+font caches, not a hidden launch-time warmup. Prior103's many file opens/maps
+are only supporting motivation; missing caches alone do not prove startup
+cost or justify shipping host-produced caches without a real matched test.
+
+## Cycle 110: reject pre-generated Fontconfig caches after cold startup comparisons
+
+### Validated candidate, without runtime or Kernel changes
+
+Investigate109's concrete missing-font-cache lead. The accepted107 image has
+no system/home Fontconfig cache. Its target library's FcGetVersion returns
+0x5462 (21602,2.16.2) and its suffix is le64.cache-9. The host's2.18.2 tool
+instead produces cache-12; do not rename or deploy that incompatible format.
+
+Fetch the official2.16.2 source archive, SHA256
+8b9368ae99d9faf2fe26491645fbeebf0272d911cacc5d3e9cf954c2157c151e,
+from https://gitlab.freedesktop.org/fontconfig/fontconfig/-/archive/2.16.2/fontconfig-2.16.2.tar.gz.
+Build only native fc-cache/fc-cat/fc-match with Meson/Ninja, static Fontconfig,
+no installation/docs/tests/fontations. Disable ccache for this temporary
+sandboxed build after its default external cache directory rejects writes.
+Do not modify host font configuration or HOME.
+
+Extract the exact107 Linux root via debugfs; its font directory timestamps
+remain0, matching the image. Run the matching tool with that sysroot, system
+fonts only, target fonts.conf/path and the same SOURCE_DATE_EPOCH. The
+[official sysroot API](https://www.freedesktop.org/software/fontconfig/fontconfig-devel/fcconfigsetsysroot.html)
+supports host-side target cache generation with target-relative paths.
+Four cache-9 files describe0/48/1/48 fonts (97 total); their combined size is
+165968 bytes, plus a200-byte CACHEDIR.TAG. Re-generating them gives exactly
+the same four blobs. The first comparison directory deliberately contains
+only those four files; its repeat diff's sole extra CACHEDIR.TAG is not a
+cache-byte mismatch.
+
+An actual target-library probe calls FcInitLoadConfig/FcDirCacheLoad and
+checks each cache directory, font count and /var/cache/fontconfig path. This
+loader maps an existing cache; it does not rebuild the font database. The
+initial post-desktop probe is insufficient by itself, because earlier GUI
+clients might already have rebuilt caches. Therefore also run an independent
+derived diagnostic image with the probe at the beginning of nanami-desktop,
+before Xfbdev/FLWM, with an explicit library path. That pre-GUI probe passes
+97fonts/4dirs. It is not part of either timed image or a hidden warmup.
+
+The first post-desktop observer times out because HMP sendkey '.' drops the
+period in the result filename: timeout.png visibly shows pointer-probelog,
+not pointer-probe.log. Correct '.' to 'dot' in the actual runner, add its AST
+regression test, confirm the old VM is terminal, and run the corrected probe.
+Do not mislabel this input-harness failure as cache incompatibility, restart a
+still-live VM, or add an unneeded libc-flush change. Both corrected probes
+return0. Eleven runner tests pass; that one-character input correction and
+its test are the only retained code changes from this cycle.
+
+### Ordinary comparisons and all samples
+
+The normal candidate starts from107 and adds only four cache blobs, their
+directory and CACHEDIR.TAG. Remove the temporary probe before timing and
+confirm it is absent. Do not change applications, launcher, fixture binaries,
+Alpha, Alter, Honoka, timer, Kernel, guest rights or workload flags. Ext2
+checks, full disk-partition comparison, cache extraction comparisons and
+exact Alter/Kernel comparisons pass before any VM. No own builds/tests/hash
+jobs overlap a VM; use fresh normal-device SMP4 boots sequentially.
+
+Files order is before/after/after/before. All four runs complete nonce ping,
+five post-ping/input captures and actual keyboard navigation:
+
+| Run | Press-to-ping ns | Ping roundtrip ns | Log directory suffix |
+| --- | ---: | ---: | --- |
+| before1 | 2374313083 | 79065000 | zsse6cqc |
+| after1 | 2368162084 | 80335000 | o9f3yua1 |
+| after2 | 2376404500 | 95039000 | fwcsnnzo |
+| before2 | 2379652625 | 75865000 | l6c5b81t |
+
+The mean press-to-ping change is2376.982854ms to2372.283292ms (-0.1977%),
+effectively flat at the100ms native/200ms host marker polling resolution.
+Observer ping instead changes77.465ms to87.687ms (+13.20%); retain that
+contrary result and do not interpret it as exclusive client CPU cost.
+
+Inspect12 key PNGs of the24 saved: ping, +200ms and keyboard challenge for
+each run. All ping images are incomplete; all four+200ms images have the
+toolbar/tree/populated root listing, and all keyboard images visibly move to
+/usr/local with its seven-item listing. Cached typography is visually normal.
+The other twelve later snapshots remain raw evidence, not a claimed full
+visual review. This remains a diagnostic observation, not an automatic
+fully-painted/input-ready gate or proof of100ms startup.
+
+Because Fontconfig may first be used during desktop startup, also measure
+ordinary OCI create/start through the terminal's X11 connection, in the
+opposite after/before/before/after order. The unchanged frozen fixture waits
+for fresh 'ready' content, performs kill/delete cleanup and repeats three
+sessions in each VM. Separate first/cold samples from later/warm samples:
+
+| Run | Cold sample0 ns | Warm sample1 ns | Warm sample2 ns | Log suffix |
+| --- | ---: | ---: | ---: | --- |
+| after1 | 3700239000 | 4176770000 | 4182294000 | a_nw1xdx |
+| before1 | 3693125000 | 4083525000 | 4290068000 | lx5k4c0y |
+| before2 | 3587024000 | 4075521000 | 4305179000 | ggymhwgp |
+| after2 | 3793177000 | 4175809000 | 4295085000 | ejajbjjj |
+
+Cold means3640.0745ms before/3746.7080ms after (+2.93%); warm means
+4188.57325ms/4207.48950ms (+0.45%). Pooled means4005.740333ms/4053.895667ms
+are+1.20%, but do not use pooling to hide the cold/warm distinction. Keep
+every sample/outlier. These startup endpoints are X11-client connection,
+not completed Files painting. All eight ordinary boots pass; the three
+compatibility-probe attempts comprise two successful runs and the one
+explicit input-harness timeout above, not three successes.
+
+### Decision, artifacts and retention
+
+Reject the cache integration: valid, reproducible prebuilt caches do not
+produce the requested5% gain in either measured startup path. Missing cache
+files alone were not proof of the bottleneck. Do not add a pinned native
+toolchain/build dependency merely because its output is valid. No new cache
+generator remains in thirdparty/tinycore or production software; core code
+and Kernel stay unchanged. The full100ms goal remains unmet and active.
+
+Keep /private/tmp/nanami-opt-cycle110.AtjnKg (about4.3MiB after cleanup): both
+raw comparison JSONL files, comparison-metrics.json/all samples, all logs,
+analyzer, generation/repeat evidence, probe C/ELF, target library/config,
+native tool executables, source archive/checksum, four small cache blobs and
+packaging scripts. Image manifests record:
+
+- Cache-only image0a2d5594417427bf7e67f9fe680576ad8238dc07edc902fd31a9b5a76f5939f4.
+- Cache-only rootfs6a7b759709851d64c0702afd053f4bc170482356004238bf0568ca192b76f9c6.
+- Pre-GUI diagnostic imagefaf608b4530a86e6376a0c1a5d7e29157131b598094727d44ed09bee734307b2.
+- Pre-GUI diagnostic rootfs74037f18851fc518005d2d9d027122c35559c9fba3a1533c03fcf42cb7379934.
+- Unchanged Alter00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+- Unchanged Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+After all VM handles become terminal, confirm no QEMU/generator process and
+empty exact-path lsof. Delete only the four110 candidate/diagnostic image
+files, plus the validated task-owned97MiB extracted root,2.9MiB tool build
+and4.1MiB extracted source directories after preserving small evidence.
+Working106/107 image/rootfs pairs remain; no user input image is removed.
+Deleted generated material is reproducible from the retained archive, cache
+blobs and107 image. No version, commit or release change is made.
+
+## Cycle 111: check inline fault context and event-tail cost
+
+Cycle110 rejects a valid Fontconfig cache because it does not improve either
+measured startup path. Inspect the syscall event boundary next, rather than
+repeat cache admission, lookup inlining, or PID-index experiments already
+rejected in earlier cycles. The full 100ms painted/input-ready target is still
+unmet; this cycle is diagnostic progress, not a performance improvement.
+
+Kernel source sends INVALID_KERNEL_CALL context starting at message index7,
+with length7+23 on x86_64. Runtime decoding subtracts7 and retains23 words;
+Alter's fast-context comparison also expects23. There is no static length
+mismatch. Confirm the branch actually used instead of inferring a runtime
+fallback from the mere presence of its compatibility code.
+
+Temporarily add bounded opt-in counters to Alter only. Begin collection at the
+first Xfe syscall context, include other Alter events until the test observer's
+nonce-validated ping, and flush once afterward. The observer uses the existing
+ordinary getpid diagnostic argument from cycle103; getpid's result, app and
+launcher bytes remain unchanged. No per-event log, clock RPC, Kernel edit,
+guest permission, MMIO, FPU, or scheduling change is introduced. Per-PID local
+counter spans cover context decoding, dispatch, the event handler, readiness
+propagation and signal pumping. Context/dispatch are nested in the handler;
+never add them to that containing span or call the totals exclusive CPU time.
+
+Build Release diagnostic Alter, replace only it and the diagnostic observer
+in a private clone of accepted107, and verify ext2, full rootfs partition,
+extracted Alter/observer and unchanged Kernel bytes. Native tests pass1330,
+17 ignored. Run one normal-device SMP4 Files timeline; driver97857 exits0,
+serial directory nanami-negoto-qemu-ut4oicq2. No own build/test/hash job or
+second VM overlaps. This is not an ordinary before/after speed comparison.
+
+Observed first-Xfe-context-to-observer-ping interval:1,944,199,000 local ticks.
+Keep every participating PID, including non-fault request/notification row0:
+
+| PID | Events | Inline context | Legacy fallback | Context ticks | Dispatch ticks | Handler ticks | Readiness ticks | Signal ticks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+|0|218|0|0|0|0|25,261,000|252,000|142,000|
+|33|2,530|2,530|0|1,642,000|49,024,000|58,530,000|15,160,000|2,239,000|
+|36|355|355|0|227,000|8,048,000|9,215,000|346,000|130,000|
+|38|29|29|0|10,000|1,078,000|1,154,000|32,000|7,000|
+|41|483|483|0|191,000|5,993,000|7,209,000|668,000|113,000|
+|42|7,323|7,323|0|4,252,000|998,767,000|1,024,933,000|5,876,000|3,573,000|
+
+All10,720 observed syscall faults use inline context; fallback count is zero.
+This does not remove legitimate PCB register operations when waking parked
+waits, handling exec, or delivering signals. Readiness plus signal event tails
+total28,538,000 ticks, about1.47% of the interval: they cannot explain the
+seconds-long launch in this trace. Do not rewrite their semantics or add a
+new pending-task index on this evidence.
+
+All dispatch spans total1,062,910,000 ticks (about54.67%). Handler plus event
+tails total1,154,840,000 (about59.40%). The remainder789,359,000 ticks includes
+guest execution, X11 work, Kernel transport, scheduler time and diagnostic
+overhead; it is **not** an estimate of IPC cost. The first handler's prefix
+starts just before the focus activation, and samples include descheduling.
+No new counter calibration makes these ticks nanoseconds. The boundary also
+excludes earlier launcher/fork/exec and is not completed paint/input readiness.
+
+Host press-to-ping is2,566,492,083ns, with release-command bounds
+110,068,208..110,092,042ns. Preserve that diagnostic observation without
+comparing it as a normal optimized candidate. Inspect three of six PNGs:
+ping still contains stale terminal/menu pixels and an incomplete listing;
+the actual +200ms capture has the root menu/tree/list populated; the later
+real keyboard challenge visibly navigates title/location/list to /usr/local
+with7items. The three later500/1000/2000ms PNGs are retained but uninspected.
+This is neither a100ms painted/input assertion nor a newly defined ready gate.
+
+Archive all three diagnostic source files, then restore main.rs, fault.rs
+and syscall_profile.rs byte-for-byte from pre-cycle snapshots. Rebuild normal
+Alter and compare exactly with accepted107's
+00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+No diagnostic code ships and no version/commit/release change is made. Kernel
+worktree stays clean and its extracted312d579b bytes are unchanged.
+
+Small evidence remains in /private/tmp/nanami-opt-cycle111.nr3b7U: raw serial
+reference, event-profile.json, all PID totals and analyzer, source snapshots,
+diagnostic Alter/observer/Kernel, packaging/full-partition checks, native and
+build logs, driver report and image manifests. Diagnostic hashes:
+
+- Image356f90ceb736ca2472e7d528dd4dfcde84439ffb7a4fe4255268448cf4568cc8.
+- Rootfs1b73170cf7dc2de23d6340179f2af32d3e7f490874e75a5cfda6cb2fb5f19100.
+- Alterd2a2c657bfa9d44e371915a01671b53dc2171b9c1db47c23773fc3c21afb8711.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+After terminal VM, empty QEMU process checks and exact-path lsof, delete this
+diagnostic after.img/rootfs.img. Keep accepted106/107 working pairs, not a
+diagnostic pair in place of the last working fallback. No user input image is
+removed; the deleted clone is reconstructable from107 and the saved ELFs.
+
+## Cycle 112: refresh the current Xfe workload and audit snapshot lifetime
+
+Cycle111 makes diagnostic progress: actual syscall context fallbacks are zero
+and event tails are only1.47% of its measured interval. Do not add another
+PID index, pending-task index or fault-context transport to solve that trace.
+The existing detailed handler profile is from103, before accepted fresh-clock
+and recvmsg writeback improvements. Repeat that profile on current107 instead
+of treating the old cost distribution as current evidence.
+
+Reapply the same opt-in bounded Xfe syscall and eight mmap-stage counters,
+preserving current invalidate_views calls rather than restoring old VM code.
+Use the existing diagnostic observer getpid argument after a nonce-validated
+ping; no launcher, Xfe, X server, library, Kernel or scheduling change. Native
+tests pass1330/17 ignored. Package only diagnostic Alter and observer into a
+private107 clone. ext2, complete rootfs partition, both extracted executables
+and unchanged Kernel comparisons pass before a single normal-device SMP4
+Files timeline. No own build/test/hash job or other VM overlaps it.
+
+The underlying QEMU runner exits0 and completes all timeline/input actions.
+Its wrapper then exits1 because a reused postcondition still searches for
+event.profile instead of launch.profile. Preserve that harness error, correct
+the label, and parse the already completed log independently. Do **not** rerun
+the completed VM or silently label the failed wrapper successful. The independent
+parser requires one header,51 distinct syscall rows, all eight stages, exactly
+one complete marker and no checked fatal/spawn/SHM/unsupported-syscall error.
+All those assertions pass. Serial directory: nanami-negoto-qemu-hy5q3t25.
+
+Observed PID42 interval is1,841,571,000 Alter-local elapsed counter ticks from
+its first syscall to observer ping. Its7,320 calls total936,423,000 handler
+ticks. These spans include descheduling/service waits, not exclusive CPU time
+or newly calibrated nanoseconds; the interval excludes earlier launcher/fork/exec
+and is not completed painting/input readiness.
+
+| Syscall | Calls | Handler ticks |
+| --- | ---: | ---: |
+| read |497|103,834,000|
+| write |1,228|154,987,000|
+| poll |600|9,618,000|
+| mmap |151|384,900,000|
+| recvmsg |1,273|17,073,000|
+| time |658|3,468,000|
+| clock_gettime |823|6,574,000|
+| openat |593|99,423,000|
+| newfstatat |372|57,726,000|
+
+All51 rows remain in launch-profile.json, not just this table. Clock calls
+are still20.23% of the syscall count, but their combined10,042,000 ticks are
+only0.55% of this interval. Do not prioritize a new clock ABI from the old
+128,652,000-tick103 profile. recvmsg's observed span also falls from the older
+64,427,000 to17,073,000 with similar call counts. These separate diagnostic
+launches are not a matched normal-speed comparison; use104/107's existing
+ordinary comparisons for their accepted performance claims.
+
+| File-mmap stage | Calls | Ticks | Logical bytes |
+| --- | ---: | ---: | ---: |
+| file-stat |134|5,291,000|33,043,740|
+| reserve |131|27,419,000|32,976,896|
+| preflight |131|308,000|32,976,896|
+| source |131|51,112,000|30,646,292|
+| cached-init |123|87,991,000|19,095,148|
+| stream-init |8|125,015,000|11,551,144|
+| hardware-protect |131|51,361,000|32,976,896|
+| metadata-commit |131|1,444,000|32,976,896|
+
+mmap is41.10% of captured dispatch ticks (correcting the preliminary38%
+commentary estimate), and20.90% of the observed interval. Cached plus streamed
+initialization is213,006,000 ticks,11.57% of the interval. File-stat includes
+shared delegation; other stages cover private construction. Do not add stages
+to their outer syscall span or infer memory bandwidth from elapsed copy time.
+Fresh counts confirm that page construction, not tiny metadata commits or
+clock lookups, is the stronger remaining user-level lead. They establish no
+new5% gain or10--100x opportunity.
+
+### Concrete ownership audit for the next copy-reduction candidate
+
+Re-read image_cache.rs, loader.rs, Alpha memory_pages.rs, memory_private.rs,
+mapping_release.rs and shared_memory.rs before proposing aliases:
+
+- Current file snapshots are immutable only until eviction. load_file_snapshot
+  deliberately reuses a cache entry's allocation and overwrites it on refill.
+  Mapping those buffers into a guest unchanged would corrupt an older mapping
+  when the cache replaces its entry. Version keys do not fix that lifetime bug.
+- Current private RAM release defers physical ownership rather than immediately
+  reclaiming it. Replacing every eviction with another request_heap allocation
+  would reintroduce the retention problem the in-place policy avoids. Do not
+  add fresh allocations per miss without a reclamation/lifetime design.
+- Existing request_memory_create allocates owned reclaimable RAM. Its matching
+  shared-reservation release unmaps/removes this copy, drops the physical
+  reference, and frees backing only for the final reference. This is an
+  existing user-level ownership mechanism, not proof that snapshots are already
+  immutable or that a new private-file mapping is safe.
+- Existing readonly-fork sharing supplies per-page physical accounting and
+  write-detachment machinery, but it requires sealed source and destination
+  processes with the same reaper. Alter's native cache owner does **not** meet
+  that contract. Do not weaken those checks or route a native snapshot through
+  that fork operation. A separate explicit owner-to-supervised-guest contract
+  would need its own validation and failure rollback.
+- A viable candidate must retire, not overwrite, a published snapshot; keep
+  the48-entry/16MiB resident-cache bounds; preserve FD version/size freshness,
+  EOF zeros, MAP_FIXED replacement, private writes/mprotect, VM peers, source
+  retirement before guest teardown, and ambiguous MAP failure ownership. No
+  writable file-cache alias, permanently pinned/non-evictable cache policy or
+  new guest native capability is acceptable.
+
+Next prototype reclaimable immutable snapshot storage using the existing RAM
+object lifetime, then evaluate explicit readonly private backing reuse with the
+existing detachment contract. This is a candidate to implement and measure,
+not an adopted API or a claimed speedup. The4MiB admission experiment was
+cycle40, not46; do not repeat that rejected capacity adjustment or102's
+byte-compare/remap candidate as if either were a new optimization.
+
+### Restoration, GUI evidence and retention
+
+Host press-to-ping is2,385,067,708ns, release-command bounds
+106,665,625..106,715,542ns and observer ping123,071,000ns. Inspect three of
+six PNGs: ping shows the Xfe title over stale terminal content, +200ms has the
+root toolbar/tree/list populated, and later keyboard input visibly navigates
+title/location/list to /usr/local with7items. Other500/1000/2000ms frames remain
+uninspected. No paint/input completion claim follows from the ping marker.
+
+Archive diagnostic fault.rs, syscall_profile.rs and vm.rs, then restore all
+three byte-for-byte from current pre-cycle snapshots. Normal Release Alter
+rebuilds exactly to107's00c904b4ca83e6c78b7003186d75c82b2c8eaca0c5cad5be11a1a312ca9a571e.
+The A9N worktree stays clean; no profiler, production behavior, Kernel, version,
+commit or release change ships in this cycle. The full100ms goal remains active.
+
+Small evidence is /private/tmp/nanami-opt-cycle112.Mn5o1l: raw log reference,
+all51 syscall rows/eight stages in launch-profile.json, parser, source snapshots,
+native/build/package logs, diagnostic executables and image manifests:
+
+- Image7cece2b1bfd1f929728a9d8c91efa976bc8801c48a8a524a6b6f0f11fe6620e3.
+- Rootfs67f5dc3088ec6d6c8daf60d61c6cdaab6d418ba4750341e461f40c602a707811.
+- Alter7941c7a69cac157e07213f39c55cace0cc4ac36493234a1d3d383351cbae899a.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+After the actual VM is terminal, no QEMU process remains and exact-path lsof
+is empty, delete only this diagnostic after.img/rootfs.img. Retain working106
+and107 pairs plus small evidence; no user input image is removed. The deleted
+diagnostic clone is reproducible from107 and its saved Alter/observer ELFs.
+
+## Cycle 113: prototype reclaimable read-only snapshot storage
+
+This is a prerequisite checkpoint, not an accepted runtime optimization.
+`NANAMI_IMMUTABLE_SNAPSHOTS=1` selects the experimental policy at build time;
+the ordinary in-place heap policy remains the default. No private guest alias,
+copy elision, new Alpha operation, Kernel change or performance gain is claimed.
+The100ms fully painted/input-responsive launch target remains unmet.
+
+### Storage and failure ownership
+
+Cacheable files use existing owned, zeroed RAM objects with page-rounded
+capacity. The48-entry/16MiB retained-owner bounds and live-main-image exclusion
+while loading PT_INTERP remain. Uncached execution/interpreter scratch keeps
+its existing reusable heap policy. Recheck file version and size after I/O,
+then apply read-only protection before publishing a valid cache identity.
+EOF padding stays zero. Native Alter remains a trusted owner with its existing
+root capabilities; this is not a security seal against that owner's remapping.
+
+Eviction invalidates identity/size/parsed metadata before fallible release.
+Only confirmed release removes the recorded allocation; failed or partially
+completed retirement keeps its exact address/capacity charged to the cache.
+A new RAM allocation is recorded with identity zero before fallible reads or
+protection. Failed fills/protection are never served as hits and retain an
+owner for later retirement. A source VA may be reused with different physical
+backing; a future independent alias must retain the old physical ownership.
+
+### Tests and actual boots
+
+- Default and experimental native suites each pass1338 tests, with17 ignored.
+- Experimental AddressSanitizer cache/core-process suites pass175, with2 ignored.
+- Final x86 FreeBSD and AArch64 Linux Release checks pass.
+- Four sequential normal-device QEMU boots return0: SMP4 process/cache freshness,
+  SMP4 three-start same-ID reuse, and two-session GUI workflows on SMP4/SMP1.
+  GUI markers cover application/input/close/restart behavior, not a measured
+  fully painted launch deadline; this cycle's screenshots were not inspected.
+- Startup samples are3,605,726,000 /4,083,126,000 /4,163,053,000ns without a
+  matched control. They establish no speedup.
+
+Cache regressions exercise retirement, zero EOF suffixes, failed release,
+failed creation/fill/protection, budget accounting, metadata freshness and
+PT_INTERP exclusion. Lifecycle tests model idempotent removal of empty Kernel
+slots, confirmed-prefix cleanup/retry, independent peer references and source
+VA reuse with distinct backing. These mocks do not prove hardware TLB behavior.
+The first failed cache test assumed the invalid victim would be selected before
+empty slots; correct the test's LRU setup, not production replacement policy.
+Retain that failed log alongside the passing final runs.
+
+### Required ownership connection before copy elision
+
+Existing physical reference keys include both base page and page count.
+MemoryCreate records a whole extent, whereas private fork/detachment uses
+single-page references. Registering page aliases beside a whole-extent owner
+would not protect those pages when the extent is released. This is a constraint
+on the next candidate, not an implemented alias path in this checkpoint.
+
+The next design is lazy canonicalization of a uniquely owned RAM extent into
+single-page owner records before its first private alias, without freeing any
+physical memory. Reject non-unique whole extents. Shared-reservation release
+must distinguish existing whole extents from a complete canonical page set,
+validate ownership before destructive operations, and free only final page
+references. Keep the one-page lease-release path unchanged. The physical
+allocator already supports interior range release; no Kernel change is needed.
+
+A separate checked native-owner-to-sealed-supervised-guest alias operation
+must preserve the existing readonly-fork restrictions, source immutability,
+normal-RAM authority, destination emptiness, VM-wide write detachment and
+rollback of possibly installed mappings. Test source eviction before guest
+teardown, mixed page lifetimes, VA reuse, fork/mprotect/privileged writes and
+failure prefixes before connecting it to file mappings. Do not copy over
+ambiguous partially installed aliases as an error fallback.
+
+### Evidence and retention
+
+Small artifacts remain in /private/tmp/nanami-opt-cycle113.JioWpM, including
+source-before/candidate snapshots, executables, all test/build/package logs,
+functional-results.jsonl and matching pre/post-boot artifact manifests:
+
+- Imagea8e30d0e5584f93307409d904da5a9dad3759d04aad437ae22ee295935de4f07.
+- Rootfsc0bd00ae9a8c985e4f26071dd32629cedcf95ccad171bb29b152622f36b466fe.
+- Alterc98a98b01d2dbfe5d6430bf5d96c5c8e1c7205c5fd113bf5a16eca2b19bac09e.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+The default prototype rebuild is6e7094e3a23c5e7bf00828055caa2072a9d20a243e00fcdaa4fc024b12f2eb5e,
+not byte-identical to accepted107. The default policy is retained, but that
+alone is not evidence of an unchanged binary or unchanged performance. The
+accepted107 disk image is not replaced. A9N's worktree remains clean.
+
+After all four VMs are terminal and exact-path lsof/process checks show no
+users, delete113's validation after.img/rootfs.img. Keep only accepted106/107
+working pairs and the small evidence. Deleted images are reproducible from
+the accepted baseline and retained executable; no exact reclaimed-space claim
+is made because APFS clones can share blocks. No version/commit/release change
+is made at this experimental checkpoint.
+
+## Cycle 114: connect private file snapshot aliases and isolate their cost
+
+Implement the complete experimental copy-elision connection rather than only
+the113 storage prerequisite. It remains behind the default-off
+`NANAMI_IMMUTABLE_SNAPSHOTS=1` build switch. No default performance promotion,
+Kernel change, version bump, commit or release is made. The full100ms painted,
+initialized, input-responsive launch goal is not achieved.
+
+### Implementation and final ownership model
+
+- Add the user-level PRIVATE_SNAPSHOT request0x1034, documented in message.md:
+  a trusted unsealed native owner maps its read-only normal RAM into a sealed
+  supervised task at an empty VA, initially R/RX. No new guest native capability,
+  Kernel ABI, IPC fastpath lock or device-attribute policy is introduced.
+- A uniquely owned whole RAM extent is converted into page references before
+  its first alias, without freeing physical memory. Reserve metadata before
+  removing the extent reference; existing aliases or invalid ownership reject
+  conversion. Request-local page handles are collected after this rewrite.
+- RAM reservations record Extent/Page reference units explicitly. The unit
+  survives failed UNMAP/capability cleanup. This internal metadata is not a
+  Kernel capability-slot or wire-record expansion. Ordinary extent release,
+  including one-page views, does not infer the unit by searching allocations.
+- Source snapshots are never overwritten after publication in this mode.
+  Eviction drops the source owner while guest references keep pages alive;
+  reused source VAs receive different backing. Existing private-write DETACH,
+  permission checks and VM quiescence preserve writes/mprotect/fork isolation.
+- Register possible destination ownership before fallible capability copying,
+  and record the possible leaf before MAP. Never fallback-copy over a failed
+  alias prefix. Existing private release/root teardown owns that prefix.
+- Only supported cached, aligned private R/RX file ranges use this connection.
+  Writable/unsupported/uncached mappings keep initialized copies. MAP_SHARED
+  retains its existing path. The48-entry/16MiB cache bounds and no-large-prefetch
+  policy remain; immutable buffers use exact page-rounded capacity rather than
+  legacy geometric growth. The native owner remains trusted, not sandboxed
+  against remapping with its own root authority.
+
+V1 inferred the source release unit from an extra extent lookup. V2 replaces
+that inference with the explicit unit. Final V3 additionally rejects partial
+or crossing RAM-object releases before touching mappings: page accounting must
+not accidentally route a subrange through private-page retirement and break a
+still-live RAM reservation. Move the pre-existing private-extent lookup below
+the exact shared-object return; shared release never used that lookup's result.
+This removes redundant work from the ordinary path as well.
+
+Tests include unique2/512-page conversion, rejection without ownership changes,
+source-first retirement, mixed held/unheld pages, source-VA reuse, cleanup retry,
+EOF bytes, fork/private writes, before/after-MAP failures, explicit-unit lifetime,
+and partial/cross-object release rejection before any UNMAP. Extend the real
+guest file-mapping fixture to force52 cache replacements while old mappings
+remain live, then fork and grant write access privately. Frame/PTE mocks are
+not hardware-TLB proofs; real x86 boots exercise the production connection.
+
+Final enabled and default native suites each pass1357 tests/17 ignored;
+selected ASan passes191/2 ignored. x86 FreeBSD, AArch64 Linux and final Alpha
+AArch64 checks pass. All34 sequential QEMU boots across V1/V2/V3 return0,
+including actual file/cache tests on SMP1/SMP4 and repeated GUI/input/Exit/restart
+sessions. No own build/test/hash job overlaps a live VM. The final V3 includes
+an SMP1 file test and two complete GUI sessions in one SMP4 boot.
+
+### Actual Files comparisons, including contrary results
+
+Compare the same applications/fixtures in fresh normal-device four-core boots.
+The control is107 with the same updated file-mapping test installed; only the
+candidate changes Alpha/init/Alter. Each table row has two boots per group in
+opposing before/after order. Keep every raw result in launch-metrics.json:
+
+| Variant / host observation | Before mean ms | After mean ms | Elapsed change |
+| --- | ---: | ---: | ---: |
+| V1, unchanged200ms poll |2383.037|2388.221|+0.22%|
+| V1,10ms poll, first cohort |2408.701|2246.733|-6.72%|
+| V1,10ms poll, reversed cohort |2387.382|2284.444|-4.31%|
+| V2,10ms poll |2412.332|2277.821|-5.58%|
+| V3 final,10ms poll |2297.242|2279.072|-0.79%|
+
+The fine observer is a private copy of the unchanged runner with only its repo
+path fixed, host wait polling shortened, and the printed poll interval corrected.
+The application and native X11 observer are not modified in those comparisons.
+Do not combine the200ms and10ms cohorts, assign V1/V2 results to V3, or claim a
+stable5% launch gain from the favorable early rows. The prior commentary's
+rounded V1 after mean2.383s was incorrect; the exact coarse result is2.388s.
+All gates remain viewability/nonce-validated event-loop evidence, not completion
+of painting or input readiness. The normal V1 ping image still has unfinished
+panels. Diagnostic ping is also partial; the inspected +200ms frame is populated,
+and later real keyboard input visibly navigates to /usr/local with7items.
+
+One process cohort for each variant retains all21 metrics and raw samples in
+native-controls-all.json. Fork/exec medians fall28.28%/26.91%/26.97% across the
+three variants. Final Alpha spawn/reap falls5.72%, Negoto creation11.81%, and
+ordinary copyout is effectively flat (-0.13%). Contrary final results include
+fork11.68% slower,128-VMA fork7.47% slower,256-VMA fork5.97% slower and Alpha
+Xfe spawn4.56% slower. Do not describe the system as uniformly faster. These
+single process cohorts do not establish small percentage differences precisely.
+
+### Confirm the alias path actually runs, then separate the mechanisms
+
+One temporary V1 Xfe diagnostic captures7323 syscalls and878,782,000 handler
+ticks in a1,777,729,000-tick first-Xfe-syscall-to-observer-ping interval. All51
+rows and nine mmap stages are in launch-profile.json. They are local elapsed
+spans, not exclusive CPU fractions or normal timing samples. In particular:
+
+- 70 successful snapshot aliases cover13,096,796 logical bytes (about12.5MiB).
+- 53 copied cached mappings cover5,998,352 bytes. Together they match112's123
+  cached mappings/19,095,148 bytes; a failure to select the new path is not the
+  explanation for the flat final launch result.
+- The alias stage spans30,092,000 ticks, copied cached initialization36,894,000,
+  streamed initialization111,666,000 and source preparation69,259,000. Outer
+  mmap totals332,807,000 ticks. Do not add nested stages to that outer span.
+- Compared with112's separate diagnostic, mmap construction/protection is lower
+  but source preparation is higher. This is not a matched normal-speed proof.
+
+Restore fault.rs, syscall_profile.rs and vm.rs exactly from their current
+pre-probe snapshots after saving diagnostics. The normal rebuilt Alter ELF
+differs from the timed ELF in non-load metadata, but its extracted loadable
+binary and complete program-header output compare byte-identically. Retain
+both full hashes; do not claim full-ELF identity.
+
+Code inspection gives a more targeted next experiment. memory_copy.rs keys
+permanent Alpha pool Frames under POOL_OWNER=0, but private child descriptors
+under their process owner. invalidate_process_copy_mappings, called when views
+and buffers are retired, flushes that owner's temporary aliases. MemoryCreate
+records pool Frames, whereas the old heap-backed image cache records private
+child descriptors. This is an inference for why fork/exec improves even when
+Files does not, not an isolated causal measurement. Next compare a reusable
+RAM-backed cache with aliasing disabled against the old heap-backed cache;
+avoid adding permanent protocol/ownership complexity without an end-to-end gain.
+
+### Artifacts and two-generation retention
+
+Evidence is /private/tmp/nanami-opt-cycle114.7Lamat: every raw launch/process
+sample, analyzers/JSON, source-before/V1/V2/final snapshots, all logs, small ELFs,
+load-image/header comparison outputs and pre/post-VM hashes. Final V3 identities:
+
+- Image889427750c4c163de4c8eacabfd98edda709ac35b2ed87378865341d05d2c53b.
+- Rootfscf0e717bfe10fb98b3f73ea16dae4d22570d51e65c9a79cafa8101ee606253ce.
+- Timed Alter38b2b8112b9029f15362d5f93bf253f63bfe892d6fc75d5b11f3b64f503882eb.
+- Final Alphabe6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73.
+- Final initc737b51ba0ae52e10d40c624ef14e3b65f8ff89bbcc2aee7fd2fc29cae56ac01.
+- Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+
+After terminal VM status, full rootfs-partition/Kernel checks and exact-path
+process/lsof checks, keep this final validated experimental image/rootfs plus
+107's accepted fallback. Remove106's two-generations-old image/rootfs and all
+114 superseded V1/V2, control and diagnostic images/rootfs. Rename final v3.img
+to after.img only after removing the superseded V1 file. This is retention of a
+validated candidate, not promotion to the default accepted optimization. Keep
+small artifacts sufficient to recreate each deleted comparison. APFS clones
+share blocks, so no exact free-space increase is inferred from logical sizes.
+## Cycle 115: isolate reusable RAM cache backing without guest aliases
+
+### Candidate and controlled comparison
+
+Test a smaller alternative to114's complete readonly alias path: replace only
+cache-admitted file buffers' request_heap storage with existing owned,
+reclaimable request_memory_create RAM. Preserve48 entries,16MiB total,2MiB
+per-file admission, geometric growth, FD identity/size rechecks and PT_INTERP's
+live-main exclusion. Valid sufficiently large victims refill in place; guests
+still receive ordinary initialized private copies, including explicit EOF zeros.
+There is no source readonly protection, snapshot-alias request, guest capability
+or Kernel change in this candidate's default build.
+
+Invalidate before any fallible retirement. Failed/partial retirement retains the
+exact owner and consumes the existing budget; do not allocate a second buffer.
+Treat identity-zero entries as potentially partially unmapped, and retire them
+before reuse. Record a new RAM owner before fallible I/O. Add regressions for
+failed growth retirement and creation after successful retirement; retain
+versioning, eviction, byte-budget, interpreter, padding and failed-fill coverage.
+
+Both comparison images use114's same final V3 Alpha/init and updated C fixture.
+Only Alter differs: default-off legacy-heap control953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e
+versus RAM-only candidatef821f692864494c38594ee495ee0a76b6cc86437aa48705f770f714917db67bc.
+The114 alias flag is unset in both. This isolates cache backing without
+attributing Alpha changes or full alias behavior to it. Kernel remains
+312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88;
+init is c737b51ba0ae52e10d40c624ef14e3b65f8ff89bbcc2aee7fd2fc29cae56ac01.
+Package with debugfs/e2fsck, compare the full rootfs partition, extract both
+Alter images and compare Kernel/init byte-for-byte before boot.
+
+### All ordinary controls and actual Files launches
+
+Ten sequential actual QEMU boots pass, normal devices and no concurrent own
+build/test/hash work. Use one VM at a time. The first process comparison is
+before→after; repeat after→before in fresh boots. Each process metric has three
+raw samples per group, except Negoto create with six. Keep all21 metrics and
+both cohorts in metrics.json; small differences are not precise estimates.
+Elapsed median changes below are negative for faster and positive for slower.
+
+| Metric | First before→after | Reversed after→before |
+| --- | ---: | ---: |
+| linux/getpid-2048 | -2.91% | 3.70% |
+| linux/getuid-2048 | -0.29% | 0.61% |
+| linux/copyout-normal | -0.17% | -0.75% |
+| linux/copyout-128-vmas | -0.27% | -1.13% |
+| linux/copyout-256-vmas | 1.84% | -0.12% |
+| linux/fork-8 | 12.32% | -4.12% |
+| linux/fork-exec-8 | -5.68% | -5.60% |
+| linux/fork-128-vmas-8 | -2.61% | -10.71% |
+| linux/fork-256-vmas-8 | -1.73% | 6.36% |
+| native/alpha-spawn-reap-8/ns | -1.08% | -33.54% |
+| native/alpha-breakdown/spawn-ns | 1.20% | -12.98% |
+| native/alpha-breakdown/kill-reap-ns | -9.05% | 3.20% |
+| native/negoto-create/ns | 20.30% | -8.92% |
+| native/alpha-xfe/spawn-ns | 7.44% | 15.45% |
+| native/alpha-xfe/kill-reap-ns | -13.34% | 12.74% |
+| native/alpha-lifecycle-busybox-8/ns | 4.98% | 18.17% |
+| native/alpha-lifecycle-busybox-8/prepare-ns | -1.95% | 20.42% |
+| native/alpha-lifecycle-busybox-8/source-release-ns | 8.31% | 4.51% |
+| native/alpha-lifecycle-xfe-3/ns | 6.28% | 7.68% |
+| native/alpha-lifecycle-xfe-3/prepare-ns | -1.69% | 1.69% |
+| native/alpha-lifecycle-xfe-3/source-release-ns | 2.61% | 11.64% |
+
+fork-exec-8 medians fall690,842,000→651,582,000ns (-5.68%) in the first cohort
+and680,597,000→642,480,000ns
+(-5.60%) in the reversed cohort. RAM backing alone accounts for a repeatable
+part of114's fork/exec improvement, not its full approximately27% result.
+It is not uniformly beneficial: native Xfe spawn regresses7.44%/15.45%, Xfe
+lifecycle6.28%/7.68%, and BusyBox lifecycle4.98%/18.17%. Negoto creation reverses
+sign (+20.30% then-8.92%); do not suppress this variability or report only the
+large Alpha spawn/reap decrease in the reversed cohort. These measurements do
+not prove the exact cache-collision or scheduling mechanism.
+
+Four cold actual dock activations use the unchanged native observer and114's
+private10ms host polling runner, in before→after→after→before order. Before
+times are2,335,007,375/2,310,707,250ns; after2,304,270,542/2,310,796,208ns.
+Mean2,322,857,312.5→2,307,533,375ns is only-0.66%, not a5% launch improvement.
+The nonce-validated event-loop reply is still not complete painting or input
+readiness. Inspect the first after ping screenshot: the title and only part of
+Xfe are painted, with stale terminal content remaining. The100ms fully painted,
+initialized and input-responsive launcher target is still unmet.
+
+### Functional verification, decision and retention
+
+The candidate passes native1359/17 ignored, selected ASan193/2 ignored and23
+cache tests in both default and opt-in immutable modes. x86 FreeBSD and AArch64
+Linux checks pass. Actual boots comprise SMP1 file-mapping/52-replacement
+coverage, four SMP4 process boots, four SMP4 Files launches, and one SMP4 GUI
+boot containing two complete desktop sessions. The GUI probe covers real input,
+Terminal/Editor/Information launch and Exit/restart cleanup. Inspect the first
+Information-command screenshot, showing the expected information text and
+successful entered command; don't infer full editor painting from window launch.
+
+Reject RAM-only backing as the default: its stable fork/exec win does not
+translate into the requested app launch, while several native lifecycle controls
+regress in both comparisons. Restore loader.rs, image_cache.rs and cache tests
+byte-for-byte from this cycle's pre-edit snapshots, preserving all114 and
+earlier dirty work. Rebuilt default Alter exactly matches the full control ELF
+SHA953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+Restored native1357/17 ignored and selected ASan191/2 ignored pass; all three
+restored source files compare byte-for-byte with their pre-cycle snapshots.
+This does not adopt a new runtime optimization or establish a systemwide5% gain.
+The earlier114 opt-in full-alias prototype stays default-off; accepted107 remains
+the working fallback. No A9N source, ABI, IPC fastpath, version or release change.
+
+Small sources, candidate/control ELFs, all raw log references, both control
+cohorts, runner, hashes and build/test logs are retained under
+/private/tmp/nanami-opt-cycle115.CCSYgn. After terminal status and explicit
+process/lsof checks, delete115's rejected candidate and control image/rootfs
+pairs (all four files removed; no115 .img remains). Retain only114's latest validated experimental pair and107's accepted
+fallback; there is no extra retained large115 artifact. Older106/108--113
+large artifacts were already removed. APFS clones share blocks, so do not
+translate logical image sizes directly into claimed physical free-space gains.
+
+The next useful isolation is the stable pool-Frame copy-window behavior itself,
+without changing file allocation policy. Audit current mapping authority,
+physical identity and teardown/reuse first; do not weaken guest sealing,
+reinterpret MMIO as pool RAM, or claim the observed regression mechanism proved.
+## Cycle 116: invalidate only retired child-cap copy aliases (rejected)
+
+### Scoped candidate, not another pool-Frame promotion
+
+The previous turn makes measured progress by rejecting RAM-only cache backing,
+restoring the exact default ELF and retaining all counter-regressions. Re-read
+cycle38's all-Frame promotion and42's eight-way rejection before choosing a
+different isolation. Do not repeat those global lifetime/cache-layout policies.
+
+Audit remove_shared_mapping: it invalidates every PID-owned copy alias even
+when the retiring RAM/view uses permanent pool metadata. Preserve allocation,
+current-Frame lookup, guest authority, pool ownership and the entire existing
+cache geometry. Instead, prototype a batch invalidator taking only the exact
+revocable child descriptors about to be removed. Normalize the VM owner once,
+skip the iterator entirely when its owner bucket is empty, and otherwise check
+only each Frame's existing four-way set. Failed MAP entries remain tracked
+non-hits; failed UNMAP stops before any guest PTE/cap removal. Whole-owner
+unmap/exec/reap/protect invalidation remains unchanged. This is a user-level
+private helper, not a protocol, Kernel, IPC fastpath, capability-domain or
+Device-attribute change.
+
+Six candidate regressions cover two-cap batches, unrelated/foreign/pool
+retention, VM-owner normalization, failed cleanup, failed publication, bucket
+collisions, an unconsumed empty-owner iterator, actual RAM-view retirement and
+child-cap failure/retry with retained references. Correct an initial fixture
+overlap (private0x200000 coincided with the shared heap watermark) using a
+separate private0x300000 VA. Against the original full-PID release, the focused
+unrelated-alias case fails as expected; this distinguishes retention behavior,
+not a security bug in the original conservative contract.
+
+The first unmeasured prototype invalidated immediately before each cap removal.
+Replace it before timing with a batch preflight, keeping the original
+pre-guest-UNMAP failure boundary and the O(1) empty-owner bulk-release path.
+Archive both small executables/sources; only the final batch is timed.
+Final candidate native1363/17 ignored, serial selected ASan191/2 ignored,
+AArch64 Alpha checking and x86 Alpha/init Release builds pass. A preliminary
+ASan command omitted serial-test selection; its result is excluded in favor of
+the corrected --test-threads=1 run.
+
+### Frozen artifacts and all ordinary results
+
+Control and candidate share the exact same rootfs, updated52-replacement C
+fixture and default-off Alter953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+The114 full-alias flag is unset. Control Alpha/init are114 V3
+be6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73 /
+c737b51ba0ae52e10d40c624ef14e3b65f8ff89bbcc2aee7fd2fc29cae56ac01.
+Final candidate Alpha/init are
+ff8f2ee85e802c07f79ad881b66187b7c42da78da9a20a38baa0691c6af086a1 /
+b0578433ffd0218f8003ccb951c88432816acadd9a47040ce8a8c2766f163e37.
+Kernel stays312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+debugfs/e2fsck, complete rootfs-partition comparisons and extracted ELF/Kernel/
+init comparisons pass before boot. No profiling or concurrent own VM/build/
+test/hash work runs during the ten sequential normal-device QEMU boots.
+
+Two process cohorts run before→after then after→before, with three samples per
+metric/group (six for Negoto create). Preserve all21 metrics and raw arrays in
+metrics.json, not just favorable rows. Negative elapsed change is faster.
+
+| Metric | First before→after | Reversed after→before |
+| --- | ---: | ---: |
+| linux/getpid-2048 | -0.50% | 0.05% |
+| linux/getuid-2048 | -0.58% | 1.21% |
+| linux/copyout-normal | -1.14% | 0.49% |
+| linux/copyout-128-vmas | 3.16% | -1.06% |
+| linux/copyout-256-vmas | -1.86% | 1.84% |
+| linux/fork-8 | 23.15% | 16.66% |
+| linux/fork-exec-8 | -2.32% | -3.50% |
+| linux/fork-128-vmas-8 | 3.09% | 5.48% |
+| linux/fork-256-vmas-8 | 1.09% | 10.74% |
+| native/alpha-spawn-reap-8/ns | -8.31% | -10.65% |
+| native/alpha-breakdown/spawn-ns | -10.93% | 0.16% |
+| native/alpha-breakdown/kill-reap-ns | -15.79% | 11.90% |
+| native/negoto-create/ns | 3.80% | 20.66% |
+| native/alpha-xfe/spawn-ns | 4.87% | -0.23% |
+| native/alpha-xfe/kill-reap-ns | 5.32% | -6.75% |
+| native/alpha-lifecycle-busybox-8/ns | -2.24% | -11.59% |
+| native/alpha-lifecycle-busybox-8/prepare-ns | -4.84% | -8.85% |
+| native/alpha-lifecycle-busybox-8/source-release-ns | 4.78% | -7.47% |
+| native/alpha-lifecycle-xfe-3/ns | 2.16% | 0.27% |
+| native/alpha-lifecycle-xfe-3/prepare-ns | -0.51% | 0.40% |
+| native/alpha-lifecycle-xfe-3/source-release-ns | -1.23% | 9.16% |
+
+fork/exec improves only2.32%/3.50%; ordinary fork worsens23.15%/16.66%, and
+Negoto creation3.80%/20.66%. Native construction/reap improves8.31%/10.65%,
+but it does not execute guest Linux code. Mixed BusyBox/Xfe results and the
+unmodified controls preclude a uniform speedup claim. Retaining more source
+aliases may change later working-set behavior, but these elapsed measurements
+do not prove an exclusive cache-collision, IPI, copy-bandwidth or scheduling
+cause.
+
+Four cold dock-to-nonce-ping Files launches use114's same private10ms host
+poll runner and unchanged native observer. Before2,318,838,792/2,364,805,666ns;
+after2,331,952,292/2,227,996,458ns. Means2,341,822,229→2,279,974,375ns are
+-2.64%, below the5% aim and still far from100ms. One pair reverses sign; do not
+promote the favorable second pair alone. This observer gate still does not
+prove complete paint or real-input readiness.
+
+All ten actual boots exit zero: SMP1 file-mapping/52-replacement coverage,
+four SMP4 process boots, four SMP4 Files activations and one SMP4 GUI boot.
+The GUI probe completes two full X11/FLWM/wbar sessions with real input,
+Terminal/Editor/Information launch and Exit/restart cleanup. Its window/input
+markers are functional evidence, not a100ms readiness result. No new visual
+paint-completion assertion is introduced.
+
+### Restore, retain one general regression, remove large comparisons
+
+Reject the scoped-invalidation runtime despite the simpler target-set work:
+fork/Negoto regress in both process cohorts, and actual Files gain is neither
+5% nor consistently signed. Restore memory_copy.rs and shared_memory.rs
+byte-for-byte from pre-cycle snapshots, and remove the prototype-only cache/
+retention tests from the main tree. The exact rebuilt Alpha returns to
+be6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73;
+Alter remains953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+Restore the installed Alpha and rebuild init as well.
+
+Keep one policy-independent lifecycle regression: failure to UNMAP a cached
+RAM child alias must preserve the child cap, guest PTE, physical references
+and reservation until a successful retry. Teach the mock temporary mapper to
+accept actual child aliases as well as pool aliases, without relaxing physical
+identity checks. This test passes the original full-PID implementation.
+Restored native1358/17 ignored and selected serial ASan186/2 ignored pass.
+The new test is stronger cleanup evidence, not a production optimization.
+
+Evidence and reconstruction inputs remain under
+/private/tmp/nanami-opt-cycle116.vCqr5G: final/source snapshots, both process
+cohorts, ten raw log references, candidate/control Alpha/init/Alter executables,
+all artifact hashes and scripts. Following terminal process/lsof checks,
+remove only116's rejected control.img, after.img and their one shared rootfs.img.
+All three are removed and no116 .img remains. Re-hash both retained pairs and
+confirm they still match their107/114 manifests.
+Retain114's validated default-off experimental pair plus107's accepted fallback;
+older two-generations-back images were already removed. Logical APFS clone
+sizes are not claimed as physical space recovered.
+
+No accepted runtime optimization, version, commit, release or Kernel change
+ships in this cycle. The full100ms paint/input goal remains active and unmet.
+Before another mapping-cache policy experiment, establish a normal Linux/QEMU
+control using the exact integer-only process-performance ELF and Tiny Core
+BusyBox already used here. Its nine Linux metrics are separable from the
+twelve native Alpha controls; do not substitute that process-only control for
+the required full app-launch measurement. Official rootfs17.1 is already cached
+under thirdparty/tinycore/downloads; no matching Linux kernel is cached there.
+
+## Cycle 117: normal Linux control on the same read-only Tiny Core disk
+
+Establish a control before changing another mapping-cache policy. Add an offline
+test runner and a deterministic, test-only initramfs overlay. The unmodified
+official Tiny Core 17.1 Linux kernel/modules boot the same QEMU CPU, memory,
+firmware and normal devices. PID 1 mounts the same107 AHCI/ext2 partition
+read-only through Linux's ext4 compatibility support, then chroots into its
+Tiny Core rootfs. The integer-only process-performance ELF, dynamic BusyBox
+and libraries are therefore the same disk files, not separately rebuilt or
+RAM-rootfs substitutes. QEMU's discarded disk snapshot protects the source
+image independently of the guest's read-only mount.
+
+The official kernel reports6.18.35-tinycore64 and uses its TSC clocksource.
+Official HTTPS MD5 files verify both downloads; SHA256 manifests and full
+command lines are retained. The project's cached rootfs17.1 input is pinned
+to4eff7d1c521a77f00da07c56dd80d2c9ca4d667bf0919bcb7f05f86bf663a6ae.
+No A9N Kernel code or build is changed.
+
+Five bootstrap pilots fail before producing usable measurements: QEMU's
+ide-hd refuses read-only block media, this Linux configuration lacks devtmpfs,
+its ext2 support is provided by ext4 rather than an ext2 module, BusyBox lacks
+the requested sha256sum applet, and libcrypt resides in /usr/lib rather than
+/lib. Correct the test bootstrap; a sixth pilot passes. Exclude all pilots
+from the matched pool.
+
+Run eight sequential ordinary boots, Nanami→Linux→Linux→Nanami for four CPUs,
+then the same order for one CPU. All eight complete successfully, with three
+samples of each of nine Linux metrics per boot. Each cell below is the pooled
+median in milliseconds, Nanami / Linux. Preserve all raw arrays in metrics.json.
+
+| Workload | Four CPUs | One CPU |
+| --- | ---: | ---: |
+| getpid, 2048 calls | 42.419 / 1.029 | 44.591 / 0.988 |
+| getuid, 2048 calls | 40.665 / 0.869 | 39.154 / 0.961 |
+| copyout, normal | 43.812 / 1.922 | 42.124 / 2.065 |
+| copyout, 128 VMAs | 45.100 / 1.897 | 43.459 / 1.952 |
+| copyout, 256 VMAs | 47.789 / 1.878 | 44.707 / 1.973 |
+| fork/wait, eight children | 13.693 / 5.277 | 9.078 / 5.530 |
+| fork/exec/wait, eight children | 723.312 / 36.758 | 553.425 / 36.192 |
+| fork/wait, 128 VMAs | 13.201 / 9.060 | 9.088 / 8.541 |
+| fork/wait, 256 VMAs | 14.210 / 12.173 | 8.845 / 11.426 |
+
+The getpid gap is41.22x/45.13x and fork/exec19.68x/15.29x, whereas ordinary
+fork differs2.59x/1.64x. One fragmented-fork case is faster on Nanami; retain
+that contrary result. The gap persisting with one CPU rules out per-call
+cross-core IPI as its sole explanation. Linux and Nanami still differ in
+clock implementation, background services, fault delivery, memory management
+and CPU-state switching. This is not a pure IPC benchmark or proof of an
+exclusive Kernel, TCG, filesystem or copy-bandwidth cause. Linux's minimal
+bootstrap is also not an equivalent full desktop workload.
+
+A ninth, separate diagnostic boot enables the existing Alter handler profiler
+on the same107 rootfs. Its full process fixture and smoke markers complete.
+Across the exit-flush batches for the24 exec children, mmap accounts for384
+calls /1,247,151,000 counter ticks, exec24 /175,671,000 and fork24 /46,918,000.
+The complete batch total is1,590,639,000 ticks. These are global aggregates
+flushed on each child's exit, not per-trigger-PID ownership or exclusive CPU
+time. Guest terminal reports are replayed after these serial profile lines;
+do not slice the serial log at the later printed fork/exec reports to infer
+the sample window. Keep diagnostic timing out of the ordinary comparison.
+Restore the normal default-off Alter executable before running that VM;
+the normal build hash remains953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+
+The native suite passes1358 tests with17 ignored, the Linux control helper's
+three tests pass, and its shell bootstrap passes syntax checking. Retain
+sources, all pilot/matched/diagnostic logs, SHA manifests, metrics, downloaded
+official kernel/modules and reconstruction scripts under
+/private/tmp/nanami-opt-cycle117.F1p1hC. Following process/lsof checks, delete
+profile.img, profile-rootfs.img and all ten generated control-initrd.cpio.gz
+archives. No117 generated image/initrd remains. Re-hash the retained107/114
+boot/rootfs pairs and confirm all four hashes still match their manifests.
+
+This cycle establishes a reproducible comparison, not a5% runtime improvement
+or the100ms full-paint/input objective. Keep107 as the accepted fallback and
+114's validated experiment default-off. Next inspect exec/dynamic-loader work
+and launcher process creation; do not repeat a rejected cache policy based
+only on operation counts. No version, commit or release change is made.
+
+## Cycle 118: remove the dock launcher's redundant shell exec
+
+Inspect upstream wbar's launch code and the exact pinned Tiny Core TCZ ELF.
+The click handler already forks and executes sh -c; the configuration then
+executed BusyBox sh a second time merely to read nanami-app. Both the upstream
+Main.cc call and the packaged binary's execlp call/arguments confirm this,
+rather than inferring shell execution from working redirections.
+Source reference:
+https://sources.debian.org/src/wbar/2.3.4-14/src/core/Main.cc/#L327.
+
+Change all eight dock commands to `. /usr/local/bin/nanami-app <application>`.
+The existing shell reads the common launch policy and execs the upstream app
+directly. Keep argument handling, DISPLAY, Calculator's environment, log
+redirections and Exit behavior in the same shared script. Do not duplicate
+application policy in the dock, add a launcher binary, replace upstream ELFs,
+alter service boundaries, or modify the Kernel. Standalone explicit-shell
+invocation of the script remains supported. Update the packaging assertion
+to check every command/argument/redirection and document the shell reuse.
+
+Build the candidate by replacing only the dock configuration and the script's
+explanatory comments in107's rootfs. Compare the full rootfs partition and the
+complete65MiB pre-rootfs disk prefix; e2fsck and extracted-file comparisons
+pass. All compiled ELFs remain identical, including Kernel
+312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88.
+Candidate image/rootfs are
+89ac0bcae58a90a64d116f36e095a514bc434e24efb4082626df3b0e4c38c4c7 /
+5cbe754e1b4e052f96a4bad95423fae598ad70ed68daa5f5b83837f0d6f88949.
+
+Run eight sequential cold Files dock activations on four CPUs: before→after→
+after→before, then after→before→before→after. Use the same private10ms host
+poll runner and unchanged native event observer as the preceding comparisons.
+Elapsed milliseconds, in each variant's execution order:
+
+| Cohort | Before | After | Mean elapsed change |
+| --- | ---: | ---: | ---: |
+| First | 2296.045, 2417.836 | 2208.933, 2305.146 | -4.24% |
+| Reversed | 2296.696, 2404.527 | 2296.244, 2278.680 | -2.69% |
+
+The pooled means are2353.776→2272.251ms, a3.46% reduction. Retain this small
+configuration simplification as removal of an actual redundant exec, not as
+a verified5% improvement or a major startup-path fix. Ordinary host/guest
+scheduling and the100ms result-file readback cadence limit the precision of
+small differences. Do not substitute this X11 nonce-ping gate for fully
+painted, initialized, input-responsive application readiness.
+
+All eleven VM runs complete successfully: eight ordinary cold launches, one
+two-session desktop/input/Exit regression, one Files/Images/Paint/Calculator/
+Clock window-and-cleanup regression, and one separate Files paint/input
+timeline. The app-window smoke invokes the shared script explicitly; it is
+not evidence that every dock button was independently clicked. The desktop
+regression does click Terminal, Editor, Information and Exit, while all eight
+timed runs click Files through the new sourced path. Packaging33 and observer
+11 host tests, shell syntax and diff whitespace checks pass. No own build,
+test or hash work overlaps a VM.
+
+Inspect the screenshots rather than accepting a timing PASS as paint proof.
+An ordinary post-ping image still shows an unpainted Files interior. In the
+separate timeline (default200ms host polling, excluded from the eight samples),
+the screenshot captured2596.034→2646.719ms after the click visibly contains
+the toolbar and /root directory list. A later real keyboard challenge changes
+the title, location field and list to /usr/local. This confirms visible
+painting and real navigation eventually work; it does not establish an exact
+paint-completion time or100ms readiness.
+
+Keep commands, raw arrays, all log references, screenshots, upstream source,
+packaged wbar ELF and reconstruction inputs under
+/private/tmp/nanami-opt-cycle118.kQqBVU. With all runners terminal and no open
+users reported by process/lsof checks, delete114's old after.img/rootfs.img
+pair, preserving its small experimental sources/ELFs/logs. Retain118 plus107's
+accepted fallback; all four retained image/rootfs hashes match their manifests.
+Deleted images can be reconstructed, not recovered from Trash. Do not claim
+their logical APFS clone sizes as physical free space.
+
+No version, commit, release, Kernel or upstream application ELF change is made.
+The5% cycle aim and100ms full-readiness objective remain unmet. The next
+controlled comparison should exercise the same Xfbdev/FLWM/Xfe userland under
+normal Linux as well:117's raw syscall/fork control alone cannot separate the
+remaining desktop/application work from Alter and nested-display overhead.
+
+## Cycle 119: same Xfbdev/FLWM/Xfe desktop under ordinary Linux
+
+The preceding cycle removes a redundant launcher exec but does not prove a5%
+improvement or100ms full readiness. Establish the missing full-desktop control
+before assigning the remaining latency to IPC, cross-core IPI or another cache
+policy. Keep the accepted118 runtime and A9N Kernel unchanged.
+
+Boot the same official Tiny Core6.18.35 kernel/modules used by117, with the
+same CPU=max, TCG default threading, memory, firmware, AHCI and normal input/
+network devices. Reuse118's actual disk and its unmodified Xfbdev, FLWM, wbar,
+Xfe, BusyBox, libraries, profile and event observer. Mount the ext2 partition
+read-only through Linux's ext4 driver; put Linux-only runtime writes in a
+volatile OverlayFS upper/work pair. Do not copy the application into the
+bootstrap RAM filesystem. The official EFI driver supplies an800x600x32 GOP
+framebuffer; its documented video=efifb:800x600 selection changes no A9N code.
+References: https://docs.kernel.org/fb/efifb.html and
+https://docs.kernel.org/filesystems/overlayfs.html.
+
+Record three failed, excluded bootstrap pilots: the observer initially lacks
+the desktop child's LD_LIBRARY_PATH; Linux PID1 also defaults HOME to / rather
+than the OCI profile's /root; after matching that environment, injected motion
+still lands on Information rather than Files. Inspect real screenshots rather
+than counting a nonresponse as application startup time. Add setup-only feedback
+from the existing raw X11 QueryPointer probe: the initial large negative moves
+do not establish the assumed origin, but observed40-pixel corrections reach
+the actual300,578 Files coordinate. Kill/reap that probe before starting the
+unchanged application event observer, then time only the actual click.
+Do not infer an exclusive cause for the initial input scaling discrepancy.
+
+Two further excluded pilots pass. One verifies actual keyboard navigation to
+/usr/local, including the title, location field and directory list. Freeze
+the successful bootstrap and host runner. Match the100ms result-file readback
+cadence and10ms host polling used by the ordinary Nanami comparator. Keep the
+100ms button hold and both release-command bounds; it is not free startup time.
+Wait for complete PNG encoding, not merely the HMP acknowledgement.
+
+Run eight sequential fresh boots: Nanami→Linux→Linux→Nanami for four CPUs,
+then the same sequence for one CPU. All eight runners succeed, with no own
+concurrent VM/build/test/hash work. Each value is click-to-EWMH nonce-ping
+elapsed milliseconds; retain the raw values rather than only a ratio:
+
+| CPUs | Nanami first / second | Linux first / second | Mean ratio, Nanami/Linux |
+| --- | ---: | ---: | ---: |
+| Four | 2182.595 / 2222.390 | 726.757 / 700.332 | 3.09x |
+| One | 2156.279 / 2136.930 | 796.123 / 926.215 | 2.49x |
+
+Means are2202.492/713.545ms on four CPUs and2146.605/861.169ms on one.
+Measured from release acknowledgement instead, means are2095.396/609.567ms
+and2039.899/755.632ms respectively. Each system/core group has only two cold
+observations; these are controlled diagnostic samples, not a precise speedup
+claim, a5% optimization result, or proof that the100ms objective is impossible.
+
+The large gap remains with one CPU, so per-call cross-core IPI alone cannot
+explain it. This is still not a pure IPC or exclusive Kernel measurement:
+Linux uses its native syscalls, page cache/COW, TSC clock and direct EFI output;
+Nanami includes Alter, additional services, its clock implementation and the
+Honoka nested composition path. Linux's volatile metadata writes also differ
+from Nanami's filesystem behavior. Equal QEMU CPU settings do not guarantee
+equal OS-enabled instruction state. Keep these distinctions rather than
+assigning the entire ratio to any one component.
+
+The initial application ping intervals are78.146/89.308ms on Nanami/four CPUs,
+versus0.758/0.652ms on Linux; one-CPU values are82.624/90.634ms versus
+4.798/19.928ms. These pings start at the first matching mapped window and can
+include remaining initialization. They are not steady-state X11 transport
+latencies. A normal-Linux pilot already has the toolbar and list visible at
+its first post-response screenshot, but that is not an exact full-readiness
+timestamp. Retain the separate real keyboard evidence without converting it
+into an earlier100ms input assertion.
+
+Sources, frozen runners, all pilot/matched logs, manifests, metrics and PNGs
+remain under /private/tmp/nanami-opt-cycle119.nHQwsT. Syntax checks pass and
+the eight-record parser checks successful completion. A9N's worktree is clean;
+all four retained118/107 boot/rootfs hashes still match. No Nanami disk image
+is generated in119. Following terminal-process and negative lsof checks, remove
+only the nine generated control-initrd.cpio.gz archives. Recover the first
+pilot's exact bootstrap from its final gzip/cpio member and verify its original
+manifest hash before deleting that archive. Preserve the official Linux input
+downloads and small reconstruction evidence; no119 image/initrd remains.
+
+This is a diagnostic cycle, not a runtime optimization, version, commit or
+release. The objective remains active. Next distinguish quiescent, serialized
+X11 request/reply cost from the remaining startup work using the same integer-
+only client on both systems. In particular, do not call the first-window ping
+a transport-only benchmark or repeat a rejected cache/placement policy solely
+because the normal Linux control is faster.
+
+## Cycle 120: separate raw and Xlib X11 round trips
+
+Keep the accepted118 runtime and A9N unchanged. Add a test-only, opt-in
+APP_OBSERVER_STEADY_RTT observer mode; normal builds remain byte-identical to
+the observer extracted from118. After the existing nonce-ping completion,
+settle for two seconds. Connect another ordinary AF_UNIX X11 client and compare
+the same8-byte QueryPointer request/32-byte reply with XQueryPointer through
+the pinned, unchanged Xlib. Neither mode modifies Xfe or the X server.
+
+Each mode has three samples, with eight warmup requests then128 serialized
+requests per sample. Sample the clock only at each sample's endpoints, never
+per request. Validate setup bounds, reply type, zero additional length and the
+incrementing sequence. Handle partial read/write and fail on EOF, negative or
+oversized transfers. Emit all six elapsed values in one final line: the native
+guest's existing100ms file bridge forwards only the last nonempty line.
+This avoids silently losing all but one sample without changing the bridge.
+
+Two initial ordinary pilots pass, but exclude them from the matched cohort.
+Then run four fresh, sequential SMP=4 normal-device boots in
+Nanami -> Linux -> Linux -> Nanami order. Use the same observer ELF, AHCI disk
+contents and upstream application/libraries under both systems. Linux retains
+119's official kernel/modules, read-only ext4 lower, volatile OverlayFS upper,
+matched OCI environment, actual-pointer calibration and800x600 EFI output.
+Nanami retains its Honoka nested display. No own build/test/hash or other VM
+runs concurrently with any of these four ordinary boots. All runners exit0.
+
+Elapsed milliseconds for128 requests, retaining every sample:
+
+| System / boot | Raw QueryPointer | Xlib QueryPointer |
+| --- | ---: | ---: |
+| Nanami first | 42.928 /30.938 /24.682 | 63.888 /61.546 /60.410 |
+| Linux first | 12.714090 /10.952078 /8.189058 | 16.472117 /15.577112 /15.681112 |
+| Linux second | 16.886102 /10.129062 /10.298063 | 15.362093 /15.011091 /13.503082 |
+| Nanami second | 39.823 /28.798 /24.851 | 61.573 /62.906 /62.134 |
+
+Six-sample medians are Nanami29.868/61.8535ms and Linux10.6250705/
+15.4696025ms for raw/Xlib, respectively. Nanami/Linux ratios are2.81x raw and
+4.00x Xlib; each system has only two independent boots. Raw samples fall during
+the runs, so finite warmup does not establish fully steady execution. Raw
+always precedes Xlib; retain that order limitation rather than selecting only
+the last, fastest raw sample. This is neither pure IPC latency nor a new
+application-ready gate. In particular, Linux host completion now includes the
+two-second settle and six sample loops: rename it diagnostic completion and
+do not pool it with119's cold click-to-ping observations.
+
+Separately compile a temporary phase-scoped Alter profiler. Existing PR_SET_NAME
+calls from an optional APP_OBSERVER_RTT_PHASES observer build mark x11.raw,
+x11.xlib and x11.done; these are ordinary Linux task names, not Kernel/API
+additions. Count both all guests and the selected observer PID, in separate
+arrays. Exclude marker calls from the counters. Each phase covers408 queries
+(three times eight warmups plus128 measured requests), not384 queries.
+
+The profile VM passes. Client-only counts are408 read and408 write for raw;
+816 poll,408 writev and1223 recvmsg for Xlib. Each phase also has six endpoint
+clock_gettime calls. Thus the client submits approximately two versus six
+syscalls per query. Other guests' read/write/select/clock counts are not
+assigned to the client. Handler counter intervals include descheduling and
+exclude subsequent parked time; they are not exclusive CPU or transport time.
+The profile VM's startup overlaps the final packaging hash, so no profiled
+elapsed value is part of the ordinary cohort. An initial exact log regex misses
+the space-padded server tag; the saved complete serial log contains the rows,
+and the final parser verifies them rather than treating absent matches as zero.
+
+Restore syscall_profile.rs and prctl.rs byte-for-byte before running that VM,
+and rebuild the normal Alter ELF to its exact pre-cycle953f319b8722d3d99fa4093
+abcab8e98938cff5b724b36c502785ab819f2049e hash. Archive the temporary profiler,
+hook and profiled ELF separately; leave no phase hook in production. The normal
+observer, ordinary image pre/post hashes and extracted Kernel hash also match.
+A9N's worktree remains clean. No runtime optimization, Kernel change, version,
+commit or release is made in this diagnostic cycle.
+
+Audit the relevant production paths rather than implementing from appearances:
+AF_UNIX completes within Alter, not through POSIX; small input/output leases
+already avoid many Alpha copies. unix_message::Message has16 iovecs, not1024,
+and must not be replaced on the false premise of a16KiB frame. Fault lookup
+already returns a three-word process snapshot. Framebuffer presentation already
+notifies its worker rather than copying a full frame inside every syscall.
+The pre-classification FD lookup and VMA permission hints were evaluated in49
+and7--9; their rejected results are not erased by a faster Linux control.
+The new six-call observation does not authorize caching mutable guest headers,
+skipping permission checks or fabricating poll/read success. Further work must
+separate current helper/lease/permission costs from fixed fault/return work
+without assigning the whole difference to IPC or IPI.
+
+Verification: Tiny Core host suite34 passed, observer suite11 passed, and the
+new C framing/partial-I/O test passes AddressSanitizer. Seven actual VM runners
+finish0: two pilots, one excluded profiler and four ordinary matched boots.
+Raw samples, complete serial profiles, ELF/source snapshots, frozen runners,
+analysis script, manifests and hashes remain in
+/private/tmp/nanami-opt-cycle120.gGx1HC. git diff --check passes.
+
+After terminal handles, a negative live-VM check and negative lsof checks,
+delete only diagnostic.img, diagnostic-rootfs.img, profile.img,
+profile-rootfs.img and the three generated control-initrd.cpio.gz files under
+pilot-linux-4, linux-first and linux-second. These seven files are not in trash;
+the retained package scripts and official inputs reconstruct them. No120 image
+or initrd remains. Verify and retain the latest usable118 image/rootfs and
+working107 fallback; intervening diagnostic cycles do not replace a working
+generation. Keep small evidence and do not claim APFS logical sizes as physical
+space recovered. The5% cycle aim and100ms painted/input objective remain unmet.
+
+## Cycle 121: sealed private pool Frames (rejected)
+
+First measure permission-check work instead of reintroducing the VMA hints
+rejected in7--9. An excluded diagnostic extends120's client-filtered raw/Xlib
+phases with endpoint counters around the existing permission predicate. Raw
+client access checks number823, with27982 summed VMA lengths and513000 handler
+counter ticks; Xlib numbers6533,222122 and2217000. All checks are allowed, so
+the original all-predicate traverses the full table. These are diagnostic
+counts/intervals, not exclusive CPU time or an ordinary elapsed comparison.
+The closing PR_SET_NAME also checks its name pointer; syscall157 is excluded
+from the phase syscall table but not the access-check counter. Preserve that
+distinction. Do not infer a5% launch gain from this walk count. Restore all
+three profiler/mapping hook files exactly and rebuild normal Alter to953f319b
+8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+
+Test a separate, user-level Alpha prototype: use an already owned physical
+pool Frame directly for sealed private anonymous/file-copy mmap pages, instead
+of copying it into a child management Node for each page. Both the target and
+memory owner must be sealed. Native processes, initial ELF/stack construction,
+shared-buffer installation, MMIO, read-only-fork target aliases and detached
+replacement pages retain their existing child capabilities. Preserve logical
+slot reservations, physical references, initialization before publication,
+permission checks, quarantine and rollback. Release uses the actual recorded
+Frame; fork/share may copy that validated Frame; detach must never remove the
+permanent pool capability. No Kernel, ABI or normal IPC fastpath changes.
+
+Audit fixed-child-cap consumers, not just the allocator: shared zeroing still
+has its own installed child caps, and native deferred-cap removal is not the
+sealed exec/reap route. Source snapshot aliases require an unsealed source.
+Sealed exec retires actual leaves and child Nodes before freeing physical
+references. Add host regressions for absent child slots, initialized suffixes,
+reuse, post-MAP failures, fork isolation, guarded detach failure and sharing.
+One new sharing test initially fails because its fixture omitted the existing
+zeroing marker; initialize that fixture before removing its child cap. This
+does not change the production zeroing policy.
+
+Both comparison builds include support for canonical Frames; only
+NANAMI_POOL_PRIVATE_PAGES=0/default versus1 differs. The control is therefore
+not claimed byte-identical to accepted118 or the pre-cycle Alpha. The flag is
+off by default in production; host sealed fixtures enable it. ARM retains the
+original path and its release check passes. The prototype can also change
+copy-window ownership/cache behavior, so do not attribute an elapsed difference
+solely to the eliminated capability COPY.
+
+Freeze two images with the exact same ext2 partition and unchanged Kernel312d
+579bd1098ca2a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88, normal Alter and
+ordinary120 RTT observer. Replace only the embedded Alpha/init policy; verify
+each embedded Alpha, extracted init, complete rootfs partition and Kernel.
+Comparison disk hashes are b39698ce6e238286a9f973514ba2af34f4accc30602daf74b5
+e27e7b0e36e4ab and11970cc7430f12bc1bff964097db85b41447b0e2376cf3fa289c30028
+ab04659; their common rootfs is2526257ed3dd11deee90d42f9d46d53023c6e69fde934a
+0c12b6a13a78b5126f. Pre/post hashes match.
+
+Seven actual VM runners finish0: one excluded access profiler, candidate
+file-mapping/protection and read-only-fork/reap pilots, then four ordinary
+control/candidate/candidate/control cold Files launches with SMP4 and normal
+devices. Run no own builds, hashes or native tests during a measured VM.
+Click-to-first-EWMH-ping results, in that order, are2182.805167,2225.824375,
+2229.862917 and2151.266167ms. Means2167.035667 versus2227.843646ms regress
+2.806%; reject the runtime change. The six128-request samples per side are
+only two independent boots each. Raw medians29.1685 versus25.9975ms improve
+10.87%, while Xlib64.0045 versus62.7055ms improves2.03%. Neither is a Files
+launch improvement, exclusive syscall/IPC timing, or100ms painted/input result.
+
+Candidate native1365/17 ignored and selected serial ASan221/2 ignored pass.
+Archive canonical-private-pages-rejected.patch relative to the pre-cycle
+snapshots, then restore all ten touched prototype source/test files exactly.
+Restored native1358/17 ignored and selected serial ASan214/2 ignored pass.
+Rebuilt Alpha equals the original be6eec02cbaf921ed44917013603a326fcd43abc
+81039c0206afade069b0bc73; installed Alpha and rebuilt init return to the exact
+pre-cycle bytes (init c737b51ba0ae52e10d40c624ef14e3b65f8ff89bbcc2aee7fd2fc
+29cae56ac01). No prototype flag, new allocator or canonical-private behavior
+remains in production. A9N's worktree stays clean; git diff --check passes.
+
+Evidence lives in/private/tmp/nanami-opt-cycle121.bNbYQG: metrics.json,
+analyze.py, complete seven serial logs, screenshots, source snapshots, rejected
+patch, ELF artifacts, freeze/package scripts and manifests. After all runners
+close, negative process/lsof checks and pre/post hashes, delete exactly
+profile.img, profile-rootfs.img, control.img, control-rootfs.img and
+candidate.img. No121 image/rootfs remains; small reproducible evidence remains.
+These files are not in trash. Retain only accepted118 and working107 image/
+rootfs generations, with hashes rechecked; do not create duplicate fallback
+copies or equate logical image size with APFS space reclaimed. No runtime
+optimization, Kernel change, version, commit or release is accepted this cycle.
+
+## Cycle 122: POSIX workspace copy coverage (rejected)
+
+Classify121 as progress: its matched launch regression rejected a concrete
+allocator policy, all sources were restored, and only118/107 usable generations
+remain. Begin122 with clean A9N status and no live QEMU/build. Do not reintroduce
+VMA hints, larger iovec arrays, tracing indexes or the rejected pool allocator.
+
+Inspect current guest-memory boundaries. The bounded read/write lease caches
+hold64 pages each; their transfer limit is4096 bytes, not their total capacity.
+Readiness has64 PollFd entries, not1024. Avoid both false large-stack premises.
+Before increasing the transfer limit, instrument four guest-memory helper
+families by requested size, selected Xfe versus other PIDs, lease success and
+endpoint elapsed counter ticks. Start at the first Xfe syscall; the existing
+diagnostic observer's ignored getpid argument closes collection after a
+nonce-validated window ping. No per-transfer UART, scheduling, Kernel or guest
+authority change. This excludes earlier fork/exec and is not full readiness.
+
+The excluded normal-device SMP4 diagnostic passes. Capture exactly24 rows
+(four helper kinds, three bins, two PID groups), with interval1824927000 ticks.
+Xfe's helper input-owned large bin has36 calls/458936 requested bytes/3187000
+ticks; output-scratch has23/159549/1581000. Other PIDs' output-owned large bin
+has61/327460/3861000. All other >4096 bins are zero, all >65536 bins zero.
+These large-helper intervals sum8629000 ticks,0.47284% of this boundary. This
+does not bound large transfers made outside the instrumented helpers, such as
+direct native calls in file_io.rs or private mmap construction, and it is not
+exclusive CPU time or newly calibrated nanoseconds. Do not implement a larger
+lease window as a demonstrated5% fix from these counts.
+
+For small Xfe helpers, all4543 input-scratch and123 input-owned calls lease;
+output-scratch leases1957 of2378 and output-owned273 of273. Inspect the421
+output misses rather than claiming all guest copies already avoid Alpha.
+Current copy_from_scratch recognizes only posix_shm, although read_posix can
+return the separately negotiated posix_direct_shm. Ordinary write/pwrite and
+POSIX writev gathering also invoke the checked-copy request directly, outside
+that helper. These are source-confirmed coverage gaps, not measured exclusive
+latency fractions. Restore all three diagnostic hooks exactly and rebuild
+normal Alter to953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e
+before any ordinary comparison.
+
+Prototype V1 admits a wholly contained dedicated POSIX workspace in the owned
+scratch predicate and routes file write/pwrite/writev copyin through the existing
+permission-checked helper. Keep the4096 transfer limit,64-page cache bounds,
+fresh volatile sampling, VM generations, pin ownership, failure quarantine and
+single checked-copy fallback. Arbitrary raw pointers remain ineligible; no
+new API, allocation, Kernel edit, scheduling policy or IPC fastpath change.
+The prototype flag NANAMI_POSIX_IO_VIEWS is default-off in production, on for
+host fixtures; comparison candidate sets1. Add adapter tests for valid
+workspace subranges, rejected cross-end/null/overflow ranges, disabled ranges,
+denied grant fallback and untouched bytes. Force read/write view adapters on
+for native ASan so eligibility is actually exercised on the ARM host.
+
+Native1359/17 ignored and selected ASan81/0 ignored pass. Candidate's real
+file-mapping/protection/fork pilot also passes. Freeze images from accepted118,
+with normal112/120 diagnostic or ordinary observers as appropriate. Only Alter
+and the test observer differ; verify complete ext2 partition, extracted binary,
+65MiB EFI prefix and Kernel312d579bd1098ca2a5bf1186a92e03524e39add7d50cc5e
+896d7da05d43d0c88. The normal control is the pre-cycle953f ELF, not a claim
+that accepted118's older Alter binary was rebuilt byte-identically.
+
+Run ordinary cold Files ABBA, then independent BAAB, followed by a separate V2
+BAAB. One VM at a time, normal input/network devices, SMP4, no own builds,
+native tests or hashes during a measured VM. Each RTT boot has three raw and
+three Xlib128-query samples, but each cohort has only two independent boots per
+side. Keep all samples and slower controls. Negative changes mean shorter.
+
+| Cohort | Files click-to-ping mean, control / candidate (ms) | Change | Raw128 median change | Xlib128 median change |
+| --- | ---: | ---: | ---: | ---: |
+| V1 ABBA |2254.792 /2105.615|-6.62%|+4.92%|+6.75%|
+| V1 BAAB |2254.446 /2159.898|-4.19%|+0.79%|+5.41%|
+| V2 BAAB |2157.341 /2140.308|-0.79%|+13.59%|+6.45%|
+
+V1's eight launch samples are2295.362166,2054.718208,2156.510875,2214.222333,
+2135.580750,2229.377125,2279.513875,2184.214625ms in actual execution order.
+V2's four are2140.872833,2176.243208,2138.439208,2139.743000ms. V1 Xlib medians
+are63.102/67.3595 and63.582/67.022ms; V2 is65.289/69.498ms. The first launch
+gain exceeds5%, but repeatedly slowing the X11 steady path is not acceptable.
+V2 changes the workspace predicate to check the original range first; it does
+not reproduce the launch gain or remove the RTT regression. Reject both.
+Do not assign these changes to branch cost, I-cache placement, IPC or host
+noise without evidence. Neither ping nor the RTT gate asserts completed
+painting, tested input responsiveness or100ms readiness.
+
+All14 actual VM runners finish0: excluded profiler, V1 mapping pilot, eight
+V1 launch/RTT boots and four V2 launch/RTT boots. Full desktop restart and all
+application-input regression suites are not claimed for these rejected builds.
+Archive both patches/source/ELFs, then restore guest_views.rs, file_io.rs,
+its adapter test and all three profiler files byte-for-byte. Restored native
+1358/17 ignored and forced-adapter selected ASan80/0 ignored pass. Generated
+Alter returns exactly to953f; Alpha be6eec02 and init c737b51b remain unchanged.
+A9N's worktree and git diff --check are clean. No runtime, Kernel, version,
+commit or release change is accepted this cycle.
+
+Evidence is/private/tmp/nanami-opt-cycle122.lP4wkQ: metrics.json/analyze.py,
+complete14 serial logs, screenshots, both rejected patches, all before/candidate
+source snapshots, normal/profile/candidate ELFs, package scripts and manifests.
+After terminal runners, negative process/lsof checks and matching pre/post
+hashes, delete the V1 candidate image/rootfs, then the profile, control and V2
+pairs: eight generated files total. No122 image/rootfs remains; small evidence
+is9MiB. Files are not in trash; scripts reconstruct their contents, not promised
+byte-identical filesystem timestamps. Preserve official inputs and recheck
+accepted118 plus working107 hashes. Do not count logical image sizes as APFS
+space recovered.
+
+Next evaluate local typed POSIX I/O buffers so this ownership proof need not
+add work to unrelated socket/argument-copy paths. Consider source-confirmed
+direct-call coverage when profiling that candidate. This is a hypothesis to
+implement/measure, not a proven fix or authority to relax permission checks.
+
+## Cycle 123: local typed POSIX buffers and generated code (rejected)
+
+Classify122 as progress: it identifies direct POSIX copy coverage gaps and
+rejects two global-workspace predicates after their RTT regressions. Recheck
+current sources, AGENTS.md, clean A9N status, no live QEMU/build and exact
+restored953f Alter. Do not reuse a rejected image or assert the previous
+regression was caused by its extra generic range checks.
+
+Prototype a private posix_buffer module and five file-I/O call sites only:
+ordinary read/write, positioned I/O, and POSIX writev gathering. Borrow the
+negotiated write workspace as MaybeUninit output only after checked subrange
+validation. A completed read may borrow initialized bytes only at the exact
+ordinary/dedicated bases returned by the offset-zero read helper and within
+the installed capacity. The synchronous copy helper may call Alpha, not POSIX;
+drop the borrow before the next backend operation. Never reinterpret a guest
+destination as owned native storage. The existing typed helpers retain current
+permission checks,4KiB cache admission,64-page bounds, generation invalidation,
+quarantine and the original single-request fallback for large/ineligible data.
+No new persistent fields, capability authority, API or Kernel changes.
+
+Unlike122, guest_views.rs and guest_memory.rs remain byte-identical throughout
+the prototype. Add five real adapter tests: exact ordinary/dedicated bytes,
+write subranges and untouched regions, rejected foreign/cross-end/null/overflow
+ranges before borrowing, propagated copy failures, and one typed64KiB transfer
+per direction without page-sized splitting. Production opt-in
+NANAMI_POSIX_BUFFER_VIEWS=1 is frozen into the candidate; it is off by default
+outside tests. Native1363/17 ignored, forced-adapter selected ASan85/0 ignored
+and an opt-in Alter AArch64 release check pass. ARM compilation is not an ARM
+runtime performance or view-eligibility claim.
+
+Freeze only normal/candidate Alter plus120's identical ordinary observer into
+private118 clones. Full ext2, extracted binaries, complete rootfs partition and
+unchanged65MiB EFI prefix checks pass; extracted Kernel remains312d579bd1098ca2
+a5bf1186a92e03524e39add7d50cc5e896d7da05d43d0c88. Actual candidate file-mapping/
+protection/fork pilot passes, followed by four ordinary Files/RTT ABBA boots.
+All five runners finish0. SMP4 and normal devices; no own builds/tests/hashes
+overlap a measured VM. Keep all samples, including adverse raw/Xlib timings.
+
+| Metric | Control | Candidate | Elapsed change |
+| --- | ---: | ---: | ---: |
+| Files click-to-ping mean (ms) |2235.555375|2129.8109375|-4.730%|
+| Raw128-request median (ms) |27.654|29.3105|+5.990%|
+| Xlib128-request median (ms) |65.782|71.756|+9.082%|
+
+Launch samples in actual order are2194.488125,2157.090416,2102.531459 and
+2276.622625ms. Each RTT median pools three samples per boot but only two
+independent boots per side. The first candidate's Xlib samples are72.607,
+72.691,70.905ms and the second70.480,74.227,67.263ms; both boot medians are worse
+than their respective controls. Reject rather than repeat another helper-placement variant
+on an unproven inlining theory. Ping/RTT are not100ms complete paint/input
+readiness, exclusive CPU/IPC timing or a retained whole-system speedup. No
+full desktop restart/all-application input claim is made for this rejected ELF.
+
+### Verify generated code before assigning a cause
+
+Run local llvm-nm/llvm-objdump on the exact frozen ELFs after all VMs close.
+compare-code.py retains raw disassemblies, start addresses, byte sizes,
+whole-function static instruction/call counts and strict symbolic comparisons.
+LLVM symbolizes branch/call operands; the script removes only instruction-line
+addresses and preserves every remaining operand. Six functions compare equal:
+
+| Function | Bytes | Static instructions / calls, both ELFs |
+| --- | ---: | ---: |
+| guest_memory::copyin_owned |226|69 /4|
+| guest_memory::copyout_owned |231|70 /4|
+| guest_views::copy_into_scratch |169|53 /2|
+| guest_views::copy_from_scratch |178|55 /2|
+| poll_wait::sys_poll_action |1712|402 /29|
+| readiness::scan_readiness |869|216 /3|
+
+The two ordinary scratch helpers and owned-copy helpers move in address;
+poll/readiness retain their addresses too. This does not demonstrate lost
+inlining or added operations in these six bodies. It does not prove the full
+syscall path or runtime state is identical. UNIX copy_in/io and fault handler
+have equal sizes/static counts but fail strict comparison; preserve their
+relocation/panic metadata differences without erasing operands. Linux dispatch
+changes from10148 to10386 bytes and2318/175 to2417/174 static instructions/calls.
+Those are whole-function totals, not instructions executed per UNIX syscall.
+Code/data locations change. Do not attribute the RTT penalty to I-cache, TCG,
+IPC, background work or cache pollution merely because they remain possible.
+Read-only Ext2 audit also confirms bounded dirty-block caching and ordered
+one-second writeback already exist; do not propose writeback as missing.
+
+### Restoration and retention
+
+Archive the full local-posix-buffer-rejected.patch and source/ELF evidence.
+Restore linux.rs, file_io.rs and the native-test manifest byte-for-byte; remove
+only the two newly authored module/test files. Their complete contents remain
+in the patch/source snapshots. An initial git apply --check command fails by
+stripping the first path component; the corrected git apply -p0 --check passes
+against the restored dirty worktree. Neither check modifies sources or reruns
+a VM. Restored native1358/17 ignored and forced-adapter selected ASan80/0 ignored
+pass; generated Alter returns exactly to953f319b8722d3d99fa4093abcab8e98938cff5
+b724b36c502785ab819f2049e. Alpha be6eec02 and init c737b51b stay exact. A9N is
+not edited or built; its worktree and git diff --check are clean.
+
+Small evidence lives in/private/tmp/nanami-opt-cycle123.sd396m: five complete
+serial logs, all samples/metrics/analyzer, ten paired code inspections and
+diffs, original/candidate sources and ELFs, package/repro scripts and manifests.
+Original disk/rootfs hashes are4c24883920e1a214e02ab81fa97e88d0e8770043a2857
+4245dea8ccaed06f62f /0543251c423f883aab901ba172277ff41de92a52a25ab9e06a67789c
+56e324b2, and a7a2268691f9c85789dfb38e589b80e448bb5759ab8d624daf3ce2c397d92
+fdc /7db0282e5669c760f1949648f336b56470b4abf2ec1750a123f63d01b715286b.
+Candidate Alter is f243d3cdac544f01fb523bec2408751d14522fe55c24c53650f014b0fba
+7b0e9. Matching pre/post hashes, terminal runners and negative process/lsof
+checks precede deletion of all four123 image/rootfs files. They are not in
+trash; source/ELFs/scripts can reconstruct contents, not guaranteed identical
+filesystem timestamps. Keep accepted118 and working107 with hashes rechecked,
+not the rejected candidate or duplicate fallbacks. No official inputs are
+deleted. No runtime optimization, version, commit or release is accepted.
+
+Next audit a diagnostic comparison that uses one identical Alter ELF and
+selects the file-I/O policy before Tiny Core startup, possibly through a
+test-only launch environment selector. A late observer-only switch would not
+hold the earlier desktop initialization state equivalent. This is a planned
+experiment, not an implemented setting or proof of layout/cache causality.
+Kernel/production ABI and guest authority must remain unchanged. The5% cycle
+aim and100ms painted/input objective remain unmet; the goal stays active.
+
+## Cycle 124: same-ELF early POSIX I/O policy (diagnostic only)
+
+Treat123 as progress: common symbolic helper bodies match, so another wrapper
+permutation on an unproved inlining theory is not the next experiment. Check
+AGENTS.md, dirty source snapshots, clean A9N status and terminal prior jobs.
+Compile both legacy raw POSIX copies and the local typed workspace adapter
+into one diagnostic Alter ELF. A test-only exact launch env value selects
+mode0/1 after payload validation, before root ELF loading, context creation
+and guest execution. The bounded owned selector copy does not retain a shared
+request slice. Missing/invalid values do not change mode. This global atomic
+selector is a single-container experiment, not a production setting or ABI.
+
+Adapter bounds, initialized-read and MaybeUninit-write ownership rules remain
+as in123. Do not widen general scratch admission or change guest_views.rs or
+guest_memory.rs. Preserve existing permissions,4KiB/64-page caches, generations,
+pin/quarantine handling and the single-request large-copy fallback. Add a sixth
+test covering both policies, malformed selector values and exact fallback
+copies. Diagnostic native1364/17 ignored and forced-view selected ASan86/0
+pass, serial test threads1; diagnostic AArch64 Release check passes. ARM
+compilation is not a runtime proof. Actual x86 Release build passes too.
+
+### Hold the complete image constant except the selector byte
+
+Freeze diagnostic Alter a1a4f5f188bf84319e085e672406ddd3231c13b0b9dc86d1563518
+ce6c28e0d7 and120's ordinary aw-rtt into private118 clones. Add the mode0 env to
+the612-byte desktop config, clone control disk/rootfs, then change JSON byte470
+with debugfs zap_block to ASCII1 without updating inode metadata. Full disk
+cmp reports exactly one difference, one-based180731351; rootfs cmp reports
+112573911, exactly68157440 apart. Extracted binaries/configs, readonly ext2
+checks and full rootfs partition comparisons pass. Both complete65MiB EFI
+prefixes equal118; Kernel remains312d579bd1098ca2a5bf1186a92e03524e39add7d50cc
+5e896d7da05d43d0c88. A9N is not edited or built. The configs' env byte is also
+guest-visible; do not describe all guest data as equal after policy execution.
+
+Archive diagnostic sources/patch and restore normal sources before running
+VMs. Rebuilt normal Alter matches953f319b8722d3d99fa4093abcab8e98938cff5b724b
+36c502785ab819f2049e exactly. This normal ELF is not118's accepted Alter.
+
+### Actual results and limits
+
+One early file-mapping pilot finishes0, but inspect its complete serial:
+the preflight mapping test runs with default mode0 BEFORE the later mode1
+desktop selection. It is not a mode1 mapping regression test. Do not relabel
+it or quietly replace it with a favorable rerun. Eight subsequent ordinary
+Files/RTT boots finish0 in ABBA then BAAB order, SMP4 and normal devices, one
+VM at a time. No own builds/tests/hashes overlap a measured VM. Every ordinary
+run verifies the expected selector before its first context-prepared line,
+no conflicting later selectors, and complete Files/RTT footers. Retain all
+three raw and three Xlib samples per boot, including46.191ms candidate raw.
+
+| Cohort / metric | Control | Candidate | Elapsed change |
+| --- | ---: | ---: | ---: |
+| ABBA Files mean (ms) |2237.036729|2118.027313|-5.320%|
+| ABBA raw128 median (ms) |25.4735|26.8755|+5.504%|
+| ABBA Xlib128 median (ms) |65.107|64.0595|-1.609%|
+| BAAB Files mean (ms) |2285.207167|2129.2864785|-6.823%|
+| BAAB raw128 median (ms) |26.0395|29.2095|+12.174%|
+| BAAB Xlib128 median (ms) |66.827|65.515|-1.963%|
+
+Pooled four independent boots per side give launch2261.121948/2123.65689575ms
+(-6.080%), raw25.770/28.0485ms (+8.842%) and Xlib65.8925/64.879ms (-1.538%).
+Reject a retained runtime change because raw RTT worsens in both reversed
+cohorts, despite the launch gain. Equal ELF layout is not a necessary
+difference for THIS raw penalty. Equal ELF bytes do not hold subsequent page,
+cache, scheduling or host state fixed. The previous Xlib regression does not
+reproduce here. Neither observation identifies a causal cache, pin, inlining,
+TCG, background-I/O or IPC explanation. Ping is not full paint/input readiness;
+RTT is not exclusive CPU or IPC timing. Do not report a retained6% system gain.
+
+### Restoration and generated-image cleanup
+
+All four pre-cycle files are byte-identical again; the two new module/test
+files are removed after archiving. git apply -p0 --check of the full diagnostic
+patch passes against the restored dirty worktree. Restored native1358/17
+ignored and selected forced-view ASan80/0 pass. A9N stays clean and unchanged.
+No production selector, version, commit or release change is made.
+
+Evidence in/private/tmp/nanami-opt-cycle124.LS7ooy includes all nine serial
+logs, eight screenshots, all samples/metrics/analyzer, source snapshots,
+ELFs, package/runner scripts and REPRO.md. Control disk/rootfs SHA values are
+c27e0b6433430140447265994ce377510d59acb5a07fc68495fef40cdd6401fe /
+ac59ccee9a23758f468b879a57e63851a24f6045fcedaee850fa91fded17316e;
+candidate values are
+a49800537d076bc17cec6bc34a68d199a61924d3329d5b319b888cf94d8942aa /
+355d4d4f04b937989810aa46329febfdba75b570e5384e8b832bb23e8f6a7c87.
+After all runners terminate, negative process/lsof checks and exact pre/post
+hashes, delete all four124 disk/rootfs files. The directory is about5MiB.
+These files are not in trash; scripts/ELFs preserve reproducible content,
+not guaranteed filesystem timestamps. Keep only latest validated118 and
+working107 with accepted hashes rechecked, never a live image or official
+input. Logical file sizes do not establish APFS physical space reclaimed.
+
+Next inspect phase-specific small-copy cache hits/misses/evictions and actual
+POSIX activity during raw versus Xlib work, using the existing temporary
+observer markers. Exclude diagnostic overhead from ordinary timings. Do not
+repeat a layout-only wrapper or assert an unmeasured cache mechanism. The
+Kernel remains unchanged and100ms full-readiness remains unmet; goal active.
+
+## Cycle 125: raw/Xlib software-copy cache phase counters
+
+Classify124 as progress: complete equal executable layouts still show a raw
+RTT penalty after selecting the file-I/O policy before startup. Recheck actual
+sources, AGENTS.md, normal953f Alter, clean A9N and no live prior jobs. Inspect
+the generic page-window, native copy adapter, typed helpers and existing120
+observer markers before selecting diagnostic events. Do not assume misses,
+ownership-pin churn or capacity pressure from occupancy alone.
+
+Compile one temporary diagnostic ELF with both124 policies and bounded atomic
+phase counters. The ordinary syscall-profile timestamp function returns None;
+there is no per-event clock, allocation or serial output. Cache acquire records
+hit/miss/evict/grant outcomes; clear_owner records calls, matched leases and
+failure. Cache scope is observer VM owner versus other owners, direction read
+versus write aliases. Boundary snapshots count all occupied/ready entries and
+observer-owner entries. The five POSIX file-I/O copy adapter sites count calls
+and bytes by observer PID versus others; they do not count all POSIX service
+IPC. No production ownership, generation, permission, pin or quarantine policy
+is changed. Generic cache tests exclude the production diagnostic hooks; actual
+VMs below exercise those hooks.
+
+Use the unchanged120 aw-phases observer's PR_SET_NAME markers for raw, Xlib and
+done. The name is read before transition: the ending phase can include its
+last cache acquisition. The marker syscall and serial flush are excluded.
+Dump/reset with counters inactive before starting the next phase. These
+instrumented timings are diagnostic provenance, not ordinary speed evidence.
+Each phase executes408 queries including warmups; each of three timed samples
+covers128 queries after8 warmups. Raw remains before Xlib.
+
+### Construction and actual executions
+
+Diagnostic x86 build, native1368/17 ignored, selected forced-view ASan90/0 and
+ARM Release check pass; native tests use one thread. Four new counter tests
+cover known names, inactive/marker filtering, exact owner/PID scopes/directions
+and transition/reset/foreign-client handling. ARM checking is not runtime
+validation. Both disks install the same diagnostic Alter48ee8181f7f7fadc7b57e3e
+0f6f6a3bfc8a2c28c2b9b6c43db6659bffaeb5890 and unchanged observer e7b2c8e45543e6
+d09102582eb3a36b5e9fa48561e3ad7e73e72a262f54ace23d. Full disks differ exactly
+one byte: JSON470, disk one-based180731351, rootfs112573911, with68157440 offset.
+Readonly ext2, extracted files, full rootfs partition and unchanged65MiB EFI
+prefix checks pass; Kernel remains312d579bd1098ca2a5bf1186a92e03524e39add7d50cc
+5e896d7da05d43d0c88. A9N is not edited or built.
+
+Archive all diagnostic code and restore before running VMs. A first archival
+patch check fails because trailing blank context was trimmed; regenerate the
+archive losslessly from saved snapshots. Correct git apply -p0 --check passes
+against restored sources without applying it. All nine compared existing files
+are byte-identical; three added files are removed. Rebuilt normal Alter matches
+953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e exactly;
+restored native1358/17 ignored and selected ASan80/0 pass. Alpha be6eec02 stays
+exact. Builds, tests, packaging and hashes are terminal before any VM.
+
+Four actual ABBA diagnostic boots finish0, one VM at a time, SMP4 and normal
+devices with frozen120 runner. Each verifies its mode before first prepared
+context, complete Files/RTT footers,80 unique cache rows,8 POSIX rows and8
+inventory rows. Explicit zeroes are retained; missing/interleaved rows are
+errors, not0. Keep every raw/Xlib sample but exclude all four instrumented
+timing runs from optimization percentages.
+
+### Observed work, not a latency-cause claim
+
+All four raw phases have0 misses, evictions, grants, uncertain mappings,
+release failures and invalidation calls in BOTH windows for all observed VMs.
+Observer page-acquisition hits are409 read/414 write in every run. All32
+POSIX file-copy rows across four boots/two phases are explicitly0 calls/bytes.
+Repeated software page-lease churn and direct execution of the five POSIX
+copy sites are therefore not observed work in these raw intervals. This does
+not prove that every state or cost in uninstrumented124 is equal.
+
+| Observer metric per phase | Control first / second | Candidate first / second |
+| --- | ---: | ---: |
+| Raw read-page hits |409 /409|409 /409|
+| Raw write-page hits |414 /414|414 /414|
+| Raw misses, both windows |0 /0|0 /0|
+| Xlib read-page hits |4079 /4079|4079 /4079|
+| Xlib write-page hits |2454 /2454|2453 /2454|
+| Xlib write misses, each successfully granted |0 /0|1 /0|
+
+The first candidate Xlib phase has exactly1 miss,1 eviction and1 successful
+write-page grant; all other Xlib phase misses are0. There are no denial,
+uncertainty, failed release or invalidation events. Observer recorded syscall
+counts also match all four runs: raw read408/write408/clock6; Xlib poll816/
+writev408/recvmsg1223/clock6. Those822 versus2453 recorded handler returns are
+not exclusive CPU costs or a demonstrated Kernel/IPC cause.
+
+Read inventories are64 occupied/ready,3 observer pages. Control write windows
+hold62 then61 entries,4 observer pages. Candidate write windows hold64; first
+starts3 observer pages and gains its fourth in Xlib, second has4 throughout.
+Background VM hit/syscall counts vary. A longer phase can itself allow more
+background calls; do not invert this into proof they caused the delay. Hit-way
+probe cost, cache contents, hardware state, scheduling, startup carryover and
+host state are not held equal by these counts. Increasing cache capacity is
+not justified by full occupancy with no raw misses.
+
+### Retention and next experiment
+
+Evidence lives in/private/tmp/nanami-opt-cycle125.kux6OA: four complete serial
+logs/screenshots, strict parser, all counter rows and excluded timing samples,
+metrics/analyzer, source snapshots, exact ELFs, reconstruction scripts and
+REPRO.md. Control disk/rootfs hashes are
+30916c0fae151452c457dd824038f65fe84aa0dc8e192070fee2a1209bac3f93 /
+c8eabc18a008a554c545dbc2e7e0dedef38f7e69d1824ea1b8753a4cd3b799ef;
+candidate hashes are
+4fad2075deec8c3064a4b5b9f429b45631c4e3046d2294f104167bfa7c8a4238 /
+c673bb2b14e7665f55f061ee0728913ec9ff7700b4e93841540a62f9bb6adc7a.
+After terminal runners, negative process/lsof and matching package/pre-cleanup
+hashes, delete all four125 disk/rootfs files. Only about4.6MiB evidence remains.
+Keep accepted118 and working107 with verified hashes; no official input or live
+media is removed. Files are not in trash; content is reproducible from scripts
+and ELFs, not guaranteed filesystem timestamps. No APFS reclaimed-space amount
+is inferred from logical file sizes. No runtime/version/release change accepted.
+
+Next compare early versus later post-startup request/reply work with same-ELF
+UNINSTRUMENTED policy controls and an explicit longer settle. Keep the original
+two-second result, not an easier late-only replacement for it or the100ms
+paint/input goal. Any phase wall/background attribution must use actual
+intervals, not unnormalized event counts. Do not repeat a larger cache or
+layout-only helper experiment. Kernel unchanged; full optimization goal active.
+
+## Cycle 126: original and later post-startup response controls
+
+Treat125 as progress: its counters find no raw software-lease churn or active
+new POSIX file-copy adapter work. They do not identify124's uninstrumented RTT
+cause. Inspect the current dirty worktree, AGENTS.md, normal953f Alter, clean
+A9N and terminal prior jobs. Keep the original two-second response condition;
+test a later one as an additional control, never an easier replacement for
+early interactivity or the100ms full paint/input requirement.
+
+### Minimal test parameter, verified executable layout
+
+Extend only the opt-in observer fixture with APP_OBSERVER_RTT_SETTLE_SECONDS,
+default2 and compile-time bounds0..60. The C test now executes the failed-settle
+path with mocked nanosleep, checking exact requested seconds, zero nanoseconds
+and early return before X/socket work. Test default/0/2/10/60 and rejected-1/61.
+Tiny Core35 host tests, observer11 tests, and current2s/10s ASan+UBSan pass.
+No production Rust, Kernel, ABI, upstream client/library or FPU change is made.
+
+A first helper function changes the default ELF; remove it before any VM.
+The direct constant initializer restores exact equality with120's ordinary
+aw-rtt e5f11841318e8a2bf9b6a08071d2dd28e5176c9446201f2e76bea610f81800bf.
+The no-RTT observer also rebuilds byte-identically to120's no-RTT observer.
+The10s ELF0b0f83ce33eaf28731729b776691009fa0e4da0778c4453487278b291f0c8b6e
+differs ONLY at one-based bytes2825 and5347,2->10: a rodata copy and the sleep
+seconds immediate. Code/data layout is unchanged. The first package precheck
+assumes one changed byte and rejects these two copies before making any image;
+correct the check to validate both. No actual VM is excluded or rerun.
+
+Reuse124's exact unprofiled same-policy-comparison Alter a1a4f5f188bf84319e085
+e672406ddd3231c13b0b9dc86d1563518ce6c28e0d7. Its test-only env selector runs
+before root loading/context creation; no125 phase counters are present. From
+accepted118 construct four conditions: early/late x control/candidate. Raw-zap
+only one policy byte or two delay bytes after cloning, without metadata edits.
+Whole disk/rootfs comparisons verify these axes and exactly three diagonal
+differences. Extracted inputs, readonly ext2, full partition and65MiB EFI
+prefixes pass; all four Kernels remain312d579bd1098ca2a5bf1186a92e03524e39add7d
+50cc5e896d7da05d43d0c88. A9N is neither edited nor built.
+
+### Sixteen ordinary boots, all samples retained
+
+Use two interleaved eight-boot cohorts, reversing ABBA/BAAB for each delay.
+Four independent fresh boots per policy/delay cell; three raw and three Xlib
+samples each, including every first/slow sample. All16 runners terminate0
+with expected mode before first prepared root context and complete Files/RTT
+footers. One VM at a time, SMP4 and normal devices; no own build/test/hash or
+other VM overlaps. The frozen120 host runner gains only a post-ping-to-result
+elapsed print after its existing complete result line. There is no per-handler
+profiling. Keep all logs, serials, screenshots and per-boot medians.
+
+| Cohort / settle | Files mean change | Raw128 median change | Xlib128 median change |
+| --- | ---: | ---: | ---: |
+| A /2s | -5.331% | -12.996% | -1.029% |
+| A /10s | -4.167% | +3.186% | -2.438% |
+| B /2s | -3.601% | -5.969% | +2.913% |
+| B /10s | -3.045% | -1.977% | -2.202% |
+
+Pooled metrics (control/candidate; RTT has12 samples but only4 independent
+boots per cell):
+
+| Settle / metric | Control | Candidate | Elapsed change |
+| --- | ---: | ---: | ---: |
+|2s Files mean (ms)|2222.16447925|2122.72912525|-4.475%|
+|2s raw128 median (ms)|29.262|26.646|-8.940%|
+|2s Xlib128 median (ms)|63.535|62.5405|-1.565%|
+|10s Files mean (ms)|2215.6461565|2135.68551075|-3.609%|
+|10s raw128 median (ms)|28.1505|27.948|-0.719%|
+|10s Xlib128 median (ms)|65.0745|63.3725|-2.615%|
+
+The changed sleep values are consumed after the launch ping, so also report
+the cold-only pool across both conditions, while retaining each condition:
+eight boots per policy,2218.905317875/2129.207318ms (-4.042%). This repeats a
+cold-launch routing benefit, not an enabled production/system gain,5% result
+or100ms complete readiness. Inspect a-03-early-candidate.png: the first-ping
+Files interior is still incompletely painted, so that gate is insufficient.
+
+Host post-ping completion medians are2.303/2.307s for2s and10.312/10.354s for
+10s. They include remaining sleep, all sample loops, screenshot/readback work;
+they are not exact sleep or CPU durations. Increasing the delay changes raw
+control -3.798% but candidate +4.886%, and Xlib +2.423%/+1.330%. First-to-last
+raw medians still fall at10s, control35.570->25.795ms and candidate36.754->
+26.2805ms. Finite warmup/delay does not prove quiescence; do not choose only
+the last sample or attribute the drift to TCG, I-cache or scheduling without
+evidence.124's raw penalty does not reproduce in this original2s comparison;
+the data do not show that waiting10s cures it or identify its cause.
+
+### State and retention
+
+Keep only the small observer parameter/coverage changes, with defaults proven
+byte-identical. The archived before/after fixture patch reverse-checks against
+the current dirty worktree; no unrelated edits are reverted. Production Alter
+remains953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e,
+Alpha remainsbe6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73.
+There is no enabled POSIX policy, version, commit, release or Kernel change.
+
+Evidence in/private/tmp/nanami-opt-cycle126.VGU2VU includes all16 complete
+serial logs/screenshots, every sample/median, four-condition manifest/hashes,
+strict runner/analyzer, before/after C fixtures, ELFs/disassemblies, package/
+build commands and REPRO.md. After all VMs are terminal and process/lsof checks
+are negative, hash all eight comparison image/rootfs targets. That command
+yields live: poll its same session to terminal, then verify EIGHT unique rows
+against the package manifest, not the partial seven-row file. No hash or VM
+is restarted merely because observation yields. Delete all eight comparison
+files only after that check; about8.5MiB evidence remains. Accepted118 and
+working107 hashes are unchanged; retain those two usable generations, never
+official inputs or live media. Deleted files are not in Trash; reconstruction
+recovers content, not guaranteed filesystem timestamps. Logical APFS clone
+sizes are not claimed as reclaimed physical space.
+
+Next validate the minimal typed POSIX-buffer implementation in a normal
+production build with diagnostic selector removed, against the exact normal
+baseline. Retain original2s response plus independent protocol/process and real
+GUI/restart/input gates; do not accept a favorable late-only metric or another
+code-placement permutation. No larger-cache/vfork/imaginary extra mmap-SHM-copy
+change is justified by this cycle. Kernel unchanged; full goal remains active.
+
+## Cycle 127: unflagged local POSIX-buffer adapter (rejected)
+
+### Change and safety boundary
+
+Validate the actual production implementation, not another diagnostic selector
+or function-placement experiment. A private `linux/posix_buffer.rs` adapter
+borrows the negotiated POSIX workspace for the synchronous copy in five file-I/O
+paths: read, write, pread, pwrite and writev gathering. It admits only the
+installed read bases and the currently selected write subrange/capacity, with
+checked arithmetic. The existing typed guest-copy helpers retain current guest
+permission checks, bounded small-copy leases and the single checked fallback
+for large/ineligible transfers. No arbitrary guest VA becomes an owned native
+buffer. No borrow survives the copy or a subsequent POSIX request; the copy
+helper may call Alpha, not POSIX. Unrelated socket/argument scratch admission,
+cache geometry, generation invalidation, fork permissions and rollback remain
+unchanged. There is no mode env, selector, AtomicBool or profiler in this ELF.
+
+Seven native tests cover both installed read buffers, chosen write subranges,
+narrower ordinary write capacity, zero-capacity direct fallback, independent
+read capacities, invalid/null/overflow ranges, copy failure and one 64KiB helper
+transfer per direction. These adapter tests mock the existing copy helper;
+they are not a substitute for its permission/mapping tests or actual hardware.
+The full serial native suite passes 1,365 tests with 17 ignored; selected
+forced-view ASan tests pass 87. x86 Release builds and ARM Release checks pass;
+an ARM compile check is not an ARM runtime claim.
+
+Actual candidate mapping/protection/current-byte/fork probes pass with both one
+and four CPUs. Unlike the earlier diagnostic pilot, this unflagged candidate
+uses its candidate path from boot, before creating the first Tiny Core context.
+Kernel sources/build and the accepted118 EFI prefix are unchanged.
+
+### Frozen components and measurements
+
+Use two accepted118 clones, replacing Alter with normal baseline953f319b or
+unflagged candidate7ae2f014 and installing the same byte-identical120 RTT
+observer e5f11841. Keep its original two-second settle; no late-only comparison
+or counters. All other services, Alpha/init, root config and firmware are
+frozen. The different production ELFs mean these are not equal-layout disks.
+The normal baseline ELF is not asserted byte-identical to accepted118's Alter.
+
+All 18 actual VMs finish zero: two mapping pilots, eight ordinary launch/RTT
+boots in ABBA then BAAB order, and four independent protocol plus four process
+boots in balanced order. Only one VM runs at a time; no own build/test/hash or
+source modification overlaps a measured VM. Preserve every timing sample,
+including cold samples, and complete serial logs. Three samples in one boot
+are not three independent boots.
+
+| Launch/response cohort | Files click-to-ping | Raw X11 128 queries | Xlib 128 queries |
+| --- | ---: | ---: | ---: |
+| A, two boots per side | -4.874% | +7.715% | +2.318% |
+| B, reversed, two boots per side | -2.575% | +1.422% | -1.002% |
+| Pooled, four boots per side | -3.727% | +5.968% | -0.306% |
+
+Pooled Files means are 2239.152 -> 2155.703ms; raw medians are 26.384 ->
+27.9585ms and Xlib 64.213 -> 64.0165ms. The launch result is below the 5% cycle
+aim, and neither first-window ping nor RTT demonstrates full paint/input
+readiness within 100ms. Raw's penalty is mixed across the reversed cohorts;
+do not claim both cohorts exceeded 5%, equivalence, or a proven latency cause.
+Retain123's adverse older compiled-candidate cohort, rather than replacing it
+with the favorable same-ELF126 diagnostic.
+
+Independent control medians below are elapsed changes, candidate versus
+control. `first`/`second` each compare one separate boot per side; pooled keeps
+both boots and all samples. Native source-release/kill-reap costs do not execute
+the five Linux POSIX-copy adapter sites, so slower results do not by themselves
+identify an Alpha or adapter implementation cause. They must not be hidden.
+
+| Independent workload | First | Second | Pooled |
+| --- | ---: | ---: | ---: |
+| Frame unchanged | -0.119% | +1.519% | +0.558% |
+| Frame small damage | +1.276% | -1.834% | +0.318% |
+| Frame full damage | +1.654% | -1.980% | -0.115% |
+| Alpha breakdown spawn | +23.641% | +4.561% | +16.493% |
+| Alpha breakdown kill/reap | +35.813% | -0.262% | +6.183% |
+| Alpha busybox lifecycle | +1.600% | +15.510% | +13.475% |
+| Alpha busybox prepare | +5.100% | +2.607% | +4.332% |
+| Alpha busybox source release | +12.077% | +9.259% | +10.613% |
+| Alpha Xfe lifecycle | +0.682% | +9.459% | +4.936% |
+| Alpha Xfe prepare | +0.121% | +12.395% | +7.415% |
+| Alpha Xfe source release | +8.578% | +5.575% | +10.545% |
+| Alpha spawn/reap eight | +8.636% | -6.031% | +0.083% |
+| Alpha Xfe kill/reap | +8.814% | +15.919% | +0.389% |
+| Alpha Xfe spawn | +3.876% | -5.817% | -1.179% |
+| Copyout ordinary | +0.859% | -4.720% | -1.305% |
+| Copyout 128 VMAs | +0.796% | -2.526% | +0.495% |
+| Copyout 256 VMAs | -4.870% | +1.023% | -2.095% |
+| Fork eight | -6.807% | -9.998% | -6.552% |
+| Fork/exec eight | -0.906% | -1.316% | -1.111% |
+| Fork 128 VMAs, eight | -14.293% | -4.882% | -11.535% |
+| Fork 256 VMAs, eight | -3.368% | -11.108% | -9.067% |
+| Getpid 2048 | -0.129% | +1.063% | +0.455% |
+| Getuid 2048 | +5.727% | +4.007% | +4.862% |
+| Negoto create | -3.144% | +8.657% | -3.875% |
+| Busybox ls eight | +0.047% | -0.533% | -0.287% |
+| Directory small 64 | -0.467% | -3.153% | -2.927% |
+| Directory large 64 | +0.748% | -7.329% | -0.963% |
+| Stat 512 | +1.819% | -3.290% | -0.985% |
+| Missing stat 512 | +4.273% | -1.684% | +1.009% |
+| UNIX 2048 | +0.628% | +3.794% | +2.099% |
+| UNIX recvmsg 2048 | -7.684% | -2.689% | -2.722% |
+| UNIX recvmsg EOF 2048 | +1.167% | -2.877% | +0.331% |
+
+The repeated native cleanup increases are small in absolute time: pooled
+busybox source release 0.424 -> 0.469ms and Xfe 0.863 -> 0.954ms. Xfe kill/reap
+illustrates why pooled results alone are insufficient: +8.814%/+15.919% in the
+two comparisons, but +0.389% pooled because boot baselines differ. No all-path
+speedup or causal attribution is made. Preserve all 29 protocol/process metrics
+plus three frame metrics, not only the favorable fork/exec measurements.
+
+The host control wrapper initially checks stdout for a footer that the process
+runner intentionally prints only to serial. Both completed VMs actually exit
+zero and their complete serial footers pass. Repair the wrapper to verify
+serial, archive those observations and resume only the remaining six VMs; do
+not overwrite or repeat the completed measurements to obtain a favorable run.
+
+Generated-code inspection also rejects a speculative dispatcher-frame theory:
+both actual dispatcher prefixes have six pushes, a 232-byte stack allocation,
+four register moves and the direct call to UNIX dispatch. Whole-function size
+10148 -> 10386 bytes does not demonstrate an extra operation on a given executed
+path, larger entry frame or loss of inlining. No wrapper/layout tuning follows.
+
+### Decision, restoration and retention
+
+Do not adopt the adapter: the modest launch benefit is not a convincing overall
+improvement with mixed response/control data. This is an acceptance decision,
+not proof that the adapter causes every slower measurement. Stop before the
+planned GUI restart/all-application/paint gates; those gates are not claimed
+passed for this candidate. No new default image, version, commit or release.
+
+Archive the exact five-file patch and before/after sources under
+`/private/tmp/nanami-opt-cycle127.RaaKZc`; `git apply --check` passes against the
+restored worktree. Restore the three existing files byte-for-byte and remove
+only the two authored additions. Generic guest_memory/guest_views and launch
+also compare exactly with pre-cycle snapshots. An initial patch-tool hunk
+syntax error changes nothing; corrected restoration passes all comparisons.
+Rebuild normal Alter to exact SHA256
+953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+Native tests return to 1,358 passed/17 ignored and ASan to 80 passed.
+Alpha remains be6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73;
+Kernel worktree is clean and was not rebuilt or edited.
+
+After all VMs/builds/tests finish, verify no process or open media uses the
+targets, hash all eight unique comparison/retained image/rootfs paths, and
+check them against the package/accepted manifests. Poll the same yielded hash
+session to terminal before checking all eight rows. Delete the four rejected
+comparison image/rootfs files; no127 images remain and about5.6MiB of small
+evidence remains. Keep only the two usable accepted generations118/107, whose
+hashes are unchanged. No official inputs or live media are removed. Deletion
+does not use Trash; preserved ELFs/patch/package steps permit reconstruction,
+not guaranteed historical filesystem timestamps. APFS logical clone sizes are
+not claimed as physical free-space gain.
+
+The full optimization goal remains active. Next inspect executed user-level
+fault/event-loop work rather than repeating POSIX-adapter placement variants;
+do not infer a large process copy or missing fast path from source syntax alone.
+
+## Cycle 128: signal-pump snapshot removal (inconclusive)
+
+### Executed-code finding and bounded implementation
+
+Inspect the actual restored953f319b Alter ELF, rather than inferring a copy
+from `let process = runtime.managed[index]` alone. Once the global
+signals_pending guard admits the pump, each of its16 task iterations performs
+a 560-byte memcpy plus scalar/context loads before testing PID/exited/lazy
+signal state. Empty task slots pay this cost too. This is not a full2272-byte
+ManagedProcess memcpy, and the walk does not run when signals_pending is false.
+The finding alone does not establish its share of end-to-end launch cost.
+
+The candidate borrows task metadata, retains only PID across child notification,
+then borrows the current task again. It copies a stopped register context only
+after eligibility, and queries parked_context only after exclusion, SIGKILL,
+prepared-bundle, stopped and blocked/eligible checks. Snapshot only PCB/context
+needed for actual delivery before mutating Runtime. Keep global pending-cache
+semantics, child notification order, stop ACK, signal masks, EINTR/SA_RESTART,
+continued-context restoration and final waiter/timer wakeups unchanged. No new
+Kernel operation, helper layer, routing selector or production counter.
+
+Pump child notifications are code5/6, whereas notify_child's leader auto-reap
+branch requires code<=3. Exited tasks are skipped before notification. This
+current call path does not remove the task record before its reborrow; this is
+a source audit of that path, not a general lifetime claim about arbitrary
+notify_child calls.
+
+Three added native tests count parked-context reads in the mock only. Empty,
+exited, absent lazy signal state, current-fault exclusion, prepared, stopped and
+blocked tasks do not read a parked context; SIGKILL of an unstarted bundle
+does not read one or resume it; eligible delivery reads once and preserves the
+stop/read/write/resume sequence. The native mock now models absent signal state
+and conditional destruction as production already does. Existing full signal
+regressions remain exercised. Candidate native tests pass1361/17ignored and
+forced-view plus signal ASan99; x86 Release and ARM Release compile checks pass.
+
+An initial compiled implementation removes the560-byte task copy but still
+copies a184-byte optional saved context before eligibility. Inspect that code
+before any VM; defer that copy by borrowing Option contents until eligibility.
+Archive the intermediate ELF/disassembly, never run it as a runtime sample.
+The final unflagged2637c1a8 ELF is the only candidate used by all actual VMs.
+Its pump is3259 bytes versus3925, and stack allocation824 bytes versus1816.
+Actual PID/exited/lazy-state guards now precede any context memcpy. These are
+code-generation facts, not a5% or100ms system-performance claim.
+
+### Runtime result and preserved failure
+
+Pin accepted118 Alpha/init/Kernel, services, root config and EFI prefix; change
+only Alter and the identical120 original2s observer in two comparison clones.
+The baseline remains normal953f319b, not asserted identical to accepted118's
+Alter. All build/test/hash jobs are terminal before a measured VM. One VM runs
+at a time; no own source edit/build/test/hash overlaps a measured VM.
+
+Seven actual VMs are attempted. File-mapping/protection/current-byte/fork pilots
+pass with one and four CPUs. All four first-cohort launch/RTT boots pass. Keep
+every sample, including the unusually slow second control:
+
+| First-cohort run | Files click-to-ping ms | Raw128 ms, all three samples | Xlib128 ms, all three samples |
+| --- | ---: | --- | --- |
+| Control a1 | 2288.329917 | 27.427,28.850,28.361 | 74.974,66.485,68.779 |
+| Candidate a1 | 2281.308208 | 36.750,22.362,23.801 | 61.712,62.014,61.102 |
+| Candidate a2 | 2179.148083 | 31.849,27.080,22.743 | 62.290,59.987,60.938 |
+| Control a2 | 3397.834917 | 28.355,24.066,22.351 | 66.349,68.607,70.499 |
+
+Those four runs are descriptive data only, not the completed reversed-cohort
+comparison. The first second-cohort run, candidate-b1, exits1 in the host
+runner while waiting for APP-EVENTLOOP-REPLY. Serial shows APP-OBSERVER-READY
+files for PID41, followed by observer exit status9 but no completion marker.
+Inspect its preserved timeout screenshot: Files is visibly painted at/root,
+with a directory listing and dock. This does not establish input responsiveness,
+that the observer sent a ping, or why it failed. No Kernel fault/panic marker
+is reported in that serial. The wrapper terminates and no VM remains live.
+
+The observer's return9 conflates clock_gettime failure with its90-second
+discovery deadline. It cannot identify which condition occurred. Likewise,
+the painted screenshot does not prove an observer bug or disprove an Alter
+regression. Missing structure/property discovery, clock/copyout failure and
+other causes remain hypotheses, not findings. Do not change the readiness
+criterion, discard this failure or simply repeat it to obtain a passing sample.
+Preserve the original serial, host log, QEMU diagnostics/thread list and PNG.
+
+The remaining three second-cohort jobs never run. No complete eight-run result,
+5% speedup, equivalence, adoption or100ms full paint/input claim is made.
+Independent protocol/process and real GUI restart/all-app/input/paint gates
+have not been reached for this candidate. partial-metrics.json explicitly
+marks the failed and unrun observations; the full-cohort analyzer intentionally
+still requires all eight complete inputs and is not used to invent them.
+
+### Restoration, retention and next evidence
+
+Archive the exact two-file patch, before/after sources and actual generated
+ELFs/disassemblies in/private/tmp/nanami-opt-cycle128.Chshgi. Restore both
+authored source files exactly; git apply --check verifies the archived patch
+against the restored dirty worktree. Rebuild Alter to exact953f319b8722d3d99fa
+4093abcab8e98938cff5b724b36c502785ab819f2049e. Native tests return to1358/17ignored;
+ASan guest-copy/UNIX plus original signal tests pass96. Alpha remainsbe6eec02;
+Kernel sources/build are unchanged. No default image, version, commit or release
+is promoted; the generated candidate is not left in the ordinary build output.
+
+After all sessions are terminal and process/lsof checks show no live media,
+hash eight unique comparison/accepted image/rootfs paths and verify all against
+their recorded package/accepted hashes. Poll the same yielded hash session to
+terminal, then delete the four comparison image/rootfs files. No128 images
+remain; about5.5MiB of source/ELF/log/screenshot evidence remains. Keep only
+the two usable accepted generations118/107 with unchanged hashes. No official
+input or active media is deleted; deletion is not through Trash. Preserved
+artifacts permit content reconstruction, not historical timestamps, and APFS
+logical clone sizes are not physical free-space measurements.
+
+The turn makes progress through actual generated-code proof, new regression
+coverage and a preserved runtime failure that changes the next action. It is
+not a repeated blocker or goal completion. Next distinguish the observer's
+two return9 conditions and retain bounded X11 discovery evidence in a test-only
+diagnostic, without changing readiness semantics or attributing the failure
+in advance. Reconsider the signal-pump optimization only after comparable
+correct runtime evidence. The full user-level optimization goal stays active.
+
+## Cycle 129: bounded observer failure evidence
+
+The previous turn is progress: actual generated-code proof, three new signal
+regressions and a preserved runtime failure changed the next action. Its
+candidate-b1 exit9 is not a proven signal-pump regression, observer bug or
+clock failure. Do not substitute a favorable first cohort or rerun to green.
+
+Keep only test-side additions this cycle. Optional APP_OBSERVER_TRACE_FAILURE
+separates begin-clock, discovery-poll, discovery-clock and discovery-deadline
+failures, preserving the original exit6/7/9 and all successful readiness/ping
+semantics. Capture errno before querying Xlib; on a clock error, do not read the
+uninitialized failed timespec. Record a16-event ring, watch/candidate/reset
+counters and a failure-only X11 tree snapshot limited to24 nodes/depth2.
+The snapshot does not subscribe, modify candidate or turn a visible tree match
+into readiness. Bound its output to one4096-byte line, escaping title whitespace
+and preserving short-write handling for the existing last-line-only bridge.
+The tree bound limits requests/storage, not synchronous Xlib response time;
+the outer host timeout remains in force. No per-event logging/timestamping.
+
+The actual observer-loop native mock tests distinct clock/deadline and early
+clock/poll failures, preserved original errno despite later Xlib mutation,
+unchanged successful window detection, failure despite a matching viewable
+snapshot, property/client-event window offsets, a16-record ring,24-node tree,
+4096-byte/single-line bound and short writes. It uses the actual observer
+source, not a rewritten predicate. All36 Tiny Core Python/compiled-C tests and
+native C ASan/UBSan pass. New trace code is conditional: default RTT observer
+e5f11841318e8a2bf9b6a08071d2dd28e5176c9446201f2e76bea610f81800bf and
+no-RTT97d9032775d25f5fe5879510234e10d65bcb5dec7c6350d6f39d47e169be2179
+compare byte-for-byte with the preserved120/126 builds. No normal observer or
+application behavior changes. The actual trace-only RTT ELF is
+c8f41d0902c626231a285c51d42bb56f00e267072f8bb0bcc9bc3c9d713c32c8.
+
+Pin accepted118 components in two clones; install that identical trace observer
+with original953f319b Alter or archived128candidate2637c1a8. Do not rebuild or
+edit Alter, Alpha or Kernel. The diagnostic host runner is an archived120
+runner copy that reports a complete APP-OBSERVER-FAIL line as failure early;
+it does not change any success criterion. Its driver preserves every serial,
+PNG and nonzero exit, classifying observer failure as failure, not pass, and
+never replaces a completed run. All own builds/tests/hashes finish before VM
+execution; no source edit overlaps the four one-at-a-time ABBA probes.
+
+| Diagnostic run | Alter | Runner exit | Observation |
+| --- | --- | ---: | --- |
+| 01-control |953f319b|0|complete ping/RTT probe, no failure trace|
+| 02-candidate |2637c1a8|0|complete ping/RTT probe, no failure trace|
+| 03-candidate |2637c1a8|0|complete ping/RTT probe, no failure trace|
+| 04-control |953f319b|0|complete ping/RTT probe, no failure trace|
+
+No128 return9 failure recurs in these four instrumented probes. This is
+non-reproduction, not proof of a cure, candidate safety, equivalence, a cause
+or a performance gain. Original128 candidate-b1, its partial cohort and failed
+screenshot/serial remain preserved. Every timing printed by the diagnostic
+runner is excluded from performance assessment. Do not invent missing128
+second-cohort samples or promote the unverified signal-pump candidate.
+
+Retain the optional observer trace/header, its full-loop native test and the
+Python test integration. Archive the exact four-file before/after patch and
+commands under/private/tmp/nanami-opt-cycle129.Hrtfuk; git apply --reverse
+--check passes against current dirty sources. Production source and normal
+Alter output remain exact953f319b; Alpha remainsbe6eec02; Kernel worktree is
+clean and not rebuilt. No version, commit, release or new default image.
+
+After all VMs are terminal and process/lsof checks find no open media, poll the
+same yielded hash session to completion and verify all eight unique diagnostic
+and accepted image/rootfs hashes. Delete all four diagnostic image/rootfs;
+no129 images remain, with about4.1MiB of small evidence. Only accepted118 and
+fallback107 remain, hashes unchanged. No official input or live media is
+deleted; files are not in Trash, and archived ELFs/package scripts allow
+reconstruction, not historical timestamps. No physical APFS reclaim claim.
+
+The full goal stays active, with no recurring blocker or completion claim.
+Next actual generated-code inspection finds three616-byte copy sites in
+wake_readiness_waiters: local snapshot, full writeback before scanning even
+though PTY updates only the deadline, and another full writeback when still
+waiting. Inspect a bounded active-interest writeback, preserving ownership,
+snapshotted FD interests, changed sources/deadlines and retry semantics; do not
+infer its end-to-end share from copy size or introduce a new heap/unsafe arena
+merely to avoid copying. The signal-pump candidate remains archived, not adopted.
+
+## Cycle 130: bounded readiness writeback (rejected)
+
+Inspect normal953f319b's actual wake_readiness_waiters code: three616-byte
+copy sites perform the detached snapshot, pre-scan publication and pending
+writeback. PTY update_deadline changes only the deadline, and production
+pollfd accesses use the active count, not the unused64-entry capacity.
+The candidate publishes only the deadline before scanning. A safe, exhaustive
+borrowed update copies every metadata field and only the active pollfd prefix
+when still waiting; preserve the full-value fallback if a provider removed
+the stored wait. No heap, unsafe arena, object-layout, protocol, Alpha, Kernel
+or signal-pump change. FD interests remain snapshotted across guest mutations.
+
+Three new tests cover counts0/1/64/3, unused-tail canaries and all metadata,
+repeated unready notifications after guest FD mutation, and the callback-cleared
+fallback. All41 readiness tests, 1,361 native tests/17 ignored and136 selected
+ASan tests pass. x86 Release and ARM Release compile checks pass; ARM compilation
+does not establish runtime behavior. Actual generated code removes the common
+pre-scan616-byte memcpy and bounds the pending copy to8*count plus metadata;
+the snapshot and cold full-copy fallback remain. Stack allocation stays824
+bytes, while the function grows1457 ->1685 bytes with extra checks. Neither
+copy-size reduction nor static code size establishes an end-to-end speedup.
+
+A final style-comment correction is followed by a rebuild before any VM.
+The final1c30f6362727b2891bd5ecdf84da2781b6cf68336fb5e85509cd23821d8ff75b
+ELF is the only candidate packaged and tested. The earlier1b3416b9 ELF is
+never VM-tested. Their inspected wake function bodies match all370 symbolic
+instructions/1685 bytes, but whole-ELF equality or a cause for the hash change
+is not claimed. Preserve the final actual disassembly, not just the earlier one.
+
+Pin118's Alpha/init/Kernel/services/root config and complete EFI prefix in two
+clones. Change only Alter and the identical120 original2s RTT observer; the
+baseline953f319b is not asserted equal to accepted118's Alter00c904b4. Optional
+129 observer diagnostics are not enabled. All build/test/hash work is terminal
+before each measured VM; one VM runs at a time with no own source edit, build,
+test or hash overlapping it. Both mapping/protection/current-byte/fork pilots
+(one and four CPUs) and all eight ABBA/BAAB launch/RTT boots exit0. Preserve
+every sample; three RTT samples per boot are not three independent boots.
+
+| Run | Files click-to-ping ms | Raw128 ms, all three samples | Xlib128 ms, all three samples |
+| --- | ---: | --- | --- |
+| Control a1 |2235.283667|30.293,25.891,24.055|66.269,64.070,64.294|
+| Candidate a1 |2267.861208|24.852,23.664,28.806|67.388,69.977,73.325|
+| Candidate a2 |2295.135792|31.161,30.440,29.781|67.373,66.315,62.389|
+| Control a2 |2258.683292|28.245,29.942,27.827|64.704,63.411,65.587|
+| Candidate b1 |2170.914708|32.520,34.245,31.053|61.616,61.347,61.983|
+| Control b1 |2208.776500|35.450,23.840,24.859|66.749,63.348,65.005|
+| Control b2 |2198.463416|32.397,27.787,24.653|64.548,62.604,61.168|
+| Candidate b2 |2257.756917|35.453,28.935,28.327|64.323,64.333,64.353|
+
+| Comparison | Launch mean elapsed change | Raw median elapsed change | Xlib median elapsed change |
+| --- | ---: | ---: | ---: |
+| First cohort |+1.536%|+4.485%|+4.468%|
+| Reversed cohort |+0.486%|+20.756%|-1.243%|
+| Pooled, four boots per side |+1.016%|+8.284%|-0.121%|
+
+Pooled launch means2225.302 ->2247.917ms, raw medians27.807 ->30.1105ms and
+Xlib64.421 ->64.343ms. Reject: launch does not improve in either cohort and
+raw response is slower in both. Xlib is mixed; do not claim every metric
+regresses or assign a CPU/cache/code-footprint cause from these timings.
+Stop before independent protocol/process and GUI restart/all-app/input/paint
+gates; those later gates are not claimed passed. First-window ping and RTT do
+not establish100ms full paint/input readiness. All eight130 completions also
+do not cure or replace128's preserved observer failure.
+
+Archive the exact three-file patch, before/after sources, final ELF/disassembly,
+acceptance rules, package/runner/analyzer scripts and complete logs under
+/private/tmp/nanami-opt-cycle130.NIB7FM. Restore all three authored files
+byte-for-byte and forward-check the archived patch against the restored dirty
+worktree. Normal Alter rebuilds to exact953f319b8722d3d99fa4093abcab8e98938c
+ff5b724b36c502785ab819f2049e. Restored native tests pass1,358/17 ignored and
+selected ASan133. Alpha remainsbe6eec02; Kernel worktree is clean and is not
+edited or rebuilt. No candidate runtime, version, commit or release is adopted.
+
+After every VM/build/test finishes, confirm no live relevant process or open
+target media. Poll the existing hash session to terminal0, then verify all
+eight unique comparison/retained image/rootfs hashes against recorded values.
+Delete only the four130 comparison image/rootfs files. No130 image remains;
+about5.0MiB of small evidence is retained. Accepted118/fallback107 hashes are
+unchanged. No official input or live media is removed; deletion is not through
+Trash. Preserved components and commands permit content reconstruction, not
+historical timestamps. Logical APFS clone sizes are not physical space reclaimed.
+
+The full optimization goal remains active. The next source audit rules out
+repeating whole-guest same-core placement (cycle91 rejected launch+4.16%) and
+missing Generic conversion batching (Alpha already batches frame ranges).
+Instead inspect whole-VMA-generation invalidation of persistent supervisor
+page leases during cold startup: unrelated mapped pages may miss after each
+bounded VMA mutation. This is an unimplemented hypothesis, not a measured
+dominant cost or gain. Any range-preserving transition must retain permission,
+ownership, generation non-reuse, backing lifetime and uncertain-release
+quarantine, handle nested/failed mutations and the generation-dependent cache
+set hash, and keep conservative invalidation for unaudited operations.
+
+## Cycle 131: range-preserving private page leases (not adopted)
+
+Source audit confirms that persistent supervisor views pin their own backing;
+Alpha's temporary copy-window invalidation does not remove these independent
+aliases. A bounded VMA mutation changes the whole MappingTable generation, so
+an unrelated page can miss despite retaining the same backing and permissions.
+Cycle125's steady raw phases already have zero lease misses; this hypothesis
+targets cold startup, not a known dominant steady-state cost.
+
+Prototype three production files and two test files only. Clear page-overlapping
+leases before and after each audited bounded mutation, including partial errors
+and reacquisition during the operation. Across unchanged owner/table identity,
+retag only ready leases in the old-to-current epoch interval outside the changed
+range. Older stale epochs and uncertain leases are never revived. Keep the
+existing generation-dependent cache hash: if its salt changes, leave that alias
+unready rather than relocating a pinned native VA into another set. Invalid
+bounds/epochs/identity fail closed; failed release remains occupied, unready and
+retryable. No heap/unsafe arena, larger cache, new hot-copy lookup, scheduler,
+protocol, Alpha or Kernel change. MappingTable's globally unique generations
+and exhaustion behavior remain unchanged.
+
+Bracket private fixed mmap, file initialization, munmap, mprotect, virtual
+reservation and ordinary anonymous metadata publication. Existing full COW
+invalidation and quiescence remain; unaudited special mappings, exec and fork
+are not granted range-retention authority. The callbacks cannot replace table
+storage or mutate backing outside the declared range. Only compare the detached
+table handle after the operation; do not dereference a potentially retired one.
+An inconsistent fixed-map reply triggers full invalidation; the normal Alpha
+handler returns the exact rounded extent. Source/metadata coalescing may extend
+an entry across equal protections without changing neighboring physical pages.
+
+Twelve added tests cover current bytes/backing replacement, unaffected read and
+write reuse, shared VM owner, intermediate versus stale epochs, partial-page
+overlap, hash-salt transitions, invalid/exhausted epochs, range overflow, failed
+release, uncertain grants, nested errors/reacquisition, table/owner/task changes
+and conservative full invalidation. The adapter uses the real MappingTable and
+actual production range wrapper. All32 focused tests, native1,370/17 ignored
+and selected forced-view ASan113/2 ignored pass; x86 Release and ARM compile
+checks pass. The initial native fixture needs ProcessMapping public for its
+public Deref interface; preserve that compiler failure and corrected result.
+No runtime uses the pre-final build. Final candidate80dce048d6c6a7cc6ed2d22c1
+fc9e6a1488800bbbab510af49bbc185afe32f4a is the only candidate VM-tested.
+
+Actual read-copy/write-copy/vector/acquire function sizes remain1225/1004/1502/
+572 bytes, equal to baseline, with the hot lookup source unchanged. The new
+change_range body is778 bytes, shared by read/write, with six cold wrapper
+monomorphs. Equal function size is not instruction equivalence or a performance
+claim; reducing grants may still fail to improve the workload.
+
+### Runtime evidence and manual-review interruption
+
+Pin accepted118 Alpha/init/Kernel/services/root config and full EFI prefix in
+comparison clones, replacing only Alter and the identical120 original2s RTT
+observer. Baseline remains normal953f319b, not asserted equal to accepted118's
+Alter00c904b4. Extract/cmp both installed ELFs, check the rootfs and compare the
+full prefix/Kernel before VM. All builds/tests/hashes finish before measured
+VMs; one VM at a time, with no own source edit/build/test/hash overlapping it.
+Both SMP1/4 mapping/protection/current-byte/fork pilots and the first six launch
+boots have recorded exit0.
+
+The user requests manual boot during control-b2. Stop the automatic driver
+before it can start the final candidate-b2. The current QEMU/child has already
+finished; its host log contains complete launch/RTT pass footers. Driver23911
+is stopped in waitpid and intentionally interrupted: session82719 ends130 from
+our SIGINT, not an observed candidate failure. Its child's exact exit is not
+recorded by the parent. Preserve original control-b2 host log, serial and PNG;
+do not fabricate a parent END exit0. Provide accepted118 with --snapshot for
+manual review, leaving the prototype unpromoted.
+
+After explicit user resume, verify all five source files remain byte-identical
+to their after-snapshots, no competing VM exists, and all six unique comparison
+media/ELF hashes match. Recover control-b2 artifacts from the original path.
+Run only the previously unrun candidate-b2 with unchanged settings; it exits0.
+Never replace or rerun a completed observation. The multi-hour intermission
+before that last sample makes cohort B and pooled results descriptive, not an
+uninterrupted balanced or repeated-improvement comparison.
+
+| Run | Files click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Control a1 |2237.768792|30.204,31.025,30.505|67.985,61.795,57.199|
+| Candidate a1 |2261.933875|28.712,22.324,20.695|57.226,62.397,64.622|
+| Candidate a2 |2288.785583|35.976,31.993,30.503|64.769,63.848,63.771|
+| Control a2 |2254.799625|31.495,26.476,29.136|63.391,64.774,65.312|
+| Candidate b1 |2246.325250|30.169,30.664,30.191|64.833,75.089,67.580|
+| Control b1 |2282.813208|35.399,27.421,25.206|65.986,64.187,63.683|
+| Control b2, original completed host record |2570.951208|39.020,29.806,28.002|66.049,63.945,65.190|
+| Candidate b2, after manual intermission |2161.009166|32.533,29.396,26.298|61.289,62.499,63.036|
+
+| Comparison | Launch mean elapsed change | Raw median elapsed change | Xlib median elapsed change |
+| --- | ---: | ---: | ---: |
+| A, uninterrupted |+1.294%|-2.461%|-0.426%|
+| B, interrupted/descriptive only |-9.198%|+4.415%|-1.166%|
+| Pooled, descriptive only |-4.154%|+0.583%|-1.041%|
+
+Cohort A launch means2246.284 ->2275.360ms do not demonstrate the target
+improvement. Keep the slower2570.951ms control and time-separated final sample;
+do not present their favorable pooled launch change as adoption evidence.
+Three RTT samples within a boot are not three independent boots. No causal
+regression diagnosis, repeated5% improvement, equivalence or100ms full paint/
+input result is claimed. Later independent controls/GUI gates are not run after
+the primary evidence fails to establish benefit. Original128 failure remains
+preserved; successful131 observations do not cure it.
+
+### Restoration, retention and next source finding
+
+Do not adopt the prototype. Archive exact before/after snapshots, the historical
+range-leases-incomplete.patch, acceptance/resume rules, actual ELFs/generated
+code, package/runner/analyzer scripts and every log/screenshot under
+/private/tmp/nanami-opt-cycle131.bYgxFf. Restore all five authored files exactly;
+git apply --check passes for that archived patch. Rebuild normal Alter to exact
+953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+Restored native tests pass1,358/17 ignored; selected ASan101/2 ignored. Kernel
+worktree is clean and neither Kernel nor Alpha is edited/rebuilt this cycle.
+No default runtime, version, commit or release is promoted.
+
+After all jobs are terminal, confirm no live relevant process or open target
+media. Poll the existing eight-file hash job to terminal0 and verify eight
+unique rows against recorded comparison/accepted values. Delete the four131
+comparison image/rootfs files. No131 image remains; about5.2MiB of small
+evidence is retained. Accepted118/fallback107, including the manual boot image,
+remain unchanged. No official input/live media is deleted. Deletion is not
+through Trash; retained components permit content reconstruction, not historical
+timestamps. APFS logical clone sizes are not a physical reclaim estimate.
+
+During read-only investigation for the next cycle, confirm a separate larger
+page-construction path: Memory.map_frame_strict publishes private pages with
+Attribute::ALL7, then protect_process_page unmaps/remaps for final RW3/RX5.
+This particular target-page publication/protection path uses3N mapping calls
+instead of1N if initialized with final permissions; it does not imply3x app
+speed. Temporary windows, copies, frame capabilities and other costs remain.
+Cycle112's hardware-protect stage is51,361,000 elapsed ticks out of1,841,571,000
+(about2.79%), not exclusive CPU time or proof of a5% improvement today.
+Fresh PROT_NONE materialization also maps7, immediately unmaps to0 and later
+maps final permissions; unpublished backing could avoid its first two calls
+without adding an OS message. Ordinary initialized private maps would need an
+explicit, backward-compatible user-level protocol, not inferred permissions
+or pointer-bit overloading. Do not change native default permissions or Kernel.
+
+Before that optimization, reproduce a failure-accounting concern with actual
+production handlers. Kernel complete_address_space_update performs the HAL PTE
+update before fallible SMP shootdown; MAP can return an error after installing
+a leaf. Alpha protect_process_page records permissions only after successful
+MAP. From old0, rollback to0 can then early-return, and mapping_release uses
+permissions!=0 to decide whether to unmap before deferring backing. Existing
+private-memory tests substitute a mock protection method, so they do not prove
+the actual handler covers this case. This is a static failure-path finding,
+not an observed runtime cause. Next test actual protection plus release before
+changing initial publication, retaining unknown-PTE quarantine and ownership.
+The full optimization goal stays active; neither completion nor a blocker.
+
+## Cycle 132: uncertain PTE accounting (safety prerequisite)
+
+Before changing initial page attributes, test the actual Alpha protection and
+release handlers with real ProcessManager/VmSpace ownership. Kernel's existing
+complete_address_space_update changes the HAL PTE before fallible SMP
+shootdown. A MAP error can therefore leave a present leaf while Alpha still
+records old permissions0. Rollback to0 previously accepted a no-op, and release
+could forget/defer the backing without UNMAP. An UNMAP error after removal could
+likewise make an old-permission retry succeed without restoring the leaf.
+This is a source-proven failure shape, not an observed cause of slow Tiny Core
+or an injected hardware shootdown failure.
+
+The first native fixture incorrectly treats an already empty leaf UNMAP as an
+error. Read both current HALs: their leaf removal is idempotent, but the later
+shootdown/parent lookup can still fail. Correct that mock, temporarily restore
+the exact two original production handlers and reproduce all three failures
+again in reproduce-idempotent-hal.log; restore the fixed handlers afterward.
+The initial wrong Cargo target and the earlier imperfect fixture remain in the
+archive, not counted as final evidence.
+
+Keep uncertain page addresses in a separate VM-local BTreeSet, allocating nodes
+only for errors; do not pack flags into permission words or descriptors. Checked
+permissions fail closed to0, which is not evidence of absence. An equal-
+permission retry first requires successful idempotent UNMAP plus shootdown ACK.
+Private/shared release and sealed exec cannot discard ownership before that
+confirmation. Failed cleanup stays pinned and retryable. Whole/range clone,
+readonly-fork and private detach reject affected uncertain sources before new
+allocation/copy. Unrelated clone ranges remain usable. Native unsealed exec
+refuses an already uncertain VM before its reset; its pre-existing handling of
+new UNMAP errors after that reset is not repaired by this change. Do not claim
+all legacy native exec cleanup is now safe.
+
+Fifteen added native cases and the strengthened shared-release test cover
+before/after leaf changes, partial rollback, fresh-reservation preflight,
+missing parent/failed ACK, shared VM peers, full-width permissions, eventual
+confirmed cleanup, clone isolation and sealed-exec retirement. Full native
+tests pass1,373/17 ignored with --test-threads=1; selected ASan passes220/5
+ignored. Alpha x86 Release and ARM compile check pass. ARM is not runtime
+tested. Kernel remains clean, neither edited nor rebuilt; IPC fastpath, Kernel
+ABI, user-level message layout, native default attributes, quiescence and alias
+authority are unchanged. No initial-final-attribute optimization is implemented
+yet. Document the failure semantics in process/README.md and doc/message.md.
+
+### Frozen artifacts and normal runtime checks
+
+Normal Alpha be6eec02cbaf921ed44917013603a326fcd43abc81039c0206afade069b0bc73
+is compared with ecc55405e18839e7072a21710d50de76d38648aadb9869313ab01307627310a3.
+Its ELF grows1463752 ->1464032 bytes; size alone is not hot-path equivalence.
+Both init variants use identical current Booter source and exact frozen
+services archive55c1b56961de1728568d6c2b05e8a8bd74c7bc8cd749916734a3a7c535e5e5ec.
+Control initc737b51b matches the pre-cycle cached init byte-for-byte; candidate
+initb3089f27 contains only the selected new Alpha in that separate include.
+The archive's old unused Alpha entry remains frozen; do not confuse it with the
+actual selected Alpha. Accepted118's init contains this exact services archive,
+but not the normal be6e Alpha: these controls are not an accepted118 comparison.
+Rootfs partitions are identical with normal Alter953f319b and original120
+2s RTT observere5f11841; Kernel remains312d579b. No full xtask/service build.
+
+The freeze script's last read-only validation fails because alpha-control.elf
+is an incorrectly named alias for saved alpha-normal.elf. Preserve the failure;
+copy the exact alias and validate the already extracted init/Kernel, services
+archive and selected Alpha in freeze-validation.log. Do not rebuild/repackage
+or replace a VM observation to hide this wrapper error.
+
+All21 actual VMs exit0 sequentially: SMP1/4 mapping/protection pilots, readonly
+private-fork isolation/source-reap, eight interleaved Files launch/RTT boots,
+eight independent protocol/process controls, two-session desktop input/exit/
+restart and the GUI application set. Preserve every original serial, host log
+and screenshot; no own source edits/builds/tests/hashes overlap measurement.
+Visually inspect actual Files, second-session information and image-viewer
+screenshots. The first-ping Files screenshot can still have an unpainted client
+area: it is not the100ms fully initialized, painted, input-responsive target.
+
+| Run | Files click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Control a1 |2379.063500|35.517,25.290,24.178|61.557,62.745,64.126|
+| Candidate a1 |2161.533916|27.214,24.084,27.107|62.052,62.387,67.028|
+| Candidate a2 |2169.152750|23.742,24.578,23.796|63.559,63.416,62.156|
+| Control a2 |2738.536916|27.996,35.349,28.667|72.979,73.880,85.420|
+| Candidate b1 |3452.635708|408.210,163.778,189.584|411.437,244.255,565.155|
+| Control b1 |2251.588000|39.640,29.716,23.492|65.578,66.800,63.843|
+| Control b2 |2390.779041|29.704,29.799,27.764|65.290,93.344,111.680|
+| Candidate b2 |2438.537792|25.920,26.592,26.861|67.496,69.929,65.435|
+
+| Comparison | Launch mean elapsed change | Raw median elapsed change | Xlib median elapsed change |
+| --- | ---: | ---: | ---: |
+| A |-15.377%|-14.120%|-8.243%|
+| B |+26.900%|+220.833%|+137.339%|
+| Pooled |+4.733%|-8.425%|+0.064%|
+
+Keep candidate-b1's adverse sample; do not discard it as host noise or claim a
+causal explanation without evidence. Opposite cohorts disagree. Pooled raw
+improvement hides that large per-boot increase and is not adoption evidence.
+The32 independent protocol/process/frame metrics and all raw samples are in
+control-metrics.json. Three cleanup submetrics are slower in both cohorts:
+BusyBox source-release+20.588%/+18.465%, Xfe source-release+11.459%/+21.654%
+and Xfe kill/reap+14.794%/+7.227%. Their pooled medians are0.4125 ->0.493ms,
+0.922 ->1.0785ms and0.5665 ->0.638ms respectively. They are small absolute
+intervals, not proof of equivalence or a reason to conceal repeat regressions.
+Whole Xfe lifecycle also rises1.950%/1.518%. No5% gain, normal-path performance
+equivalence, pure IPC cost or whole-goal completion is claimed.
+
+### Source decision, housekeeping and next work
+
+Retain the proven uncertainty-accounting correctness fix and its regression
+tests in source, not as a successful performance optimization. No new accepted
+runtime generation is promoted: accepted118 comparison has not been performed,
+and ordinary controls require further cost investigation. Current generated
+Alpha/init components contain this safety fix; the user boot image remains118.
+Archive fourteen before/after file pairs, the new test, reverse-checkable
+uncertain-pte-source.patch, ELFs, build/repro/package/analysis scripts and all
+logs under /private/tmp/nanami-opt-cycle132.hqvxGa. Source snapshots/components
+permit content reconstruction, not original image filesystem timestamps.
+
+After the unified driver/session23332 terminates0, check no relevant live
+process or open target media. Poll hash session25391 to terminal0 and verify
+all seven unique comparison/retained hashes in retention-sha256.txt. Delete
+only control.img, candidate.img and control-rootfs.img under that132 directory.
+No132 .img remains; about50.2MiB evidence is retained. Accepted118/fallback107
+and their rootfs remain unchanged. The `/private/tmp` inventory finds no other
+large task-owned obsolete media. Unknown application directories and an
+inaccessible Codex service directory are not cleaned or claimed inspected.
+Deletion is not through Trash; no APFS physical-reclaim estimate is inferred
+from logical clone sizes. Record the periodic-housekeeping policy above.
+
+Next audit final-attribute private construction without another permission
+Vec, protection-based run fragmentation, new Kernel operations or altered
+native defaults. Existing eager-copy fork ranges also publish ALL then protect;
+readonly shared aliases already use final attributes. A strict attribute-aware
+constructor must track MAP uncertainty even if later Frame-index insertion
+fails, and preserve owned allocation cleanup. Backing-only PROT_NONE needs an
+authoritative absence condition, not assumptions about unsealed native maps.
+Internal fork construction needs no new OS RPC; ordinary initialized mmap may
+need an explicit backward-compatible descriptor. This remains an unimplemented
+design, not a promised speedup. Investigate the new accounting's normal cleanup
+cost without reverting the safety invariant. The full optimization goal stays
+active and the100ms application target remains unmet.
+
+## Cycle 133: unpublished fork final permissions (rejected; constructor safety retained)
+
+The previous cycle makes concrete progress through actual-handler failure
+regressions, a retained safety fix, full normal runtime evidence and temporary
+media cleanup, not a measured speed gain. Revalidate current source and the
+specific live-job handles; no completed observation is restarted on yield.
+
+Cycle1 already rejected a broader final-attribute constructor plus mmap RPC.
+Do not present that idea as new or repeat the protocol addition. Test today's
+eager-copy runs in fresh private forks only. Borrow the existing contiguous
+page/permission snapshot without another Vec or protection-based run splits.
+Readonly shared aliases already publish final attributes and are not counted
+as newly eliminated work. Existing destination/range copies retain their
+ordinary copy/protect path. No Kernel/IPC API, device attributes, source byte
+copy count, guest authority or quiescence change.
+
+The prototype shares one non-generic constructor, keeping the legacy ALL7
+wrapper and adding strict attribute-aware mapping. Fresh unpublished children
+receive final R/RW/RX leaves directly; PROT_NONE retains backing and its page
+table path without a temporary accessible leaf, so later mprotect still works.
+Native defaults remain ALL. Initialization finishes before leaf publication.
+Possible post-MAP errors are marked uncertain before fallible Frame recording;
+an unresolved destination cannot be overwritten. These last correctness rules
+are separate from the optimization's performance acceptance.
+
+### Actual constructor failures and prototype checks
+
+Replace the constructor fixture's unconditional mock release with production
+mapping_release and real ProcessManager/VmSpace ownership. Only capabilities
+and host physical pages are modeled. Restore the original constructor
+temporarily: constructor-before.log fails because MAP-after-installation with
+old permission0 defers still-mapped backing without attempting UNMAP. Restore
+the prototype immediately; constructor-fixed.log passes18 tests. An initial
+new PROT_NONE copy test then fails because its synthetic pre-existing source
+VM has a ready-table hint but no modeled table. Correct only that fixture,
+preserving focused.log and the passing focused-corrected.log.
+
+Add final-attribute/content/PROT_NONE-upgrade/partial-rollback tests, strict
+attribute error propagation, pending destinations and legacy reservation
+metadata. Prototype final native passes1,382/17 ignored; selected ASan255/5
+ignored; Alpha x86 Release and ARM compile checks pass. Tests are serial.
+ARM is not runtime-tested. Archive all eight before/after source pairs and
+the reverse-checked unpublished-attributes-source.patch before measured VMs.
+
+Inspect actual generated code rather than assuming smaller source or fewer
+calls means lower latency. Alpha ELF1464032 ->1468400 bytes. The old constructor
+is3241 bytes; the new common body1593 plus closure2338 totals3931. Full clone
+1567 ->1427, readonly-fork clone3535 ->4218 and raw task1694 unchanged.
+The strict map body153 ->146 bytes does not establish whole-path equivalence.
+An initial objdump selector combined raw symbols with --demangle and matched
+nothing; preserve those unmatched outputs and correct the selector. Actual
+construction-normal/candidate.txt contain2342/2695 lines of selected code.
+
+### Frozen runtime comparison and every launch sample
+
+Control uses132's safety Alphaecc55405/initb3089f27; candidate uses Alphacb77f823/
+init044aee47. Both contain the exact frozen services archive55c1b569 once and
+their selected Alpha once. Rootfs partitions are identical, with normal Alter
+953f319b and original120 original2s RTT observere5f11841. Extract/cmp init and
+Kernel312d579b, check rootfs consistency and the full pre-init EFI prefix.
+No full xtask/service/Kernel build. This normal control is not accepted118's
+Alpha; no accepted118 comparison or new accepted runtime promotion occurs.
+
+Unified session97772 completes all21 sequential normal-device VMs with exit0:
+mapping/protection SMP1/4, private readonly fork/source-reap, eight Files/RTT
+boots, eight independent protocol/process controls, desktop two-session input/
+exit/restart and the GUI application set. Every timed observation finishes
+without own source edits/builds/tests/hashes overlapping it. Preserve all
+original logs/serial/PNGs. Inspect the real first-ping Files screenshot, second
+desktop information and later populated Files window. First ping still has
+unfinished panels, not proof of full paint/input or the100ms launch target.
+
+| Run | Files click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Control a1 |2274.941792|24.462,25.211,26.650|64.668,63.694,62.840|
+| Candidate a1 |2960.886209|28.142,27.800,33.932|87.582,90.068,72.279|
+| Candidate a2 |2441.280625|28.634,27.079,29.445|68.565,62.745,64.431|
+| Control a2 |2162.654708|36.398,29.204,31.535|73.558,71.458,72.168|
+| Candidate b1 |2190.896125|28.580,26.471,24.061|70.822,64.502,62.964|
+| Control b1 |2461.847000|36.545,28.813,28.341|69.125,69.821,69.080|
+| Control b2 |2345.312000|32.811,26.042,29.701|67.495,65.548,65.435|
+| Candidate b2 |2344.145375|28.490,27.757,26.282|71.287,65.095,65.457|
+
+| Comparison | Launch mean elapsed change | Raw median elapsed change | Xlib median elapsed change |
+| --- | ---: | ---: | ---: |
+| A |+21.736%|+1.651%|+3.466%|
+| B |-5.661%|-7.325%|-4.410%|
+| Pooled |+7.490%|-3.577%|-1.869%|
+
+Do not omit candidate-a1 or select the favorable reversed cohort. First-ping
+launch means2311.189 ->2484.302ms pooled do not demonstrate a gain. Each RTT
+boot has three samples, not three independent boots. All32 independent
+protocol/process/frame metrics and raw samples remain in control-metrics.json.
+Fork8 changes-0.184%/-24.336%, fork/exec8-4.733%/-18.579%; their favorable
+pooled-12.202%/-16.744% do not show repeated5% gains. Getpid, which does not
+execute fork construction, also falls7.215%/13.223%; do not assign all changes
+causally to fewer map calls. Contrary pooled Alpha spawn/reap rises6.054%,
+Alpha Xfe spawn13.514% and BusyBox ls4.453%. Negoto create falls19.311%/16.803%
+but cannot override the primary launch evidence or prove a universal gain.
+Reject the final-attribute fork prototype rather than promote a favorable
+subset or explain away slower runs as host noise without evidence.
+
+### Isolated constructor safety fix, not optimization retention
+
+Restore all eight authored prototype files byte-for-byte; the archived full
+patch forward-checks at that restoration checkpoint. Then modify only
+memory_pages.rs and its native constructor fixture:
+
+- Reject an already uncertain destination before reservation/allocation.
+- Mark possible installed-leaf state before fallible Frame bookkeeping.
+- After successful legacy MAP, record actual ALL7 rights rather than leave old
+  PROT_NONE reservation metadata that could make protection wrongly no-op.
+
+Keep four real constructor/protection/release regressions with capability
+failures before/after leaf changes, failed ACK and later confirmed retirement.
+Temporarily restore the original constructor again: safety-before.log has
+18 pass/3 fail, independently proving hidden live-leaf retirement, wrong
+successful-map rights and reallocation over unresolved presence. The fourth
+post-MAP Frame-record failure case passes even before the fix; do not claim
+all four failed. Restore the isolated fix, not the rejected constructor.
+Final native passes1,377/17 ignored and selected ASan224/5 ignored; Alpha x86
+Release and ARM compile checks pass. Source is exactly the original six other
+files plus this two-file safety patch. No new strict-attribute API, final-
+attribute constructor, clone optimization or RPC remains in production.
+
+Current/generated Alpha96bc14fe377dc9745648e9782837b85805e0594c23b0531d57968ed347072fb1
+and initba776c9cf40ba23c188c3c9541c09428325d05bdcf1aa1015344401b6704763d
+contain only the isolated source fix, with the same services archive/Kernel.
+Verify selected embedded bytes and extracted init/Kernel, then run three
+additional functional VMs: SMP1/4 mapping/protection and readonly-fork isolation/
+source-reap all return0, unified session50449. The read-only rootfs dd/cmp job
+74139 yields before its separate terminal poll; the wrapper continues to PS
+and starts these functional boots before recording that poll. It later ends0.
+Possible overlap with the first functional pilot is not ruled out; these three
+boots establish no timing claim. The earlier21 timed observations are separate
+and have the full pre-run terminal checks. Never restart or replace a completed
+observation because of the wrapper's bookkeeping issue.
+
+Archive constructor-safety-source.patch and its exact safety source snapshots;
+reverse check passes against the retained source. Original prototype snapshots,
+patch, every adverse sample, component ELFs, package/runner/verifier/analyzer
+scripts and all logs remain under /private/tmp/nanami-opt-cycle133.qDORpT.
+The full rejected patch no longer forward-applies over the overlapping retained
+safety changes; its exact original before/after snapshots remain authoritative.
+No version, commit, release or accepted runtime image is promoted. Accepted118
+remains the user boot image; the full performance goal remains active.
+
+### Cleanup and next measurement method
+
+After all sessions terminate, exact-path PS/lsof checks find no users. Poll
+hash session87974 to terminal0 and verify all eight unique comparison/retained
+hashes. Delete only133's control.img, candidate.img, safety.img and
+control-rootfs.img. No133 image remains; about52.7MiB of small component/source/
+log evidence remains. Accepted118/fallback107 hashes are unchanged. Regular
+task-owned /private/tmp inventory is completed without removing unknown apps,
+official inputs or active files. Not Trash; retained components permit content
+reconstruction, not original timestamps. APFS logical clone sizes are not a
+physical free-space estimate.
+
+Read the actual called Alpha memcpy/memset bodies: bulk copy already uses
+REP MOVSQ and bulk zeroing REP STOSQ, with at most7-byte alignment/tail work.
+There is no demonstrated byte-by-byte bulk-copy oversight. Dump both bodies
+in memory-builtins*.txt rather than implement an assumed replacement.
+Further read-only audit also rules out repeating already-indexed process
+lookup, full ManagedProcess snapshots in the fault dispatcher, cycle40's
+rejected4MiB image admission and blind activation of114's measured readonly
+snapshot aliases. The fault dispatcher already consumes inline context and a
+small FaultProcess snapshot.
+
+Installed QEMU11.1.1 exposes -plugin and its primary qemu-plugin.h, including
+physical instruction addresses and per-vCPU inline scoreboard counters. Next
+consider a bounded diagnostic execution profile to identify the dominant code,
+not another unmeasured cache/copy policy. Raw native-service PCs overlap across
+domains, so include physical code address. Whole-boot TB counts are not
+launch-only CPU time, hardware retired instructions or a speed gain; explicit
+phase boundaries are needed for launch-only claims. A REP instruction may
+execute through many small TCG blocks, but this is an unverified hypothesis,
+not a finding of expensive copies. No plugin is implemented in this cycle.
+Kernel and IPC fastpath remain unchanged; the100ms full paint/input target is
+not demonstrated and goal completion is not claimed.
+
+## Cycle 134: bounded launch execution diagnosis, not time attribution
+
+The user explicitly requires Rob Pike's rules: measure first, prove where time
+is spent, and tune only a component that dominates. Enforce this as a gate,
+not merely a retrospective before/after test of a guessed optimization.
+Neither an instruction-count hotspot nor a smaller source/binary establishes
+elapsed CPU time or launch critical-path dominance. The five-percent target
+does not override that requirement. No production source, Kernel, protocol,
+logging policy, workload size or accepted runtime image is changed this cycle.
+
+### Host-only instrumentation and validation
+
+Read the installed QEMU 11.1.1 public `qemu-plugin.h` (API 7). Implement
+`tcg-profile.c` with a fixed metadata budget, per-vCPU inline counters and
+virtual PC, physical code address, whole-block FNV1a byte hash and translated
+instruction count as its diagnostic key. Retranslation reuses the same key;
+different code or physical identity remains separate. Only translation and
+stopped snapshots take the host mutex; execution increments inline counters.
+Total counters include blocks excluded from the metadata budget. Detect
+overflow, counter regression, invalid commands, incomplete phases and output
+errors. Keep output to at most 512 rows. A mode0600 local socket is private
+to the bounded host controller; it is not a guest capability or RPC.
+
+`tcg_profile.py` matches QMP JSON acknowledgement IDs, handles fragmentation
+and events within explicit limits, and requires stop ACK plus
+query-status running=false/status=paused before sending begin/end. Snapshot
+errors resume the VM; the runner terminates its VM on other failures. Record
+all boundary ACK timestamps. The interval begins before the original mouse
+press and ends after first-ping observation and stop ACK; it includes that
+observer/control latency and background work. It is not full paint/input
+readiness or an isolated application CPU interval.
+
+Compile against actual installed headers with C11, Wall/Wextra/Werror/pedantic;
+third-party QEMU/GLib headers are system includes, not authored compiler
+extensions. Native tests model only the QEMU callbacks and exercise identity,
+phase deltas, new blocks, bounds/drops, overflow/regression, output ordering,
+fragmented socket requests, permissions and cleanup. All five test groups
+pass normally and with ASan/UBSan. Four Python controller tests pass, including
+wrong ACKs, oversized/closed responses, phase order and the pause-before-
+snapshot requirement. The plugin exports only QEMU's two required symbols.
+
+Preserve initial failures rather than erase them: Darwin mkdtemp feature macro,
+clearing an uninitialized test mutex, third-party header warnings when passed
+as ordinary includes, and sandbox denial of local sockets. Fix the first two,
+mark official external headers as system includes, and rerun the same socket
+tests with the scoped local-socket permission; final native/sanitizer tests
+pass. The initial cpio extraction command's GNU-only option is unavailable on
+macOS; inspect archive names and extract with the installed cpio syntax.
+
+### Frozen provenance and actual controlled VM
+
+Root: `/private/tmp/nanami-opt-cycle134.sqkoBf`. Start from retained118's media
+and unchanged services archive, install normal Alter953f319b and the original
+120 RTT observer e5f11841. Install current133's correctness-only Alpha96bc14fe
+inside initba776c9c. This is not a byte-identical118 runtime or a performance
+comparison with118. Verify selected embedded Alpha/services and extracted
+init/Kernel bytes. Kernel remains312d579b; no Kernel build or edit occurs.
+
+Final diagnostic image SHA256:
+924fe5494afe8a6af878d583a42ecd276e4ba0eb4e1a8c572e58b90c4837b9be.
+Rootfs:969eed013ed1a01372eb117420dcc07bdd7453d07230a2e0d04879cb1df73f9d.
+Plugin:f93244d317fd1f59885a9ffcfc1dc0305e733f06ffee4dd0b349e0135e221d91.
+The package log's earlier image hash predates final init replacement; retain
+both observations, using diagnostic-sha256.txt for the final image identity.
+
+Private runner qemu-profile.py extends the original120 RTT runner only with
+the host profile arguments and explicit boundaries. One SMP4 diagnostic VM,
+session3588, ends0 with launch and raw/Xlib128-query completion markers.
+Prehash55626 and all own builds/tests finish before launch. No own edits,
+builds, tests or hashes run while this VM is live. Save original serial,
+QEMU log, PNG, vCPU information, phase TSV and boundary JSON under run1.
+The instrumented click-to-ping2663.319208ms and RTT observations are diagnostic
+only; do not use them in ordinary performance comparisons or as100ms evidence.
+
+### What the counts show, and what they do not
+
+The phase has185,050,502 TB entries and974,707,539 translated-slot weight.
+Tracked weight is850,192,143 (87.225%); metadata reaches131,072 records and
+60,550 translations in the phase lack metadata. Total dropped translations
+including boot are146,327. Only512 of19,925 populated tracked records are
+exported. Dropped translations are not missing-instruction counts. A block's
+entry weight includes its entire translated length even if a fault interrupts
+execution, while REP can reenter small blocks. These are neither hardware
+retired instructions nor CPU-time samples.
+
+Offline analyze-profile.py validates metadata/weights and matches complete
+sequential block bytes against frozen service, Alter, Alpha and Kernel
+disassembly. Preserve physical identity and all possible artifact matches;
+unmatched and ambiguous blocks stay unattributed. Merely running addr2line
+on a shared virtual PC produces unrelated functions in other services and is
+not valid attribution. FNV matches are diagnostic, not cryptographic identity.
+
+| Exact-matched function | Exported weight / all phase weight |
+| --- | ---: |
+| Honoka fbdev damage capture |24.5613%|
+| Honoka Framebuffer::blend_color |12.5323%|
+| ext2 block_bitmap::alloc_block |3.9639%|
+| Alter Runtime::memory_access_allowed |2.2305%|
+| Kernel capability_node::traverse_slot |1.9270%|
+
+The two named Honoka functions account for37.0935% of all translated-slot
+weight, not37.0935% of time. This identifies code worth measuring in time;
+it does not prove it dominates launch latency or authorize a speed hack.
+In particular, it does not establish that IPC, IPI, fork copies, allocation
+or any new cache policy causes the delay. Do not optimize another suspected
+copy/lookup path from these counts. Next obtain bounded time attribution
+around the actual launch path, distinguish waiting/background/rendering,
+and establish repeatable dominance before changing production code.
+
+### Retention and cleanup
+
+All small source/plugin/test/VM logs and failed observations remain available
+for reproduction. After terminal-job, exact PS/lsof and final six-media hash
+checks, remove only134's diagnostic profile.img/control-rootfs.img and three
+known empty failed socket-test scratch directories. Retain validated118 and
+fallback107 unchanged; periodically inventory task-owned /private/tmp without
+touching other applications, official inputs or active files. Logical media
+sizes are not physical APFS space-recovery claims. No version, commit, release,
+new runtime promotion, five-percent gain or goal completion is claimed.
+
+## Cycle 135: random-time residency sampler rejected
+
+Classify134 as progress: it validates a host diagnostic, identifies substantial
+Honoka execution weights and rules out treating those weights as time shares.
+Now apply the user's Rob Pike requirement before any optimization: investigate
+actual time, do not guess another cache/copy change. No production guest,
+Kernel, ABI, scheduler, IPC fastpath or logging policy is modified or rebuilt.
+No new agent, version, commit, release or runtime promotion is requested.
+
+### Attempted host-only time method
+
+Prototype a bounded random-time sampler under
+`/private/tmp/nanami-opt-cycle135.yUnLlh`. The diskless stopped QEMU probe
+confirms structured human-monitor-command CPU selection and read-only
+PC/CR3/CPL/HLT plus virtual instruction-byte inspection on installed QEMU11.
+For every real sample, stop, match QMP ACK, confirm running=false/paused,
+read all four CPUs and15 code bytes, then resume in finally. Preserve raw
+responses and actual request/ACK/resume times, not just requested delays.
+Mean exponential delay12ms, capped50ms; limits512 samples/30 host seconds.
+Exclusive JSONL/summary outputs reject overwriting earlier observations.
+
+Tests cover fragmented/incorrect QMP responses, long-mode parsing, partial/
+wrong-address/HMP-error byte reads, pause-before-inspection order, resume on
+failure, per-CPU identity, limits, complete/incomplete worker output and
+preserving existing files. All11 Python tests pass before the VM; the archived
+copies also pass all11 after withdrawal. These model/probe results do not
+prove that repeated pauses preserve the actual application workload.
+
+The intended measurement is random-time guest residency, not host CPU-time
+accounting or causal launch-time fractions. Halted/background/other CPUs
+cannot be added to application critical-path time. Stop acknowledgements
+have delay, and repeated stop/resume perturbs scheduling and device timing.
+Correlated samples do not justify independent-binomial confidence intervals.
+An offline byte-matching analyzer is prepared but never used to turn this
+incomplete phase into a valid time-share result.
+
+### Frozen image and the failed real phase
+
+Use the same current correctness-only Alpha96bc14fe/initba776c9c,
+normal Alter953f319b, original120 RTT observere5f11841, services55c1b569
+and extracted unchanged Kernel312d579b as134. No guest build occurs.
+Selected init and Kernel compare exactly. Final image hash:
+eecb721e3bbd20b52f2a902a5bc623486c5e07c01b309a9df07667f023208343;
+rootfs:f3257b2600b57e3abb6c1bd37642e94315027e8a7822f5ed01079c4c576ed4c5.
+Package.log's earlier image hash predates the final init replacement.
+Prehash84446 finishes0 before the batch. No own edits/builds/tests/hashes
+run during either live measured execution.
+
+Plan ordinary1/seed13/seed29/ordinary2 with one VM at a time, identical stock
+Files and original ping/RTT workload. Actual batch97401 ends1 after ordinary1
+passes and seed13 fails. Seed29 and ordinary2 are never reached by that batch.
+Do not replace the failed observation with a successful seed or larger budget.
+
+Seed13 exhausts512 samples after9.674862541s host time. Actual stopped/
+inspection time is2.879121799s, approximately29.76%, with6.794616117s in
+sampled running gaps. Summary complete=false, explicit budget error and
+end_observed_ns=null are authoritative. The runner only checks sampler error
+at finish, which requires the missing ping, so it continues to its original
+300s observation timeout rather than fail promptly. This diagnostic harness
+limitation is preserved, not retrospectively repaired in the observation.
+
+The serial log has no Files child spawn/completion marker. The timeout PNG
+shows the Tiny Core desktop, wbar and aterm with `/bin/aw files ping` Done(9).
+It does NOT show desktop termination. A commentary initially inferred desktop
+exit from console/prelude output; inspect the image and explicitly correct
+that statement. The observation resembles an earlier unresolved observer9
+failure but does not prove the same cause or prove QMP caused it. Retain all
+512 raw snapshots, summary, original serial/QEMU logs and valid timeout PNG.
+The later requested failure.png is absent; do not invent it or call it a
+successful screenshot. None of these samples establishes time dominance.
+
+### Ordinary controls and withdrawal
+
+After the failed batch is terminal and no QEMU remains, archive the two
+sampler files and two QMP changes, then remove the two new repository files
+and restore QMP/controller tests byte-for-byte to134. Both cmp checks and
+the restored four-test suite pass. The private frozen prototype, all11-test
+logs and failure evidence remain; no sampler or extra QMP path is retained
+in repository source. Reject repeated-paused sampling for this workload
+because of its measured perturbation and incomplete phase, without claiming
+an unproven guest defect or a pure-IPC bottleneck.
+
+Run only the previously unexecuted second ordinary control separately,
+session85798, without sampler/QMP arguments. It ends0 with both launch and
+RTT completion. This is not a rerun/replacement of seed13 and does not make
+seed13 valid. Both ordinary controls use the same image:
+
+| Run | Files first-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Ordinary1 |2268.751167|30.146,27.308,28.313|67.258,67.072,64.301|
+| Ordinary2 |2225.599334|28.369,28.061,31.414|75.415,68.693,66.235|
+
+These show the current ordinary workload still completes. They are not a
+before/after optimization comparison or full paint/input/100ms evidence.
+Do not compare the failed instrumented phase's time with them as a speed
+gain. No component has yet met the dominant-time gate for another tuning edit.
+
+### Closure and next non-pausing measurement
+
+Preserve small source, unit/probe failures, original VM outputs, selected ELFs,
+scripts and hashes. After all owning sessions and final six-media hashes
+terminate, exact PS/lsof checks guard deletion of only135's control.img and
+control-rootfs.img plus its two orphaned generated Python bytecode caches.
+Accepted118/fallback107 remain unchanged. Inventory task-owned /private/tmp;
+do not touch other applications, official inputs or protected daemon state.
+No physical APFS recovery amount is inferred from logical cloned-media sizes.
+
+Next instrument only coarse user-level phase boundaries with a clock prepared
+before capture, not high-rate stop/resume or a timestamp per pixel/TB. Use
+existing local-counter/HPET reader facilities, calibrate/validate units and
+measure clock overhead. Keep bounded in-memory records; flush after the
+observed launch, not in hot handlers. Separate receive/wait, handler work,
+fbdev capture, composition and present with non-overlapping accounting where
+possible, and label nested/inclusive/descheduled intervals honestly. Correlate
+actual input and observer endpoints before claiming launch fractions. Restore
+all temporary production instrumentation after collecting evidence. Only
+repeatable dominant time attribution can authorize the next optimization.
+
+## Cycle 136: coarse user-level time rules out Honoka as the dominant launch phase
+
+Classify135 as progress: an actual failed/perturbed measurement rejects the
+repeated-stop method, rather than authorizing another guessed optimization.
+Respect the user's Rob Pike gate. This cycle measures Honoka using coarse
+user-level intervals; no Kernel, ABI, service protocol, scheduling, GPU policy
+or production optimization is changed. No new agent/version/commit/release.
+
+### Normal provenance and a corrected artifact-inspection mistake
+
+Root `/private/tmp/nanami-opt-cycle136.AVP6BT`. Build normal Honoka with the
+same pinned nightly/target and SOURCE_DATE_EPOCH=1793577600. Whole ELF hash
+2a115ea374b59073c549494c69ea9bc611d6de43882fe0bc5432166ebacf573c differs
+from retained118's22b24235913fd0473928edc9a1c9064381939e3b8192b44647b2815a3a0dd6f0.
+Do not assume identity from source. Read-only check-loaded.py independently
+compares entry point and every PT_LOAD address/permission/memory size/file
+byte; all loaded segments and entry agree. The executable segment is205246
+bytes, readonly6646676, data8 bytes with282624 memory size in both ELFs.
+Only non-loaded representation differs; use built2a115 as the explicit control.
+
+An initial llvm-objcopy --dump-section call without a distinct output filename
+rewrites its input ELF metadata, including the private134 Honoka evidence.
+Archive both rewritten files, recover the exact22b24235 retained ELF from
+untouched118 rootfs, check its SHA and restore134's artifact byte-for-byte.
+Replace136's normal copy with the untouched built2a115 ELF. This is an own
+tooling mistake, not a guest/source defect. Never use that dump syntax on
+forensic artifacts again; the subsequent verifier only reads binary data.
+Retained118/107 media remain unchanged throughout.
+
+### Temporary bounded recorder and validation
+
+Snapshot then temporarily modify only Honoka main/profile/compositor and the
+native compositor fixture's clock stub. Prepare the existing MonotonicReader
+before capture. Require1GHz/nanosecond units; log local/fallback, validity and
+64-read calibration span/max interval outside the hot measurement. Existing
+native-clock tests exercise metadata/epoch/mapping/reset/fallback cases.
+
+Arm on an actual dock-area left press (y600..740), not the earlier aterm focus
+click at300,300. Store actual native cursor coordinates and absolute times.
+Preallocate8192 heap records, record coarse boundaries and dump only after
+8seconds. No per-pixel/TB timestamp, capture-time serial logging or VM stop.
+Preserve missing/regressing clocks, budget drops and clipped window edges.
+Stages:0 receive/reply-receive,1 input pump,2 service handler,3 notification,
+4 fbdev capture,5 compose,6 present,7 render envelope,8 actual mouse press.
+Parents can contain children; compute unions, never add nested durations.
+All timings include descheduling and synchronous service waits, not CPU time.
+
+Six recorder tests and six ASan cases pass. The initial honoka-motion target
+passes37 cases (the original31 compositor cases plus the embedded recorder's
+six), and native-clock passes12, all serial. Do not double-count the six
+standalone and embedded recorder cases as distinct coverage. Profile Honoka
+cross-build passes; its SHA is6b2195c42183e9f1321f88e3c46c6cf62abbb8f1812dfe4a62df92d0cd2c1bd1.
+The stock launcher/Files and128-query raw/Xlib sample counts are unchanged.
+Use the observer's already acquired CLOCK_MONOTONIC ping timestamp; no new
+clock syscall is inserted there. No Kernel build occurs.
+
+### First pilot: complete spans, incomplete host observation
+
+Normal Alter953f319b, current correctness-only initba776c9c/Alpha96bc14fe,
+services55c1b569 and Kernel312d579b stay frozen. Initial fixture AW8025003a
+writes its absolute ping time as a separate line. Pilot39898 produces valid
+local clock (64 reads221000ns, max pair117000ns),2,901 records, no drops or
+invalid readings, an8second footer and both Files/ping and RTT completion.
+Its host click-to-ping is2401.428250ms; this is diagnostic, not a speed claim.
+
+Two actual observation mistakes prevent a valid launch-time attribution:
+the host regex overlooks padding in `[     honoka.time.end]` and continues
+waiting after the footer; the existing native bridge forwards only the last
+line of each changed pointer-probe.log read, losing the extra preceding
+absolute-time line. Read the bridge source, not assume full-file forwarding.
+After confirming data/RTT completion and exact owned process92591, send that
+Python SIGINT so its finally terminates its QEMU. Owning session39898 ends130.
+Keep the interrupted wrapper log, complete raw spans, PNG, first runner/C/AW
+and hashes. This is not a fully passing pilot or a failure silently replaced.
+The first raw phase cannot yield an exact press-to-ping fraction without its
+missing endpoint. The initial multi-operation apply_patch request is rejected
+before any edit; correct the patch format, not treat it as a source failure.
+
+Correct only the private fixtures: accept actual padded prefixes and put
+observed-ns in the existing single complete ping-report line, avoiding a new
+write and leaving the bridge unchanged. Preserve original fields. Two format
+tests cover actual first-pilot output and complete endpoint framing; two
+analyzer integration tests exercise nested unions and reject lost records,
+missing endpoints, drops and invalid clocks. All pass.
+
+After first8-media hashes terminate0 (89154), exact PS/lsof guards deletion
+of the four first diagnostic media before rebuilding corrected fixtures.
+Preserve frozen-first/first-post-run hashes and all small evidence, not extra
+old images. The corrected AW isacc104b70aa8f06c532a8e7cfcb1fb32a5b483fed036b58facb620571cf37d2f.
+Final control image37a9b4acfb40d7ab7f3935eaa9d96090b4f56d55a277dc076ce5bd70efab6666,
+rootfsa231aaf393743432e613d1acf9e25d7d644467755826df939756091abdd32dbc;
+profile image9202ccda2b676abd2904cee082d4c31e9c0601c6c8a226f311c0b44932183c36,
+rootfs427f7b825372209f4ee7b7b5e20f7f5cff770ac6afe85c6dc307dec5c9bb71fe.
+Package logs show pre-init hashes; frozen-sha256 contains final identities.
+
+### Actual time evidence, not an optimization comparison
+
+Corrected batch5927 runs profile2/control1/profile3 sequentially and ends0.
+All three complete Files/ping and raw/Xlib RTT. Both profiles have a complete
+generation1 footer, matching record count, no drops/invalids and consistent
+observer/native nanosecond epoch. Actual native click is382,688. Capture all
+source/build/test/hash sessions terminal before each batch; no own edits,
+builds, tests or hashes during live VMs. Offline analyzers run after terminal.
+
+| Observation | Profile2 | Profile3 |
+| --- | ---: | ---: |
+| Native press to observed ping |2262.957ms|2262.708ms|
+| Receive/reply-receive span union |2043.258ms /90.2915%|2044.364ms /90.3503%|
+| Fbdev capture |135.290ms /5.9785%|136.263ms /6.0221%|
+| Composition |58.868ms /2.6014%|55.450ms /2.4506%|
+| Present, including service wait |16.690ms /0.7375%|14.839ms /0.6558%|
+| Render-leaf union (capture/compose/present) |210.848ms|206.552ms|
+| Uncovered clock/bookkeeping gaps |4.036ms|3.481ms|
+| Full8second record count |2897|2901|
+| Clock64-read span / max pair |297us /116us|245us /135us|
+
+Clock spans are calibration observations including preemption, not an exact
+per-call cost to subtract. About99.82%/99.85% of the native press-to-ping
+interval is covered by the union of coarse top-level spans. Input-pump and
+notification/render-envelope intervals overlap children and are not added
+again. Record count covers the full8seconds; table durations are clipped to
+the actual observed ping, not extrapolated from the whole capture window.
+
+The ordinary control completes at2297.694292ms host click-to-ping; profile2
+2352.099417ms and profile32284.675417ms. These instrumented/one-control samples
+do not prove timing equivalence, a profiling tax or a speedup. Host and native
+endpoints differ: native input receipt omits earlier host/input transport,
+and host completion includes up to the original100ms native-observer polling
+plus10ms host polling. Do not subtract unrelated absolute clocks or present
+first ping as fully painted, input-ready100ms launch evidence. Raw/Xlib samples
+and every original serial/PNG remain available in the per-run evidence dirs.
+
+The large134 instruction-count shares did NOT identify time dominance.
+Honoka spends about90.3% inside receive waiting/transport while other processes
+and the observer can progress. This is NOT90.3% pure IPC cost or evidence that
+the Kernel fastpath/IPI is slow. Its render leaves consume only about9.2% of
+this interval, including preemption and service waits. Do not optimize blend
+or capture from those count hotspots. Periodic capture count scales with
+elapsed time; these fractions are not a fixed-work Amdahl speedup bound.
+Next trace startup outside Honoka (Alter/Alpha/guest) and observer discovery,
+without presuming which causes the remaining time. No dominant application
+initialization component has yet been identified or modified.
+
+### Exact withdrawal and cleanup
+
+Restore all four source/fixture files via apply_patch only after comparing
+their current bytes with frozen diagnostic snapshots. Every file then cmp
+matches its exact before snapshot, preserving all earlier dirty work. Rebuild
+normal Honoka (52968 terminal0) and verify exact2a115 hash. Restored actual
+compositor31/native-clock12 pass (48530 terminal0). The six recorder tests
+leave the target when their temporary module is removed; this is expected,
+not six lost original compositor tests. Kernel subtree remains clean.
+
+Preserve small complete/incomplete records, logs, source/ELF snapshots, tests,
+verifiers and PNGs. After final8unique media hashes and all sessions terminate,
+exact PS/lsof guards removal of the four second diagnostic image/rootfs files.
+Retain validated118/fallback107 unchanged. Regular task-owned /private/tmp
+inventory excludes other applications, official inputs and active/daemon
+state. No physical APFS recovery amount follows from logical clone sizes.
+No runtime promotion,5% gain,100ms result or goal completion is claimed.
+
+After closure also cmp-check23 redundant extracted component files against
+retained canonical ELFs/AWs, save duplicate-artifacts.json, verify exact-path
+lsof empty and remove only those copies. They are recoverable byte-for-byte
+from the saved correspondence, unlike deleted media filesystem timestamps.
+The136 evidence directory falls from100MiB to44MiB logical usage; no physical
+APFS recovery amount is inferred. Canonical source/ELF/failed-run evidence
+and both accepted runtime generations remain intact.
+
+## Cycle 137: selected Alter handler time does not establish a dominant launch cause
+
+Respect the user's Rob Pike gate. The repeated136 Honoka time evidence rules
+out its instruction-count hotspots as a dominant launch cause. This cycle
+measures selected Alter/Linux event handlers instead of guessing another
+optimization. No Kernel, ABI, IPC fastpath, authority, scheduler, production
+policy, version, commit or release changes. No agents are started.
+
+### Temporary bounded actor-local instrumentation
+
+Root `/private/tmp/nanami-opt-cycle137.Blkxl8`. Snapshot the current dirty
+Alter main.rs, then temporarily change only that file to own a private Profile
+in its existing single-threaded event loop. Runtime layout and shared handlers
+remain unchanged. Map2MiB native-only RAM before guests start, separate from
+Alter's ordinary1MiB allocator and every guest domain. Store at most16,384
+96-byte records; retirement remains Alpha-owned and fail-closed on error.
+
+Prime the existing MonotonicReader with64 reads, require nanosecond/1GHz units,
+and report source validity and calibration span/max. No unverified TSC units.
+Arm on observer PID41, record12seconds and dump only afterwards. Preserve
+selected PID41/42 faults and the actual parent clone/fork creating42; confirm
+the final target image is xfe. This clean-VM PID fixture is not general
+all-process coverage. Record receive entry, receipt, handler end, readiness/
+signal-pump end, syscall number, first three raw arguments where supplied,
+reply/park and existing wait flags. Parent-fork arguments are not decoded by
+the selected-child argument hook and remain zero; do not interpret them.
+
+No per-pixel/TB timing, repetitive VM stops or hot-handler serial output.
+However, timestamps and metadata work run at the event boundaries, including
+events whose bodies are not retained. The extra native mapping and local
+HPET/MMIO reads can perturb scheduling/execution. Diagnostic wall spans are
+not exact normal-path CPU costs, and gaps include probe bookkeeping too.
+
+Seven native recorder model tests and the same seven ASan cases pass serially:
+disabled/allocation-failure paths, native mapping ownership/retirement, one-time
+arming/parent marker, clock order, record capacity/first drop and bounded
+image/deferred dump. Cross-build the real diagnostic after the final helper
+snapshot. Normal Alter SHA953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e;
+profile85294012e2e9f17e01aa04b0cdf87f045ee8ffdbdbe95a8ec10b48fbfe344d27.
+These are diagnostic validation tests, not a new production optimization.
+
+### Frozen media and actual observations
+
+Use the unchanged stock Files launcher/128-query raw and Xlib workloads and
+136's AWacc104b70aa8f06c532a8e7cfcb1fb32a5b483fed036b58facb620571cf37d2f.
+Its existing ping line carries the already-read absolute clock timestamp;
+do not add another clock syscall/write or rely on the bridge forwarding every
+line. Current correctness-only initba776c9c/Alpha96bc14fe, services55c1b569,
+Kernel312d579b and retained118 Honoka22b24235 remain frozen. No Kernel build.
+
+Final frozen diagnostic media, distinct from pre-init package-log hashes:
+
+| Media | SHA256 |
+| --- | --- |
+| control.img |289b80cafa27f3e703cf39c83fb5442da911e507ae11ea6c33db6609dbcf537d|
+| control-rootfs.img |41cf8cbcc3f795a8c402a38e78cf28fcc8321f18f6666d7ab20f25313395eff6|
+| profile.img |85300b3d9290ab58ce218489af989cd36d3260841d825bd037229e8a06637aa1|
+| profile-rootfs.img |9c78e48b1d230c5e6af5e2cecfd39d361c418cde72aa037ba2a005e0f3657e2b|
+
+Pilot profile1 session63995 terminates0. Wait post-pilot SHA session14184 to
+terminal0 and verify all four media unchanged before starting follow-up.
+Sequential batch41914 runs profile2/control1/profile3 and terminates0; all
+four actual boots complete Files/ping and all raw/Xlib RTT queries. Each
+profile also completes its delayed trace footer. Follow the original live
+handles, with no own source edits/builds/tests/hashes during live VMs.
+
+The third run's initial strict offline parser fails: concurrent startup
+logging splits the clock frequency as `10000000` + CR + `00`, and inserts LF
+between `local=` and `true`. Preserve raw bytes and the first parser failure.
+Keep profile3-analysis-first-failure.log. Do not
+rerun/discard the slower observation or silently repair data. A separately
+tested private parser allows only CR/LF within the numeric frequency and
+before the local boolean. It still requires exact1GHz, valid source, complete
+ordered records, target identity and observer epoch; changed numeric values
+or injected text fail. Five analyzer tests pass, including this actual wrap
+and negative cases. Recovered profile3 JSON explicitly labels wrapped clock
+frequency; source serial remains unchanged. The original parser is archived.
+
+All three profiles have zero dropped/invalid records, a unique actual parent
+clone from PID37, final image=xfe, and a complete12second footer. Counts below
+cover the full trace; durations are clipped to that clone's receipt through
+the observer's absolute ping timestamp. No overlapping spans are added twice.
+
+| Inclusive wall-time observation | Profile1 | Profile2 | Profile3, wrapped clock line |
+| --- | ---: | ---: | ---: |
+| Parent clone receipt to observed ping |2285.974ms|2277.285ms|2447.354ms|
+| Actual creating clone, including pump |43.597ms|46.507ms|58.541ms|
+| Child handlers, excluding outer pump |1142.781ms|1161.670ms|1232.005ms|
+| Child handlers including pump |1164.844ms|1182.664ms|1253.740ms|
+| Observer handlers including pump |12.517ms|10.780ms|10.383ms|
+| Parent/child/observer handler union |1220.958ms|1239.951ms|1322.664ms|
+| Outside that selected union |1065.016ms|1037.334ms|1124.690ms|
+| Child mmap,168 calls |413.394ms|435.610ms|434.435ms|
+| mmap fraction of clone-to-ping |18.084%|19.128%|17.751%|
+| Child write,1228 calls |170.575ms|159.455ms|194.031ms|
+| Child read,502 calls |121.065ms|127.918ms|131.459ms|
+| Child openat,609 calls |114.525ms|115.339ms|122.284ms|
+| Child execve,4 calls |83.049ms|83.278ms|94.637ms|
+| Child newfstatat,379 calls |67.843ms|66.517ms|67.972ms|
+| Full12second rows |16283|16153|16313|
+| Clock64-read span / max pair |2703us /1800us|218us /118us|520us /160us|
+
+Calibration includes descheduling/preemption effects; it is
+not a per-read CPU cost or an amount to subtract from every interval. The
+handler spans also include synchronous broker work and preemption. The
+untracked remainder mixes guest userspace, other processes/brokers, Kernel/
+transport/waits and probe bookkeeping. It is not pure IPC, pure blocking,
+exclusive guest CPU, or a demonstrated fastpath/IPI bottleneck.
+
+The observer has a roughly1second gap after poll(timeout1000) in all profiles.
+That interval overlaps Files initialization: do not infer an avoidable1second
+observation delay from its presence alone. Child immediate-return gaps total
+883.018/860.996/946.571ms across7230/7224/7215 transitions, median35/33/35us;
+child park-state gaps total193.809/186.390/188.003ms. These per-process gaps
+overlap work in other rows/processes, so do not add them to the table's union
+or call their medians IPC round-trip cost. Recorded flags expose sleeps/
+readiness waits but do not establish why each wakeup occurs.
+
+| Original host observation | Click to first ping | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2479.579500ms|35.585,29.505,30.961|79.731,76.976,79.771|
+| Profile2 |2495.300125ms|26.021,27.546,27.020|83.698,73.434,73.659|
+| Ordinary control1 |2713.467250ms|33.250,35.114,33.552|74.614,74.907,71.344|
+| Profile3 |2601.347625ms|35.822,34.356,33.635|91.529,109.756,119.792|
+
+The one ordinary control and instrumented runs are not an optimization A/B,
+an exact profiling-tax estimate or timing-equivalence proof. Keep the contrary
+slower profile3 RTT samples. Host input and first-ping boundaries differ from
+the native clone window; original100ms observer/10ms host polling and actual
+ping round trip remain. None of these first-ping endpoints proves fully
+painted, input-responsive100ms readiness. No component yet meets the dominant
+critical-path gate for another tuning edit. In particular, clone is about2%
+and mmap about18--19%, not a demonstrated whole-launch explanation.
+
+### Exact restoration, cleanup and next measurement boundary
+
+After batch completion, compare main.rs with its frozen diagnostic snapshot,
+then restore it with apply_patch to its exact before bytes. Preserve all
+pre-existing dirty work. Normal rebuild16519 terminates0, cmp matches the
+control953f ELF byte-for-byte and SHA matches. No diagnostic hook/path/flag
+remains in production source; the private helper, model tests, analyzer,
+snapshots, original failures, build logs, complete serial/PNG and hashes stay
+as small reproduction evidence. Kernel subtree remains clean.
+
+Final eight-media hash job63244 terminates0. Check all four diagnostic media
+against frozen hashes and accepted118/107 against their original hashes;
+all eight agree. Exact PS shows no QEMU/build/hash process; exact four-path
+lsof is empty. Delete only137's control.img, control-rootfs.img, profile.img
+and profile-rootfs.img. The private directory falls from1175 to35MiB logical
+usage, not a claim about physical APFS space recovered. Inventory task-owned
+/private/tmp artifacts; leave unknown/official/active files and protected
+daemon state untouched. Retain only accepted118 and fallback107 media.
+
+Do not promote an image, tune a suspected copy/cache/IPC path, claim5% or100ms,
+or mark the overall goal complete from this diagnosis. Next partition the
+remaining startup/observer interval across guest/other user-level actors,
+with explicit probe overhead and true readiness endpoints, before selecting
+a dominant component. Counts or one large aggregate handler category alone
+do not satisfy Rob Pike's rule.
+
+## Cycle 138: startup path identities and a variable mmap, not a speedup
+
+Classify137 as diagnostic progress: repeated wall spans rule out whole-launch
+clone dominance but do not authorize tuning. Follow the user's Rob Pike gate.
+Root `/private/tmp/nanami-opt-cycle138.SpjS9m`. No Kernel edit/build, ABI,
+IPC fastpath, authority, scheduler, production optimization, version or release
+changes. No agents are started.
+
+### Bounded temporary path recorder
+
+Snapshot the current dirty main/state/fault/paths files. A private diagnostic
+cfg temporarily adds an actor-owned Profile to Runtime; no shared mutable
+global or guest domain mapping. An8MiB native mapping holds at most16,384
+bounded rows, retired through Alpha without local reuse on failed cleanup.
+Use the existing nanosecond MonotonicReader, prime64 reads before guests and
+retain validity/calibration/drop metadata. Arm on first observer41 syscall;
+dump on the next selected syscall at least12seconds later, not in hot handlers.
+Defer clock metadata too, avoiding137's startup-line interleaving.
+
+Record only child42 syscalls and eligible parent37 clones. Actual context
+PC/all six arguments are already available; begin/end surround personality
+dispatch, not register extraction, final fault-reply/signals or outer pumps.
+The existing read_c_string NUL scan supplies the first already-copied bounded
+string. Do not add guest reads, path/stat RPCs or hot serial output. Preserve
+raw bytes as hex, full/stored lengths and number of strings; do not silently
+treat truncation/multiple strings as a canonical path. Confirm actual clone
+returns42 and final target image is xfe. This is a fixed clean-VM fixture,
+not all-process accounting. Event timing, extra native memory and HPET/MMIO
+reads can perturb execution; do not subtract calibration as a per-read cost.
+
+Initial eight model/ASan cases pass, then add a regression that selected
+start-clock failures count as invalid rather than silently dropping a row.
+Final nine native and the same nine ASan cases pass serially. Real cfg-enabled
+Alter final cross-build71440 ends0 after the last helper change. Diagnostic
+ELF7d0a2964443ea4f1ed99b2d8081e352c32571291c7898a8c21c3dfd57c1be748;
+normal control953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+
+Use original118 Honoka/services/Kernel, current initba776c9c/Alpha96bc14fe,
+and unchanged acc104 observer/stock Files/128-query raw and Xlib workloads.
+Package60655 ends0; e2fsck and component extraction/cmp pass. Final media:
+
+| Media | SHA256 |
+| --- | --- |
+| control.img |1a82b8538c10535ca7827995afaee54162de74406aa08c9d2b0e6aab673c7a75|
+| control-rootfs.img |5cccc53f8920a35adc494cecbc2410871c13f0b2ffbf0bcb84523289f44a838e|
+| profile.img |cf04543a8eed2986f705850372eea6c733b8ebc30d4d5b8de163d36bab6c6820|
+| profile-rootfs.img |8cbcaf4e2298ee34cd868777c78760bf96163c9f05acc221292a8d2a751231ee|
+
+Package logs include pre-init hashes; frozen-sha256 records the final media.
+Pilot42288 ends0. After unchanged four-media hashes87800 end0, follow-up40277
+runs ordinary control1 then profile2 sequentially and ends0. All three boots
+complete Files/ping and every raw/Xlib RTT sample; both profiles complete
+deferred footers. No own edits/builds/tests/hashes during live VMs, no competing
+VM, no restarting from an observation yield or silently replacing a failure.
+
+### Measured paths and limits
+
+Both traces have a unique actual creating clone, image=xfe, local1GHz clock,
+zero invalid/dropped rows, no truncated paths and one explicit multi-string
+row. Full trace rows12049/12089; calibration spans592/3191us and max pair
+419/1755us include preemption. Analyze intervals only through the observer's
+absolute ping, not the entire trace. Three offline analyzer tests check union,
+FD association/close/dup/CLOEXEC and rejection of missing/corrupt/invalid/epoch
+evidence. Preserve the initial report/source when renaming the over-broad
+`xfe-config-or-resource-path` label to `xfe-related-path`: that group includes
+the program exec, not only config parsing. No timing values change.
+
+Association uses lexical first-string bytes and best-effort observed FD
+history, not canonical inode identity, call-stack phase or proof of the
+contents of socket I/O. Mmap uses its recorded file FD unless anonymous;
+read/write/fstat/close use current observed open/dup/exec history. Inherited
+or unread descriptors remain unattributed. Do not infer a connect sockaddr,
+X-server identity, data-dependency exclusivity or causal ownership from a
+filename label. Group first/last offsets and100ms buckets are not exclusive
+phase durations; nested/global intervals are not added twice.
+
+| Inclusive wall observation | Profile1 | Profile2 |
+| --- | ---: | ---: |
+| Creating clone receipt to ping |2447.424ms|2337.569ms|
+| Creating clone dispatch |52.974ms|46.753ms|
+| Selected parent/child dispatch union |1355.250ms|1201.285ms|
+| Outside that selected union |1092.174ms|1136.284ms|
+| Shared-object-path dispatch,324 calls |558.672ms|433.343ms|
+| Xfe-related-path dispatch,1354 calls |269.789ms|252.575ms|
+| Icon/pixmap-path dispatch,805 calls |138.401ms|131.586ms|
+| Font-path dispatch,498 calls |101.560ms|105.297ms|
+| Identity/timezone-path dispatch,351 calls |33.105ms|30.691ms|
+| Configuration writes only,1228 calls |176.129ms|165.534ms|
+
+Every recorded config write succeeds in full to the observed
+/root/.config/xfe/xferc_42 FD; total18,686bytes. This is a concrete many-small-
+writes observation, but only about7% of the phase, not authorization to
+change buffering/ordering/durability. Font and NSS/timezone accesses also do
+not dominate startup. Shared-object-related dispatch is the largest group
+at roughly19--23%, not a sole overwhelming whole-launch cause. Untracked
+time mixes other guest/user actors, fault continuation/pumps, transport,
+waits and instrumentation. It is not pure IPC/IPI or exclusive CPU time.
+
+One exact request differs substantially without any source/image change:
+libpcre2-8.so.0's first mmap has identical PC, arguments
+`[0,541512,1,2050,3,0]` and returned address4313247744 in both runs, but takes
+74.496ms versus6.598ms. The full pcre2-associated dispatch is85.695ms versus
+11.834ms. Preserve this variability instead of announcing an11x speedup or
+blaming storage/cache/preemption without a measured inner breakdown.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2619.539417|39.100,31.841,33.469|74.679,96.025,75.443|
+| Ordinary control1 |2270.372041|24.838,26.831,25.814|66.511,68.097,68.488|
+| Profile2 |2488.698667|40.942,41.793,34.039|78.049,85.297,80.889|
+
+Keep the slower instrumented observations and all raw serial/PNG/logs. One
+ordinary control is not an exact probe-tax estimate or timing-equivalence
+proof, and no optimization A/B occurred. Native clone and host click windows
+differ; first ping still is not fully painted/input-ready100ms completion.
+137 used a different handler envelope, so do not present the change in union
+as an optimization between cycles.
+
+### Exact restoration, housekeeping and next evidence boundary
+
+After follow-up terminal, cmp all four current files with frozen diagnostic
+snapshots, restore via apply_patch and cmp each exact before snapshot. Preserve
+all earlier dirty work. Normal rebuild3659 ends0; cmp and SHA match953f exactly.
+No private cfg/helper hook remains in the restored production files; Kernel
+subtree remains clean. Keep helper/source/ELF snapshots, native/ASan/analyzer
+tests, reports, all original records, packaging/build scripts and hashes.
+
+Final eight-media hashes15682 end0; all four diagnostics and accepted118/107
+agree with frozen identities. Exact PS shows no live QEMU/build/hash and
+exact four-path lsof is empty. Delete only138's control.img, control-rootfs.img,
+profile.img and profile-rootfs.img; retain118/fallback107. Its private directory
+falls from1182 to42MiB reported usage, not physical APFS space recovered.
+Review task-owned tmp artifacts; do not remove unknown/official/active or
+protected daemon files. No runtime promotion, new5% gain or goal completion.
+
+Next measure fstat/reservation, file-source/cache preparation, initialized-map,
+protection and stream-fallback boundaries around the observed mmap slow/fast
+requests. Record source state/bytes and distinguish service waits from actor
+work before selecting an optimization. Do not assume that fewer copies,
+another cache, buffered writes or a Kernel/IPC change is the answer.
+
+## Cycle 139: private file mmap phase time, placement is largest but not the whole launch
+
+Classify138 as progress: actual path identities reveal a same-request timing
+variation, not a cause or optimization. Respect Rob Pike's dominant-time gate.
+Root `/private/tmp/nanami-opt-cycle139.2uj2M6`. No Kernel edit/build, ABI,
+IPC fastpath, authority, scheduler, cache/admission policy, version, commit or
+release changes. No agents are started. No production optimization is retained.
+
+### Temporary stage instrumentation and validation
+
+Snapshot seven current dirty files. Replay138's temporary actor-owned recorder
+in main/state/fault/paths; add only vm/loader/file_mapping stage hooks. The
+same8MiB native-only mapping holds16,384 rows of512bytes exactly, verified by
+native/ASan bounds tests. No guest memory read, metadata RPC or per-stage
+record allocation is added. Keep the first already-copied path/context/results
+and defer output until a selected syscall at least12seconds after observer
+arming. All timings use the existing prepared local nanosecond clock.
+
+Marks surround fstat, PROT_NONE reservation, source preparation, initialized
+placement/stream fallback, hardware protection and logical metadata. Record
+actual cache hit/snapshot acquisition/ineligible branch, reason bits, source
+identity/file size and initialized/snapshot/stream route. Do not perform another
+cache lookup just for diagnosis. Separate nested positioned-read calls/bytes/
+wall time, snapshot memcpy wall time and streaming map-RPC wall time. The
+snapshot memcpy counter excludes streaming tail copies AND Alpha's byte
+initialization; it is not a complete memory-copy cost. Provider read spans can
+include cache/other actors/waits; they are not pure physical storage latency.
+Map-RPC spans are not exclusive manager CPU or pure Kernel/IPC/IPI cost.
+
+Twelve native recorder model tests and the same twelve ASan cases pass serially,
+including the new phase bounds/ordering, non-mmap no-clock, source/route and
+nested subtotal cases. Follow native build84471 to terminal0 before considering
+its handle closed. Real cfg-enabled Alter build48374 ends0. Private analyzer
+base3/new4 tests pass: stage ordering/range, corruption, duplicate/unmatched
+lines, partial paths and the snapshot branch with no separate protection call.
+Snapshot alias handling is defensive coverage; the real ordinary policy never
+enables that experimental route here.
+
+Freeze normal Alter953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e,
+diagnostic3d8155a3172eef8ef4f3ad5a09184537417d835318527020a1688efcd6d32cf9,
+current initba776c9c/Alpha96bc14fe, original118 Honoka/services/Kernel312d579b
+and acc104 observer. Keep the original Files launcher and raw/Xlib128-query
+workloads. Package35102 ends0 with filesystem/component checks. Final media,
+not the package log's pre-init intermediate hashes:
+
+| Media | SHA256 |
+| --- | --- |
+| control.img |4a8ef6fdd6af7e77014c2773656e48f405d701866ef5742fae51a4739ee77162|
+| control-rootfs.img |2c03a771d0278ad85fe0358970669b5fe3bfca3af5dda122081c1ba2afa74c2f|
+| profile.img |0a1c0ac1a3353a20daadba8c61f901e8069a3f41c413315d531f6c0ca771aaa6|
+| profile-rootfs.img |79f5081c5eaab62f1e9fe7e08377a3fa25ec5bd8fa286612cdcaf95bda3abb6e|
+
+Pilot78120 terminates0. Validate its complete trace before a follow-up cohort;
+post-pilot four-media hash95346 terminates0 with all identities unchanged.
+Sequential follow-up29702 runs ordinary control1/profile2 and ends0. All three
+boots complete Files/ping and every original raw/Xlib RTT sample; both profiles
+finish their deferred trace. One VM at a time, no own source edits/builds/
+tests/hashes during live VMs. Follow the same actual handles through yields.
+
+### Repeated wall-time evidence
+
+Both profiles have valid local1GHz clock/epoch, actual parent clone returning42,
+final image=xfe, zero drops/invalids and complete row counts12023/12062. Clock
+64-read spans2209/2932us and max pair605/736us include preemption; do not treat
+them as per-read CPU costs to subtract. Extra profiling MMIO/metadata work can
+perturb execution and code layout. Preserve this limitation and all raw data.
+
+Both traces contain168 target mmap calls.146 have file-mmap entry metadata;
+143 private calls have all ordinary stage marks. The other three are successful
+MAP_SHARED read-only fontconfig cache mappings: their early fstat marks are
+explicit but their memfd branch is outside this private initializer, not
+silently filled with fake marks or described as143-of168 complete coverage.
+The remaining unmarked calls take other/anonymous paths. Stage timings below
+are for the143 complete private mappings before the observed ping only.
+
+| Inclusive disjoint wall-time observation | Profile1 | Profile2 |
+| --- | ---: | ---: |
+| Parent clone receipt to observed ping |2169.256ms|2127.937ms|
+| Complete private-mmap dispatch |376.565ms|381.480ms|
+| fstat |6.559ms|5.883ms|
+| Reservation/overlap handling |32.802ms|32.023ms|
+| Source preparation |61.933ms|63.950ms|
+| Placement/stream initialization |237.698ms|242.595ms|
+| Hardware protection |34.215ms|33.816ms|
+| Logical metadata |1.805ms|1.746ms|
+| Dispatch outside marks |1.553ms|1.467ms|
+
+These six stage totals plus outside marks exactly equal the private dispatch
+total. Initialization is63.12%/63.59% of that measured subset, but only
+10.96%/11.40% of the full native clone-to-ping interval. It is not a sole
+overwhelming whole-launch explanation or a fixed-work speedup bound.
+
+Nested subtotals, NOT additional time to add to the table:
+
+| Nested observation | Profile1 | Profile2 |
+| --- | ---: | ---: |
+| Positioned provider reads |305 /18,657,184bytes|305 /18,657,184bytes|
+| Provider-read wall span |123.238ms|129.920ms|
+| Alter snapshot memcpy wall span |3.462ms|2.883ms|
+| Streaming map-RPC wall span |56.733ms|57.975ms|
+| Prepared-source route initialization,135 calls |112.183ms|110.560ms|
+| Stream route initialization,8 calls |125.515ms|132.035ms|
+
+The stream initializer includes its reads and map requests; do not label its
+whole125--132ms as Alpha-only placement. Conversely, the snapshot memcpy
+subtotal cannot rule out manager-side copies. Actual branch counts agree:
+108 cache hits and27 snapshot acquisitions use the prepared-source route;
+eight ineligible requests stream. Two have the oversize reason alone; six
+also have nonzero offset/partial-size reasons. Identity checking, cache
+capacity/admission, actual workloads and ordinary logging remain unchanged.
+
+Pcre2's first identical mmap args `[0,541512,1,2050,3,0]`, returned address
+4313247744, is6.837/7.044ms. Both take snapshot acquisition, file size543320,
+nine reads/543320bytes. Source preparation is3.814/4.195ms, read subtotal
+3.423/3.911ms, snapshot memcpy0.317/0.203ms, initialized placement2.496/2.336ms
+and protection0.432/0.411ms. Later segment mappings hit the cache. The old
+13874.496ms spike does NOT recur, so its cause remains unresolved. Do not
+replace it, assert a cache/storage/scheduling cause, or claim an11x speedup
+from these different diagnostic runs.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2382.819542|32.836,31.942,32.937|67.473,67.912,65.527|
+| Ordinary control1 |2247.541834|38.803,27.287,25.438|65.000,66.411,63.936|
+| Profile2 |2299.171041|41.966,33.708,34.037|72.356,68.169,66.471|
+
+This is not an optimization A/B, exact profiling-tax estimate, or timing
+equivalence proof. Do not compare139/138 instrumented times as a gain.
+Native clone and host click endpoints differ, original polling remains,
+and first ping is not fully painted/input-responsive100ms readiness.
+
+### Exact withdrawal, cleanup and next boundary
+
+After all VMs terminate, cmp all seven source files with frozen diagnostic
+snapshots, restore via apply_patch, and cmp against every exact before file.
+All earlier dirty work is preserved. Normal build66695 ends0; rebuilt Alter
+cmp/SHA exactly match953f. No diagnostic cfg/module hook remains in those
+production files. Kernel subtree stays clean. Retain source/ELF snapshots,
+models/ASan/analyzer tests, reports, original serial/log/PNG and reconstruction
+scripts. No public API or permanent profiling feature is introduced.
+
+Final eight-media hash16864 ends0; all diagnostics and accepted118/fallback107
+match frozen/original hashes. Exact PS finds no live QEMU/build/hash; exact
+four-path lsof is empty. Delete only139's control.img, control-rootfs.img,
+profile.img and profile-rootfs.img, retaining118/107. Private reported usage
+falls1178->39MiB, not a physical APFS recovery claim. Review task-owned tmp;
+leave unknown/official/active/protected daemon files untouched. No promotion,
+new5% gain,100ms result or goal completion is claimed.
+
+Next measure manager-side initialized placement: source validation, slot/Frame
+allocation, temporary aliases, byte initialization and target publication.
+Use a calibrated clock setup that does NOT call Alpha recursively from its
+own handler; no uncalibrated TSC assumptions. Separate manager/Kernel-call
+wait spans from actor CPU work, and keep source/temporary-alias ownership,
+uncertain-PTE quarantine, quiescence ACK and rollback guarantees unchanged.
+Do not repeat previously rejected cache/final-attribute experiments or bypass
+permissions on the strength of a count or this aggregate stage alone.
+
+## Cycle 140: Alpha initialized placement is distributed, not a dominant launch cause
+
+Private evidence: `/private/tmp/nanami-opt-cycle140.CROPZY`. The retained
+ACCEPTANCE.md, RESULT.md, source/ELF snapshots, test/build logs, original
+serial/PNG and strict analyses reconstruct the experiment after media cleanup.
+
+Rob Pike gate: actual time evidence precedes optimization. This cycle is
+diagnosis only; no new cache, fast path, scheduling policy or permission
+relaxation is retained. Kernel source and binaries remain unchanged.
+
+### Setup and validation
+
+Temporary hooks only in Alpha alpha.rs, alpha/mmio.rs and
+alpha/memory_pages.rs wrap the existing initialized-page constructor without
+reordering its validation, ownership, allocation, source copy, strict MAP,
+publication metadata or fail-closed rollback. Exact before/profile snapshots
+are retained here. Each constructor owns its sample, permitting nesting;
+the actor preallocates1024 bounded records and retains partial/error outcomes.
+
+The diagnostic maps the existing Alpha-owned QEMU HPET page0xfed00000 at an
+otherwise unused Alpha-only VA0x6a000000 with READ|UNCACHED. It uses a strict
+native map, one attempt, no self IPC or hardware writes. A failed/uncertain
+clock mapping is pinned and disables diagnosis without rejecting the ordinary
+driver grant. The VA does not overlap the existing0x69000000 zero page.
+After observer41 exists, check the64bit enabled counter and advertised period,
+then calibrate64 coherent high/low/high reads. Store raw ticks, not guessed
+TSC units. Actual period is10,000,000fs (10ns/tick).
+
+Select actual Files PID42. Record nine disjoint inclusive wall phases:
+source validation, destination reservation, Frame-chunk setup, deferred-reuse
+ownership transfer, allocate/copy-Frame plus ownership metadata, destination
+alias, source alias plus byte initialization, strict target publication plus
+permissions metadata, and postlude/error cleanup. Nested calls are never
+double-added; both actual runs have zero nested calls.
+
+Defer serial output at least8s after the first selected constructor. The
+observer preserves the original Files click/ping and all128 raw/Xlib query
+tests. Only after those finish does a private postamble wait12s and issue a
+normal mmap/munmap to guarantee an eventual Alpha request; no new API or
+process is introduced. Both traces actually dump before that extra request,
+through ordinary later Alpha traffic. The footer follows the original ping
+and RTT records. All378 constructor intervals end before the ping; no
+post-readiness allocation is silently included.
+
+Recorder tests8 and the same ASan8 pass serially. Offline analyzer tests7
+cover unit conversion, prefixed/deferred output, count/loss, phase partition,
+identity, explicit errors, interval union, readiness epoch and post-ping
+rejection. Real diagnostic Alpha build63062 and init27552 terminate0;
+embedded Alpha is verified exactly once. Package54775 and freeze-hash67007
+terminate0. No Kernel build.
+
+Frozen ordinary Alpha96bc14fe377dc9745648e9782837b85805e0594c23b0531d57968ed347072fb1,
+diagnostic Alpha31a344248da352a23929c63212b9db571d1ebde9897bac251c6f196b7b7b5400,
+ordinary initba776c9cf40ba23c188c3c9541c09428325d05bdcf1aa1015344401b6704763d,
+diagnostic initff9cb523e9f79cf4b75aef592a580f0f3de49b59de577304fb6ac2330568af94.
+Both use ordinary Alter953f319b, retained118 Honoka/services/Kernel312d579b,
+and identical private observerd41c9e04. Filesystem checks, extracted ELF
+comparisons and complete media identities are in frozen-sha256.txt.
+
+| Diagnostic media, subsequently deleted | SHA256 |
+| --- | --- |
+| control.img |230d36c4d40d4e81bcb6e23396e20ebc0bc7a3dc1f825a23c2d7904ddd5e71ae|
+| control-rootfs.img |bf3a5f3a7b8cf3940dae01047d787e603f2c8df1b680fc2121553ad6ff35a75e|
+| profile.img |86488c7ef9ad98a52e29ee7257972388f2d452974501f188e833d20b7802a3fc|
+| profile-rootfs.img |26b8220f2ed1d1b7208dd35384e82e7c0057e55eb2d5b34ec99351138a12c539|
+
+Pilot8909 ends0 and its complete trace is analyzed before repetition.
+Four-media hash17677 ends0 unchanged. Sequential control1/profile2 cohort
+69357 ends0. One VM at a time; no own edits/builds/tests/hashes during live
+VMs. No failed run is discarded or replaced.
+
+### Repeated actual measurements
+
+Each profile records378 successful constructors,11,629 pages and no dropped/
+invalid/error records. Source-backed calls350 initialize40,986,044 source
+bytes over10,594 pages. Thirty source calls read parent37,320 read Alter18;
+another28 calls/1035 pages are zero-only. This covers more than the private
+file-mmap subset in139: fork/exec/anonymous work is included. Do not equate
+these aggregate241/237ms to139's237/243ms stream/provider-inclusive stage.
+
+| Inclusive wall phase | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Validation |3.849|3.406|
+| Reservation |2.441|2.365|
+| Frame chunks |1.605|1.530|
+| Reuse ownership |5.818|5.632|
+| Allocate / Frame copy / ownership |51.924|52.092|
+| Destination alias |63.812|64.383|
+| Source alias / byte initialization |70.761|68.994|
+| Target publication |40.575|38.306|
+| Postlude |0.693|0.534|
+| Constructor interval union |241.478|237.242|
+
+All stage sums exactly partition the constructor interval union. The broadest
+phase is only29.3%/29.1% of constructor time, not an overwhelming component.
+The first selected constructor starts at31.047456/31.159258s on the global
+HPET epoch; the observed ping is33.224106/33.295939s. The interval is
+2176.650/2136.681ms, and constructor union is11.09%/11.10% of that interval.
+This endpoint is first-constructor-to-ping, NOT parent-clone receipt,
+native-click receipt, host click, full paint or an input-readiness assertion.
+
+The source-alias/initialization phase includes lookups and mappings, not
+isolated memcpy. Allocation includes capability/ownership operations;
+publication includes native map/page-table/provider/preemption costs, not
+pure IPC or Kernel time. No exclusive CPU attribution follows. Zero-only
+constructor totals17.917/17.978ms and parent-source totals31.677/31.096ms
+also do not identify a dominant whole-launch bottleneck.
+
+Both runs make48,784 in-sample clock reads. Calibration64-read spans are
+117/120us, median and p95 pair1/1us, maximum44/41us, minimum0us at observed
+clock quantization. Read/probe work is non-negligible; preemption and changed
+code/mapping layout can perturb the measured phases. Do NOT subtract median
+times counts as an exact profiling-tax correction or call the data bare CPU
+time. The broad repeated partition is evidence, not precise uninstrumented
+microsecond costs.
+
+| Original host observations | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2381.171292|42.364,36.358,31.780|69.527,68.314,65.414|
+| Ordinary control1 |2090.592417|33.474,26.111,25.040|63.324,62.417,63.550|
+| Profile2 |2308.954708|41.691,33.407,24.768|59.858,61.478,61.980|
+
+This is no optimization A/B or exact profiling-overhead estimate. Do not
+claim a speedup/regression from instrumented/control differences, compare
+different-cycle diagnostics as gains, or call first ping painted/input-ready
+100ms. Original138's74.496ms pcre2 spike remains unresolved.
+
+### Withdrawal and cleanup
+
+After all VMs terminate, compare all three files with their frozen diagnostic
+snapshots, restore through apply_patch and cmp against exact before copies.
+Earlier dirty work is preserved. Remove all diagnostic cfg/module hooks.
+Normal Alpha rebuild19840 ends0 and cmp/SHA matches96bc14fe; restore embedded
+Alpha and normal init rebuild26355 ends0, matchingba776c9c exactly. No
+diagnostic artifact remains installed in the normal generated outputs.
+
+Final eight-media hash22291 ends0; all four diagnostic media and retained118/
+107 identities match. Exact PS finds no live QEMU/build/hash, four-path lsof
+is empty. Delete only this cycle's four diagnostic media, keeping scripts,
+source/ELF snapshots, tests, raw serial/log/PNG and analyses. Reported cycle
+usage1176->36MiB is logical/file accounting, not a physical APFS reclaimed
+space claim. Retain accepted118 and fallback107; unknown/official/active/
+protected daemon data is untouched.
+
+Decision: no tuning follows. Alpha initialized placement is distributed and
+about11% of this measured launch interval; none of its subphases overwhelms
+the remaining work. Next evidence must broaden back to guest execution,
+other actors and actual runnable/waiting critical-path intervals, using a
+bounded measurement method with explicit probe bias. Do not infer IPI,
+storage, compositor, memcpy or IPC dominance from unassigned time or counts.
+No new5% gain,100ms result, runtime promotion, version/release or completion
+claim is made.
+
+## Cycle 141: all Alter events account for the launch interval
+
+Private evidence: `/private/tmp/nanami-opt-cycle141.U0iqkU`. Its ACCEPTANCE.md, RESULT.md,
+raw serial/log/PNG, failures, tests, source/ELF snapshots and scripts are retained.
+
+## Decision and scope
+
+Previous140 is evidence progress, not a gain: Alpha page construction is
+distributed and about11% of its measured launch interval. Do not tune that
+small fraction from intuition. This cycle broadens to all Alter actor events,
+including other processes, native requests and notifications. No runtime
+optimization, new cache policy, scheduling change, permissions relaxation,
+Kernel edit/build, ABI or guest-authority change is retained.
+
+Only Alter/Linux main.rs temporarily replays137's recorder, changing its
+selection from observer/child/parent to every event. A single actor-owned
+8MiB native mapping holds65,536 bounded96-byte rows, never mapped into a
+guest. Four local HPET-ns timestamps delimit receive/reply-receive, dispatch,
+readiness/signal pump and intervening diagnostic/bookkeeping gaps. Allocation,
+local-clock priming and64-read calibration precede capture. Record for12s
+after observer41 first appears. Preserve original Files click/ping and all128
+raw/Xlib queries. Final process-name lookups/output occur only after capture.
+
+The strict analyzer verifies local1GHz clock, zero invalids/drops, all event
+variants, identities, monotonic nonoverlapping event chain, parent clone
+producing42, final image=xfe, original ping+RTT and complete deferred output.
+Clip every interval to actual parent-clone receipt -> observer ping. Receive,
+dispatch, pump and complement exactly partition that whole interval; group
+all dispatch time by process/event/syscall. This is inclusive actor wall
+time, not exclusive CPU. Receive includes guest execution and suspension/
+scheduling, not pure IPC. Dispatch includes synchronous providers and
+preemption; pump ownership is attributed only to the triggering event.
+
+Recorder tests8 and same ASan8 pass serially. Analyzer tests7 cover boundary
+clipping/partition, requests/notifications, drops, invalid clocks/identities,
+overlap, incomplete prefix, original workload completion and actual fixed-width
+label formatting. Build96180 and final49584 end0; final main.rs/profile helper
+snapshots match the actual diagnostic binary. Package/freeze33916 ends0.
+One VM at a time, no own edits/builds/tests/hashes during live VMs.
+
+Frozen normal Alter953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e,
+diagnostic0a21d8e61e83c811779d5d0eb1f1f362fb41217e471a1507580f0b32379e70d2.
+Both use current Alpha96bc14fe/initba776c9c, original118 Honoka/services/
+Kernel312d579b and the unchanged acc104 observer. Filesystem/component
+extraction comparisons and frozen-sha256.txt retain all identities.
+
+| Diagnostic media, subsequently deleted | SHA256 |
+| --- | --- |
+| control.img |4fc6e7e9615a2c519532f38b648f137d106cf2173f77395dc2566a950429418f|
+| control-rootfs.img |8e4b84874ef16d0b687fb9e92d9715ea6e35506beb54d8b509364d7e5269a0c7|
+| profile.img |3c2ad6434309c5b77a3e645b0f542d93269f9353fb3b3c28d8c8db6726fb933f|
+| profile-rootfs.img |7bb93810e4d217923a3348e6dbf33296031503eab14fe26929187050b5610d16|
+
+### Preserve the first harness failure
+
+Pilot78185 completes the original Files/ping/RTT and all26,731 records, footer
+and process identities. Runtime's fixed-width formatter truncates the long
+label alter.time.identities.end to alter.time.identitie. The first private
+runner incorrectly waits for the untruncated text; its corresponding offline
+parser also incorrectly indexes an unpadded clock label. Keep original runner,
+parser, logs and initial ValueError, rather than editing the numerical trace.
+
+After the actual complete footer/identities are observed, identify the exact
+own Python17481/QEMU17482 by PS and interrupt only Python17481. Its finally
+block terminates QEMU; same owning78185 ends130. This is an explicit known
+harness failure, NOT a successful driver, observation-timeout restart, guest
+failure or rejected/slower workload. No repeated boot replaces it.
+
+Fix only the private text predicates: accept the known formatter's padded
+labels and exact truncated completion label; no numeric repair or filtering.
+A regression test covers that actual format. Analyze the unchanged complete
+raw trace successfully. Post-pilot four-media hash82884 ends0 unchanged.
+After PS confirms no VM/build/hash, sequential ordinary control1/profile2
+cohort65243 ends0. Both original workloads pass and second diagnostic's
+complete footer/identities are accepted by the corrected runner.
+
+### Repeated inclusive time evidence
+
+Profile1/profile2 record26,731/26,793 complete all-event rows over their full
+12s captures, with zero losses/invalids. Exactly11,038/11,111 event intervals
+intersect the measured clone-to-ping prefix. Current process identities show
+Xfbdev33, FLWM36, wbar37, aterm38 and Files/xfe42. Observer41 already exits
+before deferred identity output; its unknown final name is not invented.
+
+| Disjoint inclusive wall-time partition | Profile1 | Profile2 |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2023.006ms|2020.352ms|
+| Receive / reply-receive |780.536ms (38.58%)|773.603ms (38.29%)|
+| Dispatch bodies, all processes/events |1159.041ms (57.29%)|1165.043ms (57.67%)|
+| Readiness/signal pump |44.442ms (2.20%)|44.348ms (2.20%)|
+| Between probes / diagnostic bookkeeping |38.987ms (1.93%)|37.358ms (1.85%)|
+
+Each column exactly partitions its measured interval. There is no unaccounted
+one-second tail assigned to other processes or to guest CPU by subtraction.
+Dispatch bodies include handler-local diagnostics, native provider calls and
+preemption, so57% is not an exclusive Alter CPU share or proof that IPC,
+storage or a common frontend routine is the dominant cause.
+
+| Dispatch ownership, subset of the table above | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Files42 syscalls |1019.006|1028.422|
+| Xfbdev33 syscalls |54.071|53.901|
+| wbar37 syscalls, including creating clone |42.486|42.699|
+| Timer/readiness notifications |24.519|19.923|
+| FLWM36 syscalls |8.950|10.246|
+| Observer41 syscalls |6.942|6.812|
+| Native requests, caller20 |2.106|1.985|
+| aterm38 syscalls |0.961|1.055|
+
+Files' own dispatches account for50.37%/50.90% of the whole measured interval;
+Xfbdev's are2.67% in both runs. This narrows the next investigation away from
+other-process syscall bodies. It does NOT measure Xfbdev guest CPU execution
+or exclude its work while Alter is in receive.
+
+| Largest Files dispatch groups | Calls | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: | ---: |
+| mmap, syscall9 |168|376.609|381.761|
+| write, syscall1 |1228|156.448|155.426|
+| openat, syscall257 |609|104.416|102.162|
+| read, syscall0 |502|100.937|102.289|
+| execve dispatch attempts, syscall59 |4|70.366|78.516|
+| newfstatat, syscall262 |379|55.668|55.365|
+
+The largest individual group is18.62%/18.90% of clone-to-ping, not an
+overwhelming whole-launch cause. Four execve dispatch attempts are not proof
+of four successful image installations. Do not add previous139 mmap phases
+or140 Alpha construction to these totals: those are nested/different runs.
+Do not tune buffering, cache, copies or IPC from invocation counts.
+
+Clock64-read calibration spans217/220us, maximum pair121/125us. These include
+preemption and are not exact per-read CPU costs. Four event timestamps plus
+the deferred-window clock/probe metadata perturb execution and code layout;
+the measured between-probe gaps do not cover all instrumentation cost.
+No median-times-count subtraction or exact profiling-tax claim is justified.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1, driver130 / complete raw trace |2192.974333|35.543,26.904,25.742|71.935,69.550,72.623|
+| Ordinary control1, driver0 |2063.898084|42.453,27.701,25.295|63.980,61.482,60.743|
+| Profile2, driver0 |2191.283042|29.445,24.843,25.039|71.788,95.996,74.133|
+
+This is diagnosis, not an optimization A/B, exact profiling-overhead estimate
+or timing-equivalence proof. Native clone and host click differ. First ping
+is not complete paint/input-ready100ms. Keep every original RTT sample and
+the first driver failure; do not compare different-cycle profiles as gains.
+
+### Exact withdrawal, cleanup and next boundary
+
+After all owning jobs are terminal, cmp main.rs against its frozen diagnostic,
+restore only that file through apply_patch, cmp its exact before snapshot.
+Earlier dirty changes remain. Normal rebuild20976 ends0; cmp/SHA matches
+normal953f319b exactly. No private module/env hook remains installed. Alpha96bc
+and initba776 remain exact; Kernel subtree stays clean.
+
+Final eight-media hash42865 ends0; diagnostics and accepted118/fallback107
+match all frozen/original identities. Exact PS finds no live VM/build/hash;
+four-path lsof is empty. Delete only four141 diagnostic media. Reported
+cycle usage1180->40MiB is logical accounting, not a physical APFS recovery
+claim. Retain source/ELF snapshots, tests, runner/parser failure, raw serial/
+PNG, reports and reconstruction scripts. Keep accepted118/107, not these
+diagnostic generations. Unknown/official/active/protected data is untouched.
+
+Next measure the common work inside Files' syscall dispatches: distinguish
+guest-memory access/copy, synchronous Alpha/POSIX/VFS/provider spans and local
+semantic processing using bounded actor-owned timings, with nesting and
+probe bias explicit. This is an evidence plan, not authorization to remove
+copies, introduce caches, bypass ownership/rights or blame transport without
+measurement. Also keep the receive-side scheduling/guest-execution boundary
+unresolved rather than declaring it pure IPC or IPI.
+
+No new runtime optimization,5% gain,100ms result, release/version, image
+promotion or goal completion is claimed.
+
+## Cycle 142: selected guest-memory and provider spans do not identify one dominant helper
+
+Private evidence: `/private/tmp/nanami-opt-cycle142.NOudGu`. Retain ACCEPTANCE.md, RESULT.md,
+instrumentation manifest, all source/ELF snapshots, original logs/PNG, tests
+and reconstruction scripts after media deletion.
+
+## Decision and implementation boundary
+
+Previous141 is evidence progress: Files syscall bodies occupy about50% of
+actual clone-to-ping, with only2.67% in Xfbdev syscall bodies. Respect Rob
+Pike's rules. Measure the common frontend/provider boundaries before adding
+caches, deleting copies or changing transport. This cycle retains NO runtime
+optimization, Kernel edit/build, ABI, cache/scheduling policy or rights change.
+
+Temporary changes cover exactly11 production files: Linux main, common/state,
+guest_memory, file_io, metadata, descriptors, vm, file_mapping, common/loader,
+filesystem and common/state/io. Before/profile copies retain every earlier
+dirty change. A short-lived RefCell borrow obtains an owned timing ticket
+before an original operation; no borrow spans the operation. The recorder is
+owned by Runtime, not global state, and works with existing immutable
+guest-memory entry points. No added guest reads or payload copies, reordered
+requests, fallback behavior or alternate communication path.
+
+Replay141's all-event actor timing. A single8MiB native-owned mapping holds
+32,768 bounded216-byte rows, never mapped into a guest. Each row adds five
+interval-union subtotals plus call/error counts. Only current Files42 dispatches
+get inner stamps; seal before readiness/signal pump. Same-category nested
+helpers merge their intervals. Distinguish copyin, copyout, selected POSIX
+calls, standalone selected Alpha calls, and selected Alpha-inside-copy as a
+NONADDITIVE subtotal. Validate depth closure/event generation, primary sum
+<= body, and nested Alpha <= copyin+copyout. Error counts remain data, not
+discarded successes. Preserve zero-time observations at clock quantization.
+
+instrumentation.json enumerates92 call/helper hooks. Wrap static
+set_hardware_protection at its Runtime-bearing callers rather than expanding
+its interface. Copy spans include permission/preflight, view acquisition,
+alias/lookup, byte work and native calls, NOT isolated memcpy. POSIX/Alpha
+spans include client wrappers, providers, transport, preemption and probes,
+NOT pure IPC or exclusive actor CPU. Selected hooks are NOT complete coverage
+of every request or guest-memory view setup.
+
+Prime/calibrate the local HPET clock and buffer before recording12s after
+observer41. Retain the original Files dock/ping and all128 raw/Xlib queries.
+Deferred output preserves141's known fixed-width label behavior. No own
+edits/builds/tests/hashes while one VM is live; follow each actual handle to
+terminal. No Kernel modification or build.
+
+### Validation and frozen workload
+
+Recorder12 tests and the same ASan12 pass serially: bounded mapping/owner
+retirement, clocks, all event types, nested union, Alpha-inside-copy, cross-
+event tickets, unselected processes and post-dispatch pump exclusion.
+Offline base7/inner5 analyzer tests pass: actual log formatting, exact actor
+partition, IDs/losses, inner row correspondence, errors/counts, primary/nested
+bounds, residual and refusal to falsely clip a partial aggregate.
+
+Build57667 ends0. After source formatting/explicit RefCell guard lifetime and
+pump sealing, builds41853 and actual93108 end0. Actual diagnostic ELF is
+9bdfe41aea6713ab2f3ef085c6627aa2f72f3080284e2a56f686dd3baf6eaad6.
+Package/freeze73864 ends0 with extracted filesystem/ELF comparisons. Both
+variants use normal Alpha96bc14fe/initba776c9c, original118 Honoka/services/
+Kernel312d579b and unchanged observeracc104. Control Alter is953f319b.
+Keep all full component hashes in frozen-sha256.txt.
+
+| Diagnostic media, subsequently deleted | SHA256 |
+| --- | --- |
+| control.img |504a05c359d62aba597ba9a27ce73c738a9f272cb184f240dcc191d0bf462888|
+| control-rootfs.img |529744842267f6d11eba816657894b48bfcc965ba0ef3115161a0b2b6498213b|
+| profile.img |efaaaf02bcb6bf13537ac2b289b4e4c419c38faf9c4da8dde40becd09c2b57ab|
+| profile-rootfs.img |ea3ac8a985dd2bad92336363b0712aedd808087e3870c3c2efc4678e94bdfc8e|
+
+Pilot49093 ends0. Analyze its complete original and inner records before
+repeating. Four-media hash18213 ends0 unchanged; PS finds no running VM/
+build/hash. Sequential ordinary control1/profile2 job76950 ends0. All three
+original Files/ping/128 raw/Xlib workloads pass, and both diagnostic traces
+complete with zero dropped/invalid records. No failing/slower run is replaced.
+
+### Repeated measured wall partitions
+
+Profile1/profile2 retain26,790/26,801 full all-event rows. Strict analysis clips
+the nonoverlapping actor chain to parent-clone receipt -> observed ping.
+Every relevant inner aggregate is wholly inside that prefix; no proportional
+scaling of partial bodies is invented.
+
+| Disjoint global actor wall partition | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2066.726|2106.757|
+| Receive / reply-receive |772.947|780.183|
+| Dispatch, all event bodies |1205.611|1236.626|
+| Readiness/signal pump |44.391|45.069|
+| Between probes / bookkeeping |43.777|44.879|
+
+Each column exactly partitions the interval. Files' own7,423/7,432 bodies
+take1060.679/1090.396ms,51.32%/51.76% of that whole interval.
+
+| Disjoint primary partition within Files bodies | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Copyin helpers/direct checked transfers |139.379|137.461|
+| Copyout helpers |59.809|57.838|
+| Selected POSIX calls |313.490|341.927|
+| Selected standalone Alpha calls |236.253|234.583|
+| Residual local/other/provider/probe work |311.748|318.587|
+| Files body total |1060.679|1090.396|
+
+Selected Alpha-inside-copy is107.892/104.988ms, already inside copyin/out.
+DO NOT add it to the table. Copyin/out invocation counts5967/5984 and3041/3042
+include nested helper calls, not unique physical copies. POSIX selected calls
+are3504 both runs, with63 retained error results; standalone Alpha634 with
+zero errors, nested Alpha1715 with zero errors. Counts alone justify no
+optimization, and validation/view/transport time cannot be called byte-copy
+bandwidth.
+
+| Files syscall group, nested observations | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| mmap body,168 calls |373.950|383.382|
+| Its selected POSIX calls |111.135|123.136|
+| Its selected standalone Alpha calls |232.560|230.591|
+| Its remaining body work |30.255|29.655|
+| write body,1228 calls |170.761|168.699|
+| Its copyin interval |80.185|79.424|
+| Its selected POSIX write interval |76.069|74.832|
+| Its remaining body work |14.507|14.443|
+| read body,502 calls |104.991|112.129|
+| Its copyout interval |30.590|28.426|
+| Its selected POSIX reads |66.653|75.494|
+
+These subtables are inside the previous tables, not additional time. Write's
+selected Alpha-inside-copy75.904/75.128ms is likewise already in its copyin
+interval. Do not assume all18,686 config bytes imply avoidable buffering or
+that a checked transfer may be replaced without ownership/permission proof.
+
+#### Measured-coverage hole: path resolution
+
+Source review explains why newfstatat's selected POSIX subtotal is zero while
+its379 bodies take57.223/60.675ms. sys_newfstatat calls namespace::stat_at;
+namespace::request_path uses the separately named
+nanami_client::vfs::posix_path_request gateway and returns metadata together
+with path resolution. It bypasses the ordinary posix::posix_* hooks in this
+cycle. This is an UNMEASURED PROVIDER boundary, not proof of no filesystem
+requests or entirely local stat processing.
+
+Similarly,609 openat bodies take105.754/107.000ms: copyin22.216/21.985ms,
+selected POSIX21.014/20.833ms and residual62.524/64.182ms. The residual includes
+that uninstrumented namespace path and probes; do not call it CPU work.
+Guest read/write-view acquisition may also invoke unwrapped native helpers;
+the selected nested-Alpha subtotal does not prove complete Alpha coverage.
+
+Next add bounded timing around that actual namespace request boundary and
+separate its local descriptor/path staging from provider wait before deciding
+whether a shared resolver/cache/transport path dominates. The data narrows
+the next action but does not justify a cache or a bypass.
+
+Calibration64-read spans221/223us, maximum pair122/121us, include preemption.
+Additional RefCell/clock/probe work perturbs code layout and scheduling.
+Between-probe time excludes in-body probes, so it is not the total diagnostic
+tax. Do not subtract a presumed per-read cost or infer exclusive CPU shares.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2236.437666|50.181,33.250,26.842|75.591,72.057,73.600|
+| Ordinary control1 |2153.234875|43.585,26.812,25.120|61.692,62.944,63.227|
+| Profile2 |2245.269083|42.969,30.491,24.486|74.300,73.492,71.223|
+
+This is no optimization A/B or exact profiling-overhead estimate. Never
+compare different-cycle instrumented numbers as gains. Native clone receipt
+and host click endpoints differ; first ping is not full paint/input readiness
+or100ms. None of these individual measured helpers overwhelmingly explains
+the whole launch, and uninstrumented boundaries remain explicit.
+
+### Exact withdrawal and retention
+
+After76950 terminates, cmp all11 source files with their frozen profile copies.
+Restore through apply_patch and cmp exact before copies, preserving all prior
+dirty work. Normal rebuild29100 ends0; cmp/SHA exactly matches Alter953f.
+Normal Alpha96bc/initba776 remain exact; Kernel subtree clean. No diagnostic
+macro, Runtime field or hook remains installed in production sources.
+
+Final eight-media hash52485 ends0. All diagnostics and accepted118/fallback107
+match their frozen/original identities. Exact PS has no live VM/build/hash
+and four-path lsof is empty. Delete only this cycle's four diagnostic media,
+retaining118/107 plus scripts, source/ELF snapshots, models/ASan/analyzer tests,
+raw serial/log/PNG and reports. Reported cycle usage1183->44MiB is logical
+accounting, not a physical APFS reclaimed-space claim. Unknown/official/
+active/protected daemon data is untouched.
+
+No new performance policy,5% gain,100ms result, image promotion, release/
+version or goal-completion claim follows.
+
+## Cycle 143: namespace staging is small; gateway time is not yet provider CPU time
+
+Private evidence: `/private/tmp/nanami-opt-cycle143.uKt1M6`. ACCEPTANCE.md, RESULT.md, frozen
+source/ELF snapshots, tests, raw logs/PNG, analyses and scripts remain.
+
+## Decision and measurement design
+
+Previous142 is evidence progress: the ordinary POSIX hooks miss the separately
+named namespace::request_path -> nanami_client::vfs::posix_path_request
+gateway. Its residual is not pure local CPU work. Measure that boundary
+before changing copies, caching or transport. No runtime optimization,
+Kernel edit/build, ABI, ownership, permissions, scheduler or cache policy
+is retained this cycle.
+
+Replay142's92 aggregate hooks and all-event actor timings, adding exactly two
+hooks in namespace.rs as a12th temporary source file: the complete request
+helper and its raw gateway call. The original operation, branch/error/fallback
+semantics, request data and order remain unchanged. Before/profile snapshots
+preserve all earlier dirty work. The short RefCell borrow ends before each
+operation; only Files42 bodies get inner stamps and seal before the pump.
+
+Keep the actor-owned8MiB native mapping, never guest-visible. Each256-byte
+Row now exactly fills the32,768-row capacity. Add whole-namespace union as a
+sixth NONADDITIVE category and gateway time/count scalars. The gateway is
+already inside selected POSIX; namespace whole must not be added to primary
+totals. Validate gateway <= POSIX and namespace parents, local remainder <=
+residual, counts, depth/event closure, no losses/invalids and exact actor
+partition. Difference whole minus gateway includes local staging, postwork,
+preemption and probes, NOT exclusive CPU time.
+
+Recorder14/native ASan14 tests pass serially, covering exact buffer bounds,
+all earlier safeguards, namespace nesting and ordinary POSIX calls not being
+misclassified. Strict analyzer13 tests pass, including parent bounds,
+namespace residual/count constraints and refusal to scale partial bodies.
+Actual cfg build90136 ends0; final diagnostic ELF
+9d28b2ed7f181a735b9d02f018438aa5ca49c483f2e155201928e9423e7f53ef.
+No Kernel build or change.
+
+Package/freeze7442 ends0 with filesystem/extracted component checks. Keep
+normal Alter953f319b, Alpha96bc14fe/initba776c9c, original118 Honoka/services/
+Kernel312d579b, unchanged observeracc104, original devices/SMP/workload.
+Prime the local HPET clock and buffer before the12s capture, defer all logs/
+identity lookup, keep original Files/ping and all128 raw/Xlib queries. One VM
+at a time, no own edits/builds/tests/hashes while live, same handles to terminal.
+
+| Diagnostic media, subsequently deleted | SHA256 |
+| --- | --- |
+| control.img |bcd3383e0a4266d7420b496262777044510de460fb0a938323f451e503b2eaf2|
+| control-rootfs.img |bc5128483e81e99360b81a1c10f886428d917964c874b10018f0a81fd33e4de6|
+| profile.img |c001a467bfb301b87980f2c2d852155f86e169a2e92e7447d374fa20c28ea53f|
+| profile-rootfs.img |aed336f1464da664bc2c617be09649a16857ad63f0aa3c0fc02688e5d5abdc5a|
+
+Pilot84729 ends0 with the complete original tests and trace. Analyze it first;
+do NOT discard its slower2.623s host observation. Post-pilot four-media hash
+64144 ends0 unchanged. After PS checks, sequential ordinary control1/profile2
+job1626 ends0. Both original workloads pass; repeated trace is complete.
+No failure or slow run is erased/replaced.
+
+### Repeated evidence
+
+Both traces have valid local1GHz HPET epoch, no losses/invalids, all original
+ping/RTT gates and final image=xfe. Profile1/profile2 retain26,933/26,738 all-
+event rows;7,404/7,430 Files bodies occupy the complete measured prefix.
+
+| Disjoint global wall partition | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2446.250|2167.672|
+| Receive / reply-receive |907.155|802.698|
+| Dispatch bodies, all events |1442.624|1279.730|
+| Readiness/signal pump |49.995|44.791|
+| Between-probe/bookkeeping |46.476|40.453|
+
+Each column exactly partitions its measured interval. Different profiles
+vary; receive is not pure IPC and dispatch is not exclusive CPU. The first
+run's broader slowdown has no proven cause; do not attribute it solely to
+the added hooks, transport, IPI, storage, host load or another component.
+
+| Disjoint primary partition within Files bodies | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Copyin |157.958|142.661|
+| Copyout |70.274|61.242|
+| Selected POSIX, NOW INCLUDING namespace gateway |514.759|490.412|
+| Selected standalone Alpha |275.951|239.129|
+| Residual local/other/provider/probe work |236.157|198.094|
+| Files body total |1255.099|1131.538|
+
+Selected nested Alpha115.843/108.874ms is already inside copies, not extra.
+Expanded POSIX coverage cannot be compared with142 as a regression/gain.
+Unwrapped view-acquisition/other provider work still exists; selected does
+not mean every request.
+
+| NONADDITIVE namespace observations | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Complete request helper |150.133|143.874|
+| Raw gateway, already inside selected POSIX |142.262|137.172|
+| Helper outside gateway, already inside residual |7.871|6.702|
+| Residual after removing that local namespace interval |228.286|191.392|
+
+Both runs execute1305 namespace helper/gateway requests and retain294 error
+results. Ordinary selected POSIX error counts are357 including those gateway
+errors. These are data, not discarded successful-only samples or evidence of
+a new runtime failure. Every original application/query gate passes.
+
+The gateway occupies94.76%/95.34% of the namespace helper; outer staging/
+postprocessing/probes are only5.24%/4.66%. But the entire namespace helper is
+only6.14%/6.64% of clone-to-ping. This rules out its outer formatting/copies as
+an overwhelming whole-launch cause; it does NOT prove gateway provider CPU,
+filesystem, IPC or IPI dominates. Inspect inside the service before tuning it.
+
+| Namespace gateway by Files syscall | Calls | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: | ---: |
+| openat257 |605|62.491|65.357|
+| newfstatat262 |373|49.265|44.031|
+| access21 |175|18.136|16.296|
+| readlink89 |134|9.071|8.015|
+| execve dispatch attempts59 |4|2.212|2.565|
+
+This explains142's false-looking zero selected POSIX stat subtotal: the
+path-protocol gateway was outside its hook coverage, not absent. The stat
+bodies now take72.929/61.990ms, with namespace helper51.406/45.915ms and
+gateway49.265/44.031ms. Openat bodies131.103/123.346ms contain namespace
+helper65.888/68.550ms. These nested values are NOT added to their parents.
+Four execve attempts do not prove four successful image installations.
+
+Calibration64-read spans277/267us, maximum pair133/131us, include preemption.
+Probe/RefCell work changes code layout and scheduling. Between-probe gaps
+are not all diagnostic cost. Do not subtract guessed per-read costs or call
+namespace remainder isolated CPU time.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2623.317125|39.438,30.411,29.827|84.256,75.225,76.682|
+| Ordinary control1 |2057.513416|44.983,28.415,25.751|57.039,60.247,63.709|
+| Profile2 |2287.413500|45.823,30.242,24.190|74.494,71.373,71.911|
+
+Preserve every original sample, including slower profile1. This is diagnosis,
+not an optimization A/B, exact profiling-overhead estimate, timing equivalence
+or evidence of a different-cycle speedup. Native clone and host-click
+endpoints differ; first ping is not full paint/input-ready100ms.
+
+### Withdrawal, cleanup and next boundary
+
+After all VMs end, cmp all12 source files with frozen profiles, restore through
+apply_patch, cmp every exact before snapshot. Earlier dirty work is preserved.
+Normal rebuild27015 ends0 and cmp/SHA exactly matches953f319b. Normal
+Alpha96bc/initba776 remain exact; Kernel subtree clean. No diagnostic macro,
+Runtime field or namespace hook remains installed in production.
+
+Final eight-media hash45317 ends0; diagnostics and accepted118/fallback107
+match every frozen/original identity. Exact PS finds no live VM/build/hash;
+four-path lsof is empty. Delete only four143 diagnostic media. Reported
+cycle usage1183->44MiB is logical accounting, not physical APFS recovery.
+Retain118/107 and small source/ELF/test/log/PNG/script/report evidence; leave
+unknown/official/active/protected daemon files untouched.
+
+Next measure the service-side work behind the dominant namespace gateway,
+separating handler processing from VFS/backend waits and transport/scheduling.
+Correlate actual caller intervals with provider records on the same calibrated
+global clock; a provider sees Alter's native identity, not necessarily guest42.
+Do not infer guest ownership from that badge or assign all native traffic to
+Files. Avoid self IPC, uncalibrated counters, speculative cache policy or
+repetitive VM-stop sampling already rejected in135.
+
+No runtime optimization,5% gain,100ms result, image promotion, release/version
+or goal-completion claim follows.
+
+## Cycle 144: POSIX provider time mostly lies inside VFS calls, not one proven whole-launch bottleneck
+
+Evidence: `/private/tmp/nanami-opt-cycle144.YFxhp3`. Diagnosis only, following
+Rob Pike's rules. Replay143's Alter actor/inner recorder and add a bounded,
+actor-owned POSIX recorder plus33 actual VFS call hooks. No Kernel change or
+build, ABI/policy change, speculative cache, or production optimization.
+All26 before/profile source snapshots are retained. Initial provider build
+fails101 because two local vfs_kind_to_posix conversions were mistaken for
+VFS requests; remove those hooks. Corrected provider and Alter builds finish0.
+
+Provider uses a prewarmed local1GHz HPET clock and4MiB/32768 bounded112-byte
+rows. Capture25s from Alter's first OPEN, preserving every selected request,
+status, reply disposition and nested-merged VFS span. Native badge18 is Alter,
+NOT Files guest42. Join provider bodies to serialized Alter event intervals;
+require per-event namespace request count, descriptor0xc000, synchronous reply,
+common epoch, capture coverage and provider body<=caller gateway. No dropped,
+invalid or unmatched namespace requests. Inclusive spans are not exclusive CPU.
+
+Private observer preserves Files launch/ping and128 raw/Xlib query tests, then
+waits30s and read-only opens /bin/busybox to wake deferred provider reporting.
+Both variants use this observerb2840de9. This postamble is outside timed work.
+Keep accepted118 Kernel/Honoka/services and current Alpha96bc/initba776,
+normal Alter953f. Current normal POSIXc954c88f differs from retained118's
+combined entry/PT_LOAD signature; do not claim runtime equivalence or compare
+these times with earlier cycles as a gain. Diagnostic POSIXc1dfe25e and
+Alter675d3086 are archived, not promoted. Packaging/extraction checks pass0.
+
+Recorder22 native tests and the same22 ASan tests pass serially; collector18
+tests pass. Pilot55430 ends0, strict analysis passes before followup. Four
+post-pilot media hashes40755 match frozen identities. Sequential ordinary
+control1/profile2 job97901 ends0. One VM at a time, no own build/edit/test/hash
+while live; complete original workloads and both diagnostic dumps retained.
+
+| Wall-time observation | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2271.915|2185.281|
+| All-event receive/reply-receive |798.045|785.601|
+| All-event dispatch bodies |1386.324|1311.694|
+| Readiness/signal pump |46.061|46.645|
+| Between-probe work |41.485|41.341|
+| Files bodies, nested within dispatch |1237.567|1168.323|
+| All POSIX provider bodies inside Files bodies, nonadditive |442.453|416.356|
+| Selected VFS union inside those provider bodies, nonadditive |401.337|375.924|
+
+The first four phase rows partition clone-to-ping exactly. Provider requests
+inside Files bodies number4906/4881. Selected VFS spans occupy90.71%/90.29%
+of those provider bodies, but only17.67%/17.20% of the whole launch. They include
+downstream service/backend waits, transport, preemption and probes: this is
+NOT proof that VFS CPU, IPC, IPI or storage is the dominant cause. It also
+does not justify tuning POSIX's local copies from request counts.
+
+Both profiles match1305 namespace requests, retaining294 error results:
+caller gateway145.269/140.933ms; provider body112.195/108.966ms; selected
+VFS103.730/100.961ms; provider outside VFS8.465/8.005ms; caller outside
+provider33.074/31.967ms. These nested quantities are not added to whole launch.
+Native client18 has other/unassigned22 provider requests in each prefix and
+6519 outside it; none is silently attributed to Files. Total provider rows
+11447/11422; Alter rows27033/26879; loss/invalid counts0 in both recorders.
+Deferred provider dump ends98.611/97.518s after boot, not at capture cutoff;
+the first-OPEN+25s window covers both measured prefixes. No guessed explanation
+or subtraction of reporting/probe costs is applied. Provider64-read calibration
+spans2089/268us and maximum pair1403/150us include scheduling effects.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2405.283625|47.985,28.645,26.669|74.786,74.145,76.720|
+| Ordinary control1 |2050.206250|43.252,30.041,25.098|64.613,62.139,60.929|
+| Profile2 |2331.874208|48.853,30.080,25.817|71.619,80.142,76.798|
+
+Keep all slower runs. This is not an optimization A/B, an exact instrumentation
+tax, five-percent gain or fully painted/input-ready100ms result.
+
+After VMs end, cmp26 frozen profiles, withdraw22 changed files through
+apply_patch, cmp all26 exact before snapshots. Normal Alter rebuild1245 and
+POSIX rebuild both finish0; cmp/SHA exactly953f319b/c954c88f. Alpha96bc/initba776
+unchanged, A9N subtree clean. Earlier dirty work is preserved.
+Final eight-media hash25597 ends0, matching all frozen144 and accepted118/107
+identities. PS has no VM/build/hash; exact four-path lsof empty. Delete only
+four144 diagnostic media. Cycle directory usage1195->56MiB is logical accounting,
+not a physical APFS recovery claim. Retain small evidence and accepted118/107;
+unknown/protected daemon files and official inputs remain untouched.
+
+Next attribution, if continued, must distinguish VFS service execution from
+its downstream waits on the same actual workload. A component dominating its
+parent does not mean it dominates the whole launch. No optimization decision,
+runtime image promotion, version/release or goal-completion claim follows.
+
+## Cycle 145: VFS service and backend spans are not the overwhelming launch cost
+
+Evidence: `/private/tmp/nanami-opt-cycle145.GGSgib`. Diagnosis only under Rob Pike's
+measurement rules. Extend144 with actor-owned Ext2 request timing and selected
+leaf RPC spans: block device, Alpha/control and timer. Include after_request
+writeback in request bodies, not unrelated notification handlers. Prewarm the
+existing timer's local1GHz HPET clock and an8MiB/32768-row160-byte buffer;
+capture40s from native POSIX17's first OPEN. Badge17 is not Linux guest42.
+Join VFS bodies to captured POSIX18-client handler intervals, then actual
+serialized Files42 events, preserving all other traffic separately.
+
+Normal Ext2 build7230 and profile build60246 finish0; hashes863628f8/3e8c0689.
+Retained seed Ext2dc1510d8 differs in combined entry/PT_LOAD signature from
+current normal; do not claim equivalence or compare with prior-cycle times
+as a gain. Newc replacement changes only Ext2 payload/size; other headers,
+names and payloads remain exact. Both init builds51105 end0; embedded archive
+and Alpha occur exactly once. Control initd1fb4617, diagnosticc05d49a7.
+Use frozen144 Alter675d/POSIXc1df diagnostics, normal953f/c954 controls and
+observerb284, original118 Kernel312d/Honoka/services except explicit Ext2.
+No Kernel change/build, ABI or optimization-policy change.
+
+Five frozen source snapshots. BEFORE starting VMs, withdraw all diagnostic
+source edits through apply_patch and restore original services55c1b569.
+Rebuild21475 ends0: Ext2 exact863628f8 and init exactba776c9c; Alpha96bc,
+Alter953f and POSIXc954 unchanged. A9N subtree clean. Frozen diagnostic media
+remain independent of restored source/build outputs.
+Ten native recorder tests and same10 ASan tests pass serially; final collector
+and archive tests30 pass. Package42811, pilot68566, post-pilot hash6998 and
+sequential ordinary control1/profile2 job49940 all finish0. One VM at a time;
+no own edits/builds/tests/hashes while live. All original Files/ping/128 raw/
+Xlib tests pass. Preserve every slow run and two initial analysis failures.
+
+The raw pilot parser first rejects one interrupted Alter record: a complete
+9664-row VFS dump is inserted between its pumped timestamp and arg0. Validate
+the independent VFS dump's clock/header/all full rows/footer, extract exactly
+that contiguous substring, and join the untouched prefix/suffix for caller
+parsing. Assert exact reassembly into original text; no numeric edits or guessed
+records. Tests cover a numeric-field interruption, truncation and foreign lines.
+Both profiles need this explicitly reported demultiplexing; raw logs stay exact.
+
+The next strict join rejects50 VFS requests whose parent selected spans/calls
+are0. Source inspection proves mapping.rs invokes call_service_port directly,
+outside144's vfs_* hooks. Separate42 MAP_READ_PAGE and8 FSTATFS operations,
+require exact parent/child opcodes, count1, peer/offset/zero arguments, status/
+reply parity, and child<=whole parent. Keep selected-span bounds for every
+other request and reject unknown unwrapped operations. Do not weaken those
+bounds, omit requests or silently relabel old selected coverage as complete.
+
+| Wall-time observation | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2240.948|2284.448|
+| All-event receive/reply-receive |793.418|806.689|
+| All-event dispatch bodies |1361.946|1392.475|
+| Readiness/signal pump |45.454|44.381|
+| Between-probe work |40.130|40.903|
+| POSIX selected VFS calls, nested within dispatch |411.351|415.997|
+| Matching selected-gateway VFS bodies, nonadditive |297.827|300.442|
+| Remaining parent selected-VFS span, nonadditive |113.524|115.555|
+| Additional direct-gateway VFS bodies, nonadditive |11.588|11.465|
+| All matched VFS bodies |309.415|311.907|
+| Selected block-device calls inside those bodies |147.210|145.023|
+| Selected Alpha/control calls inside those bodies |6.491|6.299|
+| Selected timer calls inside those bodies |0.105|0.113|
+| VFS residual local/other/preemption/probe work |155.609|160.472|
+
+Receive/dispatch/pump/between-probe rows partition the launch interval exactly.
+All matched VFS bodies are13.81%/13.65% of clone-to-ping; block calls6.57%/
+6.35%. Within VFS, time is split between block waits and residual, not one
+overwhelming whole-launch component. Neither residual nor parent outside-child
+span is exclusive CPU/pure IPC. Implicit allocator/control work remains outside
+selected leaf hooks; notification writeback can affect caller waits separately.
+This rules out tuning these measured portions as the sole major launch cause.
+
+Both traces retain4726 Files-owned VFS requests, including4676 selected-gateway
+and50 direct-gateway bodies. Block calls1143/1144, Alpha84 and timer2; all selected
+backend errors0. Namespace1305 bodies take75.282/80.176ms, including block31.907/
+34.668ms with294/298 block calls;294 namespace error results remain explicit.
+VFS9664 and POSIX11422 rows each, Alter26681/26617; loss/invalid counts0.
+Other4938 VFS requests are not assigned to Files; no VFS row lacks a captured
+POSIX parent. Clock calibration64-read spans248/301us, max pair142/186us;
+probes and scheduling are not subtracted. Both original timed workloads finish
+before diagnostic output. Reporting interleaving affects parsing, not an
+invented launch-speed adjustment.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Profile1 |2370.790458|43.339,31.279,25.285|71.535,73.547,73.481|
+| Ordinary control1 |2490.765084|40.463,31.837,26.205|84.459,79.863,72.822|
+| Profile2 |2472.014709|29.642,43.029,30.646|99.160,80.855,81.289|
+
+Control is slower than profile1; preserve this variation, not a selective gain
+or negative instrumentation-tax claim. No optimization A/B, five-percent gain,
+fully painted/input-ready100ms or image-promotion result follows.
+
+After VM completion recheck all source/archive/binary identities. Final8-media
+hash68229 ends0 matching frozen145 and accepted118/107. PS has no VM/build/hash,
+exact four-path lsof empty. Delete only four145 diagnostic media; usage1218->
+79MiB is logical accounting, not physical APFS recovery. Retain118/107 and
+source/ELF/script/test/log/PNG evidence, leave unknown/protected files alone.
+Next attribution must return to the whole launch's remaining execution and
+waits rather than presuming VFS or storage CPU dominates. No speculative runtime
+change, version/release, goal-completion or safety/ownership relaxation.
+
+## Cycle 146: all Alpha request bodies cover only about eighteen percent of launch
+
+Evidence: `/private/tmp/nanami-opt-cycle146.jogYvt`. Previous145 is evidence progress,
+not an optimization: selected VFS14% and block waits6--7% do not overwhelm
+launch. Broaden attribution to all Alpha OS requests, faults and notifications.
+Reserve16384 96-byte rows on Alpha's existing owned heap; arm/prewarm64 reads
+after observer41 exists. Reuse140's single-attempt readonly UC mapping of the
+already-owned HPET Frame at reserved0x6a000000. No self IPC/device writes,
+new authority, uncertain-PTE retry/reuse or Kernel change/build.
+Record all native clients/body/status/reply; raw10ns HPET ticks convert exactly
+to the same epoch as caller probes, not a guessed TSC offset.
+
+Two before/profile source snapshots: alpha.rs and mmio.rs. Native models8 and
+same ASan8 pass initially. First Alpha build21939 ends0:40d8f965; init56862
+ends0:492e0baf. Source withdrawal and normal rebuild1339 end0, exact Alpha96bc/
+initba776, before any VM. Package83325 ends0. Original118 Kernel312d/Honoka/
+services55c1 retained; frozen144 Alter675d/POSIXc1df diagnostics versus normal
+953f/c954. Current normal POSIX differs from retained seed: no cross-cycle
+equivalence or gain claim. Normal Alpha was not replaced by an unverified build.
+
+### Preserve the failed observation and fix measurement order
+
+Pilot25555 ends0: original Files/ping/128 raw/Xlib gates pass, but Alpha and
+Alter output interleave within many numbers/prefixes. Strict collector rejects
+the damaged header; keep exact raw logs and failed analysis, not reconstructed
+values or a fabricated complete Alpha sample. Host observation2453.120250ms,
+raw31.523,27.190,25.073ms and Xlib76.519,74.610,74.086ms remain evidence of the
+original test, not accepted body attribution.
+
+Separate capture cutoff from output. Seal collection at25s, then dump ONLY
+when the existing native18 MAP_ANONYMOUS request targets observer41/4096 bytes.
+Private observer preserves all original timed work and, after30s, performs
+readonly open/close first, then anonymous mmap/munmap. Alter's own dump completes
+before processing that observer's open; open synchronously completes POSIX's
+deferred dump; only then can mmap wake Alpha. No new debug API or permission
+bypass: normal mapping authorization/cleanup still runs after reporting.
+Earlier startup mmap cannot dump before the cutoff. Added tests prove no early
+dump, deadline sealing and no clock reads merely waiting for the wake.
+
+Ten revised native and same10 ASan models pass serially; strict collector22
+tests pass. Revised Alpha17784 ends0:f7a50497; init70481 ends0:552f4105.
+New observerdae76a73 replaces14f90b9a in BOTH variants; no comparison of these
+different observer variants as a gain. Preserve v1 source/ELF/test/log/hash
+artifacts. Copy/hash45971 and final five-media hash30917 finish0; PS/lsof guard
+deletion of four v1 media plus the unused extra boot clone before repackaging.
+No failed observation is erased. Revised package2204 ends0.
+
+Reapply only the two frozen diagnostic source files to build the revision,
+then withdraw them exactly again; normal Alpha/init rebuild48956 ends0,
+cmp/SHA96bc/ba776. Source/archive and generated normal binaries are restored
+BEFORE revised VMs. A9N subtree clean. One VM at a time, no own build/edit/test/
+hash while live; same actual handles to terminal. Revised pilot51586 ends0;
+validate full data before post-pilot hash64075 and sequential control1/profile2
+job38581, all0. All original workload/query gates and three complete dumps pass.
+
+### Repeated attribution
+
+| Wall observation | Profile1 ms | Profile2 ms |
+| --- | ---: | ---: |
+| Parent clone receipt -> observed ping |2191.963|2212.368|
+| All-event receive/reply-receive |793.481|790.671|
+| All-event dispatch bodies |1315.195|1338.692|
+| Readiness/signal pump |43.585|43.888|
+| Between-probe work |39.702|39.117|
+| All Alpha body union during that interval, nonadditive |399.843|390.750|
+| Native18 Alpha body subtotal, nonadditive |396.550|387.160|
+| Files42 dispatch-owned native18 Alpha bodies, nonadditive |338.402|329.129|
+| Native18 Alpha bodies during readiness pump, nonadditive |0.458|0.408|
+
+The four global phases partition launch exactly. Alpha body union is18.24%/
+17.66% of it, not exclusive CPU and not an overwhelming whole-launch cause.
+Native18 belongs to Alter, not Files: full containment in actual serialized
+Files42 dispatch is required. Other guests/pump/native clients stay separate;
+no native18 request crosses an ambiguous phase in either valid trace.
+Do not add Alpha bodies to containing caller/provider intervals or call
+caller outside-provider time pure transport/Kernel cost.
+
+Both traces include all4146/4161 Alpha rows,3344/3340 in prefix and802/821
+outside. Files owns3017/3016 native18 requests. Its348 anonymous-map requests
+take160.271/155.922ms; two exec-memory requests52.360/51.203ms;262 protection
+requests35.304/34.468ms. These smaller shares do not justify speculative tuning
+from names/counts. All corresponding status/reply pairs remain0/0.
+Native callers3/4/14 account for the other3.293/3.590ms, not guest ownership.
+All loss/invalid/start-finish/monotonic/coverage gates pass; Alter rows26778/
+26770 and complete POSIX records also validate. Both Alpha dumps are isolated,
+not midline interleavings; exact complete-stream extraction still verifies raw
+reassembly and rejects corruption. Calibration64 reads spans179/164us, median1us,
+max64/63us, includes preemption. No estimated probe-cost subtraction.
+
+| Original host observation | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Revised profile1 |2408.661875|39.876,30.199,25.618|76.263,73.402,71.243|
+| Ordinary control1 |2089.639792|38.357,28.559,27.266|65.020,62.869,59.389|
+| Revised profile2 |2356.447542|37.842,26.784,22.716|71.009,70.859,72.556|
+
+Keep every run, including the failed original profiler. This is diagnosis,
+not an optimization A/B, exact instrumentation-tax estimate, five-percent gain
+or fully painted/input-ready100ms result. Broader Alpha bodies include Kernel/
+preemption; they neither prove nor exclude a Kernel bottleneck elsewhere.
+
+After completion recheck both source snapshots, Alpha96bc/initba776,
+Alter953f/POSIXc954 and services55c1. Final8-media hash19138 ends0 matching
+frozen v2 and accepted118/107; PS no VM/build/copy/hash and exact lsof empty.
+Delete four revised diagnostic media; cycle usage1224->84MiB is logical
+accounting, not physical APFS recovery. Earlier five v1/duplicate media were
+also removed; retain all small failed/valid proof and118/107, not unknown/
+protected files. No production profiler, runtime promotion, version/release,
+safety relaxation or goal completion follows.
+
+Next measure actual execution versus waits across the whole workload, rather
+than tunneling into another subcomponent that occupies only a modest share.
+A possible external QEMU CPU-residency probe must first have its perturbation
+validated; this is a next investigation, not permission for Kernel edits or
+evidence already obtained. Existing TB slot weights are not elapsed CPU time.
+
+## Cycle 147: passive host CPU time is not component attribution
+
+Evidence: `/private/tmp/nanami-opt-cycle147.F4Z3jw`. Follow Rob Pike's rules:
+146's Alpha18% and145's VFS14% do not establish an overwhelming whole-launch
+bottleneck. Do not subdivide another small helper or promote a cache from
+counts. First distinguish actual scheduled host CPU from elapsed time.
+
+No production source edits, guest tracing, TCG callbacks, VM stop, Kernel
+change/build, version update or runtime promotion. One common frozen boot/
+rootfs pair for every trial: normal Alpha96bc/initba776/Alter953f/POSIXc954,
+original services55c1, retained Kernel312d and baseline observeracc104 without
+deferred reporting wakes. Current normal POSIX differs from retained seed;
+no comparison against earlier cycles as a gain.
+
+Private standard-C11 helper reads public Darwin libproc process and named
+TCG-thread CPU counters only twice. Add QEMU debug thread names in ALL modes.
+Discover four distinct actual pthread handles named CPU0..3/TCG, not Darwin
+HMP's repeated process ID. Discover before cursor positioning; take the first
+snapshot AFTER the movement sleeps and immediately before the original press.
+Take the second after the original ping timestamp, before screenshot/RTT work.
+Preserve raw snapshots before any report assertion.
+
+Task totals use Mach ticks; thread totals already use nanoseconds. Validate
+conversion against standard process/thread CPU clocks, including native ASan/
+UBSan; live cross-process clock-epoch brackets pass for both binaries.
+Paused no-image QEMU fixture exits0 and verifies the four distinct names/
+handles without executing a guest. Seven Python tests check identity, units,
+counter monotonicity, missing/duplicate names, capacity, excess scope, absent
+control counters and placement of the click/report probes. Strict C11 builds
+have no GNU attributes or integer extensions. Preserve one corrected signedness
+build failure rather than suppressing its warning.
+
+| Same-image trial | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| Read1 |2147.556250|32.862,30.614,27.717|62.077,63.200,62.227|
+| No helper1 |2161.965000|32.394,30.786,27.170|58.036,63.776,62.276|
+| Helpers without counter reads |2129.355667|34.578,29.551,25.491|62.445,60.236,62.953|
+| Read2 |2101.262333|34.556,28.642,26.969|63.242,62.839,61.189|
+| No helper2 |2131.488458|34.464,28.174,26.034|63.773,60.479,64.209|
+
+Pilot64929 and sequential followup21466 reach terminal0. Every original
+Files/ping/128 raw/Xlib gate passes. No own build/edit/test/hash while live.
+Control uses the same helper executable/discovery but no counter reads in the
+two timed snapshots; no-helper runs do not call it. These few points show no
+large observed perturbation, not a statistical proof of zero overhead, a
+precise instrumentation-tax estimate, a speedup or full paint/input readiness.
+
+| Passive host CPU observation | Read1 | Read2 |
+| --- | ---: | ---: |
+| QEMU process CPU ms |2390.921|2358.605|
+| Four TCG threads CPU ms |2356.464|2326.932|
+| Average active host cores |1.0955|1.1055|
+| CPU0 occupancy percent |23.42|24.05|
+| CPU1 occupancy percent |12.76|13.22|
+| CPU2 occupancy percent |67.04|67.26|
+| CPU3 occupancy percent |6.33|6.02|
+| Maximum extra counter-window ms |3.513333|3.537626|
+| Extra window as percent of original |0.1636|0.1684|
+| Native snapshot spans microseconds |6.667,5.875|6.792,6.667|
+
+Thread identity/birth/clock/capacity and the predeclared1%-extra-window gate
+pass. Raw process-minus-vCPU totals34.457/31.673ms are not clamped or called
+exact I/O cost. Host context-switch deltas29719/29898 are NOT guest IPC counts.
+Darwin user/system time is host privilege, not guest A9N user/Kernel execution.
+All cumulative counter deltas include scheduled QEMU execution, translation,
+emulation and synchronization; they are not retired guest instructions.
+Unscheduled time does not distinguish guest idle/wait, host contention or IPC.
+CPU2 hosts Files42, Alter18, POSIX17 and other services, so its roughly67%
+occupancy is not attribution to any one of them or proof of a Kernel cause.
+Next investigate actual execution on that CPU with a separately validated
+method; do not turn this broad observation into a speculative speed hack.
+
+Package67383 and sanitizer68321 end0. Initial final hash34116 ends1 because
+two retained rootfs filenames were guessed incorrectly; preserve partial
+output, resolve actual rootfs.img paths read-only, then six-media hash41994
+ends0 matching frozen boot8a6b/rootfs707d and all accepted118/107 hashes.
+PS confirms no VM/build/hash, exact lsof empty, then remove only this cycle's
+two diagnostic media. Cycle usage588->18MiB is logical accounting, not
+physical APFS recovery. All five VM evidence directories are copied and
+byte-compared before removing their redundant temporary copies. Review
+task-owned140--147 storage; keep small proof, official inputs, protected/
+unknown files and accepted118/107. A9N subtree remains clean/unbuilt.
+
+## Cycle 148: CPU-boundary tracing perturbs launch at the scale of target gains
+
+Evidence: `/private/tmp/nanami-opt-cycle148.p13rLy`. Previous147 is evidence
+progress: CPU2 holds roughly67% occupancy but hosts several actors, not one
+identified bottleneck. Attempt host-only guest-boundary CPU attribution;
+do not tune production from counts, TB weights or an assumed Kernel cause.
+No production/Kernel edits or builds, guest probes, VM stops or version change.
+
+One common frozen pair for all ten runs, boot8751/rootfs659f: Alpha96bc/
+initba776/Alter953f/POSIXc954, baseline observeracc104, original services55c1/
+Kernel312d. Normal POSIX differs from retained seed; no cross-cycle gain claim.
+Verify Kernel ELF entry0xffff800000203180 and actual48cf/480f07 return opcodes
+read-only. Private QEMU API7 plugin observes CPU2 syscall entry, delivered
+interrupts, pre-SYSRET/IRET and idle/resume. No callback on every user TB.
+Use raw monotonic and thread-CPU timestamps before/after each probe; separate
+probe CPU, bounded131072 rows, invalid flags, unknown intervals and endpoints.
+Dump only AFTER original raw/Xlib128 work. No estimated-cost subtraction.
+
+Preserve setup failures: strict build initially diagnoses extensions inside
+external GLib headers; treat external headers as system headers while retaining
+strict C11 diagnostics on own code. First two paused no-image fixtures refuse
+ready because valid opaque register-zero was mistaken for absent. Descriptor
+presence must be tracked separately from handle value. Third paused fixture
+passes; normal and ASan/UBSan models test zero handles, disabled/control/wrong
+CPU, metadata, user/Kernel IRET, invalid target/read and capacity.
+
+Pilot80791 ends0, but initial parser's per-interval capacity bound uses the
+gap BETWEEN wall-clock apertures. CPU samples occur INSIDE those apertures:
+the valid enclosing bound is next.wall_after minus previous.wall_before.
+Audit preserves four failures against the wrong inner bound, zero against
+the enclosing bound; raw values unchanged. Seven parser tests include this
+valid counterexample AND an impossible enclosing-bound case, corruption,
+counter regression, excess scope, absent control samples and endpoint mismatch.
+
+| Version/trial | Click-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | --- | --- |
+| V1 read1 |2277.278583|34.788,28.166,25.122|64.213,62.532,60.328|
+| V1 no-plugin1 |2092.564667|33.105,26.898,24.961|62.932,63.705,63.431|
+| V1 loaded, no reads |2234.611208|31.838,29.229,25.079|67.316,62.942,62.036|
+| V1 read2 |2195.430125|26.457,26.531,23.336|65.380,61.624,61.528|
+| V1 no-plugin2 |2150.783042|31.842,27.990,25.431|63.737,64.563,63.207|
+| V2 no-plugin1 |2151.023667|27.825,24.104,22.655|63.142,62.486,62.387|
+| V2 loaded, no reads |2240.616042|34.484,27.692,25.431|63.286,64.148,62.792|
+| V2 read1 |2222.213625|33.393,26.552,24.031|66.021,68.176,63.812|
+| V2 read2 |2301.863000|33.031,26.049,24.137|62.414,62.018,62.068|
+| V2 no-plugin2 |2143.722292|31.664,34.907,27.444|68.037,68.676,69.110|
+
+V1 measured mean2236.354ms vs2121.674ms no-plugin, +5.405%; loaded control
+also+5.323%. Preserve all V1 source/binary/proof, then reduce the measurement,
+not production: V2 uses NO_REGS callbacks and reads no guest register/memory.
+IRET target privilege and all absent identity/call metadata are UNKNOWN,
+never guessed from zero-filled fields. Revised native/ASan models verify
+coarse capture succeeds despite forced register-read failure; parser tests pass.
+Build14818 ends0. V2 measured mean2262.038ms vs2147.373ms controls,+5.340%;
+loaded control+4.342%. The slower second read stays in the result.
+Few points do not prove an exact tax or confidence interval, but neither
+prototype establishes sufficiently low perturbation for five-percent tuning.
+Reject the normal-runtime attribution claim, not the inconvenient samples.
+
+For reproduction ONLY, not normal-runtime CPU shares:
+V1 raw observed CPU2 spans1558.442/1497.175ms partition exactly into Kernel-body
+residence424.991/411.924, user-side1075.819/1029.467, unknown8.744/8.204,
+host-idle15.447/15.504 and probe33.441/32.076ms.
+V2 observed1516.009/1584.154ms partitions into Kernel419.182/432.694,
+user-side806.512/833.253, deliberately unknown261.428/288.432,
+idle15.219/15.712 and probe13.668/14.063ms. Reducing the local probe subtotal
+is NOT an end-to-end speedup. CPU2 passive counters agree within enclosing
+prefix/tail bounds; no capacity, identity or lost-row failure in valid traces.
+These regions include QEMU emulation/translation/dispatch and user-side return
+machinery, not pure guest instructions, exclusive actor CPU or IPC wait.
+Do not use the figures to prove OR exclude a Kernel bottleneck.
+
+Package49014, native models, sanitizer63697, V1 pilot80791/followups57382,
+V2 build14818 and V2 trials97867 all end0. Every original Files/ping/raw/Xlib
+gate passes. One VM at a time, no own build/edit/test/hash while measured VMs
+live. Final six-media hash50973 ends0 matching frozen and accepted118/107.
+PS no VM/build/hash, exact lsof empty, then delete only two diagnostic media.
+Usage638->69MiB is logical accounting, not physical APFS recovery. Copy and
+byte-compare all ten VM evidence directories before deleting redundant temp
+copies. Current Alpha/archive still96bc/55c1; A9N clean/unbuilt. Keep small
+failed/valid proof and accepted118/107; no production profiler or promotion.
+
+Next avoid another high-frequency tracing variant. Check whether a full,
+same-application Linux GUI control can establish the actual QEMU launch floor,
+using retained official inputs and no A9N Kernel changes. This is a proposed
+independent whole-workload measurement, not evidence already obtained or a
+redefinition of the100ms fully painted/input-ready objective.
+
+## Cycle 149: Same-application Linux GUI reference shows a whole-OS gap, not a bottleneck
+
+Evidence: `/private/tmp/nanami-opt-cycle149.vVTBwN`. Previous148 rejects
+fine/coarse boundary tracing as sufficiently low-perturbation evidence for
+five-percent decisions. Do not introduce another high-frequency tracer or tune
+from its biased proportions. This cycle measures an independent whole-OS
+reference using the actual GUI workload, not only117's process microbenchmark.
+No production source edits, A9N Kernel edits/builds, version change or promotion.
+
+Both OSes read the same frozen AHCI image599cf9/rootfscf838c with the same
+unmodified xfe, Xfbdev, FLWM, wbar, libraries, dock script and observeracc104.
+Nanami uses normal Alpha96bc/initba776/Alter953f/POSIXc954, original services55c1
+and unchanged Kernel312d. Verify loaded init and Kernel ELF hashes. Linux uses
+retained official6.18.35-tinycore64 kernel63149c/modules6d876f and official17.1
+bootstrap rootfs4eff7d. A deterministic private initramfs overlay mounts the
+common disk and starts its GUI binaries; it is not the stock distribution's
+complete boot/service sequence. No alternate benchmark executable or rebuilt
+application. Only QEMU disposable snapshots are writable, never the source
+disk or host devices. No host mount/chroot/device-node creation.
+
+Same4 vCPUs,4GiB, default TCG, firmware, AHCI and normal device list, including
+PS/2 and USB mouse. Both use original Files dock launch, nonce event-loop ping,
+all three raw128 and three Xlib128 observations,100ms held button,100ms guest
+relay,10ms host poll and an extra10s after observer readiness. Linux's primary
+EFI framebuffer is800x600x32, while Nanami physically presents1920x1080 Honoka
+with nested800x600 Xfbdev. Linux uses PS/2 and feedback-based cursor calibration;
+Nanami preserves its original USB/relative input path. Linux mounts the ext2
+disk with its ext4 driver, rw,noload inside the disposable snapshot; Nanami uses
+its normal user-level stack. Different caches, background services, CPU-feature
+handling and display/input/provider paths remain possible confounders.
+
+Linux input calibration queries actual X coordinates before the timed press,
+corrects bounded relative deltas to the real Files dock target, and requires
+20 stable unpressed observations. Its parent waits/reaps the helper and emits
+LINUX-POINTER-STOPPED before the metric. The valid trajectory in all three
+successful Linux runs is500,599 ->460,588 ->420,583 ->380,580 ->340,579 ->320,578
+->310,578 ->305,578 ->302,578. No keyboard activation, coordinate warp, fake
+click or helper survives into the timed interval. Original app/observer gates
+are unchanged. Calibration is preparation, not an application speedup.
+
+Preserve and exclude ALL ten setup pilots from the matched pool, including
+the successful tenth pilot. Earlier failures exposed an incorrect PNG footer,
+wrong icon/input routing, missing explicit xHCI initialization, unsafe sharing
+of the observer's output file with a pointer helper, focus-dependent keyboard
+diagnostics and an eight-step calibration budget ending one observation early.
+Do not claim that file interference alone explains all input failures. Move
+pointer output to ttyS0, use a bounded watcher/reaping ACK, derive24 calibration
+steps with unchanged target tolerance, and test it from every framebuffer
+corner. Some failed diagnostic drivers were intentionally interrupted only
+after exact ownership verification; their original handles reached terminal130
+and cleanup, not silently retried as valid timing results. Pilot10 ends0:
+654.790667ms click,547.678500ms release-ACK,0.555004ms first ping; retain its
+raw9.013064/7.370053/7.673055 and Xlib15.736112/14.038100/13.028093ms separately.
+
+The predeclared matched cohort is four fresh cold VM boots in N/L/L/N order.
+Owning handle44102 ends0; all original Files/ping/raw/Xlib gates pass4/4.
+One VM at a time, no own edits/builds/tests/hashes or heavy inventory while live.
+
+| Trial | Click-to-observed-ping ms | Release-ACK-to-ping ms | First guest ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | ---: | ---: | --- | --- |
+| Nanami1 |2131.146375|2028.037500|78.017000|33.410,26.749,27.338|64.560,62.927,62.917|
+| Linux1 |667.679667|557.447208|0.437003|11.486069,11.639071,8.963055|19.433118,17.650107,14.874090|
+| Linux2 |667.661375|558.655958|0.601004|10.886078,9.187065,9.300066|16.169115,13.482096,13.384096|
+| Nanami2 |2077.838250|1969.813292|96.875000|38.623,30.613,23.518|65.431,61.550,62.256|
+
+Mean click-to-observed-ping2104.492313ms vs667.670521ms gives3.151992x;
+release-ACK1998.925396ms vs558.051583ms gives3.581972x. Keep raw values and
+both definitions; do not subtract guessed relay, button or scheduler overhead.
+Two observations per OS and100ms/10ms polling cannot support nanosecond-level
+precision claims, statistical significance or an exact lower bound. This is a
+whole-OS reference, NOT a speedup, pure IPC cost, exclusive actor/Kernel CPU,
+or proof that QEMU alone explains the delay. It neither proves nor excludes
+a Kernel bottleneck. First-ping and repeated RTT ratios likewise do not isolate
+transport from event-loop work or scheduling.
+
+Inspect the matched Linux after-RTT screenshot: actual Xfe `/root` listing,
+not the Information app seen in failed pilots. Native screenshot confirms
+the Xfe `/root` top-level window but a terminal overlaps its content; it does
+not verify full painting. Neither screenshot timestamps complete paint/input
+readiness. Keep the100ms fully initialized/painted/input-responsive objective:
+Linux's roughly0.67s partial observation is not evidence that100ms is impossible
+or a universal TCG floor. No one dominating normal-runtime component has been
+established by this reference, so no speculative cache/IPC/Kernel tuning follows.
+
+Archive encoder/importer/payload, complete PNG and pointer-boundary tests pass
+6/6. Relay/pointer native and ASan/UBSan models pass cadence, partial writes,
+empty polls, unstable target, bounded timeout and failures. Shell syntax passes.
+The final combined check initially fails only at byte-compilation because
+system Python3.9 inherits an unwritable external cache prefix; retain that
+failure, then explicit Homebrew Python with the prefix removed passes. This
+does not justify broader filesystem permissions or a runtime change.
+
+Final six-media hash handle45853 ends0: frozen149 pair and all accepted118/107
+hashes match. Hash all eight generated initramfs variants and retained official
+inputs. PS shows no VM/build/hash, exact lsof checks empty. Copy and byte-compare
+both Native temporary log directories before removing redundant originals.
+Delete only two149 diagnostic media and eight generated initramfs; retain small
+logs, screenshots, helper sources/binaries, manifests, official inputs and
+accepted118/107. Cycle usage731->20MiB is logical accounting, not physical APFS
+space recovered. Review task-owned140--148 proof; do not delete unknown or
+protected applications' files. A9N subtree remains clean/unbuilt.
+
+## Cycle 150: Coarse host-stack sampling does not isolate the launch critical path
+
+Evidence: `/private/tmp/nanami-opt-cycle150.oIdJox`. Previous149 is progress:
+same Files binaries show a whole-OS Nanami/Linux gap, not a causal component.
+Inspect current syscall frontend and111's inline-context evidence first:
+all observed ordinary faults already use inline registers, and event tails
+were small. Do not repeat an optimization of that disproven fallback theory.
+No production source, Kernel, ABI, app, version or release changes this cycle.
+
+The installed Darwin QEMU11.1.1 help exposes no perfmap/jitdump; upstream
+[option definitions](https://raw.githubusercontent.com/qemu/qemu/v11.1.0/qemu-options.hx)
+condition those options on a Linux host. Test Darwin sample(1) on an OWNED,
+paused, no-disk four-vCPU fixture first. Sandboxed attempt returns255 with
+process inspection denied; retain its console/result/QEMU cleanup logs.
+Approved process inspection succeeds, handle16826 terminal0. This fixture
+is NOT a performance trial: the paused fixture has796 observations
+per CPU, all condition-wait paths. sample(1)'s local manual explicitly describes
+temporary process suspension per sample; do not call this method passive.
+
+Copy normal binaries, do not build Rust/Kernel. Package41630 ends0. One common
+frozen pair, boot786ace/rootfs00c8d3, uses Alpha96bc/initba776/Alter953f/POSIXc954,
+original services55c1/Kernel312d and original observeracc104. Loaded init and
+Kernel comparisons pass. Four fresh boots in no-sampler/sample/sample/no-sampler
+order preserve real Files dock click, nonce ping and every raw128/Xlib128
+observation, same10s settle, normal devices,4CPU/4GiB/default TCG. Private
+driver starts a2s/7ms standard host sampler immediately before the press,
+records its actual process/console lifecycle, and waits for it AFTER original
+RTT gates. Cleanup always reaps its helper and QEMU, even on failure. No guest
+hook, QMP stop, per-TB callback or fake completion, but host sampling DOES suspend
+QEMU briefly. Owning75132 reaches terminal0; all original gates pass4/4.
+No own build/edit/test/hash or heavy inventory while a measured VM lives.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | First guest ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | ---: | ---: | --- | --- |
+| No sampler1 |2118.671583|2012.910875|83.937|27.575,29.308,26.244|62.715,63.647,63.819|
+| Sample1 |2191.921250|2088.871041|83.177|35.412,27.777,24.140|63.135,61.811,59.908|
+| Sample2 |2192.138459|2085.988625|88.266|28.229,27.164,24.317|65.378,63.187,62.727|
+| No sampler2 |2104.012333|1996.507125|77.232|32.209,28.617,26.893|64.148,65.310,62.030|
+
+Mean sampled2192.029855ms vs2111.341958ms controls is+3.821640%. Retain both
+slower sampled observations. This is a few-point instrumentation comparison,
+not a speedup, zero-overhead proof, confidence interval or exact observer-tax
+estimate. Being below the predeclared5% rejection threshold is not automatic
+admission: the scope gate fails independently.
+
+Sample1's console start/completion observations are+56.687/+2671.043ms from
+press; Sample2's are+55.315/+2422.435ms. These are host-observed console times,
+not exact internal sample timestamps. Both call trees actually contain
+qmp_screendump, which the driver invokes only AFTER the original ping gate.
+The requested two-second sample therefore cannot be treated as a profile
+exclusively of the original launch interval. Symbol processing finishes later
+again. Do not subtract an estimated tail or retime observations to force fit.
+
+For reproducibility only, partition CPU2's233 stack observations in each
+mixed-scope report without double-counting nested children. These are sampled
+stack occurrences, NOT function invocations, CPU nanoseconds or percentages of
+whole-launch latency. Group definitions and all named/unresolved leaves remain
+in stack_tree.py/summary.json, including residual parent observations.
+
+| Disjoint exploratory CPU2 stack group | Sample1 | Sample2 |
+| --- | ---: | ---: |
+| Host condition-wait path |52|48|
+| Host MMU-refill path |50|31|
+| Host TLB-flush path |7|12|
+| Other host TB-lookup path |23|21|
+| Other host mutex path |15|22|
+| Unresolved JIT leaf |28|48|
+| Other/unresolved |58|51|
+
+Each column sums233; retain all four CPU trees. No group establishes one
+overwhelming guest component. Unknown JIT addresses do not identify an actor,
+Kernel privilege or guest PC. A sleeping host-thread observation is not active
+CPU usage; a mutex stack does not identify BQL or guest IPC. MMU/TB paths are
+real observations but neither prove nor exclude a Kernel bottleneck. Reject
+normal-runtime whole-launch attribution and do not tune from these counts.
+Click-to-ping is still not100ms full paint/input readiness.
+
+Nine Python tests pass: helper lifecycle/status/missing report/cleanup and
+parser disjointness/overlap/missing or duplicate CPU/real paused fixture.
+Syntax checks pass. No new C/Rust code requires sanitizer/cross builds. Also
+read the installed API7 header and upstream core.c before proposing timer-
+thread register sampling: vcpu_for_each directly iterates callbacks under its
+lock, not asynchronous execution on each vCPU. It is not a verified arbitrary-
+thread register sampling facility. No such unverified sampler is implemented.
+
+Final six-media hash98992 reaches0 and matches frozen150 plus all accepted
+118/107 hashes. PS finds no VM/sample/build/hash, exact lsof empty. Copy and
+byte-compare all four VM log directories before removing their redundant
+temporary originals. Delete only two150 diagnostic media. Usage588->18MiB
+is logical accounting, not physical APFS space recovered. Keep small failed/
+valid proof, official inputs, accepted118/107 and protected/unknown files.
+A9N remains clean/unbuilt; no optimization gain or promotion is claimed.
+
+## Cycle 151: Lossless measurement records and a small runtime-linker startup span
+
+Evidence: `/private/tmp/nanami-opt-cycle151.LwWoWI`. Previous150 is progress:
+host sampling includes post-ping work and perturbs launch; do not tune from
+its mixed-scope stack proportions. Measure a real component with the shipped
+loader's own coarse statistics, not another high-frequency profiler. No
+production runtime, Kernel, ABI, application or version change is retained.
+
+### Correct the measurement bridge
+
+First pilot uses the original native bridge and a post-only observer report.
+Ping succeeds, but original raw/Xlib RTT and some appended report lines do
+not reach serial. The observer reaches its final success marker. Source
+inspection proves tinycore_applications prints only the last nonempty line
+from each changed file snapshot. The original RTT line is overwritten as
+the last visible line before the next100ms poll; absence is not an app fault.
+Preserve pilot sources/ELF/frozen hashes and partial serial/PNG, exclude it.
+Verify exact own Python96478 command, deliberately interrupt that failed
+driver, follow34725 to terminal130/finally cleanup. No timeout-based restart.
+
+Fix only the native TEST fixture: complete_appended_lines returns a borrowed
+slice of newly completed lines. Retain partial suffixes until LF, skip
+unchanged snapshots and restart on changed/truncated prefixes. Keep the
+existing previous Vec; no extra log copy or stateful service abstraction.
+Forward every nonempty line, not just the last one. Eleven native tests cover
+multi-line appends, every snapshot boundary, partial lines, truncation,
+same/longer replacement, empty/long data, CRLF and invalid UTF8. Test83595
+passes serially with --test-threads=1. Build only the native fixture with
+pinned2026-03-25 nightly and SOURCE_DATE_EPOCH;64924 ends0. No xtask/Kernel build.
+The unrelated preexisting diagnostics.rs unnecessary-unsafe warning remains.
+Update the old last-line-only comment in the latency fixture; no RTT algorithm
+or success gate is weakened. Retain this fixture correctness fix in source.
+
+### Scope, identity and original gates
+
+The shipped glibc reports2.42. Loader ELFce1d6b and Xfeb16faf extracted from
+the test image exactly match cached upstream binaries. The stock loader's
+RDTSC timing instructions are verified read-only in its ELF. Upstream
+[glibc2.42 rtld.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.42/elf/rtld.c)
+places these statistics around runtime-linker startup, ending after
+_dl_sysdep_start. It is not the preceding Alpha exec installation, subsequent
+constructors/application main, lazy later binding, or exclusive CPU time.
+Object-load and relocation times are contained spans, not additive to total.
+
+All matched boots use one frozen paira7b40e/32a65a: normal Alpha96bc/initba776/
+Alter953f/POSIXc954, original services55c1/Kernel312d. Private launcherdf1bf5
+checks the same marker in both modes and exports LD_DEBUG=statistics ONLY for
+Files when enabled. Controls create an off marker, profiles an on marker,
+before observer setup. App/loader/library bytes are unchanged. The same
+observerb01f89 adds work ONLY AFTER original ping and raw128/Xlib128 gates:
+three bracketed TSC/monotonic calibrations with100ms waits, then bounded
+/tmp/xfe.log copying. No new process/fork changes measured placement; observer41
+is onCPU1 and Files42 onCPU2 in actual logs. Calibration is a local rate
+comparison in this uniform QEMU CPU model, not cross-core absolute timestamp
+subtraction or a real-hardware TSC guarantee. Record those scope assumptions.
+
+Both modes use the same corrected native fixturef06dbb; original isd3f2bd.
+Different observer/fixture from149/150 means no cross-cycle speedup comparison.
+Preserve old setup image/binaries/hashes separately until final verification.
+Second package16537 ends0. Four cold boots in off/on/on/off order, normal
+4CPU/4GiB/default TCG, same original real Files click/nonce and all RTT samples,
+100ms relay/10ms host poll and10s settle. Owning28117 reaches terminal0; all
+original gates AND complete post-reports pass4/4. No own edits/builds/tests/
+hashes or heavy inventory while measured VMs live. No fake completion or stop.
+
+| Mode/trial | Click-to-ping ms | Release-ACK-to-ping ms | Raw128 ms, all samples | Xlib128 ms, all samples |
+| --- | ---: | ---: | --- | --- |
+| Off1 |2199.410291|2097.104000|35.428,26.501,27.942|71.938,69.463,66.517|
+| On1 |2201.653208|2100.014250|33.205,26.410,27.296|62.818,63.741,62.726|
+| On2 |2090.732375|1987.835084|33.352,28.134,23.603|73.291,68.691,67.603|
+| Off2 |2150.710125|2047.057417|24.734,24.599,24.039|64.145,63.597,62.933|
+
+First guest ping roundtrips80.058/81.943/81.007/77.149ms respectively remain
+in raw evidence. Control mean2175.060208ms, enabled2146.192792ms, difference
+-1.327201%. Do NOT interpret a favorable two-point mean as an optimization,
+negative profiler cost or proof of zero perturbation. Keep slower On1 and
+faster On2 alike.100ms guest relay and10ms host polling limit comparisons near
+the5% target. This still measures partial ping readiness, not full paint/input.
+
+### Runtime-linker evidence, not a dominating whole-launch cost
+
+Each VM prints exactly three complete calibration rows after original RTT.
+For each bracket a0<=a1<b0<=b1 and positive monotonic delta d, estimate the
+rate interval [(b0-a1)/d,(b1-a0)/d]; intersect all three, rather than assuming
+cycles equal nanoseconds or subtracting guessed call overhead. All intervals
+include1 tick/ns. On1 is[0.9992187423,1.0008526987], On2
+[0.9986999429,1.0008116883]. These are observation brackets, not confidence
+intervals, exact hardware frequency calibration or serialized loader timings.
+
+| Stock loader observation, PID42 | On1 | On2 |
+| --- | ---: | ---: |
+| Total startup cycles |41345800|40219200|
+| Relocation cycles, contained |1625400|1534700|
+| Object-load cycles, contained |38577100|37421500|
+| Approximate total ms from brackets |41.311--41.378|40.187--40.272|
+| Approximate share of host click observation |1.876--1.879%|1.922--1.926%|
+| Relocations / cached / relative, COUNTS |7862/9592/9027|7862/9592/9027|
+
+Loading objects is93.3/93.0% OF THIS SMALL LOADER SCOPE, not of whole startup.
+Neither relocation nor runtime-linker startup overwhelms the roughly2.1--2.2s
+application observation. No speculative loader cache, relocation, transport
+or Kernel optimization follows. Do not derive an exact application speedup
+bound from a partial/coarsely polled gate, or extrapolate to constructors and
+later dlopen/main work outside the loader's startup statistics. Next inspect
+that remaining actual interval rather than retune a small measured component.
+
+### Validation and cleanup
+
+Reporter23 C cases pass normal/ASan/UBSan: partial/zero/oversized writes,
+clock/bracket/overflow failures, bounded reads, file errors and cleanup.
+Analyzer9 tests reject missing original RTT (the real first failure), missing/
+duplicate clocks, incompatible scales, invalid spans/PID, control contamination
+and failed/duplicate reports. Syntax checks pass. Native forwarding regression
+passes11 tests and the real four-run complete multi-line reports. The short
+ELF disassembly excerpt is aligned at16c92; preserve the initial mid-instruction
+excerpt separately, never treat its initial decoded garbage as executed code.
+
+Final eight-media hash83047 ends0 matching new frozen pair, failed setup pair
+and all accepted118/107 hashes. PS no VM/build/hash, exact target lsof empty.
+Copy and byte-compare all five VM log directories before removing redundant
+temporary originals. Delete only four151 diagnostic media. Directory usage
+1161->21MiB is not a physical APFS recovery claim. Retain small failed/valid
+proof, official inputs, current build cache and accepted118/107;149/150 proof
+remains20/18MiB. No A9N Kernel changes/builds, version bump or image promotion.
+The test-source fix is retained, but frozen118/107 retain the old native bridge:
+future multi-line diagnostics must replace that fixture explicitly in private
+clones. No5% application gain or100ms readiness/goal completion is claimed.
+
+## Cycle 152: Post-linker startup is small and the later inclusive scope is large
+
+Evidence: `/private/tmp/nanami-opt-cycle152.ilScZR`. Continue from151's measured
+small loader span; do not tune it. No production/runtime/Kernel/API/version
+change or image promotion. Measure later startup with GNU audit lifecycle
+callbacks, not per-function/symbol tracing. The module has no DT_NEEDED, no
+PLT/symbol-binding callbacks/redirection; la_objopen returns0. Own C is C11
+with -pedantic-errors and separate assembly, no compiler extensions. Only
+Files receives LD_AUDIT. Xfe/libc/loader extracted bytes match original cache.
+
+Scope: first base-namespace LA_ACT_CONSISTENT to la_preinit. In
+[glibc2.42 rtld.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.42/elf/rtld.c)
+consistency follows relocation/early libc init; later cleanup and constructors
+are outside the loader startup statistics measured in151.
+[libc-start.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.42/csu/libc-start.c)
+calls la_preinit after program constructors and before main. This interval
+includes cleanup/startup/scheduling, NOT pure constructor CPU. Avoid claiming
+every part of initialization is measured or adding overlapping loader spans.
+
+Validate first:15 auditor C model cases and11 post-report cases pass native
+and ASan/UBSan. Cases include partial/failed writes, invalid clocks/brackets,
+namespace filtering, repeated activity, bounds/read errors and cleanup.
+Analyzer12 tests pass before workload, plus a thirteenth outside-report case
+after collection; all pass. A separate unmodified official Linux6.18.35 boot
+with exact glibc2.42 and known150ms DT_INIT yields151731075ns and two passing
+probe mains. Fixture56850 ends0 and its owned QEMU is reaped. No A9N build.
+Initial model/build output was lost across context compaction; generated
+artifacts and no active process are verified, native models run again to
+observed terminal0 rather than inventing an unseen original handle.
+
+Freeze one pair82457b/4ab6df: normal Alpha96bc/initba776/Alter953f/POSIXc954,
+original Kernel312d/services55c1, private observer818230 and corrected native
+relayf06dbb. All modes enable stock LD_DEBUG=statistics. None does not load
+the auditor; control loads it without timing reads; read takes two raw
+clock1 samples bracketed by TSC inside Files42. Same app/launcher/observer/
+media in all modes; markers set before observation. No new launcher fork or
+process. Additional report copying runs only AFTER original ping/raw/Xlib
+gates. Five cold boots none/read/control/read/none, normal4CPU/4GiB/default
+TCG/devices,10s settle. Freeze87954/admission92056/cohort2301 all reach0;
+original Files identity/nonce/ping/three raw128/three Xlib128 and post-reports
+pass5/5. No own edits/builds/tests/hashes while measured VMs live.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | First ping RTT ms |
+| --- | ---: | ---: | ---: |
+| None1 |2256.813709|2146.713959|79.995|
+| Read1 |2223.035541|2121.421625|79.875|
+| Loaded control |2249.709417|2139.684750|88.830|
+| Read2 |2170.921584|2070.698875|78.862|
+| None2 |2233.135416|2125.467083|78.880|
+
+Mean none2244.9745625ms, read2196.9785625ms (-2.137931%), loaded control
+2249.709417ms (+0.210909%). Under predeclared5% perturbation rejection, but
+two none/read and one loaded control are NOT exact tax, zero-overhead proof,
+speedup or statistical confidence. Keep every sample;100ms relay/10ms host
+polling and incomplete paint/input-ready scope remain. Do not compare this
+observer/image directly to earlier cycles as an optimization gain.
+
+| Inclusive measured scope | Read1 ms | Read2 ms |
+| --- | ---: | ---: |
+| Consistency to pre-main audit callback |34.970|34.262|
+| Approximate share of host click observation |1.573%|1.578%|
+| Pre-main callback to guest-observed ping |1339.033|1329.463|
+| Approximate share of host click observation |60.234%|61.240%|
+
+Clock samples54306061000/54341031000 and54132106000/54166368000ns come from
+the same Alter clock1 domain as the original observer. Source refresh_clock
+samples the common runtime clock, not a per-process CPU clock. No host epoch
+or cross-core absolute TSC subtraction. Ordered TSC brackets enclose raw
+clock syscall paths; their widths are50000/266000 and46000/288000cycles.
+Inclusive wall spans include provider work and descheduling. Loader startup
+is still about42--43ms;90--93% object loading is OF THAT SMALL LOADER SCOPE.
+
+Decision: post-linker initialization is not an overwhelming whole-launch
+component; no speculative constructor, loader, cache or IPC optimization.
+The later1.33s is a larger next scope, but includes audit report I/O, main,
+X/server/provider work, scheduling and ping handling. It does NOT identify
+exclusive main CPU, Kernel, IPC or a particular function as the bottleneck.
+Subdivide it with validated measurements before tuning. The original goal
+still requires full paint/input readiness, not only this ping observation.
+
+Final hash8503 ends0: all13 entries match pre-run hashes, including frozen152
+and accepted118/107. Exact lsof checks empty, PS no measured VM/build/hash.
+Byte-compare five VM log directory copies before deleting redundant originals.
+Delete two152 diagnostic images plus generated initramfs. Usage592->22MiB is
+directory accounting, not physical APFS recovery. Preserve official inputs,
+accepted118/107, current build cache and small proof. No5% gain,100ms readiness
+or goal completion is claimed; A9N remains unchanged/unbuilt.
+
+## Cycle 153: Files startup is distributed and window creation is the largest coarse body
+
+Evidence: `/private/tmp/nanami-opt-cycle153.Qu8BPD`.
+
+Previous152 is progress: it excludes post-linker initialization as a major
+whole-launch cost. This cycle partitions the later1.33s instead of tuning a
+suspected cache/IPC path. No production runtime, Kernel, ABI, version or image
+promotion. The100ms full paint/input-ready requirement remains unachieved.
+
+One frozen pair a387194d/f5088858, normal Alpha96bc/initba776/Alter953f/POSIXc954,
+original Kernel312d/services55c1, corrected native relayf06dbb. Private observer
+9012e7 adds a bounded report copy only AFTER original ping/raw128/Xlib128 gates.
+Stock Xfe/FOX/libc/loader bytes extracted from this image match original cache.
+FOX's actual file is libFOX-1.6.so.0.0.59. Initial admission96417 ends1 because
+debugfs dump does not follow its fast symlink; preserve the partial dump,
+inspect stat and extract the real inode. Corrected read-only check ends0;
+no measured VM was running or restarted. FOX vtable relocations for init and
+create are verified. Four real valid records prove wrappers actually run;
+do not assume dynamic/virtual interposition from symbol names alone.
+
+Private preload c865aa exports only three exact mangled FXApp methods:
+init(int&,char**,bool), create(), run(). RTLD_NEXT forwards original arguments,
+return and errno; raw syscalls do not change libc errno. Own C11 is compiled
+with -pedantic-errors, no compiler extensions; raw syscall assembly is a
+separate file. Five clock1 samples bracket first init/create and run entry.
+Only libc is DT_NEEDED. No high-frequency per-symbol/PLT tracing. Existing
+GNU lifecycle auditor3d99 stays enabled in ALL modes for pre-main timestamps;
+all modes also enable LD_DEBUG=statistics. Only Files receives this preload.
+
+Native12 C cases pass normal and ASan/UBSan, including ABI/errno/return/argc,
+clock failures/order/bounds, partial writes, failed report I/O, missing init
+and repeated run without duplicate reports. Post-report11 cases pass both;
+analyzer8 cases, including eight invalid-field subcases, pass. Cached official
+Linux/exact glibc dynamic-resolution fixture67748 ends0: known150ms init and
+100ms create report160845151/108179773ns, both control/read probe mains pass,
+args and return37/errno forwarding validated. Its QEMU is reaped. These
+fixture waits are correctness checks, not benchmark overhead measurements.
+
+Freeze37438 ends0. Six cold boots none/read/control/control/read/none use one
+frozen image, normal4CPU/4GiB/default TCG/devices,10s settle, one VM at once.
+No own edits/builds/tests/hashes while measured VMs live. Cohort68535 ends0:
+all original Files identity/nonce/ping/three raw128/three Xlib128 and complete
+post-report/actual wrapper mode/PID/order/validity gates pass6/6. Analysis also
+requires pre-main<=init begin<=end<=create begin<=end<=run entry<=ping and exact
+partition sum. All original per-boot samples remain in summary.json/evidence.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | First ping RTT ms |
+| --- | ---: | ---: | ---: |
+| None1 |2175.165208|2070.764792|79.509|
+| Read1 |2199.162375|2090.857625|77.315|
+| Loaded control1 |2208.995500|2103.439333|78.144|
+| Loaded control2 |2247.472750|2139.249375|78.690|
+| Read2 |2224.229000|2114.180750|78.433|
+| None2 |2226.034084|2124.423584|78.087|
+
+Mean none2200.599646ms, loaded control2228.234125ms (+1.255770%), read
+2211.695688ms (+0.504228%). Under predeclared5% rejection, but two boots per
+mode are NOT exact tax, zero-overhead proof or statistical confidence. No
+speedup claimed.100ms native relay/10ms host polling remain; coarse ping
+observation is NOT100ms full paint/input readiness. Never subtract guessed
+per-hook cost or compare this observer/media with older cycles as a gain.
+
+| Inclusive interval | Read1 ms | Read2 ms |
+| --- | ---: | ---: |
+| Pre-main to init entry |16.302|16.501|
+| FXApp::init body |300.815|288.335|
+| init return to create entry |293.431|292.592|
+| FXApp::create body |580.616|591.422|
+| create return to run entry |0.275|0.259|
+| run entry to observed ping |163.767|154.145|
+| Sum, pre-main to ping |1355.206|1343.254|
+
+Largest coarse body is create:26.402/26.590% of host click observation.
+Init is13.679/12.963%, intervening main work13.343/13.155%. This is a distributed
+profile, not proof of one exclusive dominating function. init-to-create is
+arbitrary main work, not solely constructors. All spans include providers,
+scheduling and waiting. Run-entry-to-ping INCLUDES pre-run report getpid/open/
+write/close and event-loop/wm/server response. Do not relabel as pure CPU,
+X11 latency, IPC or Kernel time. Next measure client work versus synchronous
+server/provider waiting INSIDE the largest actual create scope before tuning.
+
+Final hash50567 ends0, all14 entries match before-run hashes, including both
+diagnostic media and all accepted118/107 media. No live measured VM/build/hash;
+seven elevated exact-directory lsof checks are empty. Copy and byte-compare
+all six VM log directories before deleting originals. Cleanup ends0: two153
+images, one generated initramfs and six redundant VM log directories removed.
+Usage596->25MiB is directory accounting, not actual APFS space recovered.
+Keep accepted118/107, official inputs, current build cache and small proof.
+A9N stays clean/unbuilt; no5% gain or goal completion is claimed.
+
+Documentation correction:152 previously quoted the boot hash printed before
+freeze.sh replaces init. Authoritative frozen/before/final manifests agree on
+82457bd1 (not pre-freeze f6d690b8). Correct its prose; no media mismatch,
+measurement rerun or underlying data change occurred.
+
+## Cycle 154: Interposable synchronous replies are a minority of GUI resource creation
+
+Evidence: `/private/tmp/nanami-opt-cycle154.yyvM5b`.
+
+Previous153 is progress: create is largest coarse body, not yet an exclusive
+CPU/IPC bottleneck. Measure the actual reply path inside create before tuning.
+No production runtime, Kernel, ABI or version changes; no image promotion.
+The100ms full paint/input-ready target and overall optimization goal remain
+unachieved. Do not substitute this diagnostic's passing gates for that goal.
+
+### Scope and implementation
+
+One shared source builds baseab8496 and extended4172d1 preloads. Both keep
+init/create/run forwarding, five clock1 samples with TSC brackets and identical
+report sites; base hides _XReply, extended exports it. Baseline means NO ADDED
+REPLY HOOK, not a completely uninstrumented application. All modes retain
+GNU lifecycle audit3d99 and LD_DEBUG=statistics. Only Files gets preload.
+Extended control counts calls without per-call timing; read takes two fenced
+RDTSC samples per outer create reply. No per-call log/syscall/heap allocation.
+Forward arguments, return and errno. Nested calls counted, not double-added.
+
+Upstream [Xlibint.h](https://raw.githubusercontent.com/mirror/libX11/master/include/X11/Xlibint.h)
+declares the ABI; [xcb_io.c](https://raw.githubusercontent.com/mirror/libX11/master/src/xcb_io.c)
+shows request flush, response waiting/handling and copying inside _XReply.
+Thus this is inclusive elapsed function time, NOT pure blocking, IPC or Kernel
+CPU time. It does not cover every XCB path, asynchronous send or other wait.
+Use the real library's PLT relocation/XSync disassembly and actual nonzero
+counts to verify interposition, not assume complete coverage from a symbol.
+Single-thread pre-run Files scope; no general multithread/hardware guarantee.
+
+Same-process create samples bound counter rate [(b0-a1)/d,(b1-a0)/d], not
+assumed ticks=ns or cross-core absolute TSC subtraction. These are observation
+brackets under the uniform QEMU counter model, not confidence intervals.
+Validate ordering, bounds, sum/max/outer/nested counts and record completeness.
+Counter errors/overflow/stage changes fail admission. First/last and enclosing
+coarse spans are checked; individual cross-call timestamps are not retained.
+The complement is merely NOT IN THIS INTERPOSABLE HOOK, never pure client CPU.
+
+### Validation and frozen workload
+
+18 reply C cases pass normal and ASan/UBSan: ABI/errno/return, nesting without
+double addition, counter regression/overflow, bounds, partial/failed I/O,
+invalid mode/clock/identity and post-run bypass.12 previous phase cases pass
+both;11 report cases pass both;8 analyzer cases with13 invalid-field subcases
+pass. Strict C11/-pedantic-errors and separate assembly; no compiler extensions.
+Cached official Linux/exact glibc dynamic-lookup fixture83670 ends0. It has a
+known40ms reply inside create and another outside, plus150/100ms phase waits.
+Base counts0; extended control/read count2 total and1 in create. Read captures
+approximately41.2415--41.2496ms, preserving response content, return5, args and
+errno; all three probe mains verify run returns37 and pass. Owned VM reaped.
+This fixture is correctness validation, not a benchmark tax measurement.
+
+Freeze95642/admission6584 reach0. One final frozen pair74f6ea/3e5f35,
+normal Alpha96bc/initba776/Alter953f/POSIXc954, original Kernel312d/services55c1,
+corrected native relayf06dbb, private post-only observerf711fe. Extracted
+Xfe/FOX/Xlib/libc/loader match original retained binaries. Six fresh boots
+none/read/control/control/read/none, normal4CPU/4GiB/default TCG/devices,
+10s settle,100ms native relay/10ms host polling, one VM at once. No own edits/
+builds/tests/hashes/heavy inventory while measured VMs live. Cohort57888
+reaches0: all original Files identity/nonce/ping/3 raw128/3 Xlib128 and complete
+post-report/actual coverage/clock/mode/PID gates pass6/6. Preserve every sample.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | First ping RTT ms | Create ms |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline1 |2186.771125|2083.179042|79.840|580.602|
+| Read1 |2243.658708|2140.860500|73.806|594.194|
+| Loaded control1 |2162.900042|2057.761458|89.921|603.759|
+| Loaded control2 |2207.594250|2102.976417|79.363|582.138|
+| Read2 |2209.252584|2099.182584|77.606|582.948|
+| Baseline2 |2157.269292|2051.812459|77.132|582.616|
+
+Mean baseline2172.0202085ms, control2185.247146ms (+0.608969%), read2226.455646ms
+(+2.506212%). Below predeclared5% rejection; two observations per mode do NOT
+establish exact/zero profiling tax, statistical significance or a speedup.
+Do not subtract guessed hook overhead or compare different cycle observers
+as an improvement. Original ping gate is still NOT full paint/input readiness.
+
+### Findings, not a dominating reply bottleneck
+
+| Observation | Read1 | Read2 |
+| --- | ---: | ---: |
+| All pre-run interposed calls, COUNT |84|84|
+| Outer create calls / nested, COUNTS |36/0|36/0|
+| Outer create sum, COUNTER TICKS |98334000|98068000|
+| Maximum one reply, COUNTER TICKS |53095000|53477000|
+| Same-process ticks/ns brackets |0.999927633--1.000117807|0.999929668--1.000147526|
+| Reply sum elapsed ms brackets |98.3224--98.3411|98.0535--98.0749|
+| Share of create |16.5472--16.5503%|16.8203--16.8240%|
+| Approximate share of host click observation |4.3822--4.3831%|4.4383--4.4393%|
+| Create time NOT IN THIS HOOK, ms |495.8529--495.8716|484.8731--484.8945|
+
+Loaded controls also see84/36/0 with zero counter sums; baselines see no hook
+calls. Counts confirm this binding path, not elapsed cost by themselves.
+The observed _XReply scope is a minority of create, and does not overwhelm
+whole launch. No speculative IPC/X-server tuning follows. Conversely, the
+roughly83% complement does NOT prove CPU-bound work: other XCB/send/wait paths,
+providers, scheduling and resource creation remain in it. Next partition the
+real resource creation subcalls, verifying coverage and perturbation again.
+
+Read-only FOX disassembly is retained for selecting valid boundaries, not
+cost attribution. It contains devirtualized/outlined stock-cursor paths;
+future C++ interposition must verify actual coverage and changed dispatch,
+not infer zero work from an uncalled hook. Symbol-filter disassembly initially
+warns it cannot locate the mangled name; retain that partial output. Read ELF
+symbol start130130/size1783 and disassemble exactly that range for valid proof.
+Do not treat a stripped library's nearest-symbol annotation as an executed
+destructor or as a function-time profile.
+
+### Closure
+
+Final hash64637 reaches0, all15 entries match before-run hashes, including
+frozen154 and all accepted118/107 media. PS has no measured VM/build/hash;
+seven elevated exact-directory lsof checks are empty. Copy and byte-compare
+all six VM log directories before removing redundant temporary originals.
+Cleanup ends0: two diagnostic images, one generated initramfs and six duplicate
+VM directories removed. Usage594->27MiB is directory accounting, NOT physical
+APFS recovery. Retain accepted118/107, official inputs, build cache and small
+proof. A9N unchanged/unbuilt; no5% gain,100ms readiness or goal completion.
+
+## Cycle 155: Window-tree work dominates resource creation, not whole startup
+
+Evidence: `/private/tmp/nanami-opt-cycle155.u4wBoh`.
+
+Previous154 is progress: _XReply is a minority of create; do not tune IPC
+from that inclusive minority. This cycle partitions real resource creation.
+No production runtime/Kernel/ABI/version changes or image promotion.100ms
+full paint/input readiness and the overall optimization goal remain unmet.
+
+### Scope and implementation
+
+One source builds coarse-only based33fe4 and extended90b81e preloads. Both
+retain init/create/run forwarding and five same-process clock1/TSC brackets.
+Extended exports FXVisual/FXFont/FXCursor/FXRootWindow create; base hides those
+four hooks. The previous _XReply hook is absent in ALL modes. Only Files gets
+preload; stock Xfe/FOX/Xlib/glibc/loader remain unchanged. Existing GNU audit
+3d99 and LD_DEBUG statistics stay common. Observer9d680a copies reports only
+after original ping/raw128/Xlib128 gates. Baseline is NOT fully uninstrumented.
+
+A fixed64-frame stack accumulates nested spans. Inclusive durations can
+overlap and must NOT be summed. Subtract direct selected-child spans from
+their parent; the sum of these child-excluded buckets equals the disjoint
+top-level union. That is NOT exclusive CPU time: server/provider work, waits,
+scheduling, application callbacks and unhooked code remain. Single-thread
+pre-run Files scope, not a general multithread/hardware profiler. Preserve
+arguments/errno; no per-call logging/syscall/heap allocation. Control keeps
+counts/stack bookkeeping but no per-resource counter reads. Read takes fenced
+RDTSC entry/exit samples, checking monotonicity ACROSS calls as well as nesting.
+
+Real FOX vtable relocations and Xfe's undefined font entry are verified before
+running. Actual nonzero create counts for ALL four types are required; do
+not assume interposition from exported names or misread devirtualized code.
+Changed dispatch and instrumentation can perturb execution, hence matched
+coarse-only/loaded-control/read modes. Counters are converted using same-
+process create brackets [(b0-a1)/d,(b1-a0)/d], not ticks=ns or absolute cross-
+core subtraction. Observation brackets assume this QEMU counter model; they
+are not statistical confidence intervals or hardware frequency guarantees.
+
+### Validation and frozen workload
+
+20 resource C cases pass normal and ASan/UBSan: ABI/errno, mixed nesting,
+same-kind recursion, exact disjoint partition, within/across-call regression,
+depth/count/sum overflow, bounds, maximum text, partial/failed I/O and post-run
+bypass.12 previous phase cases and11 report cases pass both.9 analyzer methods
+with invalid-field subcases pass. The actual host runner invokes that tested
+full parser after original gates, not a second weaker record checker. Own
+strict C11/-pedantic-errors with separate assembly, no compiler extensions.
+
+Cached official Linux/exact glibc fixture18069 ends0 and its owned VM is reaped.
+Separate translation units ensure real dynamic resolution. Known visual10ms,
+font20ms twice, cursor10ms twice, root30ms plus nested font/cursor, and50ms
+unhooked parent wait. Another font call precedes create. Expected total/create
+counts are1/1,3/2,2/2,1/1; baselines see no hooks, controls see counts/zero times.
+Read child-excluded bounds are approximately15.1635--15.1647 /43.7366--43.7401 /
+26.0901--26.0923 /34.0289--34.0317ms and sum to the union. Root-inclusive is
+larger because of its children. All three probe mains verify original run
+returns37, object state17, argc and errno. These sleeps validate correctness,
+not benchmark overhead or exact scheduler delay.
+
+Build87253/freeze4098/admission83649 reach0. Final frozen pairc52cdf/b42980,
+normal Alpha96bc/initba776/Alter953f/POSIXc954, original Kernel312d/services55c1,
+corrected native relayf06dbb. Extracted original application/libraries match
+retained originals. Six fresh boots none/read/control/control/read/none,
+normal4CPU/4GiB/default TCG/devices,10s settle,100ms native relay/10ms host
+polling, one VM at once. No own edits/builds/tests/hashes/heavy inventory while
+measured VMs live. Cohort22754 ends0; all original Files identity/nonce/ping/
+3 raw128/3 Xlib128 AND complete header/four rows/mode/PID/actual coverage/
+clock/partition gates pass6/6. Preserve every sample in summary.json/evidence.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | First ping RTT ms | Create ms |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline1 |2200.733625|2095.483541|91.214|584.782|
+| Read1 |2214.707458|2104.932250|79.136|583.954|
+| Loaded control1 |2159.711750|2049.628000|77.013|579.972|
+| Loaded control2 |2185.335875|2084.285625|78.054|585.570|
+| Read2 |2206.801334|2105.185750|75.362|581.207|
+| Baseline2 |2201.332625|2091.954833|79.834|586.620|
+
+Mean baseline2201.033125ms, control2172.5238125ms (-1.295270%), read
+2210.754396ms (+0.441669%). Below predeclared5% rejection, but two observations
+per mode do NOT establish exact/zero tax, significance, negative overhead or
+any optimization gain. Do not subtract guessed cost or compare different
+cycle observers as speedups. Ping remains NOT full paint/input readiness.
+
+### Findings and next action
+
+| Resource bucket, selected-child-excluded ms bounds | Read1 | Read2 |
+| --- | ---: | ---: |
+| Visual |2.2088--2.2092|2.2137--2.2142|
+| Font |29.3667--29.3720|27.0190--27.0249|
+| Cursor |41.0234--41.0308|41.2899--41.2988|
+| Root/window tree |510.5433--510.6360|509.8686--509.9791|
+| Disjoint union |583.1421--583.2480|580.3911--580.5170|
+| Create NOT IN THESE FOUR HOOKS |0.7060--0.8119|0.6900--0.8159|
+
+Both reads count713/551 pre-run/create visual calls,564/564 font,1122/1122
+cursor,1/1 root. Counts are NOT elapsed attribution: one root call costs far
+more elapsed time than1122 cursor calls. Inclusive root is514.8148--514.9083 /
+514.5709--514.6824ms; its child-excluded value removes only selected nested
+resources. Do not add both. The union covers almost all actual create and
+all four actual binding paths have nonzero coverage. Do not imply every
+resource class or every call in FOX was instrumented.
+
+Window-tree child-excluded time is87.4287--87.4446% /87.7258--87.7448% OF CREATE,
+but only approximately23.0524--23.0566% /23.1044--23.1094% of observed HOST
+CLICK-TO-PING. It is NOT88% of whole startup, nor proof of heavy client CPU,
+IPC or Kernel cost. It includes application window-create callbacks and
+downstream operations. No speculative font/cursor/visual optimization follows.
+Do not subtract154's differently scoped _XReply result from this bucket.
+
+Next correlate THIS measured window-tree scope with Alter/Linux syscall/
+service elapsed paths, with validated low-perturbation phase gating, before
+changing production code. This moves toward a Nanami-side cause rather than
+assuming foreign-library CPU or optimizing another small component. Preserve
+the original full readiness requirement and Kernel-unchanged policy.
+
+### Closure
+
+Final hash74786 reaches0, all15 entries match before-run hashes, including
+frozen155 and all accepted118/107 media. PS no measured VM/build/hash; seven
+elevated exact-directory lsof checks empty. Byte-compare six VM log copies
+before removing redundant originals. Cleanup ends0: two diagnostic images,
+one generated initramfs and six duplicate VM directories removed. Usage596->
+27MiB is directory accounting, NOT physical APFS recovery. Keep accepted118/
+107, official inputs, current build cache and small proof. A9N clean/unbuilt;
+no5% gain,100ms full readiness or goal completion is claimed.
+
+## Cycle 156: Root-scoped write handling is a candidate, but probe disturbance matters
+
+Continue Rob Pike's measurement rule, not speculative tuning. Correlate the
+window-tree scope found in155 with Nanami's actual service event loop. Private
+evidence: `/private/tmp/nanami-opt-cycle156.FUMyvB/`, summary.json, ACCEPTANCE.md,
+sources/tests, frozen/final hashes and both rejected-v1/evidence and evidence.
+No production runtime, Kernel, ABI, version or release change is retained.
+
+### Measurement and rejected attempt
+
+A separate private Cargo package references current production common/Linux
+sources by absolute path. Only its main event loop and diagnostic module add
+measurement; normal Alter953f stays untouched. One fixed645-bin allocation,
+no per-event allocation/logging or redundant full register decode. Root PID42
+syscall numbers, other faults, requests, notifications and other actor PIDs
+occupy separate bins. Use Runtime's existing local1GHz HPET reader; missing/
+nonlocal/nonmonotonic clocks invalidate evidence rather than valid zeroes.
+
+The same private preload in every mode wraps only the three coarse FXApp
+methods plus inclusive FXRootWindow::create. Remove155's visual/font/cursor
+per-call callbacks from ALL conditions. Save the actual current thread name
+immediately before Root, set temporary standard PR_SET_NAME metadata, clock
+the original body, then restore and verify the original name/errno. No PID,
+executable identity, capability identifier or rights mutation. Actual Root
+coverage must be exactly one inside create. Guest CLOCK_MONOTONIC clocks and
+the service reader share the same timer epoch; no absolute cross-core TSC
+subtraction. Inclusive Root is not155's selected-child-excluded bucket.
+
+The service window starts after the tag event's pump, stops at receipt of
+the restored-name event and excludes restore handling/pump. Require client
+Root start/end inside the server window. Partition receive + handler + pump
++ loop bookkeeping exactly. Receive includes guest instructions, kernel
+handoff/return tails, scheduling and waits; NOT pure IPC. Handler includes
+downstream providers/preemption; NOT exclusive Alter CPU. A parked syscall
+does not acquire an invented full blocked-syscall latency.
+
+Initial cohort80829 ends1 on its fifth boot: original Files launch/ping/RTT
+passed, but direct server UART output interleaved character-wise with the
+independent native AW file relay, corrupting post-gate records. Reject the
+cohort; preserve all five logs, media hashes and binaries. Never reconstruct
+missing characters or combine its four successes with replacement runs.
+Also retain the note about a failed host rustc rebuild using default edition
+and the subsequently stale old test run; that run is NOT v2 validation.
+
+V2 eliminates the second UART writer. After original gates/reports, observer
+AW41 reads the frozen histogram via a private diagnostic syscall0x7fff,
+intercepted ONLY for its badged PID in the private Alter binary with complete
+inline context. Readout checks state, caller, index and representability;
+no arbitrary memory copy or privilege grant. Normal AW checks root-none and
+never issues this syscall. All result text uses the existing AW file relay.
+This is not a production Linux, Nanami or Kernel ABI. No Kernel source/build
+or native IPC fastpath change. No diagnostic calls inside measured workload.
+
+### Validation and matched workload
+
+Seven host Rust model tests pass with explicit edition2021/test-threads=1:
+clock/count state, exact partition, restore exclusion, other actors/overflow,
+invalid clocks, time reversal and post-scope/caller/bounds readout. Nine Root
+C cases and nine readout C cases pass normal and ASan/UBSan: forwarding,
+errno/name restoration, failure/invalid clocks, partial writes, normal's zero
+private calls, schema/error cases and maximum positive Word serialization.
+Six Python methods with invalid-field subcases pass, including actor-local
+report bounds and explicit normal absence. Strict C11/-pedantic-errors; no
+compiler extensions. V1 cached official Linux fixture72664 ends0 with three
+original mock mains/argc/object/errno/run-return checks and known60ms nested
+Root sleeps. It validates the original hook ABI, NOT v2 readout or exact tax;
+v2 readout is checked by its models and actual Nanami integration.
+
+V2 private build32428, freeze47813, admission48868 and cohort75591 end0.
+Final frozen control pairbd2f33/bf41db, diagnostic pair8c3d2d/c2f896; private
+Alter0a8c07, observer2885cc, preload134aa8. Common Alpha96bc/initba776/normal
+Alter953f/POSIXc954, original Kernel312d/services55c1, corrected native relay
+f06dbb. Packaging extracts/compares replaced binaries and unchanged Kernel.
+Six fresh boots normal/read/count/count/read/normal, same original Files,
+libraries, rootfs profile,4CPU/4GiB/default TCG/devices,10s settle,100ms native
+relay/10ms host polling. One VM at a time; no own edits/builds/tests/hashes or
+heavy inventory while measured VMs live. All original PID/nonce/ping/3 raw128/
+3 Xlib128 gates and complete Root/readout/clock/partition gates pass6/6.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | Create ms | Inclusive Root ms |
+| --- | ---: | ---: | ---: | ---: |
+| Normal1 |2203.776000|2093.742334|595.453|526.146|
+| Read1 |2292.173917|2186.221584|624.635|557.908|
+| Count1 |2151.119916|2048.372500|583.923|515.760|
+| Count2 |2210.500042|2101.801917|599.892|529.980|
+| Read2 |2199.181166|2093.669875|630.500|558.310|
+| Normal2 |2244.448834|2143.807584|589.114|520.973|
+
+Mean normal2224.112417ms, count2180.809979ms (-1.946954%), read2245.6775415ms
+(+0.969606%). Both are inside the PREDECLARED whole-launch5% rejection gate.
+But mean Root is523.5595/522.870/558.109ms: count-0.131695%, read+6.598963%.
+The whole-workload gate masks material LOCAL probe disturbance. Two points
+per mode do not establish exact tax, significance, negative overhead, an
+optimization gain or a justified per-clock subtraction. Preserve this local
+comparison rather than declaring the entire profiler negligible.
+
+### Findings and decision
+
+| Instrumented Root service window | Read1 | Read2 |
+| --- | ---: | ---: |
+| Total ms |558.170|558.584|
+| Receive ms / percent |259.852 /46.55%|258.553 /46.29%|
+| Handler ms / percent |272.448 /48.81%|273.758 /49.01%|
+| Pump ms / percent |16.944 /3.04%|17.428 /3.12%|
+| Bookkeeping ms / percent |8.926 /1.60%|8.845 /1.58%|
+| All handled events |4140|4149|
+| Root write calls |1228|1228|
+| Root write handling ms |156.071|158.862|
+
+Count modes also see1228 Root writes, with zero per-event clock values. The
+write bucket is67.74/68.31% of ROOT syscall handling,57.28/58.03% of ALL scoped
+handling, but27.96/28.44% of the scoped wall interval and approximately6.81/
+7.22% of observed whole launch. These nested scopes are NOT interchangeable.
+Boundary overhead outside the client's Root body is262/274us, not the entire
+probe cost. Do not call write the proven whole-startup bottleneck, presume
+regular-file descriptors, or attribute its inclusive elapsed to pure IPC,
+POSIX, Alpha, copying or device latency. No descriptor/provider-stage timings
+were collected in this cycle. Source inspection suggests branches to measure,
+not permission to optimize the branch we merely expect.
+
+Decision: no production tuning. First lower local measurement disturbance,
+then split the observed write path by descriptor kind and source-read/provider
+stages, validating against the same original end-to-end workload. Do not
+optimize fonts/cursors, generic mmap, cache sizes or IPC from counts alone.
+Full paint/input responsiveness remains the original requirement; ping is
+not a replacement for it. No5% gain or100ms startup claim follows.
+
+### Closure
+
+Final hash44818 ends0: all24 current/rejected/accepted media and binary entries
+match. PS shows no measured VM/build/hash,12 elevated exact-directory lsof
+checks are empty. Byte-compare11 VM evidence backups before removing duplicate
+originals. Cleanup ends0: eight diagnostic images, one generated initramfs,
+and11 duplicate VM directories removed; current evidence, failed observations,
+accepted118/107, official inputs and build cache remain. Directory usage
+2384412->46540KiB is logical accounting, NOT physical APFS recovery. A9N is
+clean/unbuilt; production main and normal Alter remain unchanged. Goal active.
+
+## Cycle 157: Low-disturbance write decomposition before selecting a change
+
+Previous turn was progress, not a speedup:156 found a write candidate but6.60%
+local probe disturbance. Evidence `/private/tmp/nanami-opt-cycle157.xdI9e0/`
+contains private source/tests, ACCEPTANCE.md, summary.json, six evidence
+directories and frozen/final hashes. No production optimization in this cycle.
+
+Replace per-event HPET samples with existing diagnostics::local_stamp on
+Alter18's configured CPU2. Same actor only, no cross-core absolute subtraction.
+Bracket TWO existing-reader HPET samples with local counter reads at phase
+boundaries. Derive elapsed-rate bounds from these actual brackets; never
+assume ticks=ns. Reject nonmonotonic counters, missing/nonlocal clocks,
+incomplete partitions or relative calibration width above1%. Hot samples do
+not read HPET. Same three coarse FXApp hooks plus inclusive Root in every
+mode, same original Xfe/libraries/workload. Native thread affinity is verified
+in spawn logs and configure_pcb_affinity source; Kernel is not changed/built.
+
+A private file_io copy classifies actual descriptor kinds and measures whole
+write, checked source read and POSIX-provider stages. Other code references
+production sources. Fixed bounded relaxed-atomic totals avoid global mutable
+aliases, allocation and per-event logging. Count keeps bookkeeping/bytes/errors
+with zero counter/calibration values. Preserve original branches and errors.
+Require classification coverage equal to Root writes and child sums no larger
+than parent. Private observer-only post-gate readout uses the single AW relay;
+no UART race or public/Kernel ABI. Inline context remains untouched on normal
+production paths. Handler/provider elapsed is NOT exclusive CPU or pure IPC.
+
+12 host Rust tests,9 Root and9 readout C cases normal/ASan/UBSan, and7 Python
+methods with invalid-field subcases pass. Distinct counter/timer fixture rate
+2 proves the parser does not equate units. Private build37102, admission51650,
+freeze58219 and six-boot cohort39760 end0; all original PID/nonce/ping/three
+raw128/three Xlib128 and full scope/calibration/partition/readout gates pass.
+The first post-run aggregate failed on duplicate dictionary keys for native
+versus observer counter calibration; separate the native key and retest.
+This is not a guest failure or reason to repeat/select boots.
+
+| Trial | Click-to-ping ms | Inclusive Root ms | Create ms |
+| --- | ---: | ---: | ---: |
+| Normal1 |2194.606125|507.782|576.161|
+| Read1 |2184.053083|530.276|597.788|
+| Count1 |2249.009625|525.034|596.997|
+| Count2 |2147.677583|523.443|591.887|
+| Read2 |2186.600625|530.908|598.198|
+| Normal2 |2162.606875|518.361|585.045|
+
+Mean whole2178.606500/2198.343604/2185.326854ms normal/count/read: +0.905951%/
++0.308470%. Mean Root513.0715/524.2385/530.592ms: +2.176500%/+3.414826%.
+Both PREDECLARED whole/local5% gates pass; two points per mode do NOT prove
+zero/exact tax, confidence or speedup. Measured receive46.90--47.38%, handler
+50.04--50.43%, pump1.95--2.02%, bookkeeping0.63--0.65% of scoped wall. These
+are not interchangeable with Root-only handler percentages or whole startup.
+
+All1228 Root writes are POSIX in both reads and both controls,18686bytes total,
+zero errors. Other descriptor kinds have no calls. Read1/2 converted bounds:
+
+| Write component | Read1 ms bounds | Read2 ms bounds |
+| --- | ---: | ---: |
+| Whole classified write |149.9931--150.0086|148.9502--148.9650|
+| Checked source-read path |73.6461--73.6537|72.6182--72.6254|
+| POSIX-provider path |75.4270--75.4348|75.3310--75.3385|
+
+The two child paths are roughly halves; do NOT claim either overwhelms the
+other or that POSIX alone is responsible. Source includes Alpha/checked-copy
+service work, not just memcpy. At most floor(18686/4097)=4 source calls exceed
+one page. Their total time is bounded by4 times the largest source sample:
+1.304/.888ms, so at least72.34/71.73ms belongs to small copies. No guessed
+length distribution. Eliminating even this whole aggregate alone is about
+3.3% of launch, not a promise of5% or10x whole-system improvement.
+
+Next trial158 routes only measured scalar POSIX write input through the
+existing permission-checked copy helper and bounded read leases, admitting
+the already owned direct-I/O destination buffer. No new cache size, buffering,
+write retry/provider bypass, Kernel or IPC-fastpath changes. This is a
+measured major component of the dominant Root syscall write path, not proof
+of a whole-startup bottleneck. Keep only if original real workload establishes
+a useful improvement and ownership/permission regressions pass.
+
+Final hash28215 ends0:17 entries match, including current and accepted118/107.
+Seven elevated exact-directory lsof checks empty; six VM backups byte-compare.
+Cleanup ends0: four diagnostic images and six duplicate VM directories removed;
+usage1196440->29712KiB is directory accounting, not physical APFS recovery.
+Summary re-parses identically after cleanup. Keep official inputs, accepted
+media, small proof and build cache. Full paint/input readiness and overall
+goal remain unproven; no5% optimization gain claimed.
+
+## Cycle 158: Write-input view reuse improves launch but fails the communication gate
+
+157 was measurement progress: classified the dominant Root syscall write
+path and its source/provider halves, with both whole/local probe gates met.
+Do not substitute counts or source appearance for the recorded elapsed data.
+Evidence `/private/tmp/nanami-opt-cycle158.WE7EIx/`: ACCEPTANCE.md, candidate
+source snapshots, native/file-mapping/rollback logs, eight boot logs/evidence,
+summary.json and frozen/final hashes. This candidate is REJECTED, not a gain
+accepted into production. Overall goal remains active/unachieved.
+
+### Candidate and safety
+
+Route scalar POSIX sys_write input through existing copyin_into and allow
+its bounded read-view destination check to recognize the already owned
+direct-I/O buffer as well as ordinary SHM. No cache-size change, buffering,
+write retry/reordering, provider bypass, public/Kernel ABI or native fastpath
+change. Keep logical read checks, one-page eligibility, live VM generation/
+pin/quarantine rules and checked-copy fallback. Only two production functions
+plus adapter boundary tests change. Leave pwrite/writev/AF_UNIX paths alone;
+they were not selected by this measured decomposition.
+
+Native targeted tests112 pass,2 explicitly ignored host microbenchmarks:
+guest-copy, native adapter bounds, read/write windows, VM mappings/private
+memory, Alpha copy window/private pages. New tests cover both owned buffers,
+denied grants without stores, unknown/exited tasks, partial/outside/overflowed
+destinations, oversized requests and malformed extents. Native candidate
+Release build19695 ends0, Kernel unbuilt. Actual4CPU TinyCore syscall/namespace/
+file-mapping regression17878 ends0. This proves those tested behaviors, not
+every possible application side effect or full desktop readiness.
+
+Freeze51829 ends0: matched before pairb3adcf/3d5049, candidate905505/d3c795.
+Normal Alter953f versus candidate3aac57, common Alpha96bc/initba776/POSIXc954,
+Kernel312d/services55c1, same observerefaddd, client preload134aa8, auditor3d99
+and native relayf06dbb. The server is NORMAL, not the private profiler.
+root-none prevents any private diagnostic syscall. Original application ELFs
+stay unchanged; same client hooks/loader-statistics/auditor in both modes,
+so this is not a fully uninstrumented absolute-startup measurement.
+
+Four pairs in before/after/after/before/before/after/after/before order, fresh
+VMs, normal4CPU/4GiB/default TCG/devices,10s settle,100ms native relay/10ms
+host polling. No own edits/builds/tests/hashes/heavy inventory while measured
+VMs live. Cohort30463 ends0: all original PID/nonce/ping/three raw128/three
+Xlib128 and complete client/report gates pass8/8. Never select only fast runs.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms | Root ms | Create ms |
+| --- | ---: | ---: | ---: | ---: |
+| Before1 |2223.301167|2115.822250|519.035|587.932|
+| After1 |2158.308500|2056.623667|440.161|509.496|
+| After2 |2098.203375|1988.916834|452.516|522.044|
+| Before2 |2231.360833|2124.442583|521.517|589.810|
+| Before3 |2263.153333|2153.243583|530.565|601.674|
+| After3 |2156.107000|2050.333166|437.469|505.852|
+| After4 |2103.330375|2003.189750|443.790|512.766|
+| Before4 |2238.007709|2128.575792|511.466|580.130|
+
+| Metric | Before | After | Observed change |
+| --- | ---: | ---: | ---: |
+| Mean click-to-ping ms |2238.9557605|2128.9873125|4.911595% shorter|
+| Median click-to-ping ms |2234.684271|2129.7186875|4.697110% shorter|
+| Mean release-ACK-to-ping ms |2130.521052|2024.76585425|4.963818% shorter|
+| Mean Root ms |520.645750|443.484000|14.820394% shorter|
+| Pooled raw128 median ms |28.013|29.797|6.368472% longer|
+| Pooled Xlib128 median ms |62.101|61.934|0.268917% shorter|
+
+### Decision: reject, do not round or excuse the failed gate
+
+The5% launch target is not met; do not round4.91% into a claimed5% gain.
+More importantly, raw communication exceeds the PREDECLARED5% regression
+gate. Four boots per mode and three within-boot batches are not independent
+confidence estimates; this does not establish a precise general slowdown or
+its cause. But uncertainty does NOT authorize discarding the failed gate or
+switching statistics after inspecting results. Retain all12 raw and12 Xlib
+values per variant in summary.json. Do not substitute Root's15% local gain
+for whole-system acceptance. Kernel-byte identity does not guarantee that a
+user-level memory-path change has no messaging-performance consequences.
+
+Candidate source and tests are saved privately. Revert ONLY our two function
+hunks and adapter additions, preserving all previous dirty-worktree work.
+Rollback tests11457 pass109,2 host microbenchmarks ignored. Rebuild32500 ends0
+and reproduces exact normal Alter953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e.
+Production file_io/main have no diff; the prior guest-view implementation and
+tests are restored. A9N is clean/unbuilt, API/version unchanged. No disabled
+experimental cache flag or unmeasured cache-policy workaround is retained.
+
+Next measure read-view grants/releases and their elapsed contribution during
+the actual raw phase, alongside timing/initial GUI work. Read-cache pressure,
+layout effects or phase-shifted background painting are HYPOTHESES, not
+findings. Do not add cache slots, invalidate memory on file-close, bypass POSIX
+or alter Kernel/IPC paths from those suspicions. The original fully painted,
+input-responsive100ms requirement remains; a ping is not its replacement.
+
+### Closure
+
+Final hash35997 ends0: all16 expected current/accepted media and binary entries
+match, including exact restored build output. Nine VM evidence directories
+byte-compare; ten elevated exact-directory lsof checks empty. Cleanup ends0:
+four diagnostic images and nine duplicate VM directories removed. Directory
+usage1194928->28200KiB is logical accounting, not physical APFS recovery.
+Re-parsing copied evidence after cleanup yields byte-identical summary.
+Accepted118/107, official inputs, original/current build caches, candidate
+sources/binary and negative evidence remain. Remove only the extra host-test
+cache created this turn after birth-time/size/cache-tag/process/open-file checks;
+its224372KiB is reproducible build output, not source or unique evidence.
+
+## Cycle 159: Communication view churn is absent but the probe control fails
+
+Apply Rob Pike's rules to158's rejected candidate: cache pressure, repeated
+mapping and phase-shifted painting are hypotheses, not elapsed attribution.
+Do not retain a source-level speed hack or change a gate to achieve5%.
+Evidence `/private/tmp/nanami-opt-cycle159.D3YZtN/`: predeclared ACCEPTANCE.md,
+private source overlays/Cargo manifest, native binaries, C/Rust/Python models,
+freeze/admission hashes,12 boot logs/evidence, summary.json and closure checks.
+No production, Kernel, public ABI, version or IPC-fastpath change in this cycle.
+Normal cached Alter stays exact953f; rejected candidate3aac remains private.
+
+### Measurement, scope and controls
+
+Use normal-before/after953f/3aac plus private before/after02f061/32f002. Private
+Alter wraps actual read/write-window lookup-copy, nested read/write grants,
+mapping release and guest_memory checked fallbacks with fixed atomic rows.
+No allocation/per-event UART. Release owner is unknown; numeric actors41/33/42
+are not automatically application identities. Direct checked-copy calls outside
+guest_memory (notably baseline POSIX scalar write in file_io) are NOT covered.
+Do not turn empty fallback rows into a claim of no Alpha memory reads.
+
+Observer41 controls six scopes with private calls0x7ffe AFTER each8warmups and
+BEFORE the original start clock; stop AFTER the original end clock. No added
+control syscall inside timed loops, no guest-memory phase tags, no new
+fault-metadata decoding except those private observer calls. Native fault
+replies still use the existing continuation. Six original raw128x3/Xlib128x3
+protocol intervals and2s settle remain unchanged. Fixed count mode reads no
+clock; timed mode uses existing fenced local counter with two same-actor HPET
+calibration brackets per phase, width<=1%. No cross-core subtraction or
+assumed ticks=ns. Reject missing/duplicate/misordered/overflowed rows, bad
+scope/calibration or parent totals exceeding native scope. Parent lookup-copy
+contains nested grant/release: never sum both. Inclusive elapsed is neither
+exclusive CPU nor pure IPC. Page-alias bytes differ from payload bytes.
+
+Query0x7fff is read-only/bounded/observer-only after all original gates; a single
+native relay emits the report. These calls exist only in private Alter, not
+Kernel/public ABI. None mode never issues them. Complete six-phase metadata
+and nonzero parent rows distinguish valid zero-grant scopes from disabled
+measurement. Common observerbf0322/client134aa8/auditor3d99/native relayf06dbb;
+same normal Alpha96bc/initba776/POSIXc954/Kernel312d/services55c1 and unchanged
+upstream application/library ELFs. Common probes mean not fully uninstrumented
+absolute launch. Native diagnostic builds81541/6719 finish0, no Kernel build.
+The initial private build's missing mut iterator binding is fixed before either
+frozen binary. Six Rust models serial, full C protocol/control/report fixture
+normal and ASan/UBSan, six Python parser tests pass. Correct two faulty C model
+error-state fixtures and one Python invalid-value expectation before freezing;
+do not claim the initial failing models validated the probe.
+
+Freeze70270 and admission both finish0. Four frozen pairs:
+normal-before039b72/b1f5f4, private-before55a51a/8583bc,
+normal-after2c0a1d/ff03a3, private-after460805/2a9de0.
+Fresh12boot order nb1,cb1,rb1,na1,ca1,ra1,ra2,ca2,na2,rb2,cb2,nb2;
+n=normal/no profiler, c=private/count, r=private/timed; b/a=before/after.
+Same4CPU/4GiB/default TCG/devices, original10s settle. No own edits/builds/
+tests/hashes/heavy inventory while a measured VM lives; one VM at a time.
+Cohort3963 ends0:12/12 original identity/nonce/ping, all raw/Xlib batches,
+loader/auditor/coarse/Root and added view reports validate. Save every run.
+
+### Results and decision
+
+Before using costs quantitatively, predeclare absolute<=5% count/read-versus-
+normal differences for each implementation's pooled raw/Xlib medians and
+whole/Root means. Two boots per condition are not exact probe tax or confidence.
+
+| Observed metric | Before normal/count/timed | After normal/count/timed |
+| --- | ---: | ---: |
+| Mean click-to-ping ms |2229.9469165 /2186.9566875 /2186.3791665|2120.6989375 /2131.616604 /2117.212229|
+| Mean Root ms |516.9475 /521.9435 /521.8230|448.9630 /447.3015 /447.7985|
+| Pooled raw128 median ms |28.8895 /27.1530 /27.8705|30.1870 /30.8735 /30.2380|
+| Pooled Xlib128 median ms |66.7450 /66.8515 /64.4220|62.9475 /65.4360 /64.5875|
+
+Before count-only raw differs-6.010834%, FAILING the absolute5% gate. A negative
+difference is not free instrumentation or a speedup. Before timed raw/Xlib
+differ-3.527/-3.480%; after count raw/Xlib+2.274/+3.953%, timed+0.169/+2.605%.
+Whole/Root differences stay within5%, which does not excuse the failed raw
+control. The global quantitative gate fails: do NOT use the converted operation
+durations to claim a precise cost share, causal slowdown, absence of all other
+memory costs, or a new optimization target. Normal versus private ELF layout/
+inactive instrumentation and activation costs remain confounded. Retain raw
+timing rows as diagnostic observations, not accepted elapsed attribution.
+
+All48 complete count/timed phases contain192 nonzero read/write-window parent
+rows, zero errors, and ZERO read grants, write grants or mapping releases.
+Both implementations and both repetitions show this, with actual parent
+activity/phase coverage. This does not support repeated view mapping INSIDE
+these communication intervals. It does NOT exclude pre-interval cache state,
+hardware-cache effects, background work or unwrapped direct checked copies.
+Do not increase cache capacity, invent close-time invalidation, bypass providers
+or change Kernel on that unsupported churn hypothesis.
+
+No new speedup accepted. Candidate158 stays rejected/restored; this diagnostic
+cohort is not permission to replace its failed acceptance gate post hoc. Before
+relying on timing or re-evaluating a candidate, isolate activation from ELF
+layout/inactive instrumentation using the SAME private ELF unarmed/count/timed
+with original gates preserved. Do not merely repeat this confounded comparison
+until it passes, or spend another optimization cycle on zero in-scope grants.
+The100ms fully painted/input-responsive objective remains active/unachieved;
+ping and valid diagnostic output do not satisfy it.
+
+### Closure
+
+Final hash93923 ends0:43 identities match, including frozen diagnostic inputs,
+normal build and accepted118/107. QEMU/controller process tree is reaped;
+protected unrelated Python daemons untouched. Twelve evidence copies byte-
+compare, thirteen elevated exact-directory lsof checks empty. Cleanup ends0:
+eight diagnostic images and12 duplicate VM log directories removed. Directory
+accounting2382012->48556KiB is logical, not physical APFS recovery. Summary
+re-parses byte-identically from copied evidence after deletion. Preserve
+accepted media, official inputs, current build cache, sources and small proof.
+
+## Cycle 160: Identical-ELF control validates timing and rejects lookup-copy tuning
+
+159 is progress, not a successful optimization: in-scope mapping churn absent,
+but its before count-only raw control differs-6.01% from NORMAL and fails the
+absolute5% probe gate. Layout/inactive instrumentation versus activation remain
+confounded. Do not repeat that comparison until favorable or invent a cache
+policy.160 changes the experiment, not production, Kernel or acceptance gates.
+Evidence `/private/tmp/nanami-opt-cycle160.iL4cqq/`: predeclared ACCEPTANCE.md,
+package/controller recipe, frozen/admission identities, model logs, nine boot
+logs/evidence, summary/costs JSON and closure checks. Source/binaries/parsers
+from159 are reused unchanged. Candidate158 stays rejected; normal Alter953f.
+
+### Same bytes, different activation
+
+One private-before Alter02f061 and ONE image9bc57b/rootfsbd9019 in every boot.
+Same observerbf0322/client134aa8/auditor3d99/relayf06dbb, normal Alpha96bc/
+initba776/POSIXc954/Kernel312d/services55c1 and upstream app/library ELFs.
+No new build, no public ABI/version or native-fastpath change. Mode marker
+alone selects unarmed/count/timed. None skips private arm/stop/readout; count
+activates rows without clocks; timed uses existing fenced counter and two
+local HPET rate brackets per phase. Same ELF removes between-build layout
+as a treatment difference, NOT every probe effect: private controls outside
+timed loops still differ, so this is activation/protocol cost, not just the
+price of a counter instruction. Startup/Root finish BEFORE activation and
+their differences are no-treatment stability checks, not activation overhead.
+
+Keep original identity/nonce/dock-click/ping, three raw128/three Xlib128,
+eight warmups per sample,2s RTT settle,10s GUI settle, loader/auditor/Root
+probes,100ms native/10ms host polling. Same4CPU/4GiB/default TCG/devices.
+Fresh9boot Latin-block order off1,count1,read1,count2,read2,off2,read3,off3,count3
+(ABC,BCA,CAB). Three boots per mode, NOT nine independent boots merely because
+each contributes three batches. No own edits/builds/tests/hashes/heavy inventory
+while a measured VM lives; one VM at a time. Follow live handle87751 to exit0.
+Original and report gates pass9/9; all metadata/calibration/coverage validate.
+
+Pre-run reused six Rust models serial, full C observer ASan/UBSan fixture,
+six view-parser tests and four new aggregation tests pass. Afterward two
+derived-cost tests validate gate rejection and upper-bound-only interpretation.
+Package26143/admission82888 finish0; no source/criteria change during runs.
+Native source inspection additionally confirms main's FaultContinue already
+calls service_fault_continue_receive_event, which retains combined Reply-
+Receive absent a deferred notification. Preserve the pending-notification
+completion path; do not invent an unmeasured split-call optimization.
+
+### Timing calibration passes, but the path does not dominate
+
+Predeclared absolute<=5% count/timed-versus-unarmed differences: pooled raw/
+Xlib medians and whole/Root means. Report release-ACK as well, not a substitute.
+
+| Metric | Unarmed | Count | Timed |
+| --- | ---: | ---: | ---: |
+| Mean click-to-ping ms |2194.212153|2210.068736|2186.939986|
+| Mean release-ACK-to-ping ms |2086.201819|2106.159764|2076.862903|
+| Mean Root ms |528.937000|531.663000|524.937333|
+| Pooled raw128 median ms |29.284|29.856|29.751|
+| Pooled Xlib128 median ms |63.149|64.601|65.315|
+
+Count raw/Xlib differences+1.953/+2.299%; timed+1.595/+3.430%. Whole count/
+timed+0.723/-0.331%, Root+0.515/-0.756%. All predeclared gates pass. This is
+a bounded group observation, not exact tax, confidence, proof layout caused
+159's failure, or proof the uninstrumented production binary has identical costs.
+Never retroactively erase159's failed gate or use this diagnostic cohort to
+accept158's failed normal-release trial.
+
+All36 complete count/timed scopes contain144 nonzero read/write-window rows,
+zero errors and ZERO read grants/write grants/releases; only operations0/2.
+Preserve159's limits: checked fallback rows omit direct callers outside
+guest_memory, release owner unknown, numeric actors not inferred applications.
+Measured parent spans start AFTER logical ownership/process checks and cover
+window lookup/copy, not all memory handling or all Alpha operations. Nested
+grant/release would be inside the parent, not additive; none occur here.
+
+In18 timed scopes the native active interval brackets BOTH original client
+clock calls, thus slightly exceeds each client interval. Scoped parent totals
+include some timestamp-output copying outside that interval. Divide their
+calibrated UPPER bounds by original client durations only as upper bounds on
+that covered in-interval work, not exact shares or critical-path lower bounds.
+Maximum raw upper bound4.542569%, Xlib4.271012% (round UP to4.55/4.28%). Scoped
+parent totals range about0.708--1.922ms raw and2.431--2.901ms Xlib. These are
+inclusive wall spans, not exclusive CPU/pure IPC, universal future limits or
+whole-startup attribution. Do not convert them into a rigorous speedup bound
+under arbitrary scheduling/parallel side effects.
+
+Rob Pike decision: this covered warm communication lookup-copy component does
+NOT dominate. Stop tuning it; no cache growth/invalidation, provider bypass,
+new zero-copy policy or Kernel edit. Do not chase another microbenchmark to
+meet5%. No optimization accepted this cycle. Full100ms paint/input readiness
+remains unproven; goal active/unachieved, not redefined as passing ping/probes.
+
+Next return to the measured COLD Root write path from157 (1228 POSIX writes,
+18686bytes, about150ms including source/provider). Kind alone does not identify
+the destination; LinuxFile has numeric handles, not a path. Identify Linux FD,
+POSIX description and reuse/open/dup/close lifetime using existing resolved
+metadata and bounded private bookkeeping, without per-write filesystem lookup
+or payload UART. Determine which actual destinations account for elapsed time
+before selecting a new change. Do not assume the writes are X11 traffic,
+warnings, registry output, /dev/null or any specific file from counts alone.
+
+### Closure
+
+Final hash86010 finishes0:46 identities match, including frozen inputs, normal
+build and accepted118/107. QEMU/controller reaped; unrelated Python daemons
+untouched. Nine evidence copies byte-compare; ten elevated exact-directory
+lsof checks empty. Cleanup ends0: diagnostic pair and nine duplicate VM dirs
+removed, logical directory accounting593900->10536KiB, NOT physical APFS
+recovery. Summary and cost reports reparse byte-identically after deletion.
+Preserve official inputs, accepted media, current build cache,159 sources/
+binaries and this small proof. Kernel remains clean/unbuilt.
+
+## Cycle 161: Root writes target one configuration file but the global timing gate fails
+
+160 is progress: same-ELF controls pass and covered warm lookup-copy does not
+dominate. Stop tuning that warm path. Return to157's measured cold Root writes,
+not an imagined memcpy/IPC bottleneck.161 identifies their actual descriptor
+and saved OPEN path. Evidence `/private/tmp/nanami-opt-cycle161.WJcNpj/`:
+predeclared ACCEPTANCE.md, private client/Alter sources and manifests, model
+logs, frozen/admission identities, pilot/nine cohort boot logs/evidence,
+summary.json and closure checks. No production, Kernel, public ABI, version
+or native-fastpath change. Normal cached Alter953f;158 remains rejected.
+
+### Bounded identity tracking without new IPC
+
+Private nanami-client facade reexports the real client and forwards the SAME
+attach/open/open-mode/dup/dup2/close calls/results. Capture existing owned SHM
+path before open IPC can reuse it, publish only successful opens; no new
+filesystem lookup, fstat, guest-memory RPC or payload UART. Success-close clears
+the binding, reuse receives a fresh monotonic trace ID, dup aliases preserve
+description ID/path. Failed operations retain their original result and
+observed binding. Unknown inherited/native descriptions are opaque/unnamed.
+These are diagnostic description IDs, NOT Kernel object IDs, capabilities or
+inode numbers. Do not equate separate opens/VMs by the number or pathname.
+
+Fixed32-provider-FD table matches existing POSIX MAX_FDS; guest FDs tracked
+separately. Atomic data is used on the serialized native Alter actor, not
+concurrently from managed guests. Bounds/overflow invalidate diagnostics,
+never substitute an operation result. Root-only256-row ledger caches each
+guest FD/provider/description binding and copies its saved path once. Existing
+write-kind and new FD bins use the SAME timestamp deltas, not two clock reads.
+Require exact calls/bytes/ticks/errors sums and max-of-maxima per stage,
+parent containment and complete native syscall/kind coverage. The kind bins
+are independent accounting bins, not a second independent timing instrument.
+Retain logical permissions, pin/generation/quarantine, read/copy fallbacks,
+normal file ordering/offset/error behavior and provider ownership.
+
+Observer41 configures0x7ffe once before READY in ALL modes. Existing restored
+Root42 PR_SET_NAME tags start/stop157's all-event/Root/write decomposition only
+when policy permits. None leaves counters unarmed; control has no clocks;
+read uses existing fenced local counter and same-actor HPET rate brackets.
+0x7fff readout remains observer-only/post-original-gates/single-relay. Paths
+travel as nonnegative seven-byte words then hex, not raw control characters.
+Diagnostic numbers exist only in private Alter, not Kernel/public ABI.
+
+19 serial Root/FD/metadata Rust models pass; the eight-test facade suite
+(including five repeated metadata tests) verifies exact arguments/results,
+one upstream call per operation, failed operation behavior, SHM capture before
+reuse and alias/reuse. Five Python FD-parser tests, two aggregation tests
+including exact+/-5% boundary cases, C readout normal/ASan/UBSan pass. Keep
+failure history: malformed initial apply_patch applied NOTHING; first private
+build rejects nested workspace roots, corrected before successful v2/v3/v4
+Release builds. No stale test/binary pass is used as proof of a failed build.
+New production code is not shipped; all instrumentation lives privately.
+
+### Fixed cohort and observations
+
+Package53891/admission37695 finish0. One frozen image745f73/rootfs314791,
+private Alterb1e0d5/observer8aa22e; common Alpha96bc/initba776/POSIXc954,
+Kernel312d/services55c1/client134aa8/auditor3d99/relayf06dbb. Same upstream
+apps/libraries. Separate4CPU read pilot42954 ends0, all original/FD gates pass.
+Its1228writes/18686bytes target one named description; its~180ms converted
+write observation is preserved, not used as a quantitative cohort sample.
+
+Nine NEW boots, predeclared off1,count1,read1,count2,read2,off2,read3,off3,count3
+Latin blocks, ONE identical private ELF/image.4CPU/4GiB/default TCG/devices,
+10s GUI/2s RTT settle, eight warmups/sample, raw128x3/Xlib128x3, common
+loader/auditor/coarse/Root probes,100ms native/10ms host polling. No own edits/
+builds/tests/hashes/heavy inventory while measured VMs live; one VM at a time.
+Cohort44097 ends0:9/9 original identity/nonce/ping/RTT and complete reports pass.
+
+Each of SIX count/read cohort boots has exactly ONE FD record: guest FD4,
+provider FD15, saved OPEN path:
+
+`/alter/linux/tinycore/rootfs/root/.config/xfe/xferc_42`
+
+In the fixture guest namespace this is `/root/.config/xfe/xferc_42`. Each
+record contains ALL1228calls/18686bytes, zero errors, all source/provider
+counts/bytes matching. No unknown destination, extra descriptor row or lost
+sample. Trace ID883/884 differs across boots; no cross-boot identity inference.
+This establishes where the observed POSIX writes went. It does NOT prove
+current filename after rename/unlink, inode equality across opens, persistence
+semantics, device type or any particular high-level FOX function solely from
+the name. Do not infer they are X11 traffic, warnings or /dev/null.
+
+### Global timing gate FAILS: do not promote the new cost rows
+
+Predeclare absolute<=5% count/read-versus-unarmed differences for whole/Root
+means and pooled raw/Xlib medians. Three boots per mode are not nine independent
+boots or exact tax/confidence. All modes retain fixed metadata bookkeeping,
+so there is no normal-production-versus-facade overhead inference.
+
+| Metric | Unarmed | Count | Timed |
+| --- | ---: | ---: | ---: |
+| Mean click-to-ping ms |2157.980333|2144.417472|2150.402097|
+| Mean release-ACK-to-ping ms |2054.024750|2039.086917|2046.040764|
+| Mean Root ms |514.204667|522.878000|521.767333|
+| Pooled raw128 median ms |28.071|25.052|29.215|
+| Pooled Xlib128 median ms |61.839|61.066|61.473|
+
+Count raw differs-10.754872%, FAIL. Read raw+4.075380%; Xlib count/read
+-1.250020/-0.591860%. Whole-0.628498/-0.351173%, Root+1.686747/+1.470750%
+remain within5%, which does NOT excuse the failed global gate. The Root scope
+has already stopped before RTT, so do not label the faster count group exact
+clock overhead or a10.75% IPC gain. Prior state/post-Root work, phase effects,
+JIT/scheduling and ordinary variance remain unproven explanations.
+
+Keep read raw parent ticks149174000/149246000/149510000 and calibrated source/
+provider rows in summary as diagnostic observations, not newly accepted elapsed
+attribution. Do not silently relax to only the favorable local/whole criteria,
+discard count3 or retry until a passing cohort appears. None of this accepts
+158's rejected normal-release tradeoff or establishes5% optimization progress.
+The useful new evidence is complete, named descriptor/lifetime coverage.
+
+### Next bounded trial, not a new timing claim
+
+Use previously valid157's source/provider decomposition (~73/~75ms), plus161's
+destination/accounting evidence, to consider a GENERIC scalar POSIX write-input
+call-site trial. The existing typed copyin_owned helper already validates logical
+permissions, uses bounded RAM leases and retains one checked fallback for large/
+unsupported inputs. Validate the existing manager-owned POSIX buffer's mutable
+slice preconditions/lifetime and try that helper ONLY at the scalar call site.
+Unlike158, do not expand the global scratch-ownership predicate or change warm
+AF_UNIX/header helpers. Do not add a filename fastpath, skip/preseed config
+persistence, buffer unacknowledged writes, reorder/retry operations or bypass
+POSIX. Preserve sealed guests, COW, SMP ACKs and uncertain-PTE quarantine.
+
+This is a selected experiment, not proof it is safe/faster or guaranteed5%:
+157's source half alone is roughly3.3% of whole launch. Implement only with
+proportionate ownership/protection/fallback tests and actual file-mapping
+regression, then normal-release balanced before/after original launch/RTT
+gates. No microbenchmark, private-profiler or local Root result substitutes for
+whole-system acceptance. Kernel untouched. Full100ms paint/input readiness
+and overall goal remain active/unachieved.
+
+### Closure
+
+Final hash80647 ends0:82 identities match, including private sources/frozen
+media, normal build and accepted118/107. QEMU/controller reaped; protected
+unrelated Python daemons untouched. Ten VM copies byte-compare; eleven elevated
+exact-directory lsof checks empty. Cleanup ends0: diagnostic pair and ten
+duplicate VM dirs removed, logical directory accounting599476->16112KiB,
+NOT physical APFS recovery. Reparse copied evidence after deletion yields
+byte-identical summary. Keep official inputs, accepted media, current build
+cache, private source/binary and small proof. Kernel clean/unbuilt.
+
+## Cycle 162: withdraw the small write-input trial under the dominance rule
+
+The user's explicit Rob Pike instruction is the selection gate, not merely a
+requirement to benchmark a speculative change afterwards. Valid157 attributes
+roughly73ms to source-read in a roughly2.18s launch: about3.3%, not a component
+overwhelming the rest. Even removing that measured interval entirely cannot by
+itself establish the5% whole-launch target.161 names the destination but its
+failed global timing gate provides no stronger quantitative selection evidence.
+
+Withdraw the scalar POSIX write-input copyin_owned call-site experiment and its
+new scalar-write regression helper before a runtime build, image or VM test.
+Restore ONLY those new edits; preserve earlier file-mapping tests and all other
+ongoing work. Keep withdrawn source and the unvalidated standalone C executable
+in `/private/tmp/nanami-opt-cycle162.wcJHUk` as small historical evidence, not a
+passing test or usable fixture. Its open flags also omitted O_CREAT; compilation
+alone would not establish the regression test's validity.
+
+Verification: production file_io.rs matches its original tracked contents;
+cached normal Alter is still
+`953f319b8722d3d99fa4093abcab8e98938cff5b724b36c502785ab819f2049e`.
+No Kernel/runtime build or VM measurement is performed, no media is generated,
+and no new optimization or speedup is accepted. Continue by measuring dominant
+intervals in actual launch, including paint/input readiness, before choosing a
+code change. Original overall goal remains active and unachieved.
+
+## Cycle 163: first ping precedes visible completion and later real input works
+
+Evidence: `/private/tmp/nanami-opt-cycle163.Ea1FmV`. Previous162 is progress:
+withdraw an unbuilt small write-input speed hack under the dominance rule.
+This cycle changes no production runtime, Kernel, public ABI, upstream app/
+library, version or accepted image. No Rust/Kernel build. Ordinary Alter953f,
+Alpha96bc/initba776/POSIXc954 and original Kernel312d/services55c1 remain.
+
+Fix the measurement scope before choosing more speed changes. Reuse original
+Files dock-click/identity/nonce-ping/three raw128/three Xlib128/report gates.
+One frozen normal pairfe7d62/931cc7, corrected native relayf06dbb, common
+observerefaddd/preload134aa8/auditor3d99. Four NEW baseline1/timeline1/timeline2/
+baseline2 boots,4CPU/4GiB/default TCG/normal devices,10s GUI/2s RTT settle.
+No own edits/builds/tests/hashes/heavy inventory overlaps measured VMs.
+
+Only timeline boots add after-ping screenshots at requested200/500/1000/2000/
+4000/8000ms, then real keyboard Ctrl-L/Ctrl-A,/usr/local,Enter and a later
+screenshot. Record actual capture apertures, not requested delay as completion.
+Capture/input intervenes and overlaps RTT; those samples cannot establish
+normal-path timing attribution, probe tax or a gain. Native100ms/host10ms
+polling remains; coarse screenshots do not prove100ms full readiness.
+
+Package65315/preflight72181/cohort99379 finish0. All original gates pass4/4.
+Six timeline-parser tests cover ordering/duplicate/missing/name/input/actual
+versus requested time; original158 serial parser admission passes. Preserve
+all observations, including slower baseline2 and larger RTTs. No rerun-to-pass.
+
+| Trial | Click-to-ping ms | Release-ACK-to-ping ms |
+| --- | ---: | ---: |
+| baseline1 |2205.262959|2103.193292|
+| timeline1 |2233.060458|2127.992875|
+| timeline2 |2167.233792|2063.764667|
+| baseline2 |2368.872167|2263.784875|
+
+Cold mean2287.067563 vs2200.147125ms (-3.800519%) passes the PREDECLARED cold
+stability gate only. No speed change occurred; two boots/mode and common probes
+are not equivalence, exact tax or confidence. Do not claim a3.8% optimization.
+
+Visually inspect all18 actual screenshots. All four initial post-ping images
+retain large stale/unpainted client areas; original runner does not print this
+initial capture aperture, so do not invent one from ping time. Timeline1's
+200ms-request frame2433.525--2487.838ms after press shows menus/tree/list but
+status0;500ms-request2737.141--2791.784ms shows723-byte status as well.
+Timeline2's200ms-request2367.379--2475.504ms still has blank right panel and
+overlapping menu text;500ms-request2668.374--2723.694ms shows menus/tree/list/
+723-byte status. Later1/2/4/8s-request images retain these visible components.
+These are captured states, NOT exact first-full-paint or all-work-complete times.
+
+Both later keyboard-challenge images show Xfe title/location/tree selecting
+/usr/local and its bin/etc/lib/sbin/share/tce.installed list. This verifies
+meaningful later input handling, NOT startup input-ready latency. Injection
+itself includes per-key sleeps. Preserve all actual timestamp bounds in summary.
+Do not infer guest CPU quiescence from unchanged pictures or normal-runtime
+paint guarantees from these intervened captures.
+
+Setup record: attempted absent resource_analyze.py copy fails before packaging;
+actual startup/audit/base imports pass admission. Optional debugfs rootfs dumps
+for embedded fb/ext2/ahci report absent and are NOT successful driver checks.
+Exact init/Kernel and actual Honoka22b242/Xfe/FOX comparisons supply provenance.
+
+Next keep visual/input completion in end-to-end acceptance and establish a
+dominant actual launch component before selecting a change. The first-ping
+metric is insufficient; the large initial scope is not itself a causal function.
+No optimization is selected from the smaller paint/status observations. No5%
+gain,100ms readiness or goal completion; Kernel remains clean/unbuilt.
+
+Final hash65997 ends0:38 identities match, including frozen media/helpers,
+normal Alter and accepted118/107. Terminal QEMU/controller, final PS finds no
+relevant jobs; five elevated exact-directory lsof checks empty. Four VM evidence
+copies byte-compare. Delete only two diagnostic media/four redundant VM dirs:
+logical usage605792->22428KiB, not physical APFS recovery. Reanalysis from copied
+proof is byte-identical and all six parser tests pass again. Accepted118/107,
+official inputs, current build cache and small proof remain.
+
+## Cycle 164: syscall pairing prototype validates observed coverage, not runtime costs
+
+Evidence: `/private/tmp/nanami-opt-cycle164.nBhoyC`. Previous163 is progress:
+first ping precedes visible completion, and later real input works. Continue
+measurement, not a small-helper speed hack. No production/runtime/Kernel/ABI/
+version or original application/library change; no Rust/Kernel build or image
+promotion. Default Alter953f and accepted118/107 remain.
+
+Private host QEMU system-emulation plugin pairs user syscall entries with the
+next user TB at exact CR3+PC+2. Negative native A9N calls ignored. Fixed32768
+rows/128 AS, per-vCPU handles/buffers, opaque zero handles valid. No Kernel/
+IRQ/IRET/SYSRET trace, guest write, all-TB timing or arbitrary-thread register
+read. Predetermined ELF syscall-return page offsets admit a return TB translated
+before the entry TB. Count mode has no hot-loop clocks; timed mode takes host
+mach_absolute_time apertures. Socket stamps fall inside Python host brackets.
+Elapsed round trips include providers/descheduling/other probes, not pure IPC,
+Kernel CPU or transport. No guessed-cost subtraction.
+
+Six ledger groups/five adapter groups pass normal and ASan/UBSan; six fixture
+parser tests and five actual-pilot parser tests pass. Exact/wrong identity/PC,
+duplicate returns, exec/exit/open/replacement, capacity, clocks, offset flags,
+errno, missing/failed/zero registers and prior return translation are covered.
+Build38160/adapter72086/final adapter46614 end0. Preserve v1/v2 off installation
+failures before guest execution: added errno log proves sandbox AF_UNIX bind
+EPERM. Approved v3 SAME v2 plugin succeeds; owning51309 ends0, three VMs reaped.
+
+Retained official Linux6.18.35 plus known freestanding fixture: off records0;
+count76/time77 total rows, both EXACT69 marked calls (prctl begin,65 getpid,
+ENOSYS999999,20ms nanosleep,prctl end), all paired with correct results/PID82.
+Known sleep aperture21.907334--21.908833ms validates correctness, NOT overhead,
+a real startup bottleneck or speedup.
+
+Package38979/mask93223/admission75183/pilot63390 end0. One NEW actual Files
+pilot: normal4CPU/4GiB/default TCG/devices,10s GUI/2s RTT, normal runtime and
+common observer/preload/launcher. All original identity/nonce/ping/raw128/
+Xlib128/report gates pass. No own heavy work while live. Collector begins
+before press, ends after observed ping, dumps only after original gates.
+Later screenshots/input also follow those gates, not the RTT interval.
+
+Instrumented pilot click3310.111292ms/release-ACK3208.719792ms. Raw128
+43.024/27.301/24.733ms; Xlib12864.352/63.316/66.233ms. Preserve these values;
+cross-cycle controls cannot establish exact probe tax. NO matched perturbation
+cohort has run: do not promote syscall elapsed subtotals/percentages.
+
+Trace11660 rows/eight AS, no global read/capacity/clock failure. Current Files
+AS0x136cc1000 has7771 observed entries:7770 exact returns inside press/ping,
+one OPEN writev20, no recorded uncovered offset/pairing errors, all pairs
+CPU2->2. Eight getpid42 results, Root.read tag and early tid42 setup identify
+this image. Earlier AS0x136cc0000 also returns42 and has88 pairs plus OPEN
+execve59 before the new image's brk/mmap/arch_prctl/tid setup. Do not merge
+epochs or treat CR3 as eternal process/thread identity. AS0x13a070000 has194
+unexplained replacements; signals/shared VM/lifetime/other cause is UNPROVEN.
+Never label it Xfbdev/Kernel/IPC failure or sum overlapping AS durations.
+
+View actual initial/post-gate/input images: initial client unpainted; later
+root menus/tree/list/723-byte status and/usr/local navigation visible. Nominal
+200ms request actually captures6001.779--6055.837ms after press because original
+gates already ran; input image13865.705--13920.877ms. Actual apertures, not early
+readiness, exact completion or delay-based PASS. Preserve the original100ms
+fully painted/input-ready objective.
+
+Admission gap: prototype hooks unprefixed0f05 only. Zero uncovered flags mean
+RECORDED rows, not proof no prefixed syscall escaped. Add executed unsupported-
+instruction guarding/decoded-ELF validation and resolve scope/AS/thread lifetime
+limits BEFORE cost claims. Then predeclare matched no-plugin/loaded-off/count/
+timed original whole/raw/Xlib<=5% perturbation rejection plus visual/input
+evidence. A known fixture or coverage-valid actor does not prove low tax or a
+dominant normal-runtime component. No optimization selected,5% gain,100ms
+completion or goal completion; full goal active. Preserve an exploratory CSV
+entry_cpu/entry-cpu KeyError and its corrected command, not its partial output
+as a passing analyzer. Kernel remains clean/unbuilt.
+
+Final hash26217 ends0:45 identities match (including v1 snapshots/v2 plugin,
+fixture, frozen media/helpers, normal Alter and accepted118/107). Final PS has
+no relevant jobs; two elevated exact-directory lsof checks empty. Pilot evidence
+copy byte-compares. Remove only diagnostic pair/generated initramfs/duplicate
+VM directory: logical usage609812->22812KiB, not physical APFS recovery.
+Copied-proof reanalysis is byte-identical; five workload parser tests pass again.
+Keep official inputs, accepted118/107, current cache and small proof.
+
+## Cycle 165: reject the syscall profiler after matched perturbation controls
+
+Evidence: `/private/tmp/nanami-opt-cycle165.dsKDNP`. Previous164 is progress
+on observed syscall pairing, NOT admitted costs. Follow the user's Rob Pike
+selection rule: no production speed change without a measured dominant actual
+workload component. Production runtime/Kernel/ABI/application/version unchanged;
+no Rust/Kernel build, image promotion or new accepted optimization.
+
+First improve private collector correctness: executed genuine prefixed SYSCALL
+invalidates count/time admission; native negative calls and inactive/off paths
+remain ignored. Instruction operands ending0f05 are not mistaken for opcodes.
+Decoded x86-64 ELF sites must map through a valid congruent LOAD to actual0f05
+bytes; unsupported prefixes reject the mask. Six ledger and six adapter groups
+pass normal/ASan/UBSan;13 Python fixture/decoder/exact-Fraction gate tests pass,
+including after the cohort. A missing optional Pillow import after measurement
+does not pass or install anything; inspect16 actual images directly instead.
+
+Known Linux fixture: three new off/count/time VMs finish normally. Off records0;
+count/time each recover EXACT69 marked calls/results/PID82. Timed20ms sleep
+aperture23.798709--23.805000ms is correctness evidence, not normal probe tax.
+These controls do not establish universal AS/thread lifetime or workload cost.
+
+Before the actual cohort freeze ACCEPTANCE.md, plugin/masks/helpers and one
+normal image/rootfs pair e7f822/9bc54c. Use ordinary Alter953f, Alpha96bc,
+initba776/POSIXc954, original Kernel312d/services55c1 and corrected relayf06dbb.
+Eight fresh boots in fixed none1/off1/count1/time1/time2/count2/off2/none2 order;
+two boots/mode,4CPU/4GiB/default TCG/normal devices. No own edits/builds/tests/
+hashes/heavy inventory while measured VMs live. Owning session8250 finishes0;
+all original identity/nonce/ping/three raw128/three Xlib128/report gates pass8/8.
+All screenshots and real input are AFTER original gates, not inside their RTTs.
+
+Predeclare absolute5% comparison against no-plugin for EACH loaded-off/count/
+time mode and EACH whole click-to-ping mean/raw128 median/Xlib128 median.
+Use exact fractions at the gate; do not round a failure into acceptance.
+
+| Mode | Click-to-ping mean ms | Raw128 median ms | Xlib128 median ms |
+| --- | ---: | ---: | ---: |
+| No plugin |2292.1533125|31.6535|70.1795|
+| Loaded, recording off |2323.2506045|29.0820|65.8300|
+| Count only |3351.9398955|28.2750|66.8915|
+| Timed |3464.5267500|25.7795|62.9870|
+
+Whole shifts+1.356685%/+46.235414%/+51.147252%; raw shifts-8.123904%/
+-10.673385%/-18.557190%; Xlib shifts-6.197679%/-4.685129%/-10.248719%.
+GLOBAL GATE FAILS. Preserve all observations, including favorable RTT shifts;
+do not call them gains, exact instrumentation tax or six independent boots.
+Reject ALL normal-runtime syscall-cost attribution from this cohort. Do not
+calculate elapsed subtotals/rankings, subtract guessed overhead, relax limits,
+retry until passing, or infer a Kernel/IPC bottleneck from this trace.
+
+Recorded current Files image coverage passes in four armed runs (PID42,
+CPU2->2, no recorded uncovered/invalid rows). Other AS have200--233 unexplained
+replacements and are excluded, not identified as a failed service. Older same-
+PID exec AS remain separate. Coverage correctness does not rescue failed
+perturbation admission; no dominating component is established by this cycle.
+
+Directly view all eight original post-ping images: stale terminal/client areas
+remain. Directly view eight later keyboard-challenge images: actual Ctrl-L/
+Ctrl-A,/usr/local,Enter reaches the correct title/location/tree/folder list.
+These late functional observations do NOT establish exact first-full-paint,
+startup input-ready latency or100ms readiness. Keep actual capture/input bounds;
+requested delays are not completion times. No5% speedup or goal completion.
+
+Closure: final hash45302 ends0,40 identities match frozen inputs/current cache/
+accepted118/107. Final PS has no QEMU/controller; nine elevated exact-directory
+lsof checks empty. Eight VM backups byte-compare. Cleanup ends0: remove only
+two diagnostic media/generated initramfs/eight duplicate VM dirs. Logical root
+usage619512->32512KiB is not physical APFS recovery. Reanalysis from retained
+copies is byte-identical. Keep accepted media, official inputs, current cache,
+all raw observations/private sources and small proof. Kernel clean/unbuilt.

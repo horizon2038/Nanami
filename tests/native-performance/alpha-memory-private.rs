@@ -171,6 +171,20 @@ struct Alpha {
     invalidations: Vec<usize>,
 }
 impl Alpha {
+    fn read_process_memory_into_static_buffer(
+        &mut self,
+        _: usize,
+        address: usize,
+        bytes: usize,
+    ) -> Result<&'static [u8], CapabilityError> {
+        if address == 0 || bytes != 2 * core::mem::size_of::<Word>() {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        // Only test-owned native descriptor addresses are passed here. The
+        // production caller-memory walker has its own checked-copy regressions.
+        Ok(unsafe { core::slice::from_raw_parts(address as *const u8, bytes) })
+    }
+
     fn new() -> Self {
         KERNEL.with(|kernel| *kernel.borrow_mut() = Kernel::default());
         let mut processes = manager();
@@ -344,6 +358,232 @@ impl Alpha {
 }
 #[path = "../../nanami/src/nanami_core/alpha/memory_private.rs"]
 mod production;
+#[path = "../../nanami/src/nanami_core/alpha/memory_snapshot.rs"]
+mod snapshots;
+
+fn snapshot(a: &mut Alpha, pages: usize) -> usize {
+    let owner = a.processes.find_entry_by_pid(4).unwrap();
+    a.processes
+        .install_process(
+            4,
+            owner.reaper_pid,
+            owner.root_slot,
+            owner.root_node,
+            owner.pcb,
+            owner.address_space,
+            owner.os_port,
+            owner.os_port_identifier,
+            owner.affinity,
+            owner.next_frame_slot,
+            owner.user_heap_next_va,
+            owner.user_heap_limit_va,
+        )
+        .unwrap();
+    let r = a
+        .processes
+        .reserve_shared_memory(4, pages, PROCESS_FRAME_TOTAL_PAGES)
+        .unwrap();
+    let mut first = 0;
+    for offset in 0..pages {
+        let slot = r.start_slot + offset;
+        let physical = a
+            .memory
+            .allocate_process_frame(
+                process_frame_chunk_descriptor(owner.root_node, slot / 512),
+                9,
+                slot % 512,
+            )
+            .unwrap();
+        if offset == 0 {
+            first = physical;
+        }
+        assert_eq!(physical, first + offset);
+        KERNEL.with(|k| {
+            k.borrow_mut()
+                .physical
+                .get_mut(&physical)
+                .unwrap()
+                .fill(0x30 + offset as u8)
+        });
+        let va = r.base_va + offset * PAGE_SIZE;
+        let frame = process_frame_descriptor(owner.root_node, slot);
+        let vm = a.processes.vm_space_mut(4).unwrap();
+        vm.record_frame(va, frame).unwrap();
+        vm.set_permissions(va, 1);
+        arch::address_space::map(
+            owner.address_space,
+            frame,
+            va,
+            Attribute::from_bits(1).unwrap(),
+        )
+        .unwrap();
+    }
+    a.processes
+        .register_physical_allocation(4, r.base_va, r.start_slot, first, pages)
+        .unwrap();
+    r.base_va
+}
+
+#[test]
+fn native_snapshot_aliases_without_copy_and_private_detach_preserves_source() {
+    for pages in [1, 3] {
+        let mut a = Alpha::new();
+        let source = snapshot(&mut a, pages);
+        let before = KERNEL.with(|k| k.borrow().allocations);
+        a.map_process_private_snapshot(4, 1, source, 0x10000, pages * PAGE_SIZE, 5)
+            .unwrap();
+        // Repeated alias of an already canonical one-page source is valid too.
+        a.map_process_private_snapshot(4, 2, source, 0x20000, PAGE_SIZE, 1)
+            .unwrap();
+        assert_eq!(KERNEL.with(|k| k.borrow().allocations), before);
+        for offset in 0..pages {
+            let va = 0x10000 + offset * PAGE_SIZE;
+            assert_eq!(
+                a.physical(1, va),
+                a.physical(4, source + offset * PAGE_SIZE)
+            );
+            assert_eq!(a.byte(1, va), 0x30 + offset as u8);
+            assert_eq!(a.processes.vm_space_mut(1).unwrap().permissions(va), 5);
+        }
+        a.prepare(1, 0x10000, PAGE_SIZE, 1).unwrap();
+        let private = a.physical(1, 0x10000);
+        KERNEL.with(|k| k.borrow_mut().physical.get_mut(&private).unwrap()[0] = 0xaa);
+        assert_eq!(a.byte(4, source), 0x30);
+        assert_eq!(a.byte(2, 0x20000), 0x30);
+        assert_eq!(a.byte(1, 0x10000), 0xaa);
+    }
+}
+
+#[test]
+fn snapshot_alias_checks_owner_immutability_extent_and_destination() {
+    for invalid in 0..10 {
+        let mut a = Alpha::new();
+        let source = snapshot(&mut a, 3);
+        let mut caller = 4;
+        let mut target = 1;
+        let mut start = source;
+        let mut bytes = PAGE_SIZE;
+        let mut permissions = 1;
+        match invalid {
+            0 => caller = 3,
+            1 => target = 4,
+            2 => permissions = 3,
+            3 => permissions = 4,
+            4 => start += 1,
+            5 => bytes = 4 * PAGE_SIZE,
+            6 => a
+                .processes
+                .vm_space_mut(4)
+                .unwrap()
+                .set_permissions(source + 2 * PAGE_SIZE, 3),
+            7 => {
+                a.page(1, 0x10000, 0, 0);
+            }
+            8 => {
+                a.processes.seal_capabilities(4).unwrap();
+            }
+            _ => {
+                let allocation = a
+                    .processes
+                    .find_active_physical_allocation_reference(4, source, 3)
+                    .unwrap();
+                a.processes
+                    .register_physical_allocation(3, 0x80000, 0, allocation.base_page, 3)
+                    .unwrap();
+            }
+        }
+        let before = KERNEL.with(|k| {
+            (
+                k.borrow().allocations,
+                k.borrow().copies,
+                k.borrow().ptes.clone(),
+            )
+        });
+        assert!(a
+            .map_process_private_snapshot(caller, target, start, 0x10000, bytes, permissions)
+            .is_err());
+        KERNEL.with(|k| {
+            assert_eq!(
+                (
+                    k.borrow().allocations,
+                    k.borrow().copies,
+                    k.borrow().ptes.clone()
+                ),
+                before
+            )
+        });
+    }
+}
+
+#[test]
+fn snapshot_alias_failures_keep_possible_pte_and_physical_prefix_owned() {
+    for (after, copy) in [(false, false), (true, false), (false, true)] {
+        let mut a = Alpha::new();
+        let source = snapshot(&mut a, 3);
+        KERNEL.with(|k| {
+            let mut k = k.borrow_mut();
+            k.fail_map = usize::from(!copy);
+            k.fail_map_after_install = after;
+            k.fail_copy = copy;
+        });
+        assert!(a
+            .map_process_private_snapshot(4, 1, source, 0x10000, 3 * PAGE_SIZE, 1)
+            .is_err());
+        let allocation = a
+            .processes
+            .find_active_physical_allocation_reference(1, 0x10000, 1)
+            .unwrap();
+        assert_eq!(a.processes.physical_reference_count(allocation), 2);
+        assert!(a
+            .processes
+            .vm_space_mut(4)
+            .unwrap()
+            .private_page_shared(source));
+        KERNEL.with(|k| {
+            assert_eq!(k.borrow().physical.len(), 3);
+            assert_eq!(k.borrow().ptes.contains_key(&(501, 0x10000)), after);
+        });
+        // Before-MAP failures still retain the registered physical owner;
+        // after-MAP errors also retain the possible leaf for root rollback.
+        assert_eq!(
+            a.processes
+                .vm_space_mut(1)
+                .unwrap()
+                .find_frame(0x10000)
+                .is_some(),
+            !copy
+        );
+    }
+}
+
+#[test]
+fn snapshot_child_remains_forkable_and_private_after_native_source_retirement() {
+    let mut a = Alpha::new();
+    let source = snapshot(&mut a, 2);
+    a.map_process_private_snapshot(4, 1, source, 0x10000, 2 * PAGE_SIZE, 1)
+        .unwrap();
+    a.clone_process_vm_shared_readonly(1, 2).unwrap();
+    for offset in 0..2 {
+        let va = source + offset * PAGE_SIZE;
+        let (allocation, last) = a
+            .processes
+            .release_physical_allocation_reference(4, va, 1)
+            .unwrap();
+        assert!(!last);
+        let frame = process_frame_descriptor(304, allocation.start_slot);
+        arch::address_space::unmap(504, frame, va).unwrap();
+        arch::node::remove(
+            process_frame_chunk_descriptor(304, allocation.start_slot / 512),
+            allocation.start_slot % 512,
+        )
+        .unwrap();
+    }
+    assert_eq!(a.byte(1, 0x10000), 0x30);
+    assert_eq!(a.byte(2, 0x11000), 0x31);
+    a.prepare(2, 0x10000, 2 * PAGE_SIZE, 1).unwrap();
+    assert_ne!(a.physical(1, 0x10000), a.physical(2, 0x10000));
+    assert_eq!(a.byte(2, 0x11000), 0x31);
+}
 
 #[test]
 fn readonly_fork_shares_physical_backing_but_not_writable_or_prot_none() {
@@ -369,6 +609,39 @@ fn readonly_fork_shares_physical_backing_but_not_writable_or_prot_none() {
             (8, 2)
         )
     });
+}
+
+#[test]
+fn readonly_fork_and_private_detach_reject_uncertain_source_backing() {
+    let mut a = Alpha::new();
+    a.page(1, 0x1000, 0x51, 5);
+    a.processes
+        .vm_space_mut(1)
+        .unwrap()
+        .mark_mapping_uncertain(0x1000);
+    let before = KERNEL.with(|kernel| (kernel.borrow().allocations, kernel.borrow().copies));
+    assert_eq!(
+        a.clone_process_vm_shared_readonly(1, 2),
+        Err(CapabilityError::Fatal)
+    );
+    assert_eq!(
+        KERNEL.with(|kernel| (kernel.borrow().allocations, kernel.borrow().copies)),
+        before
+    );
+
+    let mut a = Alpha::new();
+    a.page(1, 0x1000, 0x51, 5);
+    a.clone_process_vm_shared_readonly(1, 2).unwrap();
+    a.processes
+        .vm_space_mut(2)
+        .unwrap()
+        .mark_mapping_uncertain(0x1000);
+    let before = KERNEL.with(|kernel| (kernel.borrow().allocations, kernel.borrow().copies));
+    assert!(a.prepare(2, 0x1000, PAGE_SIZE, 1).is_err());
+    assert_eq!(
+        KERNEL.with(|kernel| (kernel.borrow().allocations, kernel.borrow().copies)),
+        before
+    );
 }
 
 #[test]

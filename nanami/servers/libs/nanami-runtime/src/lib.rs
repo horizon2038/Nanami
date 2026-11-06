@@ -688,6 +688,42 @@ pub fn request_process_private_write(
     Ok(needed != 0)
 }
 
+/// Alias immutable caller-owned RAM privately into a sealed supervised task.
+/// The caller must never refill its source and must detach before private writes.
+/// Errors may leave an owned destination prefix which the caller must release.
+pub fn request_process_map_private_snapshot(
+    pid: Word,
+    base: Word,
+    bytes: Word,
+    source: Word,
+    permissions: Word,
+) -> Result<(), RequestError> {
+    if pid == 0
+        || base == 0
+        || source == 0
+        || bytes == 0
+        || (base | source | bytes) & 4095 != 0
+        || base.checked_add(bytes).is_none()
+        || source.checked_add(bytes).is_none()
+        || (permissions != 1 && permissions != 5)
+    {
+        return Err(RequestError::InvalidArgument);
+    }
+    let descriptor = [source, permissions];
+    let (status, _, _) = call_os_port(
+        OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT,
+        pid,
+        base,
+        bytes,
+        descriptor.as_ptr() as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
+}
+
 /// Allocate initialized private pages at a fixed address. The source prefix is
 /// copied directly by Alpha; only the remaining bytes are zeroed.
 pub fn request_process_map_initialized_at(
@@ -885,6 +921,41 @@ pub fn request_process_memory_read_checked(
         return Err(RequestError::InvalidArgument);
     }
     request_process_memory_read(pid, target, destination, bytes | OS_MEMORY_COPY_USER_ACCESS)
+}
+
+/// Borrow one readable private RAM page from a sealed supervised task.
+/// `local` must be a reserved, otherwise unused page in the caller's layout.
+/// Release it with request_mapping_release(local, 4096) before reusing the VA.
+/// It pins backing, not the target mapping: the caller owns cache invalidation.
+/// On any error, conservatively clean/quarantine `local` before another grant.
+pub fn request_process_read_view(pid: Word, target: Word, local: Word) -> Result<(), RequestError> {
+    request_process_page_view(OS_REQUEST_PROCESS_READ_VIEW, pid, target, local)
+}
+
+/// Borrow writable private RAM, not a mapping with elevated guest permissions.
+/// The same invalidation, lifetime and error-cleanup rules as READ_VIEW apply.
+pub fn request_process_write_view(
+    pid: Word,
+    target: Word,
+    local: Word,
+) -> Result<(), RequestError> {
+    request_process_page_view(OS_REQUEST_PROCESS_WRITE_VIEW, pid, target, local)
+}
+
+fn request_process_page_view(
+    code: Word,
+    pid: Word,
+    target: Word,
+    local: Word,
+) -> Result<(), RequestError> {
+    if pid == 0 || target == 0 || local == 0 || (target | local) & 4095 != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, _, _) = call_os_port(code, pid, target, local, 0, 5)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok(())
 }
 
 pub fn request_process_memory_write_checked(

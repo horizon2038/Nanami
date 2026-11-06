@@ -436,6 +436,7 @@ VFSのdelegated I/Oでは、file handleのownerとbufferのpeerを分離する�
 | interval | `0x4003, milliseconds, notification_slot` | interval登録の受理 |
 | clock query | `0x4004` | `OK, ticks, tick_hz` |
 | alarm | `0x4005, absolute_tick, notification_slot, enabled` | alarmの設定・取消の受理 |
+| counter source（任意） | `0x4006, kind` | `OK, physical_block_base, period_fs`（kind=1の場合） |
 
 古い`0x4001`のsleep requestも現在は予約を受理して返し、満了をNotificationで知らせる。server自身を満了までblockingさせる方式ではない。
 
@@ -444,6 +445,12 @@ timer-serverはclientの指定Notificationのaliasを保持し、Timer badgeで�
 同じNotificationには複数のsleep / interval / alarmが同居し得る。badgeだけではどの予約が完了したか分からない。共有bound Notificationを使うsleep helperはclockとdeadlineを再確認し、無関係なbadgeを後でevent loopへ戻す。
 
 専用delay用Notificationでは、その用途以外のinterval / IRQ等を混ぜないという追加前提がある。alarmの取消後でも既に配送済みbadgeは取り消せず、intervalの取りこぼし回数もNotificationからは得られない。
+
+counter sourceはNative client向けの任意の読取経路であり、Capability Transferや共有RAMのattachではない。requestはcodeを含め2 Word、replyはstatusを含め3 Word。現在のkind=1は、timer ownerが起動済みの64-bit HPETを表す。返されるのは物理blockのbaseと1 cycle当たりのfemtosecondsであり、client VAやNotification slotではない。raw counterを`raw * period_fs / 1_000_000`でnanosecondsへ変換し、通常のclock queryと同じepoch・`tick_hz=1_000_000_000`で扱う。32-bit HPETのwrap補正はownerの状態を必要とするため、この経路には公開しない。PIT・未対応backend・未知kindは成功として扱わず、従来のclock queryへ戻す。
+
+情報replyだけではMMIO mapping権、IRQ権、comparatorやconfigurationの変更権は得られない。Native clientは既存の権限で別途Uncached mappingを作り、HPET capabilities register・period・enabled状態と、clock queryの前後sampleに入るepoch・単位を確認する。`MonotonicReader`はその後も毎回実counterを読み、現在時刻のTTL cacheや未検証TSC補間は行わない。不整合・逆行・無効化等を検出した場合や情報取得に失敗した場合は、新しいRPC sampleを使う。読取adapter自身はregisterへ書かないが、mappingのPTEがread-onlyであるという契約ではない。Device属性・mapping権限の管理は従来どおりUserの責任である。
+
+この読取経路はproviderとcounterの安定した寿命を前提とする。provider Capabilityを差し替えるときは、同じslotを再利用する場合もreaderを再作成する。readerは所有するNative mappingを破棄時にreleaseし、失敗時のmapping記録はAlpha側に残る。Linux guestへMMIOやNative Capabilityを渡す経路は追加しない。sleep・interval・alarmの予約と満了Notificationは引き続きtimer-serviceが管理する。
 
 ### 9.3 Input: 共有ring + 起床hint
 
@@ -490,7 +497,11 @@ logical framebufferの先頭4 KiBはdamage queue用で、pixel dataは`base + 0x
 
 clientはpixelを書き、damage entryを公開した後にNOTIFYする。`nanami-ui::Window`のproducerはentryをRelaxed storeし、tailをRelease storeする。consumerはatomic accessで公開済みentryを読む。queueが使えない・満杯の場合、同helperは`INVALIDATE_LOGICAL_FRAMEBUFFER = 0x7010`の同期requestへfallbackする。
 
-legacy present badgeのlow bitsはwindow IDであり、複数windowの通知をORするとIDが混ざり得る。実装には定期Timerで全windowのdamage queueをdrainする経路もある。IDLではこのbadgeを「正確に一つのwindow event」としてモデル化してはいけない。
+window IDは不透明なhandleであり、連番として解釈してはいけない。現在のHonokaは同時に存在する最大16 windowsへ、low 16 bitsのうち重複しない1 bitずつを割り当てる。bits 16..47は再生成を区別するgenerationであり、同期requestではowner PIDと完全なhandleの一致を確認する。generationはwrapさせず、使い切った場合は新規createを拒否する。
+
+present badgeは`PRESENT | window_id`、または既存clientの`PRESENT | (window_id & 0xffff_ffff)`のどちらでも送れる。受信側はlow 16 bitsだけをwindow集合のhintとして読み、通知対象のdamage queueまたはfbdev captureをdrainする。複数送信のORでは対象bitが残り、generationのOR値をobject IDとして利用しない。z-order変更でもhintは変わらない。window破棄後に届いた古いhintは、同じbitを再利用したwindowの再確認を起こし得るが、古いhandleによる同期操作を許可するものではない。hintが0のpresentは全surfaceの再確認を要求する。
+
+定期Timerにはnative damage queueのdrain経路もあるが、queueを持たないfbdev surfaceの更新をこのTimerに依存させない。IDLではNotificationを「正確に一つのwindow event」やpixel更新そのものとしてモデル化せず、共有surface / queueを再確認するcoalescing可能な起床hintとして表現する。
 
 input領域には通常のInput ringに加え、`Word[5 + 1024]`にresize mailboxがある。最新resizeを上書きし、consumerはatomic swapで取り出す。満杯のkey/mouse queueに最終resizeを失わせないための、ordered ringとは別のlast-value方式である。
 
@@ -820,6 +831,9 @@ protocolであり、A9NのCapability ABIやIPC fastpathは変更しない。
 | `PROCESS_MEMORY_WRITE_VECTOR` | `0x102f` | target PID, caller側descriptor VA, count, reserved=0 | なし |
 | `PROCESS_SEAL_CAPABILITIES` | `0x1030` | target PID, reserved=0, reserved=0, reserved=0 | なし |
 | `PROCESS_PRIVATE_WRITE` | `0x1031` | target PID, VA, byte count, mode | QUERY: 分離の要否、DETACH: 0 |
+| `PROCESS_READ_VIEW` | `0x1032` | target PID, source page VA, caller page VA, reserved=0 | なし |
+| `PROCESS_WRITE_VIEW` | `0x1033` | target PID, source page VA, caller page VA, reserved=0 | なし |
+| `PROCESS_PRIVATE_SNAPSHOT` | `0x1034` | target PID, destination VA, page-rounded bytes, caller側descriptor VA | なし |
 
 PROTECTのpermissionはbit 0=R、1=W、2=X。0ではleafだけを外し、backingとFrame
 Capabilityは保持する。対象本人またはreaperが要求できる。CASはrobust futexの
@@ -858,6 +872,83 @@ Alphaも共有markerが残るpageへのこれらの操作を拒否し、RW tempo
 通常のpermission-checked copyoutは従来どおりで、書き込み可能なprivate pageにQUERYを追加しない。
 分離失敗は通常のerror replyで、未公開backingの参照は保持する。コピーの自動再実行や、
 失敗したVM全体のretry可能性を保証するprotocolではない。RW pageのfault-driven COWとは異なる。
+
+PRIVATE_SNAPSHOTは、unsealedな信頼するnative supervisorが所有する通常RAMを、
+自身がreaperであるsealed taskへprivateなR/RX backingとして接続する要求である。
+descriptorはnative Wordの`[source VA, permissions]`。source/destination VAとbytesは
+非0・page-alignedで、permissionsは1（R）または5（RX）。sourceは全範囲を含む
+callerのRAM reservationを持ち、既にR-onlyでなければならない。Deviceや未追跡のFrame、
+終了・quarantine済みのprocess、既存のbacking/lazy mappingを持つdestinationは拒否する。
+現在の実装対象はx86_64で、他backendはこの要求を拒否する。
+
+最初のaliasでは、単独所有のextent参照を物理解放なしにpage参照へ分割する。
+既に外部aliasを持つwhole extentは分割しない。sourceとdestinationの共有markerにより、
+Alpha経由の書込み・W付与・通常のwritable共有を拒否する。privateな変更は既存の
+PRIVATE_WRITEのQUERY/DETACHとVM全体のquiescence契約を使う。通常のreadonly forkの
+sealed-source・同一reaper条件を緩める要求ではない。実行用sealed rootへCapabilityを追加せず、
+管理用Frame copyと物理参照だけをAlphaが保持する。
+
+callerのsource RAM object全体を既存のMAPPING_RELEASEで退避しても、guestの参照が残るpageは
+解放しない。source VAを再利用する際は別のbackingを割り当て、公開済みのsnapshotを
+refillしない。native owner自身のroot権限を制限するsecurity sealではなく、属性整合性と
+immutableな内容の維持は信頼するownerの責任である。descriptorは同期CALL中に読み取り、
+NotificationやCapability Transferは伴わない。
+
+RAM予約はextent参照かpage参照かを内部metadataで保持する。page単位へ分割した後も
+予約全体が解除単位であり、部分解除や別objectにまたがる解除は変更前に拒否する。
+このmetadataはKernelのCapability slotやwire recordを拡張しない。
+
+失敗時はdestinationに参照・Capability・PTEのprefixが残り得る。callerはその範囲を
+解除するかprocessを回収し、確認前に別のcopy/mappingへfallbackして上書きしない。
+解放に失敗した所有権は保持し、未確認のRAMやVA/slotを再利用しない。
+Alterの利用は`NANAMI_IMMUTABLE_SNAPSHOTS=1`で有効にする実験段階で、既定では無効。
+
+READ_VIEWは、sealedなtaskのreaperである、unsealedな信頼するnative supervisor専用。
+現在R permissionがあり、activeな1-page private RAM allocationとして追跡できるbackingを、
+callerが指定した未使用のpage-aligned VAへR属性でmapする。MMIOや明示的なshared-buffer
+reservation、大きいallocationの未追跡subrangeは対象外。Normal/WB RAMとしてalias可能な
+pageを対象とし、属性整合性はsupervisorの責任とする。source/target VAは非0で、対象は
+caller自身や終了済みtaskではない。callerもseal済みなら拒否する。
+
+通常のshared mappingと同じRAM参照、reservation、管理用Frame copyをcallerの管理rootに
+保持する。Frame descriptorはreplyで返さないが、native supervisor自身の管理権限を制限する
+mechanismではない。guestの実行用sealed rootにはcapabilityを追加しない。
+sourceのmunmap/exec/reap後も借用したRAMをpinし、callerが既存のMAPPING_RELEASEで
+caller VAの4096 bytesを解除するまで再利用しない。source VAへの将来の再mappingを追跡する
+viewでも、内容のsnapshotでもない。callerは読み取り時のpermissionを確認し、VM世代、
+mprotect、backingの分離・置換、exec等に応じてcached viewを無効化する責任を持つ。
+
+通常errorでは公開前の拒否、またはrollbackが完了している。rollback失敗はFATALとし、
+callerはそのVAにmapping/参照が残り得るものとして、解除確認まで再利用しない。
+transport/protocol errorも同様に曖昧な結果として扱う。PIDやVAだけからcallerの外で
+使用中のRAMを解放したり、未確認のmappingへ別のpageを上書きしたりしてはならない。
+
+WRITE_VIEWはREAD_VIEWと同じcaller・target・alignment・RAM所有権・寿命の条件を使い、
+現在R/W両方が許可されたprivate pageだけをcallerへR/W属性（Xなし）でmapする。
+private forkの共有markerが残るpage、R-only／W-only／PROT_NONE、MMIO、明示的な
+shared-buffer reservationはこの経路では扱わない。readonly pageの書込み許可を引き上げたり、
+fork backingをこの要求で分離したりはしない。requestはcodeを含め5 Word、replyは共通の
+status/detail形式で、成功時detailは0。NotificationやCapability Transferは伴わない。
+
+書込みviewもbackingをpinするaliasであり、source VAへ追従しない。supervisorは毎回現在の
+guest permissionとVM世代を確認し、backing・保護・exec等の変更で古いviewを使わない。
+sourceの実行用sealed rootへのcapability追加はない。caller側は従来の管理権限を持つ信頼する
+supervisorであり、R/W aliasの範囲外までnative自身をsandboxするprotocolではない。
+
+Alter/Linuxの小さいcopyoutは、所有するscratch範囲または型で借用した初期化済みsourceに限定して
+この参照を再利用する。任意のraw source VAをRust sliceへ変換してはならない。ページ境界を
+またぐ出力は全pageを準備してから最初のbyteを書き、参照の準備失敗時には元のpermission-checked
+RPCへ戻す。大きい転送や対象外のbackingも従来経路を維持する。複数出力の順序、EFAULT時の
+有効prefix、socket queueのcommit順序は変更しない。これは全メモリ操作の原子性やsnapshotを
+保証する仕組みではなく、user-levelのcopy経路の選択である。
+共通handlerを使うFreeBSD taskにはWRITE_VIEWを要求せず、従来のchecked copyへ戻す。
+
+UNIX `recvmsg`のpayloadと結果fieldも、sourceをraw VAへ落とす前に所有bufferの借用として
+扱う。最大4 buffer・合計4096 bytesに限って全viewを準備し、後続の取得によるcache evictionが
+先行viewを置き換えていないことも、最初のstore前に再確認する。衝突・拒否・準備失敗では
+1 byteもこの経路で書かず、元の順序付きWRITE_VECTORへ戻す。大きい出力をpage単位の
+別requestへ分割しない。metadataは必要なfieldのbyteだけを書き、msghdrの入力fieldやpaddingを
+上書きしない。このuser-levelの選択はWRITE_VECTORのwire format・上限・error契約を変更しない。
 
 SEAL_CAPABILITIESは対象のreaperだけが要求できる。自身・Alpha・終了済みtaskは対象外。
 信頼するsupervisorは初回実行より前に要求する。既に他者へ移譲したcapabilityの撤回を
@@ -918,6 +1009,16 @@ privileged copyの意味は変更しない。新APIを使うclientには対応�
   image構築・debug用privileged copyを維持する。SDKの`*_checked` helperがこのbitを設定する。
 - `PROCESS_MEMORY_CLONE`とpage-alignedな`PROCESS_MEMORY_COPY_WITHIN`は、指定範囲内の
   backingを持つpageだけを複製し、permissionも保持する。未populatedの予約領域は複製しない。
+
+mapping操作の失敗statusは、PTEが未変更だったことを保証しない。Kernelがleafを更新後、
+remote TLB shootdownの失敗を返す場合がある。Alphaはこの状態をR/W/Xとは別に追跡し、
+未確認のpageへのchecked accessと、その状態を引き継ぐprivate fork／copyを拒否する。
+permission照会が0でも、PTEが存在しない証拠にはしない。protectionの再試行では、
+不確かなleafのUNMAPが成功応答を返すまで同一属性のno-opとして成功させない。
+空leafへのUNMAPもKernelの確認が成功して初めてcleanup完了とし、cleanup失敗中は
+Frame・物理参照を保持する。private／shared releaseは確認前のbacking再利用を行わない。
+opcode・Word配置・通常の成功応答は変えず、単発／範囲操作の失敗時に全体の原子性を
+新しく保証するものでもない。clientが失敗を未実行とみなして別mappingを重ねてはならない。
 
 ### 16.2 POSIX / VFSのrooted pathname操作
 

@@ -539,6 +539,9 @@ fn copyout_from(
 mod futex;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/memfd.rs"]
 mod memfd;
+mod guest_views {
+    pub(super) fn invalidate(_: &super::Runtime, _: usize) {}
+}
 fn record_action_result(_: &mut Runtime, _: Word, _: Word, _: EmulationAction) {}
 fn read_shm_u32(runtime: &Runtime, offset: Word) -> u32 {
     unsafe { ((runtime.posix_shm + offset) as *const u32).read_unaligned() }

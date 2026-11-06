@@ -7,7 +7,7 @@ use super::{
     LINUX_MADV_POPULATE_READ, LINUX_MADV_POPULATE_WRITE, LINUX_MADV_RANDOM, LINUX_MADV_SEQUENTIAL,
     LINUX_MADV_UNMERGEABLE, LINUX_MADV_WILLNEED, LINUX_MAP_ANONYMOUS, LINUX_MAP_FIXED,
     LINUX_MREMAP_FIXED, LINUX_MREMAP_MAYMOVE, LINUX_MREMAP_SUPPORTED_FLAGS, LINUX_O_ACCMODE,
-    LINUX_O_WRONLY, LINUX_PAGE_SIZE, LINUX_PROT_ALL, LINUX_PROT_NONE, LINUX_PROT_READ,
+    LINUX_O_WRONLY, LINUX_PAGE_SIZE, LINUX_PROT_ALL, LINUX_PROT_EXEC, LINUX_PROT_NONE, LINUX_PROT_READ,
     LINUX_PROT_WRITE, LINUX_STACK_BYTES, LINUX_STACK_GUARD_BYTES, LINUX_STACK_TOP,
     LINUX_VIRTUAL_RESERVATION_BASE, LINUX_VIRTUAL_RESERVATION_LIMIT,
 };
@@ -248,10 +248,28 @@ pub(super) fn sys_file_mmap(
             )
             .map_err(super::map_load_error)?
             {
-                nanami_runtime::request_process_map_initialized_at(
-                    pid, base, mapped, source, bytes,
-                )
-                .map_err(map_request_error)?;
+                if cfg!(target_arch = "x86_64")
+                    && (prot == LINUX_PROT_READ || prot == (LINUX_PROT_READ | LINUX_PROT_EXEC))
+                    && source & (LINUX_PAGE_SIZE - 1) == 0
+                    && runtime.image_cache.immutable_range(source, mapped)
+                {
+                    // No fallback after an alias request: it may have installed
+                    // a prefix. The outer munmap owns failed-range cleanup.
+                    super::private_memory::mark_shared(runtime, pid);
+                    nanami_runtime::request_process_map_private_snapshot(
+                        pid, base, mapped, source, prot,
+                    )
+                    .map_err(map_request_error)?;
+                    if !runtime.protect_mapping(pid, base, mapped, prot) {
+                        return Err(ENOMEM);
+                    }
+                    return Ok(base);
+                } else {
+                    nanami_runtime::request_process_map_initialized_at(
+                        pid, base, mapped, source, bytes,
+                    )
+                    .map_err(map_request_error)?;
+                }
                 initialized = true;
             }
         }
@@ -292,6 +310,11 @@ pub(super) fn sys_munmap(
     let end = addr.checked_add(mapped).ok_or(EINVAL)?;
     if !runtime.can_remove_mapping(pid, addr, mapped) {
         return Err(ENOMEM);
+    }
+    // A failed release can already have removed a prefix of the hardware
+    // mappings. Reject old read leases even if logical metadata stays intact.
+    if let Some(process) = runtime.managed_process(pid) {
+        process.mappings.invalidate_views();
     }
     super::memfd::unmap(runtime, pid, addr, mapped)?;
     let mut cursor = addr;
@@ -376,6 +399,11 @@ pub(super) fn sys_mprotect(
     }
     if !runtime.can_protect_mapping(pid, addr, mapped) {
         return Err(ENOMEM);
+    }
+    // Invalidate before touching PTEs, including partial updates whose rollback
+    // fails. A subsequent cached read must revalidate current Alpha permissions.
+    if let Some(process) = runtime.managed_process(pid) {
+        process.mappings.invalidate_views();
     }
     if prot & LINUX_PROT_WRITE != 0 {
         super::private_memory::with_private_write(runtime, pid, addr, mapped, || {

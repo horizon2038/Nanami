@@ -311,6 +311,34 @@ fn permissions_keep_full_word_values_and_mapping_hints_stay_vm_local() {
 }
 
 #[test]
+fn uncertain_presence_is_separate_from_permission_bits_and_requires_confirmation() {
+    let mut vm = VmSpace::new();
+    vm.record_frame(0x1000, 42).unwrap();
+    vm.set_permissions(0x1000, usize::MAX);
+    vm.mark_mapping_uncertain(0x1000);
+    assert_eq!(vm.permissions(0x1000), 0);
+    assert_eq!(
+        vm.find_frame(0x1000),
+        Some(42),
+        "ownership metadata is not discarded"
+    );
+    assert!(vm.frame_may_be_present(0x1000));
+    assert!(vm.has_uncertain_mappings(0, 0x2000));
+    assert!(!vm.has_uncertain_mappings(0x2000, 0x3000));
+    vm.set_permissions(0x1000, 7);
+    assert_eq!(vm.permissions(0x1000), 0);
+    vm.confirm_unmapped(0x1000);
+    assert_eq!(vm.permissions(0x1000), 0);
+    assert!(!vm.frame_may_be_present(0x1000));
+    assert!(!vm.mapping_is_uncertain(0x1000));
+    vm.set_permissions(0x1000, usize::MAX);
+    assert_eq!(vm.permissions(0x1000), usize::MAX);
+    vm.mark_mapping_uncertain(0x1000);
+    assert_eq!(vm.forget_frame(0x1000), Some(42));
+    assert!(!vm.mapping_is_uncertain(0x1000));
+}
+
+#[test]
 fn permission_keys_remain_exact_across_offsets_blocks_and_word_boundaries() {
     let mut vm = VmSpace::new();
     let addresses = [

@@ -1079,6 +1079,14 @@ impl Alpha {
         if target.capabilities_sealed {
             return self.drop_sealed_process_runtime_mappings(pid, target);
         }
+        // The legacy native reset path must not erase unresolved PTE ownership.
+        if self
+            .processes
+            .vm_space_mut(pid)
+            .is_some_and(|vm| vm.has_uncertain_mappings(0, usize::MAX))
+        {
+            return Err(CapabilityError::Fatal);
+        }
         let begin = exec_profile::stamp();
         self.invalidate_process_copy_mappings(pid)?;
         let allocations =

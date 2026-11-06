@@ -100,6 +100,7 @@ struct Runtime {
     poll_objects: PollObjects,
     posix_shm: Word,
     timer_port: Word,
+    clock_reader: timer::MonotonicReader,
     monotonic_ticks: Word,
     monotonic_tick_hz: Word,
     realtime_anchor: Option<(Word, Word)>,
@@ -199,6 +200,13 @@ mod realtime;
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 pub mod timer {
     use super::*;
+    #[derive(Default)]
+    pub struct MonotonicReader;
+    impl MonotonicReader {
+        pub fn sample(&mut self, port: Word) -> Result<(Word, Word), i32> {
+            timer_service_monotonic_ticks(port)
+        }
+    }
     pub const TIMER_NOTIFICATION_IDENTIFIER_BIT: Word = 1 << 63;
     pub fn timer_service_monotonic_ticks(port: Word) -> Result<(Word, Word), i32> {
         assert_ne!(port, 0, "clock query used a missing capability");

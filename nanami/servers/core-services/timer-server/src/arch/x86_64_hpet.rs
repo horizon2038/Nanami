@@ -36,6 +36,7 @@ const TIMER_ROUTE_MASK: u64 = 0x1f << TIMER_ROUTE_SHIFT;
 pub struct PreparedTimer {
     pub resource: Word,
     pub irq_number: Word,
+    physical_base: Word,
     clock: Clock,
     legacy: bool,
     comparator_wide: bool,
@@ -108,6 +109,7 @@ pub fn prepare(_timer_resource_slot: Word) -> Result<PreparedTimer, RequestError
     Ok(PreparedTimer {
         resource: virtual_base,
         irq_number,
+        physical_base,
         clock: Clock::new(period_fs, capabilities & CAP_COUNTER_64 != 0),
         legacy,
         comparator_wide: capabilities & CAP_COUNTER_64 != 0
@@ -120,6 +122,15 @@ pub fn prepare(_timer_resource_slot: Word) -> Result<PreparedTimer, RequestError
 }
 
 impl PreparedTimer {
+    pub fn counter_source(&self) -> Option<(Word, Word)> {
+        if !self.clock.wide
+            || unsafe { read64(self.resource, REG_CONFIGURATION) } & GENERAL_ENABLE == 0
+        {
+            return None;
+        }
+        Some((self.physical_base, self.clock.period_fs as Word))
+    }
+
     pub fn start(&mut self) -> Result<(), RequestError> {
         let base = self.resource;
         unsafe {

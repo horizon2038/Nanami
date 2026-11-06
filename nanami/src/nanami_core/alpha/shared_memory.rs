@@ -9,6 +9,143 @@ struct SharedMapping {
 }
 
 impl Alpha {
+    /// A supervisor already has checked read authority. A view additionally
+    /// pins one ordinary RAM allocation. The normal management copy stays in
+    /// the trusted native supervisor's root; no descriptor is returned.
+    /// It deliberately does not follow later changes in the source VM.
+    pub(super) fn handle_process_read_view_request(
+        &mut self,
+        request: OsRequestEvent,
+    ) -> Result<(), CapabilityError> {
+        self.handle_process_page_view_request(request, false)
+    }
+
+    pub(super) fn handle_process_page_view_request(
+        &mut self,
+        request: OsRequestEvent,
+        writable: bool,
+    ) -> Result<(), CapabilityError> {
+        let caller = request.identifier;
+        let source_pid = request.arg0;
+        let source_va = request.arg1;
+        let local_va = request.arg2;
+        if caller == 0
+            || source_pid == caller
+            || source_va == 0
+            || local_va == 0
+            || (source_va | local_va) & (PAGE_SIZE - 1) != 0
+            || request.arg3 != 0
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let source = self
+            .processes
+            .find_entry_by_pid(source_pid)
+            .filter(|entry| !entry.exited)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if source.reaper_pid != caller || !source.capabilities_sealed {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let caller_entry = self
+            .processes
+            .find_entry_by_pid(caller)
+            .filter(|entry| !entry.exited)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if caller_entry.capabilities_sealed {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        // Exact one-page private ownership excludes MMIO and shared-buffer
+        // reservations. Do not invent suballocations inside larger extents.
+        let allocation = self
+            .processes
+            .find_active_physical_allocation_reference(source_pid, source_va, 1)
+            .filter(|_| {
+                self.processes
+                    .shared_memory_reservation(source_pid, source_va, 1)
+                    .is_none()
+            })
+            .ok_or(CapabilityError::PermissionDenied)?;
+        let owner = self
+            .processes
+            .memory_entry(source_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        self.memory
+            .ensure_alpha_frame_at_physical_index(allocation.base_page)?;
+        let frame = self
+            .memory
+            .physical_frame_descriptor_from_index(allocation.base_page)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let vm = self
+            .processes
+            .vm_space_mut(source_pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let child = process_frame_descriptor(owner.root_node, allocation.start_slot);
+        let permissions = if writable { 3 } else { 1 };
+        if vm.permissions(source_va) & permissions != permissions
+            || (writable && vm.private_page_shared(source_va))
+            || !vm
+                .find_frame(source_va)
+                .is_some_and(|current| current == frame || current == child)
+        {
+            return Err(CapabilityError::PermissionDenied);
+        }
+        let mut mapping = self.reserve_shared_mapping_at(caller, 1, local_va)?;
+        if let Err(error) = self.processes.register_physical_allocation(
+            caller,
+            local_va,
+            mapping.reservation.start_slot,
+            allocation.base_page,
+            1,
+        ) {
+            self.processes
+                .recycle_shared_memory(caller, mapping.reservation);
+            return Err(error);
+        }
+        let result = (|| {
+            let slot = mapping.reservation.start_slot;
+            self.ensure_process_frame_chunks(caller, mapping.entry.root_node, slot, 1)?;
+            arch::node::copy(
+                process_frame_chunk_descriptor(
+                    mapping.entry.root_node,
+                    slot / PROCESS_FRAME_CHUNK_PAGES,
+                ),
+                slot % PROCESS_FRAME_CHUNK_PAGES,
+                frame,
+            )?;
+            mapping.copied = 1;
+            let vm = self
+                .processes
+                .vm_space_mut(caller)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            self.memory
+                .ensure_page_tables(mapping.entry.address_space, local_va, vm)?;
+            // Track a possibly installed PTE before the fallible MAP. Normal
+            // release can then retry cleanup even after an ambiguous failure.
+            vm.record_frame(local_va, frame)
+                .map_err(|_| CapabilityError::Fatal)?;
+            vm.set_permissions(local_va, permissions);
+            mapping.mapped = 1;
+            arch::address_space::map(
+                mapping.entry.address_space,
+                frame,
+                local_va,
+                nun::capability_call::address_space::Attribute::from_bits(permissions)
+                    .ok_or(CapabilityError::InvalidArgument)?,
+            )
+        })();
+        if let Err(error) = result {
+            if let Err(cleanup) = self.remove_shared_mapping(&mut mapping) {
+                error!(
+                    "[view.err] rollback pid={} va={:#x} err={:?}",
+                    caller, local_va, cleanup
+                );
+                return Err(CapabilityError::Fatal);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(super) fn handle_mapping_share_request(
         &mut self,
         request: OsRequestEvent,
@@ -37,8 +174,14 @@ impl Alpha {
             .processes
             .find_active_physical_allocation_reference(pid, source_va, pages)
             .ok_or(CapabilityError::PermissionDenied)?;
-        let end = source_va.checked_add(pages * PAGE_SIZE).ok_or(CapabilityError::InvalidArgument)?;
-        if self.processes.vm_space_mut(pid).is_some_and(|vm| vm.private_range_shared(source_va, end)) {
+        let end = source_va
+            .checked_add(pages * PAGE_SIZE)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if self
+            .processes
+            .vm_space_mut(pid)
+            .is_some_and(|vm| vm.private_range_shared(source_va, end))
+        {
             // Exporting a writable alias also requires explicit privatization.
             return Err(CapabilityError::IllegalOperation);
         }
@@ -279,6 +422,42 @@ impl Alpha {
         })
     }
 
+    fn reserve_shared_mapping_at(
+        &mut self,
+        pid: usize,
+        pages: usize,
+        base: usize,
+    ) -> Result<SharedMapping, CapabilityError> {
+        let entry = self
+            .processes
+            .memory_entry(pid)
+            .ok_or(CapabilityError::InvalidArgument)?;
+        let end = pages
+            .checked_mul(PAGE_SIZE)
+            .and_then(|bytes| base.checked_add(bytes))
+            .ok_or(CapabilityError::InvalidArgument)?;
+        for va in (base..end).step_by(PAGE_SIZE) {
+            if self.processes.find_lazy_mapping(pid, va).is_some()
+                || self
+                    .processes
+                    .vm_space_mut(pid)
+                    .and_then(|vm| vm.find_frame(va))
+                    .is_some()
+            {
+                return Err(CapabilityError::IllegalOperation);
+            }
+        }
+        let reservation =
+            self.processes
+                .reserve_shared_memory_at(pid, pages, PROCESS_FRAME_TOTAL_PAGES, base)?;
+        Ok(SharedMapping {
+            entry,
+            reservation,
+            copied: 0,
+            mapped: 0,
+        })
+    }
+
     fn install_shared_memory(
         &mut self,
         mappings: &mut [SharedMapping],
@@ -365,6 +544,33 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let r = mapping.reservation;
         let entry = mapping.entry;
+        // Ordinary whole extents, including the one-page view-release hot path,
+        // retain their original accounting. Only explicitly canonicalized RAM
+        // owns a complete set of single-page references instead of one extent.
+        let canonical_pages = if r.has_page_references() {
+            let end = r
+                .page_count
+                .checked_mul(PAGE_SIZE)
+                .and_then(|bytes| r.base_va.checked_add(bytes))
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let pages = self
+                .processes
+                .physical_pages_in_range(entry.pid, r.base_va, end);
+            if pages.len() != r.page_count
+                || pages.iter().enumerate().any(|(offset, page)| {
+                    page.base_va != r.base_va + offset * PAGE_SIZE
+                        || page.start_slot != r.start_slot + offset
+                        || self.processes.physical_reference_count(*page) == 0
+                })
+            {
+                // Validate before any UNMAP or capability removal. A damaged
+                // owner set is quarantined, not mistaken for already freed RAM.
+                return Err(CapabilityError::IllegalOperation);
+            }
+            Some(pages)
+        } else {
+            None
+        };
         self.invalidate_process_copy_mappings(entry.pid)?;
         while mapping.mapped != 0 {
             let page = mapping.mapped - 1;
@@ -373,9 +579,14 @@ impl Alpha {
             if self
                 .processes
                 .vm_space_mut(entry.pid)
-                .is_none_or(|vm| vm.permissions(va) != 0)
+                .is_none_or(|vm| vm.mapping_is_uncertain(va) || vm.permissions(va) != 0)
             {
-                arch::address_space::unmap(entry.address_space, frame, va)?;
+                if let Err(error) = arch::address_space::unmap(entry.address_space, frame, va) {
+                    if let Some(vm) = self.processes.vm_space_mut(entry.pid) {
+                        vm.mark_mapping_uncertain(va);
+                    }
+                    return Err(error);
+                }
             }
             if let Some(vm) = self.processes.vm_space_mut(entry.pid) {
                 vm.forget_frame(va);
@@ -391,14 +602,26 @@ impl Alpha {
             )?;
             mapping.copied -= 1;
         }
-        let (allocation, last) = self.processes.release_physical_allocation_reference(
-            entry.pid,
-            r.base_va,
-            r.page_count,
-        )?;
-        if last {
-            self.memory
-                .free_physical(allocation.base_page * PAGE_SIZE, r.page_count * PAGE_SIZE)?;
+        if let Some(pages) = canonical_pages {
+            for page in pages.into_iter().rev() {
+                if self.processes.physical_reference_count(page) == 1 {
+                    // Keep the reference until the allocator confirms release.
+                    self.memory
+                        .free_physical(page.base_page * PAGE_SIZE, PAGE_SIZE)?;
+                }
+                self.processes
+                    .release_physical_allocation_reference(entry.pid, page.base_va, 1)?;
+            }
+        } else {
+            let (allocation, last) = self.processes.release_physical_allocation_reference(
+                entry.pid,
+                r.base_va,
+                r.page_count,
+            )?;
+            if last {
+                self.memory
+                    .free_physical(allocation.base_page * PAGE_SIZE, r.page_count * PAGE_SIZE)?;
+            }
         }
         self.processes.recycle_shared_memory(entry.pid, r);
         Ok(())

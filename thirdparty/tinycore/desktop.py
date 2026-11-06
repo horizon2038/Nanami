@@ -250,21 +250,34 @@ def configure_links(root):
 
 def build_readiness(root):
     """Build profile-owned glue against the pinned, unchanged runtime libraries."""
+    return build_xlib_tool(root, HERE / "tools/wait-for-x.c", "usr/local/bin/nanami-wait-for-x")
+
+
+def build_window_observer(root):
+    """Install the test-only launch observer; never modify the desktop clients."""
+    source = HERE.parents[1] / "tests/alter-linux/desktop-window-observer.c"
+    return build_xlib_tool(root, source, "bin/aw")
+
+
+def build_xlib_tool(root, source, destination):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("desktop profile root must be a real directory")
     resolved = root.resolve()
-    for relative in ["usr", "usr/local", "usr/local/bin"]:
+    relative_path = Path(destination)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError("desktop helper destination must stay inside the profile")
+    for relative in reversed(relative_path.parents):
         directory = root / relative
         if directory.is_symlink() or not directory.is_dir():
-            raise ValueError(f"desktop readiness directory is not real: {relative}")
+            raise ValueError(f"desktop helper directory is not real: {relative}")
     libraries = []
     for relative in ["usr/local/lib/libX11.so.6", "lib/libc.so.6"]:
         library = (root / relative).resolve(strict=True)
         if not library.is_relative_to(resolved) or not library.is_file():
             raise ValueError(f"profile library escapes root: {relative}")
         libraries.append(str(library))
-    binary = root / "usr/local/bin/nanami-wait-for-x"
+    binary = root / relative_path
     if binary.parent.is_symlink() or binary.is_symlink() or binary.exists():
         raise ValueError("desktop readiness destination is not empty")
     subprocess.run([
@@ -273,7 +286,7 @@ def build_readiness(root):
         "-fno-pie", "-no-pie", "-mno-sse", "-mno-sse2", "-mno-red-zone",
         "-O2", "-Wall", "-Wextra", "-Werror", "-Wl,-e,_start,--image-base=0x400000",
         "-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined",
-        str(HERE / "tools/wait-for-x.c"), str(HERE / "tools/start-x86_64.S"),
+        str(source), str(HERE / "tools/start-x86_64.S"),
         *libraries, "-o", str(binary),
     ], check=True)
     binary.chmod(0o755)

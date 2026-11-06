@@ -240,8 +240,16 @@ pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
         runtime.timer_port =
             nanami_runtime::ipc::process_slot_descriptor(crate::abi::SLOT_TIMER_SERVICE);
     }
-    let (ticks, tick_hz) = nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
-        .map_err(map_request_error)?;
+    const LOCAL: bool = match option_env!("NANAMI_ALTER_LOCAL_CLOCK") {
+        Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+        None => cfg!(target_arch = "x86_64"),
+    };
+    let sample = if LOCAL {
+        runtime.clock_reader.sample(runtime.timer_port)
+    } else {
+        nanami_client::timer::timer_service_monotonic_ticks(runtime.timer_port)
+    };
+    let (ticks, tick_hz) = sample.map_err(map_request_error)?;
     if tick_hz == 0 {
         return Err(EIO);
     }

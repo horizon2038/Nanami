@@ -7,6 +7,19 @@ pub struct SharedMemoryReservation {
     pub base_va: usize,
     pub start_slot: usize,
     pub page_count: usize,
+    references: ReferenceUnit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceUnit {
+    Extent,
+    Page,
+}
+
+impl SharedMemoryReservation {
+    pub fn has_page_references(self) -> bool {
+        self.references == ReferenceUnit::Page
+    }
 }
 
 #[derive(Default)]
@@ -196,6 +209,7 @@ impl ProcessManager {
             base_va,
             start_slot,
             page_count,
+            references: ReferenceUnit::Extent,
         };
         space.active.insert(base_va, reservation);
         let entry = self.entry_mut_by_pid(pid).unwrap();
@@ -223,18 +237,114 @@ impl ProcessManager {
             .copied()
     }
 
+    /// Find one reservation containing the complete nonempty byte range.
+    pub fn shared_memory_containing_range(
+        &self,
+        pid: usize,
+        base_va: usize,
+        bytes: usize,
+    ) -> Option<SharedMemoryReservation> {
+        let end = base_va.checked_add(bytes)?;
+        if bytes == 0 {
+            return None;
+        }
+        let pid = self.memory_owner_pid(pid);
+        let (_, reservation) = self
+            .shared_memory
+            .get(&pid)?
+            .active
+            .range(..=base_va)
+            .next_back()?;
+        let limit = reservation
+            .page_count
+            .checked_mul(USER_PAGE_SIZE)
+            .and_then(|bytes| reservation.base_va.checked_add(bytes))?;
+        (end <= limit).then_some(*reservation)
+    }
+
+    /// Find any reservation overlapping a complete nonempty byte range.
+    pub fn shared_memory_overlapping_range(
+        &self,
+        pid: usize,
+        base_va: usize,
+        bytes: usize,
+    ) -> Option<SharedMemoryReservation> {
+        let end = base_va.checked_add(bytes)?;
+        if bytes == 0 {
+            return None;
+        }
+        let pid = self.memory_owner_pid(pid);
+        let (_, reservation) = self
+            .shared_memory
+            .get(&pid)?
+            .active
+            .range(..end)
+            .next_back()?;
+        let limit = reservation
+            .page_count
+            .checked_mul(USER_PAGE_SIZE)
+            .and_then(|bytes| reservation.base_va.checked_add(bytes))?;
+        (limit > base_va).then_some(*reservation)
+    }
+
+    /// Change a RAM reservation's accounting exactly once, without releasing
+    /// backing. The explicit unit survives partial UNMAP/capability cleanup,
+    /// so ordinary extent release never has to search for the allocation twice.
+    pub fn canonicalize_shared_memory(
+        &mut self,
+        pid: usize,
+        reservation: SharedMemoryReservation,
+    ) -> Result<(), CapabilityError> {
+        let pid = self.memory_owner_pid(pid);
+        if self.shared_memory_reservation(pid, reservation.base_va, reservation.page_count)
+            != Some(reservation)
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        if reservation.has_page_references() || reservation.page_count == 1 {
+            return Ok(());
+        }
+        let allocation = self
+            .physical_allocations
+            .find(
+                AllocationState::Active,
+                pid,
+                reservation.base_va,
+                reservation.page_count,
+            )
+            .filter(|allocation| allocation.start_slot == reservation.start_slot)
+            .ok_or(CapabilityError::IllegalOperation)?;
+        self.physical_allocations
+            .split_unique_extent(pid, allocation)
+            .map_err(|_| CapabilityError::IllegalOperation)?;
+        self.shared_memory
+            .get_mut(&pid)
+            .unwrap()
+            .active
+            .get_mut(&reservation.base_va)
+            .unwrap()
+            .references = ReferenceUnit::Page;
+        Ok(())
+    }
+
     // Call only after every mapping and capability in the reservation has been
     // removed (or before any was installed when rolling back a reservation).
     pub fn recycle_shared_memory(&mut self, pid: usize, reservation: SharedMemoryReservation) {
         let pid = self.memory_owner_pid(pid);
+        let heap_limit = self.find_entry_by_pid(pid).unwrap().user_heap_limit_va / USER_PAGE_SIZE;
         let space = self.shared_memory.get_mut(&pid).unwrap();
         assert_eq!(space.active.remove(&reservation.base_va), Some(reservation));
         space
             .slots
             .insert(reservation.start_slot, reservation.page_count);
-        space
-            .pages
-            .insert(reservation.base_va / USER_PAGE_SIZE, reservation.page_count);
+        // Fixed mappings may live beyond the default allocation arena. Their
+        // capability slots are reusable, but offering their VA to a default
+        // allocation would make an otherwise valid request fail its heap limit.
+        let first = reservation.base_va / USER_PAGE_SIZE;
+        let end = (first + reservation.page_count).min(heap_limit);
+        if first < end {
+            space.pages.insert(first, end - first);
+        }
     }
 
     pub(super) fn exclude_shared_virtual_range(

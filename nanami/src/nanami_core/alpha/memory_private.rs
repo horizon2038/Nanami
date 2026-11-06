@@ -44,11 +44,14 @@ impl Alpha {
             .processes
             .memory_entry(target)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let pages = self
+        let vm = self
             .processes
             .vm_space_mut(source)
-            .ok_or(CapabilityError::InvalidArgument)?
-            .backed_pages(0, usize::MAX);
+            .ok_or(CapabilityError::InvalidArgument)?;
+        if vm.has_uncertain_mappings(0, usize::MAX) {
+            return Err(CapabilityError::Fatal);
+        }
+        let pages = vm.backed_pages(0, usize::MAX);
         // One request-local ownership snapshot, never a list search per page.
         let references = self
             .processes
@@ -243,7 +246,10 @@ impl Alpha {
             .processes
             .vm_space_mut(pid)
             .ok_or(CapabilityError::Fatal)?;
-        if vm.find_frame(old.base_va) != Some(old_frame) || vm.permissions(old.base_va) & 2 != 0 {
+        if vm.mapping_is_uncertain(old.base_va)
+            || vm.find_frame(old.base_va) != Some(old_frame)
+            || vm.permissions(old.base_va) & 2 != 0
+        {
             return Err(CapabilityError::Fatal);
         }
         let permissions = vm.permissions(old.base_va);

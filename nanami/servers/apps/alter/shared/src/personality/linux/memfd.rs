@@ -324,7 +324,13 @@ pub(super) fn map(
                     .pages
                     .get(&((offset + page_offset) / LINUX_PAGE_SIZE))
                 {
-                    write_target_memory_from(runtime, pid, base + page_offset, *source, LINUX_PAGE_SIZE)?;
+                    write_target_memory_from(
+                        runtime,
+                        pid,
+                        base + page_offset,
+                        *source,
+                        LINUX_PAGE_SIZE,
+                    )?;
                 }
                 nanami_runtime::request_process_mapping_protect(
                     pid,
@@ -717,6 +723,7 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
     let old_pages = align_up_word(old, LINUX_PAGE_SIZE);
     let new_pages = align_up_word(length, LINUX_PAGE_SIZE);
     for mapping in &maps {
+        super::guest_views::invalidate(runtime, mapping.pid);
         let first = old_pages
             .min(new_pages)
             .saturating_sub(mapping.offset)

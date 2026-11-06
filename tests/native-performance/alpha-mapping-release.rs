@@ -130,6 +130,64 @@ fn sparse_release_walks_backing_not_a_terabyte_of_unpopulated_addresses() {
 }
 
 #[test]
+fn canonical_ram_reservations_reject_partial_and_crossing_releases_before_unmap() {
+    for canonical in [false, true] {
+        let mut alpha = Alpha::new();
+        let r = alpha
+            .processes
+            .reserve_shared_memory_at(1, 3, 1024, 0x2000)
+            .unwrap();
+        alpha
+            .processes
+            .register_physical_allocation(1, r.base_va, r.start_slot, 100, 3)
+            .unwrap();
+        if canonical {
+            alpha.processes.canonicalize_shared_memory(1, r).unwrap();
+        }
+        let root = alpha.processes.memory_entry(1).unwrap().root_node;
+        for page in 0..3 {
+            alpha
+                .processes
+                .vm_space_mut(1)
+                .unwrap()
+                .record_frame(
+                    r.base_va + page * PAGE_SIZE,
+                    process_frame_descriptor(root, r.start_slot + page),
+                )
+                .unwrap();
+        }
+        for sparse in [false, true] {
+            for (base, bytes) in [
+                (0x2000, PAGE_SIZE),
+                (0x3000, PAGE_SIZE),
+                (0x1000, 2 * PAGE_SIZE),
+                (0x4000, 2 * PAGE_SIZE),
+                (0x1000, 5 * PAGE_SIZE),
+            ] {
+                assert_eq!(
+                    alpha.release(base, bytes, sparse),
+                    Err(CapabilityError::InvalidArgument)
+                );
+                assert_eq!(alpha.invalidations, 0);
+                assert_eq!(alpha.shared_releases, 0);
+                CALLS.with(|calls| assert!(calls.borrow().unmaps.is_empty()));
+                assert_eq!(
+                    alpha
+                        .processes
+                        .vm_space_mut(1)
+                        .unwrap()
+                        .backed_pages(0, usize::MAX)
+                        .len(),
+                    3
+                );
+            }
+        }
+        assert_eq!(alpha.release(r.base_va, 3 * PAGE_SIZE, false), Ok(()));
+        assert_eq!(alpha.shared_releases, 1);
+    }
+}
+
+#[test]
 fn strict_holes_and_unreferenced_prot_none_leaves_fail_before_any_mutation() {
     let mut alpha = Alpha::new();
     alpha.page(0x1000, 1, 3);

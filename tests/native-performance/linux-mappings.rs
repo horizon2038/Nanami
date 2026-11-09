@@ -818,6 +818,94 @@ fn compact_prefix_has_no_empty_entries_after_split_remove_merge_and_reset() {
     assert!(!r.has_mapping(1, 0x1000, 0x1000));
 }
 
+fn scalar_remove_entries(entries: &mut Vec<ProcessMapping>, base: Word, end: Word) -> bool {
+    let mut cursor = base;
+    while cursor < end {
+        let mut selected = None;
+        for (index, mapping) in entries.iter().enumerate() {
+            if mapping.base == 0 { continue; }
+            let Some(stop) = mapping.base.checked_add(mapping.size) else { return false; };
+            if mapping.base <= cursor && cursor < stop { selected = Some((index,*mapping,stop)); break; }
+        }
+        let Some((index,mapping,stop)) = selected else { return false; };
+        let next = stop.min(end);
+        let left = cursor-mapping.base;
+        let right = stop-next;
+        if left != 0 && right != 0 && entries.len() == ALTER_PROCESS_MAPPING_MAX { return false; }
+        entries.remove(index);
+        if left != 0 { entries.push(ProcessMapping {base:mapping.base,size:left,prot:mapping.prot}); }
+        if right != 0 { entries.push(ProcessMapping {base:next,size:right,prot:mapping.prot}); }
+        cursor=next;
+    }
+    true
+}
+
+#[test]
+fn whole_vma_removal_compacts_once_and_keeps_shared_length_without_allocating() {
+    for count in [3,8,64,128,ALTER_PROCESS_MAPPING_MAX] {
+        let mut r=Runtime::new();
+        for index in 0..count {
+            assert!(r.process.mappings.push(ProcessMapping {base:4096*(index+1),size:4096,prot:index%8}));
+        }
+        let alias=r.process.mappings;
+        let generation=alias.generation();
+        MappingTable::take_entry_moves();
+        let allocations=ALLOCATION_CALLS.with(Cell::get);
+        assert!(r.remove_mapping(1,4096,count*4096));
+        assert_eq!(ALLOCATION_CALLS.with(Cell::get),allocations);
+        assert_eq!(MappingTable::take_entry_moves(),count-1);
+        assert!(alias.is_empty());
+        assert_ne!(alias.generation(),generation);
+        assert!(!r.has_mapping(1,4096,4));
+    }
+}
+
+#[test]
+fn whole_vma_removal_keeps_unselected_overlaps_and_surviving_permission_bits() {
+    let mut r=Runtime::new();
+    let entries=[
+        ProcessMapping {base:0x1000,size:4096,prot:3},
+        ProcessMapping {base:0x1000,size:2048,prot:0},
+        ProcessMapping {base:0x2000,size:4096,prot:1},
+        ProcessMapping {base:0x9000,size:4096,prot:4},
+        ProcessMapping {base:0x3000,size:4096,prot:5},
+    ];
+    for mapping in entries { assert!(r.process.mappings.push(mapping)); }
+    let mut expected=entries.to_vec();
+    assert!(scalar_remove_entries(&mut expected,0x1000,0x4000));
+    assert!(r.remove_mapping(1,0x1000,0x3000));
+    assert_eq!(&*r.process.mappings,expected.as_slice());
+    assert!(!r.memory_access_allowed(1,0x1000,4,1));
+    assert!(!r.memory_access_allowed(1,0x9000,4,2));
+    assert!(r.memory_access_allowed(1,0x9000,4,4));
+}
+
+#[test]
+fn whole_and_partial_vma_removal_match_scalar_order_for_shuffled_overlapping_tables() {
+    let mut random=0x11335577u64;
+    for case in 0..512 {
+        let mut r=Runtime::new();
+        let mut entries:Vec<_>=(0..16).map(|index| ProcessMapping {base:0x1000+index*4096,size:4096,prot:index%8}).collect();
+        for index in (1..entries.len()).rev() {
+            random=random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            entries.swap(index,(random>>32) as usize%(index+1));
+        }
+        if case%2==0 {
+            for offset in 0..4 { entries.insert(offset*3,ProcessMapping {base:0x2000+offset*4096,size:8192,prot:offset}); }
+        }
+        for &mapping in &entries { assert!(r.process.mappings.push(mapping)); }
+        let base=0x1000+(case%6)*4096+if case%3==0 {123} else {0};
+        let end=0x1000+(10+case%7)*4096-if case%5==0 {77} else {0};
+        let mut expected=entries;
+        assert!(scalar_remove_entries(&mut expected,base,end));
+        assert!(r.remove_mapping(1,base,end-base));
+        assert_eq!(&*r.process.mappings,expected.as_slice());
+        for page in 1..=16 { for permission in [1,2,4] {
+            assert_eq!(r.memory_access_allowed(1,page*4096,4,permission),uncached_access_allowed(&r,page*4096,4,permission));
+        }}
+    }
+}
+
 #[test]
 fn clone_vm_alias_observes_length_changes_and_cannot_use_stale_permissions() {
     let mut r = Runtime::new();

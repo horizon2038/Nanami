@@ -346,7 +346,10 @@ fn glyph5x7(ch: u8) -> [u8; 7] {
 }
 
 fn contains(rect: Rect, x: i32, y: i32) -> bool {
-    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+    // Overflowing clip edges use the legacy release-mode pixel walk. Make
+    // its wrapping bounds explicit so debug tests follow the same behavior.
+    x >= rect.x && x < rect.x.wrapping_add(rect.width)
+        && y >= rect.y && y < rect.y.wrapping_add(rect.height)
 }
 
 #[cfg(test)]

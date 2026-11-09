@@ -134,6 +134,11 @@ impl Runtime {
                         return false;
                     };
                     if mapping.base <= cursor && cursor < mapping_end {
+                        if cursor == base && mapping.base == base && mapping_end < end
+                            && remove_whole_entries(process, base, end)
+                        {
+                            return true;
+                        }
                         let chunk_end = ::core::cmp::min(mapping_end, end);
                         if !remove_mapping_fragment(process, i, cursor, chunk_end) {
                             return false;
@@ -185,7 +190,7 @@ impl Runtime {
         let process = self.managed_process(pid)?;
         let mut cursor = CoverageCursor::new(&process.mappings, base, end);
         let mut out = None;
-        while let Some(mapping) = cursor.next_chunk().ok()? {
+        while let Some((_, mapping)) = cursor.next_chunk().ok()? {
             if let Some(prot) = out {
                 if prot != mapping.prot {
                     return None;
@@ -300,7 +305,7 @@ impl<'a> CoverageCursor<'a> {
         Self { mappings, cursor, end, candidates: None }
     }
 
-    fn next_chunk(&mut self) -> Result<Option<ProcessMapping>, ()> {
+    fn next_chunk(&mut self) -> Result<Option<(usize, ProcessMapping)>, ()> {
         if self.cursor >= self.end { return Ok(None); }
         if self.candidates.is_none() {
             // The common one-VMA query keeps the original linear first-match
@@ -318,7 +323,7 @@ impl<'a> CoverageCursor<'a> {
                         candidates[index / Word::BITS as usize] &= !(1usize << (index % Word::BITS as usize));
                         self.candidates = Some(candidates);
                     }
-                    return Ok(Some(mapping));
+                    return Ok(Some((index, mapping)));
                 }
             }
             return Err(());
@@ -344,12 +349,45 @@ impl<'a> CoverageCursor<'a> {
                 } else if mapping.base <= self.cursor {
                     self.cursor = end.min(self.end);
                     candidates[word] &= !mask;
-                    return Ok(Some(mapping));
+                    return Ok(Some((index, mapping)));
                 }
             }
         }
         Err(())
     }
+}
+
+fn remove_whole_entries(process: &mut ManagedProcess, base: Word, end: Word) -> bool {
+    let mut selected = [0usize; ALTER_PROCESS_MAPPING_MAX.div_ceil(Word::BITS as usize)];
+    let mut count = 0;
+    let mut cursor = CoverageCursor::new(&process.mappings, base, end);
+    loop {
+        let start = cursor.cursor;
+        match cursor.next_chunk() {
+            Ok(Some((index, mapping))) => {
+                // Partial boundaries keep their original ordered split path.
+                // No metadata has changed if this plan cannot be completed.
+                if mapping.base != start || mapping.base + mapping.size > end {
+                    return false;
+                }
+                selected[index / Word::BITS as usize] |= 1usize << (index % Word::BITS as usize);
+                count += 1;
+            }
+            Ok(None) => break,
+            Err(()) => return false,
+        }
+    }
+    if count < 3 { return false; }
+    // The coverage cursor selected only whole entries, in the same first-
+    // covering order as removal. No appended boundary fragment can alter a
+    // later selection. Stable retain also leaves unselected overlaps in place.
+    let mut index = 0;
+    process.mappings.retain(|_| {
+        let keep = selected[index / Word::BITS as usize] & (1usize << (index % Word::BITS as usize)) == 0;
+        index += 1;
+        keep
+    });
+    true
 }
 
 fn remove_mapping_fragment(process: &mut ManagedProcess, i: usize, base: Word, end: Word) -> bool {

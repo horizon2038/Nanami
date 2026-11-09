@@ -601,7 +601,9 @@ impl PhysicalAllocator {
 }
 
 fn bytes_to_pages(size_bytes: usize) -> usize {
-    (size_bytes + PAGE_SIZE - 1) / PAGE_SIZE
+    // Preserve release-mode rounding for oversized requests: an overflowing
+    // alignment addition yields zero pages and allocation rejects the request.
+    size_bytes.wrapping_add(PAGE_SIZE - 1) / PAGE_SIZE
 }
 
 fn is_page_aligned(address: usize) -> bool {

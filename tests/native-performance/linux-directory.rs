@@ -3,6 +3,12 @@
 extern crate self as nanami_runtime;
 use std::cell::RefCell;
 pub type Word = usize;
+#[derive(Clone, Copy, Debug)]
+pub enum RequestError {
+    Status(i32),
+    Unsupported,
+    Transport,
+}
 mod arch {
     pub const CPU_INFO: &[u8] = b"test CPU";
     pub const PROC_VERSION: &[u8] = b"test kernel";
@@ -27,6 +33,31 @@ const LINUX_DT_REG: usize = 8;
 const LINUX_DT_BLK: usize = 6;
 const LINUX_DT_CHR: usize = 2;
 const LINUX_DT_SOCK: usize = 12;
+
+#[test]
+fn dirent_serializer_initializes_every_record_byte_and_preserves_unaligned_guards() {
+    for len in 0usize..256 {
+        let name: Vec<u8> = (0..len).map(|i| ((i * 37 + len) % 255 + 1) as u8).collect();
+        let bytes = (19 + len + 1).next_multiple_of(8);
+        for alignment in 0..8 {
+            for (inode, next, dtype) in [(0, 0, 0), (usize::MAX, usize::MAX, 255), (0x12345678, 0x87654321, 8)] {
+                let start = 8 + alignment;
+                let mut output: Vec<u8> = (0..start + bytes + 8).map(|i| (i * 53 + 0x17) as u8).collect();
+                let mut expected = output.clone();
+                // Independent LP64 dirent64 layout, including NUL/padding.
+                let record = &mut expected[start..start + bytes];
+                record.fill(0);
+                record[..8].copy_from_slice(&(inode as u64).to_le_bytes());
+                record[8..16].copy_from_slice(&(next as u64).to_le_bytes());
+                record[16..18].copy_from_slice(&(bytes as u16).to_le_bytes());
+                record[18] = dtype as u8;
+                record[19..19 + len].copy_from_slice(&name);
+                directory::write_entry_for_test(output.as_mut_ptr() as Word + start, inode, next, dtype, &name);
+                assert_eq!(output, expected, "len={len} alignment={alignment}");
+            }
+        }
+    }
+}
 
 #[test]
 fn legacy_virtual_devices_are_exposed_only_with_a_graphics_grant() {
@@ -99,6 +130,11 @@ struct Backend {
     cursor: usize,
     shm: usize,
     reads: usize,
+    seeks: usize,
+    biased_calls: usize,
+    biased_unsupported: bool,
+    biased_error: Option<RequestError>,
+    biased_reject_after: Option<usize>,
 }
 thread_local! {
     static BACKEND: RefCell<Backend> = RefCell::new(Backend::default());
@@ -106,13 +142,14 @@ thread_local! {
 mod posix {
     use super::*;
     pub use nanami_uapi::posix::*;
-    pub fn posix_seek(_: Word, _: Word, offset: Word, whence: Word) -> Result<Word, i32> {
+    pub fn posix_seek(_: Word, _: Word, offset: Word, whence: Word) -> Result<Word, RequestError> {
         BACKEND.with(|backend| {
             let mut backend = backend.borrow_mut();
+            backend.seeks += 1;
             match whence {
                 POSIX_SEEK_SET => backend.cursor = offset,
                 POSIX_SEEK_CUR => backend.cursor += offset,
-                _ => return Err(EINVAL),
+                _ => return Err(RequestError::Status(EINVAL)),
             }
             Ok(backend.cursor)
         })
@@ -122,7 +159,7 @@ mod posix {
         _: Word,
         count: Word,
         offset: Word,
-    ) -> Result<(Word, Word), i32> {
+    ) -> Result<(Word, Word), RequestError> {
         BACKEND.with(|backend| {
             let mut backend = backend.borrow_mut();
             backend.reads += 1;
@@ -148,12 +185,36 @@ mod posix {
             Ok((count, end))
         })
     }
+    pub fn posix_read_dir_biased(
+        port: Word, fd: Word, count: Word, offset: Word, bias: Word,
+    ) -> Result<(Word, Word), RequestError> {
+        BACKEND.with(|backend| {
+            let mut backend = backend.borrow_mut();
+            backend.biased_calls += 1;
+            if backend.biased_unsupported
+                || backend.biased_reject_after.is_some_and(|limit| backend.biased_calls > limit)
+            {
+                return Err(RequestError::Unsupported);
+            }
+            if let Some(error) = backend.biased_error {
+                return Err(error);
+            }
+            backend.cursor = backend.cursor.checked_sub(bias).ok_or(RequestError::Status(EINVAL))?;
+            Ok(())
+        })?;
+        let reply = posix_read_dir(port, fd, count, offset);
+        BACKEND.with(|backend| backend.borrow_mut().cursor += bias);
+        reply
+    }
 }
 fn align_up_word(value: Word, align: Word) -> Word {
     (value + align - 1) & !(align - 1)
 }
-fn map_request_error(error: i32) -> i32 {
-    error
+fn map_request_error(error: RequestError) -> i32 {
+    match error {
+        RequestError::Status(code) => code,
+        _ => EIO,
+    }
 }
 fn write_u16(address: Word, value: u16) {
     unsafe { (address as *mut u16).write_unaligned(value) }
@@ -191,6 +252,7 @@ fn fixture(private_root: bool, names: Vec<&str>) -> Runtime {
             shm,
             cursor: 0,
             reads: 0,
+            ..Backend::default()
         }
     });
     Runtime {
@@ -414,4 +476,61 @@ fn oversized_guest_count_still_obeys_the_actual_shared_memory_extent() {
     assert!(output[copied..].iter().all(|byte| *byte == 0xa5));
     assert!(runtime._buffer[end..].iter().all(|byte| *byte == 0xa5));
     BACKEND.with(|backend| assert_eq!(backend.borrow().cursor, 2));
+}
+
+#[test]
+fn root_backing_read_removes_both_cursor_conversion_seeks() {
+    let mut runtime = fixture(true, vec!["one", "two"]);
+    read(&mut runtime, 0, 512);
+    BACKEND.with(|b| { let mut b = b.borrow_mut(); b.seeks = 0; b.reads = 0; });
+    assert_eq!(read(&mut runtime, 1, 512).len(), 2);
+    BACKEND.with(|b| {
+        let b = b.borrow();
+        let enabled = option_env!("NANAMI_BIASED_READDIR") != Some("0");
+        assert_eq!(b.seeks, if enabled { 1 } else { 3 });
+        assert_eq!(b.biased_calls, usize::from(enabled));
+        assert_eq!(b.reads, 1);
+        assert_eq!(b.cursor, 5);
+    });
+}
+
+#[test]
+fn unsupported_new_entry_falls_back_without_losing_overlay_cookies() {
+    let mut runtime = fixture(true, vec!["one", "two"]);
+    read(&mut runtime, 0, 512);
+    BACKEND.with(|b| b.borrow_mut().biased_unsupported = true);
+    let entries = read(&mut runtime, 1, 512);
+    assert_eq!(entries.iter().map(|entry| entry.2).collect::<Vec<_>>(), [4, 5]);
+    BACKEND.with(|b| { let b = b.borrow(); assert_eq!(b.reads, 1); assert_eq!(b.cursor, 5); });
+}
+
+#[test]
+fn real_errors_never_trigger_the_legacy_read_route() {
+    if option_env!("NANAMI_BIASED_READDIR") == Some("0") {
+        return;
+    }
+    for (error, expected) in [(RequestError::Status(EINVAL), EINVAL), (RequestError::Transport, EIO)] {
+        let mut runtime = fixture(true, vec!["one", "two"]);
+        read(&mut runtime, 0, 512);
+        BACKEND.with(|b| { let mut b = b.borrow_mut(); b.biased_error = Some(error); b.seeks = 0; });
+        let mut output = [0xaau8; 512];
+        assert_eq!(directory::sys_getdents64(&mut runtime, 1, 1, output.as_mut_ptr() as Word, 512), Err(expected));
+        assert!(output.iter().all(|byte| *byte == 0xaa));
+        BACKEND.with(|b| { let b = b.borrow(); assert_eq!((b.cursor, b.reads, b.seeks), (3, 0, 1)); });
+    }
+}
+
+#[test]
+fn unsupported_after_a_shadowed_batch_does_not_restart_the_stream() {
+    if option_env!("NANAMI_BIASED_READDIR") == Some("0") {
+        return;
+    }
+    let mut names = vec!["dev"; 16];
+    names.push("visible");
+    let mut runtime = fixture(true, names);
+    read(&mut runtime, 0, 512);
+    BACKEND.with(|b| b.borrow_mut().biased_reject_after = Some(1));
+    let mut output = [0u8; 32];
+    assert_eq!(directory::sys_getdents64(&mut runtime, 1, 1, output.as_mut_ptr() as Word, 32), Err(EIO));
+    BACKEND.with(|b| { let b = b.borrow(); assert_eq!((b.reads, b.biased_calls, b.cursor), (1, 2, 19)); });
 }

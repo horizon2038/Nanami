@@ -61,6 +61,45 @@ impl WriteEffects for Machine {
 }
 
 #[test]
+fn contiguous_large_writes_prepare_all_pages_and_reuse_every_lease() {
+    for offset in [0, 1, 7, PAGE - 1] {
+        for len in [PAGE + 1, 2 * PAGE, MAX_CONTIGUOUS_WRITE_BYTES - 1, MAX_CONTIGUOUS_WRITE_BYTES] {
+            let writer = WriteWindow::new();
+            let mut machine = Machine::default();
+            let pages = (offset + len).div_ceil(PAGE);
+            for i in 0..pages { machine.page(7, PAGE * (i + 1), 0x33); }
+            let mut expected = vec![0x33; pages * PAGE];
+            for epoch in 0..3 {
+                let bytes: Vec<_> = (0..len).map(|i| (i * 37 + epoch * 11) as u8).collect();
+                assert!(writer.copy_from(7, 1, 7, PAGE + offset, &bytes, &mut machine));
+                expected[offset..offset + len].copy_from_slice(&bytes);
+                for i in 0..pages {
+                    assert_eq!(&machine.pages[&(7, PAGE * (i + 1))].borrow()[..], &expected[i * PAGE..(i + 1) * PAGE]);
+                }
+                assert_eq!(machine.grants, pages);
+            }
+            writer.clear_owner(7, &mut machine);
+            assert!(machine.maps.is_empty());
+        }
+    }
+}
+
+#[test]
+fn large_write_missing_any_page_never_stores_a_prefix() {
+    for missing in 0..5 {
+        let writer = WriteWindow::new();
+        let mut machine = Machine::default();
+        for i in 0..5 {
+            if i != missing { machine.page(7, PAGE * (i + 1), 0x55); }
+        }
+        assert!(!writer.copy_from(7, 1, 7, PAGE + 1, &vec![0x77; MAX_CONTIGUOUS_WRITE_BYTES], &mut machine));
+        for page in machine.pages.values() { assert_eq!(&page.borrow()[..], &[0x55; PAGE]); }
+        writer.clear_owner(7, &mut machine);
+        assert!(machine.maps.is_empty());
+    }
+}
+
+#[test]
 fn repeated_owned_writes_reuse_pins_and_do_not_overlap_read_aliases() {
     let reader = ReadWindow::new();
     let writer = WriteWindow::new();
@@ -118,7 +157,7 @@ fn write_generation_change_cannot_modify_replaced_backing() {
     assert_eq!(&machine.pages[&(7, PAGE)].borrow()[..32], &[23; 32]);
     assert!(!writer.copy_from(7, 0, 7, PAGE, &[24; 32], &mut machine));
     assert!(!writer.copy_from(7, 2, 7, usize::MAX - 10, &[24; 32], &mut machine));
-    assert!(!writer.copy_from(7, 2, 7, PAGE, &[24; PAGE + 1], &mut machine));
+    assert!(!writer.copy_from(7, 2, 7, PAGE, &[24; MAX_CONTIGUOUS_WRITE_BYTES + 1], &mut machine));
 }
 
 #[test]
@@ -235,6 +274,42 @@ fn read(
         return None;
     }
     Some(bytes.map(|byte| unsafe { byte.assume_init() }))
+}
+
+#[test]
+fn large_read_views_sample_current_bytes_and_reuse_all_five_pages() {
+    let window = ReadWindow::new();
+    let mut machine = Machine::default();
+    for i in 0..5 { machine.page(7, PAGE * (i + 1), 0); }
+    for epoch in 0..5 {
+        for i in 0..5 { machine.pages[&(7, PAGE * (i + 1))].borrow_mut().fill((epoch * 11 + i) as u8); }
+        let mut bytes = vec![MaybeUninit::new(0xab); MAX_CONTIGUOUS_READ_BYTES];
+        assert!(window.copy_into(7, 1, 7, PAGE + 19, &mut bytes, &mut machine));
+        for (i, byte) in bytes.iter().enumerate() {
+            assert_eq!(unsafe { byte.assume_init() }, (epoch * 11 + (i + 19) / PAGE) as u8);
+        }
+        assert_eq!(machine.grants, 5);
+    }
+    assert!(!window.copy_into(7, 1, 7, PAGE, &mut vec![MaybeUninit::uninit(); MAX_CONTIGUOUS_READ_BYTES + 1], &mut machine));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn large_read_missing_later_page_returns_false_with_only_local_prefix_sampled() {
+    for missing in 0..5 {
+        let window = ReadWindow::new();
+        let mut machine = Machine::default();
+        for i in 0..5 { if i != missing { machine.page(7, PAGE * (i + 1), 0x55); } }
+        let mut bytes = vec![MaybeUninit::new(0xab); MAX_CONTIGUOUS_READ_BYTES];
+        assert!(!window.copy_into(7, 1, 7, PAGE + 19, &mut bytes, &mut machine));
+        let sampled = (missing * PAGE).saturating_sub(19);
+        for (i, byte) in bytes.iter().enumerate() {
+            assert_eq!(unsafe { byte.assume_init() }, if i < sampled { 0x55 } else { 0xab });
+        }
+        window.clear_owner(7, &mut machine);
+        assert!(machine.maps.is_empty());
+    }
 }
 
 #[test]

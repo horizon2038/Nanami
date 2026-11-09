@@ -8,6 +8,8 @@ const ENABLED: bool = match option_env!("NANAMI_ALTER_PROFILE") {
     None => false,
 };
 const SYSCALLS: usize = 512;
+#[cfg(feature = "syscall-scope")]
+const _: () = assert!(!ENABLED, "legacy and scoped syscall profilers must not run together");
 static CALLS: [AtomicU64; SYSCALLS] = [const { AtomicU64::new(0) }; SYSCALLS];
 static TICKS: [AtomicU64; SYSCALLS] = [const { AtomicU64::new(0) }; SYSCALLS];
 

@@ -33,6 +33,12 @@ pub(super) fn prctl(runtime: &mut Runtime, pid: Word, args: [Word; 6]) -> Result
                 copied += bytes;
             }
             runtime.managed_process_mut(pid).ok_or(ESRCH)?.comm = name;
+            #[cfg(feature = "syscall-scope")]
+            {
+                let _ = runtime.syscall_scope.command(
+                    pid, &name, nanami_runtime::diagnostics::local_stamp,
+                ).map_err(|_| EINVAL)?;
+            }
             Ok(0)
         }
         16 => {
@@ -57,6 +63,25 @@ pub(super) fn prctl(runtime: &mut Runtime, pid: Word, args: [Word; 6]) -> Result
             Ok(0)
         }
         21 => Ok(0), // PR_GET_SECCOMP: no filter installed; SET is not accepted.
+        #[cfg(feature = "syscall-scope")]
+        0x4e53_0001 => {
+            // Private diagnostic readout; not an A9N Kernel ABI. Scope must be
+            // stopped and owned by this still-live process. EFAULT retains it.
+            use crate::common::scope_controller::REPORT_BYTES;
+            use crate::common::syscall_scope::Error;
+            // prctl has five ABI arguments; the sixth syscall register is unused.
+            if args[2] < REPORT_BYTES || args[3..5].iter().any(|arg| *arg != 0) {
+                return Err(EINVAL);
+            }
+            runtime.managed_process(pid).ok_or(ESRCH)?;
+            let packet = runtime.syscall_scope.report(pid).map_err(|error| match error {
+                Error::NotOwner => EPERM,
+                Error::NoMemory => ENOMEM,
+                _ => EINVAL,
+            })?;
+            copyout_owned(runtime, pid, args[1], &packet)?;
+            Ok(packet.len())
+        }
         _ => Err(EINVAL),
     }
 }

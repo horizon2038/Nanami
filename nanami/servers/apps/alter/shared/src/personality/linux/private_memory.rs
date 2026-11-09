@@ -19,14 +19,42 @@ pub(super) fn with_private_write<T>(
     bytes: Word,
     operation: impl FnOnce() -> Result<T, i32>,
 ) -> Result<T, i32> {
+    with_private_write_inner(runtime, pid, address, bytes, true, operation)
+}
+
+/// The caller already validated a live immutable-snapshot extent. Its pages
+/// can be detached directly; never omit quiescence, view invalidation or DETACH.
+pub(super) fn with_snapshot_write<T>(
+    runtime: &Runtime,
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    operation: impl FnOnce() -> Result<T, i32>,
+) -> Result<T, i32> {
+    with_private_write_inner(runtime, pid, address, bytes, false, operation)
+}
+
+fn with_private_write_inner<T>(
+    runtime: &Runtime,
+    pid: Word,
+    address: Word,
+    bytes: Word,
+    query: bool,
+    operation: impl FnOnce() -> Result<T, i32>,
+) -> Result<T, i32> {
+    if bytes != 0 {
+        // Privileged copies can change readonly bytes without a VMA mutation.
+        // Independent of optional guest-view flags and of the COW query result.
+        runtime.readonly_mapping.set(crate::state::ReadonlyMapping::EMPTY);
+    }
     if bytes == 0
-        || !runtime
+        || (query && !runtime
             .managed_process(pid)
-            .is_some_and(|process| process.vm_private_shared)
+            .is_some_and(|process| process.vm_private_shared))
     {
         return operation();
     }
-    if !nanami_runtime::request_process_private_write(pid, address, bytes, OS_PRIVATE_WRITE_QUERY)
+    if query && !nanami_runtime::request_process_private_write(pid, address, bytes, OS_PRIVATE_WRITE_QUERY)
         .map_err(map_request_error)?
     {
         return operation();

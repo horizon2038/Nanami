@@ -430,6 +430,83 @@ fn pool_origin_is_distinct_from_child_aliases_and_survives_process_arena_reset()
 }
 
 #[test]
+fn completed_frame_range_reuses_one_index_lookup_for_dense_page_resolution() {
+    let (mut memory, _) = boot(40, true);
+    let base = 0x200000000usize;
+    let first = map(&mut memory, base, false);
+    map(&mut memory, 0x208000000, false);
+    map(&mut memory, 0x210000000, false); // Evict the first range even with two entries.
+    let before = memory.frame_range_lookup_diagnostics().0;
+    let calls = FAKE.with(|fake| fake.borrow().calls);
+    for offset in 0..2048 {
+        let address = base + offset * 4096;
+        let page = address >> 12;
+        memory.ensure_alpha_frame_at_physical_index(page).unwrap();
+        let descriptor = memory.physical_frame_descriptor_from_index(page).unwrap();
+        assert_eq!(memory.physical_frame_descriptor_from_index(page), Some(descriptor));
+        FAKE.with(|fake| {
+            let fake = fake.borrow();
+            let (&node, &(start, _)) = fake.frames.iter().find(|(_, (start, pages))|
+                address >= *start && address - *start < *pages * 4096).unwrap();
+            assert_eq!(descriptor, make_child_slot_descriptor(node, fake.caps[&node].radix, (address - start) >> 12));
+        });
+    }
+    assert_eq!(memory.frame_range_lookup_diagnostics().0 - before, 1);
+    FAKE.with(|fake| assert_eq!(fake.borrow().calls, calls));
+    for page in [0, 0x400000000 >> 12, usize::MAX] {
+        assert!(memory.physical_frame_descriptor_from_index(page).is_none());
+    }
+    // Neither a miss nor the independent bootstrap range evicts this entry.
+    assert!(memory.physical_frame_descriptor_from_index(0x80000000 >> 12).is_some());
+    let before = memory.frame_range_lookup_diagnostics().0;
+    assert_eq!(memory.physical_frame_descriptor_from_index(base >> 12), Some(first));
+    assert_eq!(memory.frame_range_lookup_diagnostics().0, before);
+    println!("READY-FRAME-RANGE pages=2048 resolutions=6144 index-lookups=1 metadata-bytes={}", memory.frame_range_lookup_diagnostics().1);
+}
+
+#[test]
+fn ready_range_cache_does_not_publish_failed_conversion_or_retry_it() {
+    let (mut memory, _) = boot(40, true);
+    let ready = map(&mut memory, 0x200000000, false);
+    FAKE.with(|fake| fake.borrow_mut().fail_kind = Some((CapabilityType::Frame, 0)));
+    for _ in 0..2 {
+        assert!(memory.ensure_alpha_frames_for_range_from_initial_generic(0xa1220000, 4096, true).is_err());
+        assert!(memory.physical_frame_descriptor_from_index(0xa1220000 >> 12).is_none());
+        assert_eq!(memory.physical_frame_descriptor_from_index(0x200000000 >> 12), Some(ready));
+    }
+    let calls = FAKE.with(|fake| fake.borrow().calls);
+    assert!(memory.ensure_alpha_frame_at_physical_index(0xa1220000 >> 12).is_err());
+    FAKE.with(|fake| assert_eq!(fake.borrow().calls, calls));
+}
+
+#[test]
+fn alternating_ready_frame_ranges_avoid_repeated_index_searches() {
+    let (mut memory, _) = boot(40, true);
+    let bases = [0x200000000usize, 0x208000000];
+    for base in bases { map(&mut memory, base, false); }
+    let before = memory.frame_range_lookup_diagnostics().0;
+    let calls = FAKE.with(|fake| fake.borrow().calls);
+    for offset in 0..2048 {
+        for base in bases {
+            let address = base + offset * 4096;
+            let descriptor = memory.physical_frame_descriptor_from_index(address >> 12).unwrap();
+            FAKE.with(|fake| {
+                let fake = fake.borrow();
+                let (&node, &(start, _)) = fake.frames.iter().find(|(_, (start, pages))|
+                    address >= *start && address - *start < *pages * 4096).unwrap();
+                assert_eq!(descriptor, make_child_slot_descriptor(node, fake.caps[&node].radix,
+                    (address - start) >> 12));
+            });
+        }
+    }
+    let lookups = memory.frame_range_lookup_diagnostics().0 - before;
+    FAKE.with(|fake| assert_eq!(fake.borrow().calls, calls));
+    println!("alternating frame ranges resolutions=4096 tree-lookups={lookups} cache-bytes={}",
+        memory.frame_range_lookup_diagnostics().1);
+    assert_eq!(lookups, 0);
+}
+
+#[test]
 fn subpage_boot_reservations_exclude_the_whole_page_from_allocation_and_frame_sources() {
     for consumed in [1, 128, 2048, 4095, 4097, 0x200080] {
         let (mut memory, _) = boot_with_reserved_prefix(33, true, consumed);

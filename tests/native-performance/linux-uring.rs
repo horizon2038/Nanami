@@ -102,6 +102,55 @@ pub(super) fn sys_close(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Wo
     Ok(0)
 }
 
+#[test]
+fn scalar_io_keeps_payload_offsets_short_reads_and_avoids_vector_allocation() {
+    let mut r = runtime();
+    let fd = memfd::create(&mut r, 1, c"scalar".as_ptr() as Word, 0).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    let payload = [0x37u8; 64];
+    memfd::io(&mut r, 1, file, payload.as_ptr() as Word, payload.len(), Some(0), true).unwrap();
+    let mut counts = [0; 2];
+    for (i, opcode) in [23, 22].into_iter().enumerate() {
+        let mut output = [0xa5u8; 80];
+        let ptr = if opcode == 23 { payload.as_ptr() as Word } else { output.as_mut_ptr() as Word };
+        FUTEX_ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = io_uring::io_for_test(&mut r, 1, opcode, fd, ptr, 64, 0);
+        counts[i] = FUTEX_ALLOCATIONS.with(|c| c.replace(None).unwrap());
+        assert_eq!(result, Ok(64));
+        if opcode == 22 { assert_eq!(&output[..64], &payload); }
+        assert!(output[64..].iter().all(|b| *b == 0xa5));
+    }
+    println!("uring scalar write/read vector allocations: {counts:?}");
+    assert_eq!(counts, [0, 0]);
+    let mut out = [0xa5u8; 80];
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 22, fd, out.as_mut_ptr() as Word, 80, 60), Ok(4));
+    assert_eq!(&out[..4], &payload[..4]);
+    assert!(out[4..].iter().all(|b| *b == 0xa5));
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 22, fd, 0, 1, 0), Err(EFAULT));
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 22, fd, 0, i32::MAX as Word + 1, 0), Err(EINVAL));
+}
+
+#[test]
+fn vector_io_validates_all_lengths_before_writing_and_preserves_order() {
+    let mut r = runtime();
+    let fd = memfd::create(&mut r, 1, c"vectors".as_ptr() as Word, 0).unwrap();
+    let a = *b"hello";
+    let b = *b"world!";
+    let vectors = [(a.as_ptr() as Word, a.len()), (b.as_ptr() as Word, b.len())];
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 2, fd, vectors.as_ptr() as Word, 2, 0), Ok(11));
+    let mut out = [0xa5u8; 16];
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 22, fd, out.as_mut_ptr() as Word, 16, 0), Ok(11));
+    assert_eq!(&out[..11], b"helloworld!");
+    assert_eq!(&out[11..], &[0xa5; 5]);
+    let bad = [(a.as_ptr() as Word, 5), (0, i32::MAX as Word)];
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 2, fd, bad.as_ptr() as Word, 2, 0), Err(EINVAL));
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 1, fd, 0, 0, 0), Ok(0));
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 1, fd, 0, 1025, 0), Err(EINVAL));
+    let mut after = [0xa5u8; 16];
+    assert_eq!(io_uring::io_for_test(&mut r, 1, 22, fd, after.as_mut_ptr() as Word, 16, 0), Ok(11));
+    assert_eq!(after, out);
+}
+
 fn setup(runtime: &mut Runtime, flags: u32) -> (Word, [u32; 30], Word, Word) {
     let mut params = [0u32; 30];
     params[2] = flags;

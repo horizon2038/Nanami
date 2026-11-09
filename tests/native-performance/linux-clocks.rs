@@ -2,7 +2,16 @@
 extern crate self as a9n_abi;
 extern crate self as nanami_client;
 extern crate self as nanami_runtime;
+// Real reporting uses the KVM adapter; this harness tests the timer algorithm.
+#[cfg(feature = "wait-shape")]
+mod wait_shape {
+    pub(super) fn report(_: &mut super::Runtime) {}
+    pub(super) fn clock(_: &mut super::Runtime, _: usize, _: usize) {}
+}
 use std::cell::RefCell;
+thread_local! {
+    static STOPPED_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 pub use std::println;
 pub type Word = usize;
 pub const PROCESS_SLOT_NOTIFICATION: Word = 18;
@@ -111,6 +120,7 @@ struct Runtime {
 }
 impl Runtime {
     fn is_signal_stopped(&self, pid: Word) -> bool {
+        STOPPED_QUERIES.with(|count| count.set(count.get() + 1));
         self.managed_process(pid)
             .is_some_and(Process::signal_stopped)
     }
@@ -354,6 +364,24 @@ fn sleep(runtime: &mut Runtime, pid: Word, ns: Word) -> EmulationAction {
 fn notify(runtime: &mut Runtime, ticks: Word) {
     FAKE.with(|fake| fake.borrow_mut().ticks = ticks);
     handle_timer_notification(runtime, timer::TIMER_NOTIFICATION_IDENTIFIER_BIT);
+}
+
+#[test]
+fn timer_notification_only_queries_stop_state_for_due_sleepers() {
+    let mut counts = Vec::new();
+    for shape in 0..4 {
+        let mut r = runtime(1_000_000_000);
+        if shape != 0 {
+            assert!(matches!(sleep(&mut r, 1, 100), EmulationAction::Park));
+            r.managed[0].stopped = shape == 3;
+        }
+        STOPPED_QUERIES.with(|count| count.set(0));
+        notify(&mut r, if shape == 1 { 50 } else { 100 });
+        counts.push(STOPPED_QUERIES.with(|count| count.get()));
+        assert_eq!(r.managed[0].sleep_waiting, shape == 1 || shape == 3);
+    }
+    println!("TIMER-EXPIRY-FILTER idle/future/due/stopped={counts:?}");
+    assert_eq!(counts, [0, 1, 1, 2]);
 }
 
 #[test]
@@ -605,6 +633,56 @@ fn clock_deadlines_exclude_stopped_sleep_and_readiness_waiters() {
     r.managed[0].stopped = true;
     arm_clock_timer(&mut r).unwrap();
     assert_eq!(r.clock_deadline, None);
+}
+
+#[test]
+fn fused_managed_deadline_pass_preserves_old_minimum_and_alarm_deduplication() {
+    let mut idle = runtime(1000);
+    STOPPED_QUERIES.with(|count| count.set(0));
+    arm_clock_timer(&mut idle).unwrap();
+    let idle_queries = STOPPED_QUERIES.with(|count| count.get());
+    let mut dual = runtime(1000);
+    dual.managed[0].sleep_waiting = true;
+    dual.managed[0].sleep_deadline = 50;
+    dual.managed[0].readiness_wait = Some(ReadinessWait { deadline: Some(40) });
+    dual.managed[1].readiness_wait = Some(ReadinessWait { deadline: None });
+    dual.managed[3].exited = true;
+    dual.managed[3].readiness_wait = Some(ReadinessWait { deadline: Some(1) });
+    STOPPED_QUERIES.with(|count| count.set(0));
+    arm_clock_timer(&mut dual).unwrap();
+    let dual_queries = STOPPED_QUERIES.with(|count| count.get());
+    assert_eq!(dual.clock_deadline, Some(40));
+    println!("CLOCK-DEADLINE-PASS processes=4 idle-stop-queries={idle_queries} dual-waiter-stop-queries={dual_queries}");
+    assert_eq!((idle_queries, dual_queries), (0, 1));
+    let mut random = 0x39c5_172bu32;
+    for _ in 0..2048 {
+        let mut r = runtime(1000);
+        for (index, process) in r.managed.iter_mut().enumerate() {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            let shape = random ^ random.rotate_left(13);
+            process.pid = if shape & 1 == 0 { 0 } else { index + 1 };
+            process.sleep_waiting = shape & 2 != 0;
+            process.exited = shape & 4 != 0;
+            process.stopped = shape & 8 != 0;
+            process.sleep_deadline = ((random >> 8) % 101) as usize;
+            process.readiness_wait = match (shape >> 4) & 3 {
+                0 => None,
+                1 => Some(ReadinessWait { deadline: None }),
+                2 => Some(ReadinessWait { deadline: Some(0) }),
+                _ => Some(ReadinessWait { deadline: Some(((random >> 16) % 101) as usize) }),
+            };
+        }
+        let expected = r.managed.iter().filter(|p|
+            p.pid != 0 && p.sleep_waiting && !r.is_signal_stopped(p.pid))
+            .map(|p| p.sleep_deadline).chain(r.managed.iter().filter(|p|
+                p.pid != 0 && !p.exited && !r.is_signal_stopped(p.pid))
+                .filter_map(|p| p.readiness_wait.as_ref().and_then(|wait| wait.deadline))).min();
+        r.clock_deadline = Some(Word::MAX);
+        arm_clock_timer(&mut r).unwrap();
+        assert_eq!(r.clock_deadline, expected);
+        arm_clock_timer(&mut r).unwrap();
+        FAKE.with_borrow(|fake| assert_eq!(fake.alarms, [expected]));
+    }
 }
 
 #[test]

@@ -4,13 +4,18 @@ use super::Word;
 use core::{cell::RefCell, mem::MaybeUninit};
 
 pub const PAGE: Word = 4096;
+pub const MAX_CONTIGUOUS_READ_BYTES: usize = 4 * PAGE;
 /// Bounded optional fast path; larger vectors retain the checked-copy service.
 pub const MAX_WRITE_BUFFERS: usize = 4;
+/// A contiguous owned copy touches at most five distinct consecutive sets.
+pub const MAX_CONTIGUOUS_WRITE_BYTES: usize = 4 * PAGE;
+const CONTIGUOUS_WRITE_PAGES: usize = MAX_CONTIGUOUS_WRITE_BYTES / PAGE + 1;
 const READ_BASE: Word = 0x20_0000_0000;
 const WRITE_BASE: Word = READ_BASE + SLOTS * PAGE;
 const SETS: usize = 16;
 const WAYS: usize = 4;
 const SLOTS: usize = SETS * WAYS;
+const _: () = assert!(CONTIGUOUS_WRITE_PAGES <= SETS);
 
 #[derive(Clone, Copy)]
 struct Lease {
@@ -152,7 +157,7 @@ impl ReadWindow {
         effects: &mut impl Effects,
     ) -> bool {
         if generation == 0
-            || destination.len() > PAGE
+            || destination.len() > MAX_CONTIGUOUS_READ_BYTES
             || source.checked_add(destination.len()).is_none()
         {
             return false;
@@ -198,8 +203,8 @@ impl WriteWindow {
 
     /// Prepare every page before storing a byte. On failure the caller can
     /// use the original checked request without repeating a partial write.
-    /// Adjacent pages occupy distinct sets, so preparing the second page
-    /// cannot evict the first. Sources are owned native buffers, not raw VAs.
+    /// This bounded consecutive range occupies distinct sets, so preparing a
+    /// later page cannot evict an earlier one. Sources are owned native buffers.
     pub fn copy_from(
         &self,
         owner: Word,
@@ -209,12 +214,13 @@ impl WriteWindow {
         source: &[u8],
         effects: &mut impl WriteEffects,
     ) -> bool {
-        if generation == 0 || source.len() > PAGE || destination.checked_add(source.len()).is_none()
+        if generation == 0 || source.len() > MAX_CONTIGUOUS_WRITE_BYTES
+            || destination.checked_add(source.len()).is_none()
         {
             return false;
         }
         let mut state = self.0.state.borrow_mut();
-        let mut fragments = [(0, 0, 0); 2];
+        let mut fragments = [(0, 0, 0); CONTIGUOUS_WRITE_PAGES];
         let mut count = 0;
         let mut prepared = 0;
         while prepared < source.len() {

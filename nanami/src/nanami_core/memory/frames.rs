@@ -37,11 +37,36 @@ impl MemoryManager {
         if let Some(range) = self.bootstrap_frames.filter(|range| range.contains(page)) {
             return Some(range);
         }
-        self.physical_frames
+        let recent = self.ready_frame_range.get();
+        if let Some(range) = recent.filter(|range| range.contains(page)) {
+            return Some(range);
+        }
+        // A copy can alternate source and destination pool ranges. Keep both
+        // completed identities; neither entry contains page contents or rights.
+        if let Some(range) = self.ready_frame_range_other.get().filter(|range| range.contains(page)) {
+            return Some(range);
+        }
+        #[cfg(test)]
+        self.frame_range_index_lookups.set(self.frame_range_index_lookups.get() + 1);
+        let range = self.physical_frames
             .range(..=page)
             .next_back()
             .map(|(_, range)| *range)
-            .filter(|range| range.contains(page))
+            .filter(|range| range.contains(page));
+        // Pending/failed conversions can change or remain quarantined. Only
+        // Ready records have permanent node/Frame identity and may bypass the
+        // index on later lookups. Misses do not evict a useful completed range.
+        if let Some(range) = range.filter(|range| range.ready && !range.failed) {
+            self.ready_frame_range_other.set(recent);
+            self.ready_frame_range.set(Some(range));
+        }
+        range
+    }
+
+    #[cfg(test)]
+    pub fn frame_range_lookup_diagnostics(&self) -> (usize, usize) {
+        (self.frame_range_index_lookups.get(), core::mem::size_of_val(&self.ready_frame_range)
+            + core::mem::size_of_val(&self.ready_frame_range_other))
     }
 
     pub fn prepare_bootstrap_frames(

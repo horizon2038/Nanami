@@ -50,6 +50,26 @@ lease reclamation. Resizing a pinned file returns `EBUSY`, then succeeds after
 unmap. The Tiny Core `--desktop --with-tests` recipe includes this fixture and
 the desktop probe executes it before starting Xfbdev/wbar.
 
+The same fixture emits `READLINK-KIND-PASS` after checking regular files,
+directories, bound UNIX sockets, symlink truncation/dangling targets, dirfd and
+absolute-path rules, regular-to-link-to-regular replacement, NULL/zero output,
+protected output pages and `/proc/self{,/exe}`. A strict native probe built with
+The fixture additionally emits `ROOTED-OPEN-PASS` for read-only open/read,
+CLOEXEC, relative/absolute dirfd, NOFOLLOW, dangling symlink, directory mismatch,
+invalid guest pointer, virtual mount priority and repeated FD pressure. It
+holds a pure-virtual spare so the Linux FD slot is available when checking a
+symlink into `/dev` with POSIX capacity exhausted. `/` has a POSIX backing FD
+for its merged listing and is not a pure-virtual capacity assertion.
+`NANAMI_REQUIRE_ROOTED_OPEN=1` makes the strict native probe require this marker
+in the same collected buffer as generic mapping completion and emit
+`TINYCORE-ROOTED-OPEN-PASS`; use it with the readlink and recvmsg requirements.
+
+`NANAMI_REQUIRE_READLINK_KIND=1` checks `READLINK-KIND-PASS` in the same console buffer as
+`FILE-MAPPING-PASS`, then emits `TINYCORE-READLINK-KIND-PASS`. Guest console output
+is consumed by the probe; do not search the host serial log for the guest marker
+and mistake its absence for the test not running. Default probe behavior is
+unchanged. The new strict marker and existing16 UNIX fault marker are independent.
+
 The same fixture checks private file mmap through cached and over-2-MiB uncached
 paths, partial-EOF zero fill and MAP_FIXED replacement of dirty backing. It
 unlinks its own running executable inside the QEMU snapshot and then forks:
@@ -861,6 +881,18 @@ Use a new output directory; rebuilding a disk replaces its guest data. The
 QEMU smoke runner uses a private snapshot and does not modify the input image.
 
 ## Process creation and ELF snapshot cache
+
+The file-mapping fixture also keeps a readonly mapping with a partial EOF page
+and a separate zero suffix alive across 50 cache versions, followed by 50
+distinct linked inodes to force retirement under generation-aware eviction.
+The links remain live until cleanup to prevent inode reuse. It verifies bytes
+after retirement, fork/mprotect write isolation in both regions, and unchanged
+file contents. Run `qemu-smoke.py --tinycore-file-mapping` with the rebuilt
+fixture and matching Alpha/Alter; the same checks cover the immutable optout.
+It also appends128 eight-byte chunks across a single-indirect data-block
+boundary, fsyncs, reopens and verifies the final size and every payload byte.
+Another case enumerates64 files through a small getdents buffer while extending
+an unrelated regular file, checking that no directory entry is lost or repeated.
 
 `process-performance.c` measures complete fork/wait and fork/exec/wait loops;
 it also checks fixed-work getresuid/copyout loops with zero, 128 and 256 extra

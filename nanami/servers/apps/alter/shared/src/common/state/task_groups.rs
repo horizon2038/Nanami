@@ -65,7 +65,11 @@ impl Runtime {
         target.vm_group = source.vm_group;
         target.vm_private_shared = source.vm_private_shared;
         if files {
-            target.files.release();
+            // CLONE_FILES may already have installed this borrowed handle.
+            // Releasing it here would free the parent's live table.
+            if !target.files.same_storage(source.files) {
+                target.files.release();
+            }
             target.files = source.files;
         }
         if fs {

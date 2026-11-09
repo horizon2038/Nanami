@@ -13,7 +13,7 @@ impl Alpha {
                 // Every local alias loses its Frame capability; only the final
                 // active/deferred owner can release the RAM. Commit each successful
                 // record so a later failure cannot leave already-freed RAM owned.
-                if let Some(root_node) = process_root {
+                if let Some(root_node) = process_root.filter(|_| allocation.owns_frame_cap) {
                     for page in 0..allocation.page_count {
                         let slot = allocation.start_slot + page;
                         arch::node::remove(

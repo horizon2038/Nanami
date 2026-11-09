@@ -75,6 +75,37 @@ impl Alpha {
 mod production;
 
 #[test]
+fn mixed_pool_and_child_cap_aliases_keep_failed_child_and_free_ram_once() {
+    let mut alpha = Alpha::new();
+    alpha.deferred(1, 1, 77, 1);
+    alpha.processes.register_pool_alias(1, 2 * PAGE_SIZE, 2, 77).unwrap();
+    alpha.processes.defer_active_physical_allocation(1, 2 * PAGE_SIZE, 1).unwrap();
+    CALLS.with(|calls| calls.borrow_mut().fail_remove = Some(0));
+    assert_eq!(alpha.free_deferred_process_allocations(1, Some(100)), Err(CapabilityError::Fatal));
+    assert!(alpha.memory.freed.is_empty());
+    let remaining: Vec<_> = alpha.processes.deferred_physical_allocations_for_pid(1).collect();
+    assert_eq!(remaining.len(), 1);
+    assert!(remaining[0].owns_frame_cap);
+    CALLS.with(|calls| calls.borrow_mut().fail_remove = None);
+    alpha.free_deferred_process_allocations(1, Some(100)).unwrap();
+    assert_eq!(alpha.memory.freed, [(77 * PAGE_SIZE, PAGE_SIZE)]);
+}
+
+#[test]
+fn sole_pool_alias_survives_ram_release_failure_without_cap_removal() {
+    let mut alpha = Alpha::new();
+    alpha.processes.register_pool_alias(1, PAGE_SIZE, 1, 77).unwrap();
+    alpha.processes.defer_active_physical_allocation(1, PAGE_SIZE, 1).unwrap();
+    alpha.memory.fail_free = true;
+    assert_eq!(alpha.free_deferred_process_allocations(1, Some(100)), Err(CapabilityError::Fatal));
+    assert!(!alpha.processes.deferred_physical_allocations_for_pid(1).next().unwrap().owns_frame_cap);
+    CALLS.with(|calls| assert!(calls.borrow().removed.is_empty()));
+    alpha.memory.fail_free = false;
+    alpha.free_deferred_process_allocations(1, Some(100)).unwrap();
+    assert_eq!(alpha.memory.freed, [(77 * PAGE_SIZE, PAGE_SIZE)]);
+}
+
+#[test]
 fn exec_removes_every_alias_before_releasing_the_shared_physical_extent_once() {
     let mut alpha = Alpha::new();
     for slot in [1, 3, 5] {

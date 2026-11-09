@@ -122,9 +122,9 @@ pub(super) fn timer_set(
         report_timer(runtime, pid, previous, output)?;
     }
     proposed.expire(runtime.monotonic_ticks);
-    *runtime.poll_objects.get_mut(id).ok_or(EBADF)? = Object::Timer(proposed);
+    *runtime.poll_objects.timer_mut(id).ok_or(EBADF)? = proposed;
     if let Err(errno) = arm_clock_timer(runtime) {
-        *runtime.poll_objects.get_mut(id).ok_or(EBADF)? = Object::Timer(previous);
+        *runtime.poll_objects.timer_mut(id).ok_or(EBADF)? = previous;
         return Err(errno);
     }
     runtime.readiness_changes |= READY_OBJECT;
@@ -146,7 +146,7 @@ pub(super) fn signal_create(
     let mask = signals::blockable(read_shm_u64(runtime, 0) as u64);
     if fd as i32 != -1 {
         let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-        let Some(Object::Signals(object)) = runtime.poll_objects.get_mut(file.resource) else {
+        let Some(object) = runtime.poll_objects.signals_mut(file.resource) else {
             return Err(EINVAL);
         };
         object.mask = mask;
@@ -186,10 +186,9 @@ pub(super) fn read(
             return Err(EAGAIN);
         }
         write_guest_u64(runtime, pid, buffer, count as Word)?;
-        let Some(Object::Timer(timer)) = runtime.poll_objects.get_mut(file.resource) else {
+        if !runtime.poll_objects.clear_timer_expirations(file.resource) {
             return Err(EBADF);
-        };
-        timer.expirations = 0;
+        }
         runtime.readiness_changes |= READY_OBJECT;
         return Ok(8);
     }
@@ -207,12 +206,13 @@ pub(super) fn read(
             break;
         };
         let record = signal_record(info);
-        if let Err(errno) = super::copyout_from(
+        // Keep the initialized record owned through synchronous copyout so
+        // eligible guest buffers can reuse the existing writable lease.
+        if let Err(errno) = super::copyout_owned(
             runtime,
             pid,
             buffer.checked_add(copied).ok_or(EFAULT)?,
-            record.as_ptr() as Word,
-            RECORD_BYTES,
+            &record,
         ) {
             runtime
                 .managed_process_mut(pid)

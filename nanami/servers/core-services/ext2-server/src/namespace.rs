@@ -1,102 +1,13 @@
 use super::*;
+use super::link_target::read_link;
+use super::directory_parent::read_parent_name;
 use alloc::vec::Vec;
 use nanami_client::vfs::*;
 use path_walk::{Error, Filesystem, Kind, Node};
 
-struct Disk<'a>(&'a mut Ext2Runtime);
-
-fn kind(inode: Ext2Inode) -> Kind {
-    match inode.mode & EXT2_S_IFMT {
-        EXT2_S_IFDIR => Kind::Directory,
-        EXT2_S_IFLNK => Kind::Symlink,
-        EXT2_S_IFSOCK => Kind::Socket,
-        _ => Kind::File,
-    }
-}
-
-impl Filesystem for Disk<'_> {
-    fn lookup(&mut self, directory: u32, name: &[u8]) -> Result<Node, Error> {
-        let parent = read_inode(self.0, directory).map_err(|_| Error::Io)?;
-        if kind(parent) != Kind::Directory {
-            return Err(Error::NotDirectory);
-        }
-        if name.len() > EXT2_NAME_LEN_MAX {
-            return Err(Error::TooLong);
-        }
-        let inode = unsafe { lookup_in_directory(self.0, directory, name.as_ptr(), name.len()) }
-            .ok_or(Error::Missing)?;
-        Ok(Node {
-            inode,
-            kind: kind(read_inode(self.0, inode).map_err(|_| Error::Io)?),
-        })
-    }
-    fn read_link(&mut self, inode: u32) -> Result<Vec<u8>, Error> {
-        read_link(self.0, inode)
-    }
-    fn parent_name(&mut self, directory: u32) -> Result<(u32, Vec<u8>), Error> {
-        let parent = self.lookup(directory, b"..")?.inode;
-        let inode = read_inode(self.0, parent).map_err(|_| Error::Io)?;
-        for logical in 0..(inode.size as usize).div_ceil(self.0.block_size) {
-            let block = get_data_block(self.0, inode, logical).map_err(|_| Error::Io)?;
-            if block == 0 {
-                return Err(Error::Io);
-            }
-            read_block(self.0, block as usize).map_err(|_| Error::Io)?;
-            let mut offset = 0;
-            while offset < self.0.block_size {
-                let entry = parse_directory_entry(
-                    self.0.block_shm as usize + offset,
-                    self.0.block_size - offset,
-                )
-                .ok_or(Error::Io)?;
-                let name = unsafe { core::slice::from_raw_parts(entry.name_ptr, entry.name_len) };
-                if entry.inode == directory && name != b"." && name != b".." {
-                    return Ok((parent, name.to_vec()));
-                }
-                offset += entry.record_len;
-            }
-        }
-        Err(Error::Missing)
-    }
-}
-
-fn read_link(runtime: &mut Ext2Runtime, number: u32) -> Result<Vec<u8>, Error> {
-    let inode = read_inode(runtime, number).map_err(|_| Error::Io)?;
-    if kind(inode) != Kind::Symlink {
-        return Err(Error::Invalid);
-    }
-    let bytes = inode.size as usize;
-    if bytes > path_walk::PATH_MAX {
-        return Err(Error::TooLong);
-    }
-    let mut output = Vec::new();
-    output.try_reserve(bytes).map_err(|_| Error::NoSpace)?;
-    if inode.sectors == 0 {
-        if bytes > EXT2_INODE_BLOCK_POINTERS * 4 {
-            return Err(Error::Io);
-        }
-        for block in inode.block {
-            output.extend_from_slice(&block.to_le_bytes());
-        }
-        output.truncate(bytes);
-    } else {
-        let mut copied = 0;
-        while copied < bytes {
-            let block = get_data_block(runtime, inode, copied / runtime.block_size)
-                .map_err(|_| Error::Io)?;
-            if block == 0 {
-                return Err(Error::Io);
-            }
-            read_block(runtime, block as usize).map_err(|_| Error::Io)?;
-            let count = (bytes - copied).min(runtime.block_size);
-            output.extend_from_slice(unsafe {
-                core::slice::from_raw_parts(runtime.block_shm as *const u8, count)
-            });
-            copied += count;
-        }
-    }
-    Ok(output)
-}
+#[path = "namespace_disk.rs"]
+mod disk;
+use disk::{Disk, kind};
 
 fn input(session: ClientSession, offset: Word, bytes: Word) -> Result<Vec<u8>, Error> {
     if bytes > path_walk::PATH_MAX
@@ -153,16 +64,16 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
         {
             return Err(Error::Invalid);
         }
-        let root_path = input(session, request.root_offset, request.root_bytes)?;
-        if root_path.first() != Some(&b'/') {
-            return Err(Error::Invalid);
-        }
+        super::path_input::root(session.shm_local, session.shm_size,
+            request.root_offset, request.root_bytes)?;
         let root = lookup_path(runtime, session, request.root_offset, request.root_bytes)
             .ok_or(Error::Missing)?;
         if kind(read_inode(runtime, root).map_err(|_| Error::Io)?) != Kind::Directory {
             return Err(Error::NotDirectory);
         }
-        let path = input(session, request.path_offset, request.path_bytes)?;
+        let mut path_storage = [0u8; 256];
+        let path = super::path_input::path(session.shm_local, session.shm_size,
+            request.path_offset, request.path_bytes, &mut path_storage)?;
         let start = if path.first() == Some(&b'/') || request.directory == VFS_PATH_DIRECTORY_ROOT {
             root
         } else {
@@ -180,17 +91,43 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
             && request.operation != VFS_PATH_SYMLINK
             && request.flags & VFS_PATH_FOLLOW_FINAL != 0;
         let allow_missing = request.operation == VFS_PATH_SYMLINK
-            || (request.operation == VFS_PATH_RESOLVE
+            || (matches!(request.operation, VFS_PATH_RESOLVE | VFS_PATH_OPEN_READONLY)
                 && request.flags & VFS_PATH_ALLOW_MISSING != 0);
-        let resolved = path_walk::resolve(
-            &mut Disk(runtime),
+        // Only SYMLINK consumes the owned final name (including rollback).
+        // Keep the same complete walk and canonical path for other requests.
+        let resolved = path_walk::resolve_with_leaf_name(
+            &mut Disk::new(runtime, Node { inode: root, kind: Kind::Directory }),
             root,
             start,
             &path,
             follow,
             allow_missing,
+            request.operation == VFS_PATH_SYMLINK,
         )?;
         match request.operation {
+            VFS_PATH_OPEN_READONLY => {
+                let flags = super::path_input::word(session.shm_local, session.shm_size,
+                    request.target_offset, request.target_bytes)?;
+                let total = core::mem::size_of::<PathOpenResult>()
+                    .checked_add(resolved.path.len()).ok_or(Error::TooLong)?;
+                if request.output_offset.checked_add(total)
+                    .is_none_or(|end| end > session.shm_size)
+                {
+                    return Err(Error::TooLong);
+                }
+                let output = unsafe {
+                    core::slice::from_raw_parts_mut(
+                        (session.shm_local + request.output_offset) as *mut u8,
+                        request.output_bytes.min(total),
+                    )
+                };
+                readonly_open::complete(&resolved.path, resolved.node.map(|node| node.kind),
+                    flags, output, || {
+                        let node = resolved.node.ok_or(Error::Missing)?;
+                        let inode = read_inode(runtime, node.inode).map_err(|_| Error::Io)?;
+                        Ok(alloc_handle(runtime, message.identifier, node.inode, inode))
+                    })
+            }
             VFS_PATH_RESOLVE => {
                 let metadata_bytes = if request.flags & VFS_PATH_WITH_METADATA != 0 {
                     core::mem::size_of::<PathMetadata>()
@@ -250,9 +187,8 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                 ))
             }
             VFS_PATH_CHMOD => {
-                let mode = input(session, request.target_offset, request.target_bytes)?;
-                let mode =
-                    Word::from_le_bytes(mode.as_slice().try_into().map_err(|_| Error::Invalid)?);
+                let mode = super::path_input::word(session.shm_local, session.shm_size,
+                    request.target_offset, request.target_bytes)?;
                 let number = resolved.node.ok_or(Error::Missing)?.inode;
                 chmod_inode(runtime, number, mode)?;
                 Ok((0, 0))

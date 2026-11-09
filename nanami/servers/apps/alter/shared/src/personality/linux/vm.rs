@@ -12,51 +12,6 @@ use super::{
     LINUX_VIRTUAL_RESERVATION_BASE, LINUX_VIRTUAL_RESERVATION_LIMIT,
 };
 
-pub(super) fn sys_brk(runtime: &mut Runtime, pid: Word, requested: Word) -> Result<Word, i32> {
-    let Some(process) = runtime.managed_process(pid) else {
-        return Err(ESRCH);
-    };
-    if process.program_break == 0 {
-        let (base, mapped) =
-            map_anonymous_tracked(runtime, pid, 4096, LINUX_PROT_READ | LINUX_PROT_WRITE)?;
-        let Some(process) = runtime.managed_process_mut(pid) else {
-            return Err(ESRCH);
-        };
-        process.program_break = base;
-        process.mapped_break = base + mapped;
-        runtime.sync_program_break(pid);
-    }
-    let current = runtime
-        .managed_process(pid)
-        .map(|process| process.program_break)
-        .ok_or(ESRCH)?;
-    if requested == 0 || requested <= current {
-        return Ok(current);
-    }
-    let mapped = runtime
-        .managed_process(pid)
-        .map(|process| process.mapped_break)
-        .ok_or(ESRCH)?;
-    if requested > mapped {
-        let extra = align_up_word(requested - mapped, 4096);
-        let (base, size) =
-            map_anonymous_tracked(runtime, pid, extra, LINUX_PROT_READ | LINUX_PROT_WRITE)?;
-        if base != mapped {
-            return Ok(current);
-        }
-        let Some(process) = runtime.managed_process_mut(pid) else {
-            return Err(ESRCH);
-        };
-        process.mapped_break = mapped + size;
-    }
-    let Some(process) = runtime.managed_process_mut(pid) else {
-        return Err(ESRCH);
-    };
-    process.program_break = requested;
-    runtime.sync_program_break(pid);
-    Ok(requested)
-}
-
 pub(super) fn sys_mmap(
     runtime: &mut Runtime,
     pid: Word,
@@ -136,9 +91,9 @@ pub(super) fn sys_mmap(
             }
             return Ok(requested_addr);
         }
-        let (base, granted) = nanami_runtime::request_process_map_anonymous_at(pid, fixed_base, mapped)
+        map_anonymous_at_tracked(runtime, pid, fixed_base, mapped, _prot)
             .map_err(|err| {
-                let errno = map_request_error(err);
+                let errno = err;
                 nanami_runtime::println!(
                     "[alter/linux] mmap fixed failed pid={} addr={:#x} base={:#x} len={:#x} mapped={:#x} prot={:#x} flags={:#x} fd={:#x} off={:#x} errno={}",
                     pid,
@@ -154,12 +109,6 @@ pub(super) fn sys_mmap(
                 );
                 errno
             })?;
-        if base != fixed_base || granted < mapped || !runtime.add_mapping(pid, base, granted, _prot)
-        {
-            let _ = nanami_runtime::request_process_mapping_release(pid, base, granted);
-            return Err(ENOMEM);
-        }
-        set_hardware_protection(pid, base, granted, _prot)?;
         return Ok(requested_addr);
     }
     if _prot == LINUX_PROT_NONE {
@@ -221,6 +170,9 @@ pub(super) fn sys_file_mmap(
         return Err(EOPNOTSUPP);
     }
     let mapped = len.checked_add(LINUX_PAGE_SIZE - 1).ok_or(ENOMEM)? & !(LINUX_PAGE_SIZE - 1);
+    if super::file_remap::reuse(runtime, pid, identity, file_size, addr, mapped, offset, prot, flags)? {
+        return Ok(addr);
+    }
     let base = sys_mmap(
         runtime,
         pid,
@@ -237,8 +189,14 @@ pub(super) fn sys_file_mmap(
         }
         let bytes = mapped.min(file_size.saturating_sub(offset));
         let mut initialized = false;
+        let mut final_permissions = false;
         if bytes != 0 {
-            if let Some(source) = crate::loader::file_mapping_source(
+            let file_source = if prot == LINUX_PROT_READ || prot == (LINUX_PROT_READ | LINUX_PROT_EXEC) {
+                crate::loader::readonly_file_mapping_source
+            } else {
+                crate::loader::file_mapping_source
+            };
+            if let Some(source) = file_source(
                 runtime,
                 file.posix_fd,
                 identity,
@@ -248,35 +206,50 @@ pub(super) fn sys_file_mmap(
             )
             .map_err(super::map_load_error)?
             {
-                if cfg!(target_arch = "x86_64")
-                    && (prot == LINUX_PROT_READ || prot == (LINUX_PROT_READ | LINUX_PROT_EXEC))
-                    && source & (LINUX_PAGE_SIZE - 1) == 0
-                    && runtime.image_cache.immutable_range(source, mapped)
-                {
-                    // No fallback after an alias request: it may have installed
-                    // a prefix. The outer munmap owns failed-range cleanup.
-                    super::private_memory::mark_shared(runtime, pid);
-                    nanami_runtime::request_process_map_private_snapshot(
-                        pid, base, mapped, source, prot,
-                    )
-                    .map_err(map_request_error)?;
+                if super::file_snapshot::map_readonly(
+                    runtime, pid, base, mapped, source, bytes, prot, FINAL_PERMISSIONS,
+                )? {
                     if !runtime.protect_mapping(pid, base, mapped, prot) {
                         return Err(ENOMEM);
                     }
+                    super::file_remap::remember(runtime, pid, identity, file_size, base, mapped, offset);
                     return Ok(base);
                 } else {
-                    nanami_runtime::request_process_map_initialized_at(
-                        pid, base, mapped, source, bytes,
-                    )
-                    .map_err(map_request_error)?;
+                    if FINAL_PERMISSIONS {
+                        nanami_runtime::request_process_map_initialized_protected_at(
+                            pid, base, mapped, source, bytes, prot,
+                        ).map_err(map_request_error)?;
+                        final_permissions = true;
+                    } else {
+                        nanami_runtime::request_process_map_initialized_at(
+                            pid, base, mapped, source, bytes,
+                        ).map_err(map_request_error)?;
+                    }
                 }
                 initialized = true;
             }
         }
         if !initialized {
-            super::file_mapping::initialize(runtime, pid, base, mapped, file, offset, bytes)?;
+            super::file_mapping::initialize(
+                runtime, pid, base, mapped, file, offset, bytes,
+                STREAMED_FINAL_PERMISSIONS.then_some(prot),
+            )?;
+            final_permissions = STREAMED_FINAL_PERMISSIONS;
+            #[cfg(target_os = "none")]
+            if final_permissions && option_env!("NANAMI_STREAMED_MMAP_DIAG") == Some("1") {
+                use core::sync::atomic::{AtomicBool, Ordering};
+                static FILES: AtomicBool = AtomicBool::new(false);
+                if runtime.managed_process(pid).is_some_and(|process| {
+                    process.image_name[..process.image_name_len].rsplit(|byte| *byte == b'/').next()
+                        == Some(&b"xfe"[..])
+                }) && !FILES.swap(true, Ordering::Relaxed) {
+                    nanami_runtime::println!("[linux.mmap] streamed-final-files pid={} bytes={} mapped={}", pid, bytes, mapped);
+                }
+            }
         }
-        set_hardware_protection(pid, base, mapped, prot)?;
+        if !final_permissions {
+            set_hardware_protection(pid, base, mapped, prot)?;
+        }
         if !runtime.protect_mapping(pid, base, mapped, prot) {
             return Err(ENOMEM);
         }
@@ -287,6 +260,20 @@ pub(super) fn sys_file_mmap(
     }
     result
 }
+
+// Initialize private file backing before publishing leaves with final rights.
+// Requires the matching Alpha constructor; =0 restores the old two-step path.
+const FINAL_PERMISSIONS: bool = match option_env!("NANAMI_MAP_FINAL_PERMISSIONS") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => true,
+};
+
+// Private file fallback only. Anonymous mmap retains its existing constructor.
+const STREAMED_FINAL_PERMISSIONS: bool = FINAL_PERMISSIONS
+    && match option_env!("NANAMI_STREAMED_MMAP_FINAL") {
+        Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+        None => true,
+    };
 
 pub(super) fn sys_munmap(
     runtime: &mut Runtime,
@@ -400,21 +387,30 @@ pub(super) fn sys_mprotect(
     if !runtime.can_protect_mapping(pid, addr, mapped) {
         return Err(ENOMEM);
     }
+    let snapshot_write = super::file_remap::snapshot_write(runtime, pid, addr, mapped, prot);
+    let origin = super::file_remap::before_protect(runtime, pid, prot);
     // Invalidate before touching PTEs, including partial updates whose rollback
     // fails. A subsequent cached read must revalidate current Alpha permissions.
     if let Some(process) = runtime.managed_process(pid) {
         process.mappings.invalidate_views();
     }
     if prot & LINUX_PROT_WRITE != 0 {
-        super::private_memory::with_private_write(runtime, pid, addr, mapped, || {
-            super::memfd::protect(runtime, pid, addr, mapped, prot)
-        })?;
+        if snapshot_write {
+            super::private_memory::with_snapshot_write(runtime, pid, addr, mapped, || {
+                super::memfd::protect(runtime, pid, addr, mapped, prot)
+            })?;
+        } else {
+            super::private_memory::with_private_write(runtime, pid, addr, mapped, || {
+                super::memfd::protect(runtime, pid, addr, mapped, prot)
+            })?;
+        }
     } else {
         super::memfd::protect(runtime, pid, addr, mapped, prot)?;
     }
     if !runtime.protect_mapping(pid, addr, mapped, prot) {
         return Err(ENOMEM);
     }
+    super::file_remap::after_protect(runtime, pid, origin);
     Ok(0)
 }
 
@@ -631,18 +627,19 @@ pub(super) fn map_anonymous_tracked(
     len: Word,
     prot: Word,
 ) -> Result<(Word, Word), i32> {
-    let (base, mapped) =
-        nanami_runtime::request_process_map_anonymous(pid, len).map_err(map_request_error)?;
-    if !runtime.add_mapping(pid, base, mapped, prot) {
-        nanami_runtime::request_process_mapping_release(pid, base, mapped)
-            .map_err(map_request_error)?;
-        return Err(ENOMEM);
-    }
-    if let Err(errno) = set_hardware_protection(pid, base, mapped, prot) {
-        let _ = sys_munmap(runtime, pid, base, mapped);
-        return Err(errno);
-    }
-    Ok((base, mapped))
+    map_anonymous_tracked_impl(runtime, pid, None, len, prot)
+}
+
+pub(super) fn map_anonymous_at_tracked(
+    runtime: &mut Runtime, pid: Word, base: Word, len: Word, prot: Word,
+) -> Result<(Word, Word), i32> {
+    map_anonymous_tracked_impl(runtime, pid, Some(base), len, prot)
+}
+
+fn map_anonymous_tracked_impl(
+    runtime: &mut Runtime, pid: Word, requested: Option<Word>, len: Word, prot: Word,
+) -> Result<(Word, Word), i32> {
+    super::anonymous_mapping::map(runtime, pid, requested, len, prot)
 }
 
 pub(super) fn register_linux_stack_mappings(runtime: &mut Runtime, pid: Word) -> bool {

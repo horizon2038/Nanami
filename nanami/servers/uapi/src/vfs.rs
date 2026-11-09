@@ -59,6 +59,19 @@ pub const VFS_PATH_STAT: Word = 4;
 /// target contains one little-endian Word of permission/special mode bits.
 /// FOLLOW_FINAL selects whether the final symlink is dereferenced.
 pub const VFS_PATH_CHMOD: Word = 5;
+/// Best-effort read-only open during rooted resolution. target is one Word of
+/// VFS_OPEN_DIRECTORY (or zero); other open flags are not accepted. Output is
+/// PathOpenResult followed by the canonical path. A NONE descriptor means no
+/// handle was acquired and the caller may use its original open path instead.
+/// VFS returns an owned handle; POSIX translates it to an owned directory/file FD.
+pub const VFS_PATH_OPEN_READONLY: Word = 6;
+pub const VFS_PATH_OPEN_NONE: Word = Word::MAX;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct PathOpenResult {
+    pub descriptor: Word,
+}
 pub const VFS_PATH_FOLLOW_FINAL: Word = 1;
 pub const VFS_PATH_ALLOW_MISSING: Word = 2;
 /// RESOLVE output starts with PathMetadata, followed by the canonical path.

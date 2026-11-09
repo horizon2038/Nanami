@@ -5,6 +5,19 @@ use alloc::vec::Vec;
 
 const ONESHOT: u32 = 1 << 30;
 const EDGE: u32 = 1 << 31;
+
+#[cfg(test)]
+static WATCH_QUERIES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) fn take_watch_queries() -> usize {
+    WATCH_QUERIES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
+fn regular_kind(kind: LinuxFileKind) -> bool {
+    matches!(kind, LinuxFileKind::Posix | LinuxFileKind::MemoryFile
+        | LinuxFileKind::VirtualFile | LinuxFileKind::VirtualDirectory
+        | LinuxFileKind::Framebuffer)
+}
 #[cfg(target_arch = "x86_64")]
 const EVENT_BYTES: usize = 12;
 #[cfg(target_arch = "aarch64")]
@@ -22,10 +35,7 @@ fn object(runtime: &Runtime, id: Word) -> Result<&Epoll, i32> {
 }
 
 fn object_mut(runtime: &mut Runtime, id: Word) -> Result<&mut Epoll, i32> {
-    match runtime.poll_objects.get_mut(id) {
-        Some(Object::Epoll(epoll)) => Ok(epoll),
-        _ => Err(EBADF),
-    }
+    runtime.poll_objects.epoll_mut(id).ok_or(EBADF)
 }
 
 pub(super) fn create(runtime: &mut Runtime, pid: Word, flags: Word) -> Result<Word, i32> {
@@ -39,6 +49,7 @@ pub(super) fn create(runtime: &mut Runtime, pid: Word, flags: Word) -> Result<Wo
         Object::Epoll(Epoll {
             watches: Vec::new(),
             cursor: 0,
+            source_mask: core::cell::Cell::new(None),
         }),
         flags,
     )
@@ -57,14 +68,7 @@ pub(super) fn control(
     if epoll.kind != LinuxFileKind::Epoll || super::eventfd::same_file(epoll, file) {
         return Err(EINVAL);
     }
-    if matches!(
-        file.kind,
-        LinuxFileKind::Posix
-            | LinuxFileKind::MemoryFile
-            | LinuxFileKind::VirtualFile
-            | LinuxFileKind::VirtualDirectory
-            | LinuxFileKind::Framebuffer
-    ) {
+    if regular_kind(file.kind) {
         return Err(EPERM);
     }
     if file.kind == LinuxFileKind::Epoll {
@@ -127,6 +131,7 @@ pub(super) fn control(
         }
         _ => return Err(ENOENT),
     }
+    epoll.source_mask.set(None);
     runtime.readiness_changes |= READY_OBJECT;
     Ok(0)
 }
@@ -162,17 +167,24 @@ pub(super) fn wait_set(
 
 pub(super) fn sources(runtime: &Runtime, id: Word) -> Word {
     object(runtime, id).map_or(READY_OBJECT, |epoll| {
-        epoll
+        if let Some(sources) = epoll.source_mask.get() {
+            return sources;
+        }
+        let sources = epoll
             .watches
             .iter()
             .filter(|watch| watch.armed)
             .fold(READY_OBJECT, |sources, watch| {
                 sources | super::readiness::file_sources(watch.file, watch.events as i16)
-            })
+            });
+        epoll.source_mask.set(Some(sources));
+        sources
     })
 }
 
-fn watch_events(runtime: &mut Runtime, pid: Word, watch: Watch) -> Result<u32, i32> {
+fn watch_events(runtime: &mut Runtime, pid: Word, watch: Watch, input_pumped: &mut bool) -> Result<u32, i32> {
+    #[cfg(test)]
+    WATCH_QUERIES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if !watch.armed {
         return Ok(0);
     }
@@ -200,7 +212,6 @@ fn watch_events(runtime: &mut Runtime, pid: Word, watch: Watch) -> Result<u32, i
     let Some((owner, fd)) = owner else {
         return Ok(0);
     };
-    let mut pumped = false;
     let available = super::readiness::fd_readiness(
         runtime,
         if matches!(
@@ -214,16 +225,16 @@ fn watch_events(runtime: &mut Runtime, pid: Word, watch: Watch) -> Result<u32, i
         fd,
         watch.file,
         watch.events as i16,
-        &mut pumped,
+        input_pumped,
     )?;
     Ok(available as u16 as u32 & (watch.events | LINUX_POLLERR as u32 | LINUX_POLLHUP as u32))
 }
 
-pub(super) fn ready(runtime: &mut Runtime, pid: Word, id: Word) -> Result<bool, i32> {
+pub(super) fn ready(runtime: &mut Runtime, pid: Word, id: Word, input_pumped: &mut bool) -> Result<bool, i32> {
     let count = object(runtime, id)?.watches.len();
     for index in 0..count {
         let watch = object(runtime, id)?.watches[index];
-        if watch_events(runtime, pid, watch)? != 0 {
+        if watch_events(runtime, pid, watch, input_pumped)? != 0 {
             return Ok(true);
         }
     }
@@ -245,51 +256,76 @@ pub(super) fn complete(
         return Err(EINVAL);
     }
     let start = object(runtime, id)?.cursor;
-    let mut bytes = [0u8; WATCH_LIMIT * EVENT_BYTES];
-    let mut selected = [0usize; WATCH_LIMIT];
+    // Empty readiness attempts must not initialize event/selection buffers.
+    // Keep both request-local and materialize them only on the first event.
+    let mut output = None;
     let mut written = 0;
-    for offset in 0..count {
-        let index = (start + offset) % count;
+    // One drain covers all input sessions, as in a regular poll scan. Keep
+    // this local to the batch so the next readiness attempt drains again.
+    let mut input_pumped = false;
+    // DEL can leave cursor beyond the new count. Normalize once, then keep
+    // the request-local index in range without a division per watched FD.
+    let mut next_index = if count == 0 { 0 } else { start % count };
+    for _ in 0..count {
+        let index = next_index;
+        next_index += 1;
+        if next_index == count {
+            next_index = 0;
+        }
         let watch = object(runtime, id)?.watches[index];
-        let events = watch_events(runtime, pid, watch)?;
+        let events = watch_events(runtime, pid, watch, &mut input_pumped)?;
         if events == 0 {
             continue;
         }
-        let output = &mut bytes[written * EVENT_BYTES..(written + 1) * EVENT_BYTES];
-        output[..4].copy_from_slice(&events.to_le_bytes());
-        output[EVENT_BYTES - 8..].copy_from_slice(&watch.data.to_le_bytes());
+        let (bytes, selected) = output.get_or_insert_with(|| (
+            [0u8; WATCH_LIMIT * EVENT_BYTES], [0usize; WATCH_LIMIT],
+        ));
+        let event = &mut bytes[written * EVENT_BYTES..(written + 1) * EVENT_BYTES];
+        event[..4].copy_from_slice(&events.to_le_bytes());
+        event[EVENT_BYTES - 8..].copy_from_slice(&watch.data.to_le_bytes());
         selected[written] = index;
         written += 1;
         if written == max {
             break;
         }
     }
-    if written != 0 {
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                runtime.posix_shm as *mut u8,
-                written * EVENT_BYTES,
-            );
-        }
-        write_target_memory(runtime, pid, context.args[1], written * EVENT_BYTES)
-            .map_err(|_| EFAULT)?;
+    if let Some((bytes, selected)) = output.as_ref() {
+        write_events(runtime, pid, context.args[1], &bytes[..written * EVENT_BYTES])?;
         let epoll = object_mut(runtime, id)?;
         for index in &selected[..written] {
             if epoll.watches[*index].events & ONESHOT != 0 {
                 epoll.watches[*index].armed = false;
+                epoll.source_mask.set(None);
             }
         }
-        epoll.cursor = (selected[written - 1] + 1) % count;
+        let next = selected[written - 1] + 1;
+        epoll.cursor = if next == count { 0 } else { next };
     }
     Ok(written)
 }
 
+fn write_events(runtime: &mut Runtime, pid: Word, output: Word, bytes: &[u8]) -> Result<(), i32> {
+    // The event bytes remain owned for the entire synchronous copyout. Avoid
+    // staging through SHM and keep the existing bounded writable-view path.
+    super::copyout_owned(runtime, pid, output, bytes).map_err(|_| EFAULT)
+}
+
 pub(super) fn forget_closed(runtime: &mut Runtime, pid: Word, file: LinuxFile) {
-    if runtime.poll_objects.is_empty() {
+    // control() rejects these immutable description kinds. No registration
+    // can match them, so global FD/SCM_RIGHTS reference discovery cannot affect
+    // watch cleanup. This does not skip the caller's actual close/release.
+    if regular_kind(file.kind)
+        || matches!(file.kind, LinuxFileKind::Empty | LinuxFileKind::Epoll)
+        || runtime.poll_objects.is_empty()
+    {
         return;
     }
     let terminal = runtime.terminal_id(pid).unwrap_or(0);
+    // Without a matching registration, discovering aliases cannot change
+    // cleanup. Include disabled one-shot watches in this exact identity test.
+    if !runtime.poll_objects.has_file_watch(file, terminal) {
+        return;
+    }
     let referenced = runtime.managed.iter().any(|process| {
         process.pid != 0
             && (file.kind != LinuxFileKind::Terminal || process.terminal_id == terminal)

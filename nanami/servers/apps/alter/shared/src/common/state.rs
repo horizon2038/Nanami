@@ -2,6 +2,9 @@
 mod clients;
 #[path = "state/descriptors.rs"]
 mod descriptors;
+#[path = "state/pipe.rs"]
+mod pipe;
+pub use pipe::LinuxPipe;
 #[path = "state/file_table.rs"]
 mod file_table;
 pub use file_table::FileTable;
@@ -22,12 +25,21 @@ mod mappings;
 #[path = "state/page_window.rs"]
 pub mod page_window;
 pub use mapping_table::MappingTable;
+#[path = "state/readonly_mapping.rs"]
+mod readonly_mapping;
+pub use readonly_mapping::ReadonlyMapping;
 #[path = "state/poll_objects.rs"]
 pub mod poll_objects;
 #[path = "state/process_index.rs"]
 mod process_index;
 #[path = "state/processes.rs"]
 mod processes;
+#[path = "state/process_install.rs"]
+mod process_install;
+#[path = "state/process_tree.rs"]
+mod process_tree;
+#[path = "state/child_wait.rs"]
+mod child_wait;
 #[path = "state/pty.rs"]
 pub mod pty;
 #[path = "state/readiness.rs"]
@@ -249,42 +261,6 @@ impl LinuxFile {
 }
 
 #[derive(Clone, Copy)]
-pub struct LinuxPipe {
-    pub active: bool,
-    pub readers: Word,
-    pub writers: Word,
-    // Runtime owns this allocation; copying pipe metadata does not transfer ownership.
-    pub(super) buffer: Word,
-    pub read: usize,
-    pub write: usize,
-    pub len: usize,
-}
-
-impl LinuxPipe {
-    pub const EMPTY: Self = Self {
-        active: false,
-        readers: 0,
-        writers: 0,
-        buffer: 0,
-        read: 0,
-        write: 0,
-        len: 0,
-    };
-
-    pub fn read_byte(&self, index: usize) -> u8 {
-        debug_assert!(self.active && self.buffer != 0 && index < LINUX_PIPE_BYTES);
-        unsafe { ::core::ptr::read((self.buffer as *const u8).add(index)) }
-    }
-
-    pub fn write_byte(&mut self, index: usize, value: u8) {
-        debug_assert!(self.active && self.buffer != 0 && index < LINUX_PIPE_BYTES);
-        unsafe {
-            ::core::ptr::write((self.buffer as *mut u8).add(index), value);
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
 pub struct ProcessMapping {
     pub base: Word,
     pub size: Word,
@@ -501,6 +477,10 @@ impl GraphicsSession {
 }
 
 pub struct Runtime {
+    #[cfg(feature = "syscall-scope")]
+    pub(crate) syscall_scope: super::scope_controller::Controller,
+    #[cfg(feature = "wait-shape")]
+    pub(crate) wait_shape: super::wait_shape::Trace,
     pub read_window: page_window::ReadWindow,
     pub write_window: page_window::WriteWindow,
     /// Accepted fault whose reply has not yet been sent. Not a runnable task.
@@ -557,6 +537,7 @@ pub struct Runtime {
     pub exec_stack_buffer: Word,
     pub exec_stack_buffer_size: Word,
     pub image_cache: super::image_cache::ImageCache,
+    pub readonly_mapping: core::cell::Cell<ReadonlyMapping>,
     pub trapped_faults: Word,
     // False for the normal non-strace case. Once enabled it remains true so
     // hot syscall paths can skip all trace-related process-table scans.
@@ -583,6 +564,10 @@ impl Runtime {
     ) -> Self {
         Self {
             read_window: page_window::ReadWindow::new(),
+            #[cfg(feature = "syscall-scope")]
+            syscall_scope: super::scope_controller::Controller::new(),
+            #[cfg(feature = "wait-shape")]
+            wait_shape: super::wait_shape::Trace::new(),
             write_window: page_window::WriteWindow::new(),
             current_fault_pid: 0,
             terminal_controls: [TerminalControl::EMPTY; ALTER_MANAGED_PROCESS_MAX],
@@ -637,6 +622,7 @@ impl Runtime {
             exec_stack_buffer: 0,
             exec_stack_buffer_size: 0,
             image_cache: super::image_cache::ImageCache::new(),
+            readonly_mapping: core::cell::Cell::new(ReadonlyMapping::EMPTY),
             trapped_faults: 0,
             trace_ever_enabled: false,
             signals_pending: false,

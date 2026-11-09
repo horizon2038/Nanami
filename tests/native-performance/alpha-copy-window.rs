@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 type CapabilityDescriptor = usize;
 const PAGE_SIZE: usize = 4096;
+const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
 #[derive(Debug, PartialEq, Eq)]
 enum CapabilityError {
     InvalidArgument,
@@ -12,6 +13,9 @@ enum CapabilityError {
 const POOL_FRAME: usize = 0x4000_0000;
 struct Memory;
 impl Memory {
+    fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> {
+        (page < 0x10000).then_some(POOL_FRAME + page)
+    }
     fn is_pool_frame_descriptor(&self, frame: usize) -> bool {
         frame & 0xffff_0000 == POOL_FRAME
     }
@@ -21,11 +25,14 @@ struct Alpha {
     memory: Memory,
     processes: Processes,
     copy_window: memory_copy::CopyWindow,
+    initialization_window: memory_init::InitializationWindow,
     mappings: BTreeMap<usize, usize>,
     maps: usize,
     unmaps: usize,
     fail_map: bool,
     fail_unmap: bool,
+    fail_after_unmaps: Option<usize>,
+    unmap_attempts: Vec<(usize, usize)>,
 }
 impl Alpha {
     fn new() -> Self {
@@ -33,11 +40,14 @@ impl Alpha {
             memory: Memory,
             processes: Processes::default(),
             copy_window: memory_copy::CopyWindow::new(),
+            initialization_window: memory_init::InitializationWindow::new(),
             mappings: BTreeMap::new(),
             maps: 0,
             unmaps: 0,
             fail_map: false,
             fail_unmap: false,
+            fail_after_unmaps: None,
+            unmap_attempts: Vec::new(),
         }
     }
     fn map_alpha_temporary_frame(
@@ -55,7 +65,8 @@ impl Alpha {
         }
     }
     fn unmap_alpha_frame(&mut self, frame: usize, va: usize) -> Result<(), CapabilityError> {
-        if self.fail_unmap {
+        self.unmap_attempts.push((frame, va));
+        if self.fail_unmap || self.fail_after_unmaps == Some(self.unmaps) {
             return Err(CapabilityError::IllegalOperation);
         }
         assert_eq!(self.mappings.remove(&va), Some(frame));
@@ -72,6 +83,66 @@ impl Processes {
 }
 #[path = "../../nanami/src/nanami_core/alpha/memory_copy.rs"]
 mod memory_copy;
+#[path = "../../nanami/src/nanami_core/alpha/memory_init.rs"]
+mod memory_init;
+
+#[test]
+fn copy_uses_exact_ready_initialization_alias_without_another_mapping_or_eviction() {
+    let mut a = Alpha::new();
+    let source = a.map_initialization_page(19).unwrap();
+    let frame = POOL_FRAME + 19;
+    for pid in [1, 2, 256, 999] {
+        assert_eq!(a.map_process_transfer_frame(pid, frame, None).unwrap(), source);
+        a.invalidate_process_copy_mappings(pid).unwrap();
+    }
+    assert_eq!((a.maps, a.unmaps), (1, 0));
+    let destination = a.map_process_transfer_frame(2, 123, Some(source)).unwrap();
+    assert_ne!(destination, source);
+    assert_eq!(a.mappings[&source], frame);
+    assert_eq!(a.map_process_transfer_frame(1, frame, Some(destination)).unwrap(), source);
+    assert_eq!((a.maps, a.unmaps), (2, 0));
+    a.invalidate_process_copy_mappings(2).unwrap();
+    assert_eq!(a.mappings[&source], frame);
+    assert!(!a.mappings.contains_key(&destination));
+}
+
+#[test]
+fn initialization_slot_replacement_and_pending_errors_fall_back_to_tracked_copy_aliases() {
+    let mut a = Alpha::new();
+    let old = a.map_initialization_page(19).unwrap();
+    let replacement = a.map_initialization_page(19 + 2048).unwrap();
+    assert_eq!(old, replacement);
+    let fallback = a.map_process_transfer_frame(1, POOL_FRAME + 19, Some(replacement)).unwrap();
+    assert_ne!(fallback, replacement);
+    assert_eq!(a.mappings[&replacement], POOL_FRAME + 19 + 2048);
+    assert_eq!(a.mappings[&fallback], POOL_FRAME + 19);
+    a.fail_map = true;
+    assert!(a.map_initialization_page(20).is_err());
+    a.fail_map = false;
+    assert!(a.cached_initialization_frame(POOL_FRAME + 20).is_none());
+    let pending = a.initialization_alias_address(20);
+    let fallback = a.map_process_transfer_frame(2, POOL_FRAME + 20, Some(pending)).unwrap();
+    assert_ne!(fallback, pending);
+    assert_eq!(a.mappings[&pending], POOL_FRAME + 20);
+    assert_eq!(a.mappings[&fallback], POOL_FRAME + 20);
+    a.fail_unmap = true;
+    assert!(a.map_initialization_page(20 + 2048).is_err());
+    assert!(a.cached_initialization_frame(POOL_FRAME + 20).is_none());
+    assert_eq!(a.map_process_transfer_frame(2, POOL_FRAME + 20, None).unwrap(), fallback);
+}
+
+#[test]
+fn retained_copy_alias_survives_initialization_window_replacement() {
+    let mut a = Alpha::new();
+    let initial = a.map_initialization_page(19).unwrap();
+    // COW detach obtains its source before mapping a new initialization page;
+    // it must retain the stable CopyWindow contract rather than transfer reuse.
+    let retained = a.map_process_copy_frame(1, POOL_FRAME + 19, None).unwrap();
+    assert_ne!(retained, initial);
+    a.map_initialization_page(19 + 2048).unwrap();
+    assert_eq!(a.mappings[&retained], POOL_FRAME + 19);
+    assert_eq!(a.mappings[&initial], POOL_FRAME + 19 + 2048);
+}
 
 #[test]
 fn copy_alias_and_metadata_budgets_remain_bounded() {
@@ -117,6 +188,20 @@ fn eviction_never_overwrites_the_pinned_source() {
     a.invalidate_process_copy_mappings(1).unwrap();
     assert!(a.mappings.is_empty());
     assert_eq!(a.maps, a.unmaps);
+}
+
+#[test]
+fn source_fallback_cannot_evict_a_pinned_permanent_pool_destination() {
+    let mut a = Alpha::new();
+    let destination = a.map_process_copy_frame(0, POOL_FRAME + 100, None).unwrap();
+    for frame in 200..10_200 {
+        let source = a.map_process_copy_frame(17, frame, Some(destination)).unwrap();
+        assert_ne!(source, destination);
+        assert_eq!(a.mappings[&destination], POOL_FRAME + 100);
+    }
+    a.invalidate_process_copy_mappings(17).unwrap();
+    assert_eq!(a.mappings.len(), 1);
+    assert_eq!(a.mappings[&destination], POOL_FRAME + 100);
 }
 
 #[test]
@@ -245,6 +330,50 @@ fn eviction_unmap_failure_stops_replacement_and_is_recoverable() {
 fn cache_window_stays_below_the_initialization_window() {
     assert!(0x6600_0000 + memory_copy::COPY_WINDOW_PAGES * PAGE_SIZE <= 0x6700_0000);
     assert!(std::mem::size_of::<memory_copy::CopyWindow>() <= 52 * 1024);
+    assert_eq!(std::mem::size_of::<memory_copy::CopyWindow>(), 50176);
+}
+
+#[test]
+fn owner_lists_preserve_scalar_unmap_order_and_failure_prefix_after_evictions() {
+    for fail_prefix in [0, 1, 5, 31] {
+        let mut a = Alpha::new();
+        let mut owners = BTreeMap::new();
+        for frame in 1..=3500 {
+            let pid = [1, 257, 513, 2][frame % 4];
+            let va = a.map_process_copy_frame(pid, frame, None).unwrap();
+            owners.retain(|va, _| a.mappings.contains_key(va));
+            owners.insert(va, pid);
+            if frame % 97 == 0 { a.copy_window.assert_consistent(); }
+        }
+        // Pool aliases share bucket zero with PID256 but outlive its teardown.
+        let pool = a.map_process_copy_frame(256, POOL_FRAME + 7, None).unwrap();
+        owners.retain(|va, _| a.mappings.contains_key(va));
+        owners.insert(pool, 0);
+        let expected: Vec<_> = owners.iter().filter(|(_, pid)| **pid == 1)
+            .map(|(va, _)| (a.mappings[va], *va)).collect();
+        assert!(expected.len() > fail_prefix);
+        let before = a.mappings.clone();
+        a.unmap_attempts.clear();
+        a.fail_after_unmaps = Some(a.unmaps + fail_prefix);
+        assert!(a.invalidate_process_copy_mappings(1).is_err());
+        assert_eq!(a.unmap_attempts, expected[..=fail_prefix]);
+        let mut remaining = before;
+        for &(_, va) in &expected[..fail_prefix] { remaining.remove(&va); }
+        assert_eq!(a.mappings, remaining);
+        a.copy_window.assert_consistent();
+        a.fail_after_unmaps = None;
+        a.unmap_attempts.clear();
+        a.invalidate_process_copy_mappings(1).unwrap();
+        assert_eq!(a.unmap_attempts, expected[fail_prefix..]);
+        for &(_, va) in &expected[fail_prefix..] { remaining.remove(&va); }
+        assert_eq!(a.mappings, remaining);
+        for pid in [257, 513, 2, 256, 999] {
+            a.invalidate_process_copy_mappings(pid).unwrap();
+            a.copy_window.assert_consistent();
+        }
+        assert_eq!(a.mappings.len(), 1);
+        assert_eq!(a.mappings.get(&pool), Some(&(POOL_FRAME + 7)));
+    }
 }
 
 #[test]

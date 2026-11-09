@@ -21,14 +21,22 @@ pub(super) fn read_file(
     }
     let mut remaining = min(len, file_size - file_offset);
     let mut copied = 0usize;
+    // Device geometry is fixed after mount; block/cache I/O cannot change it.
+    let block_size = runtime.block_size;
+    let block_capacity = runtime.block_shm_size as usize / block_size;
     while remaining > 0 {
-        let logical_block = (file_offset + copied) / runtime.block_size;
-        let Ok(physical_block) = get_data_block(runtime, inode, logical_block) else {
+        let logical_block = (file_offset + copied) / block_size;
+        let block_offset = (file_offset + copied) % block_size;
+        let needed_blocks =
+            (block_offset + remaining + block_size - 1) / block_size;
+        let max_blocks = min(needed_blocks, block_capacity.max(1));
+        let Ok((physical_block, run_blocks)) =
+            get_read_data_run(runtime, &inode, logical_block, max_blocks)
+        else {
             return Err(nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION);
         };
-        let block_offset = (file_offset + copied) % runtime.block_size;
         if physical_block == 0 {
-            let n = min(remaining, runtime.block_size - block_offset);
+            let n = min(remaining, run_blocks * block_size - block_offset);
             unsafe {
                 ptr::write_bytes(
                     (session.shm_local as usize + out_offset + copied) as *mut u8,
@@ -40,32 +48,28 @@ pub(super) fn read_file(
             remaining -= n;
             continue;
         }
-        let block_capacity = runtime.block_shm_size as usize / runtime.block_size;
         if block_capacity == 0 {
             return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
         }
-        let needed_blocks =
-            (block_offset + remaining + runtime.block_size - 1) / runtime.block_size;
-        let max_blocks = min(needed_blocks, block_capacity);
-        let mut run_blocks = 1usize;
-        while run_blocks < max_blocks {
-            let Ok(next_block) = get_data_block(runtime, inode, logical_block + run_blocks) else {
-                break;
-            };
-            if next_block == 0 || next_block as usize != physical_block as usize + run_blocks {
-                break;
-            }
-            run_blocks += 1;
-        }
-        read_blocks(runtime, physical_block as usize, run_blocks)
+        validate_run(runtime, physical_block as usize, run_blocks)
             .map_err(map_request_error_to_status)?;
-        let n = min(remaining, run_blocks * runtime.block_size - block_offset);
-        unsafe {
-            ptr::copy_nonoverlapping(
-                (runtime.block_shm as usize + block_offset) as *const u8,
+        let n = min(remaining, run_blocks * block_size - block_offset);
+        let output = unsafe {
+            core::slice::from_raw_parts_mut(
                 (session.shm_local as usize + out_offset + copied) as *mut u8,
                 n,
-            );
+            )
+        };
+        if !runtime.block_cache.load_range(physical_block as usize, block_offset, output) {
+            read_blocks(runtime, physical_block as usize, run_blocks)
+                .map_err(map_request_error_to_status)?;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    (runtime.block_shm as usize + block_offset) as *const u8,
+                    output.as_mut_ptr(),
+                    n,
+                );
+            }
         }
         copied += n;
         remaining -= n;
@@ -97,22 +101,34 @@ pub(super) fn write_file(
     }
     let mut copied = 0usize;
     let mut inode_dirty = false;
+    let mut allocation_changed = false;
     // Same-size writes need not write the inode. Invalidate before the first
     // possible data mutation, not only after successful metadata writeback.
     runtime.file_versions.invalidate(inode_no);
+    let block_size = runtime.block_size;
+    let block_capacity = runtime.block_shm_size as usize / block_size;
     while copied < len {
-        let logical_block = (file_offset + copied) / runtime.block_size;
-        let block_offset = (file_offset + copied) % runtime.block_size;
-        let mut n = min(len - copied, runtime.block_size - block_offset);
-        let existing = get_data_block(runtime, *inode, logical_block)
+        let logical_block = (file_offset + copied) / block_size;
+        let block_offset = (file_offset + copied) % block_size;
+        let mut n = min(len - copied, block_size - block_offset);
+        let whole_blocks = block_offset == 0 && n == block_size;
+        let max_blocks = if whole_blocks {
+            min(
+                (len - copied) / block_size,
+                block_capacity,
+            )
+        } else {
+            1
+        };
+        let (existing, run_blocks) = get_data_run(runtime, inode, logical_block, max_blocks)
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
         if existing == 0 {
             ensure_data_block_with(runtime, inode, logical_block, |runtime, block| {
                 // Initialize new blocks with their payload in one cached write.
                 // Partial writes must still zero all previously unallocated bytes.
                 unsafe {
-                    if n != runtime.block_size {
-                        ptr::write_bytes(runtime.block_shm as *mut u8, 0, runtime.block_size);
+                    if n != block_size {
+                        ptr::write_bytes(runtime.block_shm as *mut u8, 0, block_size);
                     }
                     ptr::copy_nonoverlapping(
                         (session.shm_local as usize + input_offset + copied) as *const u8,
@@ -124,6 +140,7 @@ pub(super) fn write_file(
             })
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
             inode_dirty = true;
+            allocation_changed = true;
             unsafe {
                 runtime.mapped_pages.update(
                     inode_no,
@@ -136,24 +153,11 @@ pub(super) fn write_file(
             continue;
         }
         let physical_block = existing as usize;
-        let mut run_blocks = 1usize;
-        if block_offset == 0 && n == runtime.block_size {
+        if whole_blocks {
             // Look ahead only through already allocated, physically contiguous blocks.
             // Block-map reads may overwrite the scratch buffer: finish them before
             // staging any payload. Allocation and partial-block writes keep their path.
-            let max_blocks = min(
-                (len - copied) / runtime.block_size,
-                runtime.block_shm_size as usize / runtime.block_size,
-            );
-            while run_blocks < max_blocks {
-                match get_data_block(runtime, *inode, logical_block + run_blocks) {
-                    Ok(next) if next != 0 && next as usize == physical_block + run_blocks => {
-                        run_blocks += 1
-                    }
-                    _ => break,
-                }
-            }
-            n = run_blocks * runtime.block_size;
+            n = run_blocks * block_size;
         } else {
             read_block(runtime, physical_block)
                 .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
@@ -182,7 +186,13 @@ pub(super) fn write_file(
         inode_dirty = true;
     }
     if inode_dirty {
-        write_inode(runtime, inode_no, *inode).map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
+        if allocation_changed {
+            write_inode(runtime, inode_no, *inode)
+        } else {
+            // The inode came from read_inode and all payload blocks already
+            // existed. Its stored sector count remains valid as size grows.
+            write_inode_existing_blocks(runtime, inode_no, *inode)
+        }.map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)?;
     }
     Ok(copied)
 }

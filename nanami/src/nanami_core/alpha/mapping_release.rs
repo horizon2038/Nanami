@@ -89,10 +89,15 @@ impl Alpha {
             // retained PROT_NONE backing, must have a validated reference.
             if allow_holes
                 && self.processes.vm_space_mut(target_pid).is_some_and(|vm| {
+                    let mut index = 0;
                     !vm.all_backed_pages(base_va, end_va, |va| {
-                        allocations
-                            .binary_search_by_key(&va, |allocation| allocation.base_va)
-                            .is_ok()
+                        // Both sequences ascend by VA, including unaligned
+                        // backing keys. Preserve exact membership, not coverage
+                        // by a neighboring extent or an allocation's length.
+                        while index < allocations.len() && allocations[index].base_va < va {
+                            index += 1;
+                        }
+                        allocations.get(index).is_some_and(|allocation| allocation.base_va == va)
                     })
                 })
             {
@@ -105,21 +110,33 @@ impl Alpha {
         } else {
             allocations.as_slice()
         };
+        // Synchronous UNMAP cannot dispatch a process event. Keep one borrow
+        // of the current VM for presence checks, success and error metadata.
+        // Empty sparse releases retain their no-update-lookup path.
+        let mut vm = if spans.is_empty() {
+            None
+        } else {
+            self.processes.vm_space_mut(target_pid)
+        };
         for allocation in spans {
             for page in 0..allocation.page_count {
                 let va = allocation.base_va + page * PAGE_SIZE;
                 let slot = allocation.start_slot + page;
-                let frame = process_frame_descriptor(entry.root_node, slot);
-                let present = self
-                    .processes
-                    .vm_space_mut(target_pid)
-                    .is_some_and(|vm| vm.frame_may_be_present(va));
-                if let Err(e) = if present {
-                    arch::address_space::unmap(entry.address_space, frame, va)
+                let present = vm.as_ref().is_some_and(|vm| vm.frame_may_be_present(va));
+                // Construction may own RAM before its pool conversion succeeds.
+                // A confirmed absent leaf needs no descriptor to retire safely.
+                if !present {
+                    if let Some(vm) = vm.as_mut() { vm.forget_frame(va); }
+                    continue;
+                }
+                let frame = if allocation.owns_frame_cap {
+                    process_frame_descriptor(entry.root_node, slot)
                 } else {
-                    Ok(())
-                } {
-                    if let Some(vm) = self.processes.vm_space_mut(target_pid) {
+                    self.memory.physical_frame_descriptor_from_index(allocation.base_page + page)
+                        .ok_or(CapabilityError::Fatal)?
+                };
+                if let Err(e) = arch::address_space::unmap(entry.address_space, frame, va) {
+                    if let Some(vm) = vm.as_mut() {
                         vm.mark_mapping_uncertain(va);
                     }
                     info!(
@@ -128,7 +145,7 @@ impl Alpha {
                     );
                     return Err(e);
                 }
-                if let Some(vm) = self.processes.vm_space_mut(target_pid) {
+                if let Some(vm) = vm.as_mut() {
                     vm.forget_frame(va);
                 }
             }
@@ -137,7 +154,7 @@ impl Alpha {
         if exact_allocation.is_some() {
             self.processes
                 .defer_active_physical_allocation(target_pid, base_va, page_count)?;
-        } else {
+        } else if !self.processes.try_defer_physical_pages(target_pid, base_va, end_va, &allocations) {
             // Fresh page extents are registered in increasing VA order; release
             // their newest references first instead of repeatedly walking past
             // the rest of the same extent in the ownership list.

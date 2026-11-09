@@ -13,6 +13,9 @@ pub const READY_PTY: Word = 256;
 // Data arrival and capacity release need only wake matching I/O interests.
 pub const READY_UNIX_READ: Word = 512;
 pub const READY_UNIX_WRITE: Word = 1024;
+// READY_PIPE remains the EOF/EPIPE/description state-change source.
+pub const READY_PIPE_READ: Word = 2048;
+pub const READY_PIPE_WRITE: Word = 4096;
 
 #[repr(C)]
 #[derive(Clone, Copy)]

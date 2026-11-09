@@ -173,9 +173,17 @@ fn run_event_loop(
                 render_until_idle(compositor);
             }
             ServiceEvent::Notification { identifier, .. } => {
+                #[cfg(feature = "honoka-frame-events")]
+                compositor.note_graphics_notification(
+                    is_present_notification(identifier), is_timer_notification(identifier),
+                );
                 let received = nanami_runtime::diagnostics::stamp();
                 handle_notification(identifier, rtc_port, input_queue, compositor);
                 render_until_idle(compositor);
+                #[cfg(feature = "honoka-frame-events")]
+                if is_timer_notification(identifier) {
+                    compositor.report_frame_events();
+                }
                 nanami_runtime::diagnostics::wake(
                     nanami_runtime::diagnostics::InputStage::Honoka,
                     identifier,

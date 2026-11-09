@@ -280,6 +280,26 @@ pub(crate) fn handle_read_dir(
     runtime: &mut Runtime,
     request: ServiceRequest,
 ) -> (Word, Word, Word) {
+    handle_read_dir_with_bias(runtime, request, 0)
+}
+
+pub(crate) fn handle_read_dir_biased(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+) -> (Word, Word, Word) {
+    let (status, first, second) = handle_read_dir_with_bias(runtime, request, request.arg3);
+    if status == nanami_runtime::OS_RESPONSE_OK {
+        (status, first, second)
+    } else {
+        (POSIX_READ_DIR_BIASED_ERROR, status, 0)
+    }
+}
+
+fn handle_read_dir_with_bias(
+    runtime: &mut Runtime,
+    request: ServiceRequest,
+    bias: Word,
+) -> (Word, Word, Word) {
     let Some(index) = find_session(runtime, request.identifier) else {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     };
@@ -297,6 +317,9 @@ pub(crate) fn handle_read_dir(
     if entry.kind != FdKind::Directory {
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
+    let Some(start_index) = entry.offset.checked_sub(bias) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
     if out_offset > runtime.sessions[index].shm_size as usize {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
@@ -315,16 +338,22 @@ pub(crate) fn handle_read_dir(
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
     if capped_entries == 0 {
-        return (nanami_runtime::OS_RESPONSE_OK, 0, entry.offset);
+        return (nanami_runtime::OS_RESPONSE_OK, 0, start_index);
     }
     match nanami_client::vfs::vfs_read_dir(
         runtime.vfs_port,
         entry.vfs_handle,
-        entry.offset,
+        start_index,
         capped_entries,
         VFS_IO_OFFSET as Word,
     ) {
         Ok((entries, next_index)) => {
+            if entries > capped_entries || next_index < entries {
+                return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
+            }
+            let Some(next_offset) = next_index.checked_add(bias) else {
+                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+            };
             let copy_bytes = (entries as usize).saturating_mul(record_bytes);
             unsafe {
                 ptr::copy_nonoverlapping(
@@ -333,7 +362,7 @@ pub(crate) fn handle_read_dir(
                     copy_bytes,
                 );
             }
-            runtime.open_files[open_index].offset = next_index;
+            runtime.open_files[open_index].offset = next_offset;
             (nanami_runtime::OS_RESPONSE_OK, entries, next_index)
         }
         Err(e) => (map_request_error_to_status(e), 0, 0),

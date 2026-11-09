@@ -12,6 +12,25 @@ pub(super) fn read_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), 
     read_blocks(runtime, block, 1)
 }
 
+/// Pointer-only lookups need four cached bytes, not a full scratch-block copy.
+/// Cold reads retain the ordinary validation, retry and cache-fill path.
+pub(super) fn read_block_u32(
+    runtime: &mut Ext2Runtime, block: usize, offset: usize,
+) -> Result<u32, RequestError> {
+    validate_run(runtime, block, 1)?;
+    if offset.checked_add(4).is_none_or(|end| end > runtime.block_size) {
+        return Err(RequestError::InvalidArgument);
+    }
+    let mut bytes = [0; 4];
+    if !runtime.block_cache.load_range(block, offset, &mut bytes) {
+        read_block(runtime, block)?;
+        unsafe {
+            ptr::copy_nonoverlapping((runtime.block_shm + offset) as *const u8, bytes.as_mut_ptr(), 4);
+        }
+    }
+    Ok(u32::from_le_bytes(bytes))
+}
+
 pub(super) fn read_blocks(
     runtime: &mut Ext2Runtime,
     block: usize,
@@ -23,18 +42,14 @@ pub(super) fn read_blocks(
         let target = unsafe {
             core::slice::from_raw_parts_mut(
                 (runtime.block_shm + offset * runtime.block_size) as *mut u8,
-                runtime.block_size,
+                (count - offset) * runtime.block_size,
             )
         };
-        if runtime.block_cache.load(block + offset, target) {
-            offset += 1;
-            continue;
-        }
+        let (cached, next_cached) = runtime.block_cache.load_prefix_and_gap(block + offset, count - offset, target);
+        offset += cached;
+        if offset == count { break; }
         let first = offset;
-        offset += 1;
-        while offset < count && !runtime.block_cache.contains(block + offset) {
-            offset += 1;
-        }
+        offset += next_cached - cached;
         read_blocks_uncached(
             runtime,
             block + first,
@@ -48,13 +63,37 @@ pub(super) fn read_blocks(
                     runtime.block_size,
                 )
             };
+            // The gap scan proved this block absent. The device read borrows
+            // runtime immutably; filling earlier, distinct gap blocks cannot
+            // make this one resident. Keep the same CLOCK/store operation.
+            runtime.block_cache.store_read_miss(block + index, source);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn read_blocks_reference(runtime: &mut Ext2Runtime, block: usize, count: usize) -> Result<(), RequestError> {
+    validate_run(runtime, block, count)?;
+    let mut offset = 0;
+    while offset < count {
+        let target = unsafe { core::slice::from_raw_parts_mut(
+            (runtime.block_shm + offset * runtime.block_size) as *mut u8, runtime.block_size) };
+        if runtime.block_cache.load(block + offset, target) { offset += 1; continue; }
+        let first = offset;
+        offset += 1;
+        while offset < count && !runtime.block_cache.contains(block + offset) { offset += 1; }
+        read_blocks_uncached(runtime, block + first, offset - first, first * runtime.block_size)?;
+        for index in first..offset {
+            let source = unsafe { core::slice::from_raw_parts(
+                (runtime.block_shm + index * runtime.block_size) as *const u8, runtime.block_size) };
             runtime.block_cache.store(block + index, source, None);
         }
     }
     Ok(())
 }
 
-fn validate_run(runtime: &Ext2Runtime, block: usize, count: usize) -> Result<(), RequestError> {
+pub(super) fn validate_run(runtime: &Ext2Runtime, block: usize, count: usize) -> Result<(), RequestError> {
     if count == 0
         || block
             .checked_add(count)
@@ -135,6 +174,13 @@ pub(super) fn write_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(),
     // Directory contents, inode tables and allocation metadata all use this
     // path. Invalidate before a write attempt, including partial/error paths.
     directory::invalidate(runtime);
+    write_inode_table_block(runtime, block)
+}
+
+/// Metadata persistence without a directory-cookie generation change. Only
+/// regular-file inode records may use this directly; generic metadata writes
+/// must keep write_block's conservative invalidation.
+pub(super) fn write_inode_table_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), RequestError> {
     cache_write(runtime, block, 1, block_cache::BlockKind::Metadata)
 }
 

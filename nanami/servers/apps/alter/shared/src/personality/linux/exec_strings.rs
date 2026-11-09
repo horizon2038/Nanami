@@ -164,10 +164,7 @@ pub(super) fn snapshot_guest_string(
                 page_bytes,
             )
         };
-        let chunk = page
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(page_bytes);
+        let chunk = crate::common::nul_scan::find_nul(page).unwrap_or(page_bytes);
         let end = offset
             .checked_add(copied)
             .and_then(|value| value.checked_add(chunk))
@@ -222,12 +219,30 @@ pub(super) fn read_guest_pointer_array(
         let source = array_ptr
             .checked_add((count as Word).checked_mul(8).ok_or(EFAULT)?)
             .ok_or(EFAULT)?;
-        let value = guest_page.read_word(pid, source)?;
-        if value == 0 {
-            return Ok(count);
+        let page_offset = guest_page.ensure(pid, source)?;
+        let words = ((LINUX_PAGE_SIZE as usize - page_offset) / core::mem::size_of::<Word>())
+            .min(out.len() - count);
+        if words == 0 {
+            // Unaligned words spanning two pages retain the checked split copy.
+            let value = guest_page.read_word(pid, source)?;
+            if value == 0 {
+                return Ok(count);
+            }
+            out[count] = value;
+            count += 1;
+            continue;
         }
-        out[count] = value;
-        count += 1;
+        // This page is already an owned snapshot, unchanged until ensure() on
+        // the next page. No guest reread or additional lookahead is needed.
+        let words_start = (guest_page.buffer + page_offset) as *const Word;
+        for index in 0..words {
+            let value = unsafe { words_start.add(index).read_unaligned() };
+            if value == 0 {
+                return Ok(count);
+            }
+            out[count] = value;
+            count += 1;
+        }
     }
     Ok(count)
 }

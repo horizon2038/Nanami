@@ -29,12 +29,25 @@ pub(super) fn sys_fork(
             return Err(EINVAL);
         }
     }
-    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
+    // Keep the consumed parent values at the original snapshot point. The
+    // image name must remain owned across process construction and mutation.
+    let (parent_pcb, parent_fs_base, parent_owner_pid, parent_terminal_id,
+        parent_image_name, parent_image_name_len, parent_program_break, parent_mapped_break,
+        parent_trace_enabled, parent_diagnostics_enabled, parent_graphics_enabled,
+        parent_framebuffer_size, parent_graphics_session, parent_personality,
+        parent_terminal_canonical, parent_terminal_echo, parent_terminal_termios, parent_tgid) = {
+        let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
+        (parent.pcb, parent.fs_base, parent.owner_pid, parent.terminal_id,
+         parent.image_name, parent.image_name_len, parent.program_break, parent.mapped_break,
+         parent.trace_enabled, parent.diagnostics_enabled, parent.graphics_enabled,
+         parent.framebuffer_size, parent.graphics_session, parent.personality,
+         parent.terminal_canonical, parent.terminal_echo, parent.terminal_termios, parent.tgid)
+    };
     let image_name =
-        ::core::str::from_utf8(&parent.image_name[..parent.image_name_len]).map_err(|_| EINVAL)?;
+        ::core::str::from_utf8(&parent_image_name[..parent_image_name_len]).map_err(|_| EINVAL)?;
     let clone_options = clone_options(context);
-    let current_fs_base = read_register_value(parent.pcb, REG_FS_BASE).unwrap_or(parent.fs_base);
-    if current_fs_base != parent.fs_base {
+    let current_fs_base = read_register_value(parent_pcb, REG_FS_BASE).unwrap_or(parent_fs_base);
+    if current_fs_base != parent_fs_base {
         let _ = runtime.set_fs_base(parent_pid, current_fs_base);
     }
 
@@ -78,7 +91,7 @@ pub(super) fn sys_fork(
     if let Err(error) = fork_step(
         "clone registers",
         match clone_registers_for_fork(
-            parent.pcb,
+            parent_pcb,
             child_pcb,
             context,
             clone_options.child_stack,
@@ -88,7 +101,7 @@ pub(super) fn sys_fork(
             Err(error) => {
                 nanami_runtime::println!(
                     "[alter/linux] fork register clone failed parent_pcb={:#x} child_pcb={:#x} err={:?}",
-                    parent.pcb,
+                    parent_pcb,
                     child_pcb,
                     error
                 );
@@ -102,10 +115,10 @@ pub(super) fn sys_fork(
     if !runtime.install_managed_child_process(
         child_pid,
         parent_pid,
-        parent.owner_pid,
+        parent_owner_pid,
         child_pcb,
-        parent.terminal_id,
-        &parent.image_name[..parent.image_name_len],
+        parent_terminal_id,
+        &parent_image_name[..parent_image_name_len],
     ) {
         nanami_runtime::println!(
             "[alter/linux] fork failed stage=install child parent={} child={} errno={}",
@@ -169,19 +182,19 @@ pub(super) fn sys_fork(
             runtime.remove_process(child_pid);
             return Err(ESRCH);
         };
-        child.program_break = parent.program_break;
-        child.mapped_break = parent.mapped_break;
+        child.program_break = parent_program_break;
+        child.mapped_break = parent_mapped_break;
         child.fs_base = child_fs_base;
-        child.trace_enabled = parent.trace_enabled;
-        child.diagnostics_enabled = parent.diagnostics_enabled;
-        child.graphics_enabled = parent.graphics_enabled;
-        child.framebuffer_size = parent.framebuffer_size;
-        child.graphics_session = parent.graphics_session;
-        child.personality = parent.personality;
-        child.terminal_canonical = parent.terminal_canonical;
-        child.terminal_echo = parent.terminal_echo;
-        child.terminal_termios = parent.terminal_termios;
-        child.parent_pid = parent.tgid;
+        child.trace_enabled = parent_trace_enabled;
+        child.diagnostics_enabled = parent_diagnostics_enabled;
+        child.graphics_enabled = parent_graphics_enabled;
+        child.framebuffer_size = parent_framebuffer_size;
+        child.graphics_session = parent_graphics_session;
+        child.personality = parent_personality;
+        child.terminal_canonical = parent_terminal_canonical;
+        child.terminal_echo = parent_terminal_echo;
+        child.terminal_termios = parent_terminal_termios;
+        child.parent_pid = parent_tgid;
     }
     runtime.inherit_signals(parent_pid, child_pid);
     super::sysv_shm::inherited(runtime, child_pid);

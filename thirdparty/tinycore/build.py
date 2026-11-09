@@ -226,6 +226,7 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
             directory.mkdir(exist_ok=True)
             (directory / "config.json").write_text(json.dumps(configuration(smoke), indent=2) + "\n")
         if graphical:
+            font_caches = desktop.build_font_cache(guest)
             directory = overlay / "tinycore-desktop"
             directory.mkdir()
             (directory / "config.json").write_text(json.dumps(configuration(graphical=True), indent=2) + "\n")
@@ -234,6 +235,7 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
                     "omitted_device_nodes": skipped,
                     "entry": ["/bin/busybox", "sh", "/init"]}
         if desktop_lock is not None:
+            manifest["font_caches"] = font_caches
             manifest["desktop"] = desktop_lock
             manifest["profile_symlinks"] = profile_links
             manifest["profile_helpers"] = profile_helpers
@@ -255,10 +257,14 @@ def main():
     parser.add_argument("--image", action="store_true", help="also build a separate Nanami boot disk")
     parser.add_argument("--desktop", action="store_true", help="include the pinned Xfbdev/FLWM desktop in build-desktop/")
     parser.add_argument("--with-tests", action="store_true", help="with --image, include the native integration probe")
+    parser.add_argument("--with-launch-rtt", action="store_true",
+                        help="with desktop tests, include post-ping raw/Xlib round-trip diagnostics")
     parser.add_argument("--offline", action="store_true", help="use cached/local archive and Cargo dependencies only")
     parser.add_argument("--output-dir", type=Path, help="assemble a separate build without replacing an existing disk")
     parser.add_argument("--size-mib", type=int, help="rootfs capacity (desktop: 256 MiB; console: 128 MiB)")
     args = parser.parse_args()
+    if args.with_launch_rtt and not (args.desktop and args.image and args.with_tests):
+        parser.error("--with-launch-rtt requires --desktop --image --with-tests")
     if args.with_tests and not args.image:
         parser.error("--with-tests requires --image")
     size_mib = args.size_mib
@@ -277,7 +283,23 @@ def main():
         payload = []
         if args.with_tests:
             if args.desktop:
-                desktop.build_window_observer(output / "overlay/tinycore/rootfs")
+                import desktop
+                if args.with_launch_rtt:
+                    desktop.build_window_observer(output / "overlay/tinycore/rootfs", steady_rtt=True)
+                else:
+                    desktop.build_window_observer(output / "overlay/tinycore/rootfs")
+                # Check before any desktop client can regenerate a missing or
+                # invalid cache. This helper and entry wrapper are test-only.
+                desktop.build_xlib_tool(
+                    output / "overlay/tinycore/rootfs", HERE / "tools/check-font-cache.c",
+                    "usr/local/bin/nanami-check-font-cache",
+                    runtime_libraries=("usr/local/lib/libfontconfig.so.1", "lib/libc.so.6"))
+                config_path = output / "overlay/tinycore-desktop/config.json"
+                config = json.loads(config_path.read_text())
+                config["process"]["args"] = ["/bin/busybox", "sh", "-c",
+                    "LD_LIBRARY_PATH=/usr/local/lib:/lib /usr/local/bin/nanami-check-font-cache "
+                    "&& exec /bin/busybox sh /init --desktop"]
+                config_path.write_text(json.dumps(config, indent=2) + "\n")
                 for name, source in [("nanami-desktop-test", "desktop-apps.sh"),
                                      ("nanami-desktop-links-test", "desktop-links.sh")]:
                     script = output / "overlay/tinycore/rootfs/usr/local/bin" / name
@@ -293,13 +315,16 @@ def main():
                                          ("nanami-process-performance", [], "process-performance.c"),
                                          ("nanami-cap-seal", [], "capability-sealing.c"),
                                          ("nanami-exec-cache", [], "exec-cache.c"),
-                                         ("nanami-file-mapping", [], "file-mapping.c")]:
+                                         ("nanami-file-mapping", [], "file-mapping.c"),
+                                         ("nanami-syscall-scope", [], "syscall-scope.c")]:
                 binary = output / "overlay/tinycore/rootfs/bin" / name
                 extra_sources = []
                 if source == "desktop-syscalls.c":
                     extra_sources.append(str(REPO / "tests/alter-linux/desktop-syscalls-x86_64.S"))
                 elif source == "capability-sealing.c":
                     extra_sources.append(str(REPO / "tests/alter-linux/capability-sealing-x86_64.S"))
+                elif source == "file-mapping.c":
+                    extra_sources.append(str(REPO / "tests/alter-linux/threads-x86_64.S"))
                 subprocess.run([os.environ.get("CC", "clang"), "--target=x86_64-unknown-linux-gnu",
                                 "-fuse-ld=lld", "-nostdlib", "-static", "-ffreestanding", "-fno-builtin",
                                 "-fno-stack-protector", "-mno-sse", "-mno-sse2", "-mno-red-zone",

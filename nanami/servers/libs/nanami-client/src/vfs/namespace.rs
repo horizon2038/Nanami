@@ -26,6 +26,19 @@ pub fn posix_path_request(
     )
 }
 
+pub fn posix_rooted_open_request(
+    port: CapabilityDescriptor, descriptor_offset: Word,
+) -> Result<(Word, Word), PathError> {
+    match path_request(port, crate::uapi::posix::POSIX_REQUEST_OPEN_ROOTED, descriptor_offset) {
+        // Legacy POSIX dispatchers reject this unknown request before forwarding
+        // to VFS, hence no handle was acquired. Do not map other failures.
+        Err(PathError::Transport(RequestError::Status(crate::uapi::os::OS_RESPONSE_INVALID_ARGUMENT))) => {
+            Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED))
+        }
+        other => other,
+    }
+}
+
 pub fn vfs_fchmod(port: CapabilityDescriptor, handle: Word, mode: Word) -> Result<(), PathError> {
     fchmod(port, VFS_REQUEST_FCHMOD, handle, mode)
 }

@@ -17,31 +17,18 @@ impl Alpha {
         // The supervisor has already trapped/stopped this sole VM user. Do not
         // Suspend an accepted fault: exec's reply must still reach its resolver.
         self.invalidate_process_copy_mappings(pid)?;
-        let pages = self
+        let unmapped = self
             .processes
             .vm_space_mut(pid)
             .ok_or(CapabilityError::InvalidArgument)?
-            .backed_pages(0, usize::MAX);
-        for (va, permissions) in pages {
-            if permissions == 0
-                && !self
-                    .processes
-                    .vm_space_mut(pid)
-                    .is_some_and(|vm| vm.mapping_is_uncertain(va))
-            {
-                continue;
+            .try_for_each_present_frame(0, usize::MAX, |va, frame| {
+                arch::address_space::unmap(target.address_space, frame, va)
+            });
+        if let Err((va, error)) = unmapped {
+            if let Some(vm) = self.processes.vm_space_mut(pid) {
+                vm.mark_mapping_uncertain(va);
             }
-            let frame = self
-                .processes
-                .vm_space_mut(pid)
-                .and_then(|vm| vm.find_frame(va))
-                .ok_or(CapabilityError::Fatal)?;
-            if let Err(error) = arch::address_space::unmap(target.address_space, frame, va) {
-                if let Some(vm) = self.processes.vm_space_mut(pid) {
-                    vm.mark_mapping_uncertain(va);
-                }
-                return Err(error);
-            }
+            return Err(error);
         }
         // REVOKE clears each Node's contents but retains that Node itself.
         // Existing chunk descriptors/arena reservations remain reusable.

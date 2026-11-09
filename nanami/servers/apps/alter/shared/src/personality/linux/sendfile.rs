@@ -137,12 +137,12 @@ pub(super) fn sys_sendfile(
         }
         LinuxFileKind::PipeWrite => {
             let pipe = runtime.pipe_mut(output.posix_fd).ok_or(EBADF)?;
-            for index in 0..bytes {
-                pipe.write_byte(pipe.write, unsafe { *((source + index) as *const u8) });
-                pipe.write = (pipe.write + 1) % LINUX_PIPE_BYTES;
+            let source = unsafe { core::slice::from_raw_parts(source as *const u8, bytes) };
+            let became_readable = pipe.len == 0;
+            pipe.copy_in(source);
+            if became_readable {
+                runtime.readiness_changes |= crate::state::readiness::READY_PIPE_READ;
             }
-            pipe.len += bytes;
-            runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
             bytes
         }
         _ => bytes, // /dev/null and /dev/zero

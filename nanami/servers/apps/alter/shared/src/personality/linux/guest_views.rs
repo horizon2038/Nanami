@@ -1,8 +1,11 @@
 //! Supervisor-local RAM leases for typed owned buffers and owned scratch.
 //! Arbitrary raw local addresses retain Alpha's checked-copy path.
 use super::{Runtime, Word};
-use crate::state::page_window::{Effects, GrantError, LeaseEffects, WriteEffects, PAGE};
+use crate::state::page_window::{
+    Effects, GrantError, LeaseEffects, WriteEffects, MAX_CONTIGUOUS_WRITE_BYTES, PAGE,
+};
 use core::mem::MaybeUninit;
+pub(super) use crate::state::page_window::MAX_CONTIGUOUS_READ_BYTES;
 
 const ENABLED: bool = match option_env!("NANAMI_GUEST_READ_VIEWS") {
     Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
@@ -15,6 +18,24 @@ const WRITE_ENABLED: bool = match option_env!("NANAMI_GUEST_WRITE_VIEWS") {
     None => cfg!(target_arch = "x86_64"),
 };
 struct NativeEffects<const WRITE: bool>;
+
+// MOVSQ samples/stores the same forward sequence of eight-byte words as the
+// scalar loop. No SIMD/FPU state is used, and default asm memory effects keep
+// these external-process accesses observable to the compiler.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn copy_sampled_words(source: *const u8, destination: *mut u8, words: usize) {
+    unsafe {
+        core::arch::asm!(
+            "cld",
+            "rep movsq",
+            inout("rsi") source => _,
+            inout("rdi") destination => _,
+            inout("rcx") words => _,
+            options(nostack),
+        );
+    }
+}
 impl<const WRITE: bool> LeaseEffects for NativeEffects<WRITE> {
     fn grant(&mut self, pid: Word, page: Word, local: Word) -> Result<(), GrantError> {
         let result = if WRITE {
@@ -52,6 +73,21 @@ impl Effects for NativeEffects<false> {
                     .write(core::ptr::read_volatile((source + copied) as *const u8));
                 copied += 1;
             }
+            #[cfg(target_arch = "x86_64")]
+            if destination.len() - copied >= 2048 {
+                let words = (destination.len() - copied) / 8;
+                copy_sampled_words((source + copied) as *const u8, output.add(copied), words);
+                copied += words * 8;
+            }
+            while destination.len() - copied >= 32 {
+                let input = (source + copied) as *const u64;
+                let target = output.add(copied) as *mut u64;
+                target.write_unaligned(core::ptr::read_volatile(input));
+                target.add(1).write_unaligned(core::ptr::read_volatile(input.add(1)));
+                target.add(2).write_unaligned(core::ptr::read_volatile(input.add(2)));
+                target.add(3).write_unaligned(core::ptr::read_volatile(input.add(3)));
+                copied += 32;
+            }
             while destination.len() - copied >= 8 {
                 let value = core::ptr::read_volatile((source + copied) as *const u64);
                 (output.add(copied) as *mut u64).write_unaligned(value);
@@ -79,6 +115,21 @@ impl WriteEffects for NativeEffects<true> {
                 core::ptr::write_volatile((destination + copied) as *mut u8, source[copied]);
                 copied += 1;
             }
+            #[cfg(target_arch = "x86_64")]
+            if source.len() - copied >= 2048 {
+                let words = (source.len() - copied) / 8;
+                copy_sampled_words(source.as_ptr().add(copied), (destination + copied) as *mut u8, words);
+                copied += words * 8;
+            }
+            while source.len() - copied >= 32 {
+                let input = source.as_ptr().add(copied) as *const u64;
+                let target = (destination + copied) as *mut u64;
+                core::ptr::write_volatile(target, input.read_unaligned());
+                core::ptr::write_volatile(target.add(1), input.add(1).read_unaligned());
+                core::ptr::write_volatile(target.add(2), input.add(2).read_unaligned());
+                core::ptr::write_volatile(target.add(3), input.add(3).read_unaligned());
+                copied += 32;
+            }
             while source.len() - copied >= 8 {
                 let value = (source.as_ptr().add(copied) as *const u64).read_unaligned();
                 core::ptr::write_volatile((destination + copied) as *mut u64, value);
@@ -92,6 +143,16 @@ impl WriteEffects for NativeEffects<true> {
     }
 }
 
+#[cfg(test)]
+pub(super) unsafe fn read_native_for_test(source: Word, destination: &mut [MaybeUninit<u8>]) {
+    NativeEffects::<false>.read(source, 0, destination);
+}
+
+#[cfg(test)]
+pub(super) unsafe fn write_native_for_test(destination: Word, source: &[u8]) {
+    NativeEffects::<true>.write(destination, 0, source);
+}
+
 /// The caller has already applied current personality read permissions.
 pub(super) fn copy_into_scratch(
     runtime: &Runtime,
@@ -100,17 +161,20 @@ pub(super) fn copy_into_scratch(
     destination: Word,
     bytes: Word,
 ) -> bool {
-    if !ENABLED || bytes > PAGE || destination < runtime.posix_shm {
+    if !ENABLED || bytes > MAX_CONTIGUOUS_READ_BYTES || destination.checked_add(bytes).is_none() {
         return false;
     }
-    let Some(end) = (destination - runtime.posix_shm).checked_add(bytes) else {
-        return false;
-    };
-    if end > runtime.posix_shm_size {
+    let owned = |base: Word, size: Word| base != 0 && size != 0
+        && destination.checked_sub(base).and_then(|offset| offset.checked_add(bytes))
+            .is_some_and(|end| end <= size);
+    if !owned(runtime.posix_shm, runtime.posix_shm_size)
+        && !owned(runtime.posix_direct_shm, runtime.posix_direct_shm_size)
+    {
         return false;
     }
     // Runtime owns this mapped scratch range for the complete synchronous
-    // request. No borrowed guest pointer is reinterpreted as an owned buffer.
+    // request, including the delegated POSIX window. No borrowed guest pointer
+    // is reinterpreted as an owned buffer.
     let buffer =
         unsafe { core::slice::from_raw_parts_mut(destination as *mut MaybeUninit<u8>, bytes) };
     copy_into_owned(runtime, pid, source, buffer)
@@ -124,7 +188,7 @@ pub(super) fn copy_into_owned(
     source: Word,
     destination: &mut [MaybeUninit<u8>],
 ) -> bool {
-    if !ENABLED || destination.len() > PAGE {
+    if !ENABLED || destination.len() > MAX_CONTIGUOUS_READ_BYTES {
         return false;
     }
     let Some(process) = runtime
@@ -150,13 +214,19 @@ pub(super) fn copy_from_scratch(
     source: Word,
     bytes: Word,
 ) -> bool {
-    if !WRITE_ENABLED || bytes > PAGE || source < runtime.posix_shm {
+    if !WRITE_ENABLED || bytes > MAX_CONTIGUOUS_WRITE_BYTES || source.checked_add(bytes).is_none() {
         return false;
     }
-    let Some(end) = (source - runtime.posix_shm).checked_add(bytes) else {
-        return false;
-    };
-    if end > runtime.posix_shm_size {
+    // Both windows are owned, mapped RAM for this synchronous request. Direct
+    // POSIX reads return the delegated window, not the ordinary control SHM.
+    // Keeping that window eligible lets repeated small file reads reuse the
+    // same authorized writable guest lease instead of copying through Alpha.
+    let owned = |base: Word, size: Word| base != 0 && size != 0
+        && source.checked_sub(base).and_then(|offset| offset.checked_add(bytes))
+            .is_some_and(|end| end <= size);
+    if !owned(runtime.posix_shm, runtime.posix_shm_size)
+        && !owned(runtime.posix_direct_shm, runtime.posix_direct_shm_size)
+    {
         return false;
     }
     let buffer = unsafe { core::slice::from_raw_parts(source as *const u8, bytes) };
@@ -171,7 +241,7 @@ pub(super) fn copy_from_owned(
     destination: Word,
     source: &[u8],
 ) -> bool {
-    if !WRITE_ENABLED || source.len() > PAGE {
+    if !WRITE_ENABLED || source.len() > MAX_CONTIGUOUS_WRITE_BYTES {
         return false;
     }
     let Some(process) = runtime.managed_process(pid).filter(|process| {

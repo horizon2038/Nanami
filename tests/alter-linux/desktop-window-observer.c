@@ -253,6 +253,9 @@ static int report_ping(int output, const char *label, unsigned long nanos) {
 }
 /* EWMH response proves the stock client's event loop is running, not that
  * every pixel is painted. Unsupported clients fail, never silently pass. */
+#ifdef APP_OBSERVER_SYSCALL_SCOPE
+#include "desktop-syscall-scope.h"
+#endif
 static int await_ping(AppDisplay *display, int output, const char *label) {
     unsigned long protocols = XInternAtom(display, "WM_PROTOCOLS", 1);
     unsigned long ping = XInternAtom(display, "_NET_WM_PING", 1);
@@ -301,6 +304,12 @@ static int await_ping(AppDisplay *display, int output, const char *label) {
                 }
                 unsigned long nanos = (now.seconds - begin.seconds) * 1000000000UL
                     + now.nanoseconds - begin.nanoseconds;
+#ifdef APP_OBSERVER_SYSCALL_SCOPE
+                if (!app_scope_stop()) {
+                    report(output, "APP-SCOPE-FAIL ", label);
+                    return 16;
+                }
+#endif
                 return report_ping(output, label, nanos) ? 0 : 14;
             }
         }
@@ -310,10 +319,17 @@ static int await_ping(AppDisplay *display, int output, const char *label) {
     }
 }
 int main(int argc, char **argv) {
+#ifdef APP_OBSERVER_SYSCALL_SCOPE
+    if (argc != 4 || !equal(argv[2], "ping")) {
+        return 2;
+    }
+#else
     if ((argc != 2 && argc != 3)
-        || (argc == 3 && !equal(argv[2], "ping"))
-        || (!equal(argv[1], "terminal") && !equal(argv[1], "files")
-            && !equal(argv[1], "editor"))) {
+        || (argc == 3 && !equal(argv[2], "ping"))) {
+        return 2;
+    }
+#endif
+    if (!equal(argv[1], "terminal") && !equal(argv[1], "files") && !equal(argv[1], "editor")) {
         return 2;
     }
     AppDisplay *display = XOpenDisplay("unix/:0");
@@ -328,6 +344,14 @@ int main(int argc, char **argv) {
     }
     XSync(display, 0);
     int output = open("/tmp/pointer-probe.log", 1 | 64 | 512, 0600);
+#ifdef APP_OBSERVER_SYSCALL_SCOPE
+    if (output < 0 || !app_scope_start(argv[3])) {
+        if (output >= 0) {
+            report(output, "APP-SCOPE-FAIL ", argv[1]);
+        }
+        return 17;
+    }
+#endif
     if (output < 0 || !report(output, "APP-OBSERVER-READY ", argv[1])) {
         return 5;
     }
@@ -395,7 +419,7 @@ int main(int argc, char **argv) {
             ready = candidate_visible(display, argv[1]);
         }
         if (ready) {
-            if (argc == 3) {
+            if (argc >= 3) {
                 int result = await_ping(display, output, argv[1]);
 #ifdef APP_OBSERVER_STEADY_RTT
                 if (result == 0) {
@@ -403,6 +427,12 @@ int main(int argc, char **argv) {
                     if (result != 0) {
                         report(output, "APP-X11-RTT-FAIL ", argv[1]);
                     }
+                }
+#endif
+#ifdef APP_OBSERVER_SYSCALL_SCOPE
+                if (result == 0 && !app_scope_save(output, argv[1])) {
+                    report(output, "APP-SCOPE-FAIL ", argv[1]);
+                    result = 18;
                 }
 #endif
                 close(output);

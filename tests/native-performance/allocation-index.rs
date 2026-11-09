@@ -71,6 +71,7 @@ fn indexed_counts_match_full_scan_with_aliases_defer_reuse_drop_and_exec() {
                     start_slot: step,
                     base_page: 1 + (seed >> 17) as usize % 32,
                     page_count: 1 + (seed >> 24) as usize % 3,
+                    owns_frame_cap: true,
                 };
                 manager
                     .register_physical_allocation(

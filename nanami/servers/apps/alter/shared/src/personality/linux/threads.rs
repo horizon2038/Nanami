@@ -44,7 +44,17 @@ pub(super) fn clone_vm(
         .ok_or(ESRCH)?
         .signals_mut()
         .clone_task(flags & CLONE_SIGHAND != 0, thread);
-    let parent = runtime.managed_process(parent_pid).copied().ok_or(ESRCH)?;
+    // Snapshot only fields used below, before creating or installing the task.
+    // Keep owned cwd/image bytes across operations that can mutate process slots.
+    let (parent_pcb, parent_fs_base, owner_pid, terminal_id, image_name, image_name_len,
+        cwd, cwd_len, trace_enabled, diagnostics_enabled, personality,
+        graphics_enabled, graphics_session, framebuffer_size) = {
+        let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
+        (parent.pcb, parent.fs_base, parent.owner_pid, parent.terminal_id,
+         parent.image_name, parent.image_name_len, parent.cwd, parent.cwd_len,
+         parent.trace_enabled, parent.diagnostics_enabled, parent.personality,
+         parent.graphics_enabled, parent.graphics_session, parent.framebuffer_size)
+    };
     let slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
     let pid = nanami_runtime::request_process_thread_create(parent_pid, slot, LINUX_TASK_PRIORITY)
         .map_err(map_request_error)?;
@@ -53,17 +63,18 @@ pub(super) fn clone_vm(
         let fs_base = if options.set_tls {
             options.tls
         } else {
-            read_register_value(parent.pcb, REG_FS_BASE).unwrap_or(parent.fs_base)
+            read_register_value(parent_pcb, REG_FS_BASE).unwrap_or(parent_fs_base)
         };
-        clone_registers_for_fork(parent.pcb, pcb, context, options.child_stack, fs_base)
+        clone_registers_for_fork(parent_pcb, pcb, context, options.child_stack, fs_base)
             .map_err(|_| EIO)?;
-        if !runtime.install_managed_child_process(
+        if !runtime.install_managed_child_task(
             pid,
             parent_pid,
-            parent.owner_pid,
+            owner_pid,
             pcb,
-            parent.terminal_id,
-            &parent.image_name[..parent.image_name_len],
+            terminal_id,
+            &image_name[..image_name_len],
+            flags & CLONE_FILES != 0,
         ) {
             return Err(ENOMEM);
         }
@@ -85,16 +96,16 @@ pub(super) fn clone_vm(
         ) {
             return Err(ENOMEM);
         }
-        let _ = runtime.set_cwd(pid, &parent.cwd[..parent.cwd_len]);
+        let _ = runtime.set_cwd(pid, &cwd[..cwd_len]);
         let child = runtime.managed_process_mut(pid).ok_or(ESRCH)?;
         *child.signals_mut() = parent_signals;
         child.fs_base = fs_base;
-        child.trace_enabled = parent.trace_enabled;
-        child.diagnostics_enabled = parent.diagnostics_enabled;
-        child.personality = parent.personality;
-        child.graphics_enabled = parent.graphics_enabled;
-        child.graphics_session = parent.graphics_session;
-        child.framebuffer_size = parent.framebuffer_size;
+        child.trace_enabled = trace_enabled;
+        child.diagnostics_enabled = diagnostics_enabled;
+        child.personality = personality;
+        child.graphics_enabled = graphics_enabled;
+        child.graphics_session = graphics_session;
+        child.framebuffer_size = framebuffer_size;
         write_clone_tid_pointers(
             runtime,
             parent_pid,

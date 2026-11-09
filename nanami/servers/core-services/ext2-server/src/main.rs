@@ -3,10 +3,19 @@
 
 extern crate alloc;
 mod block_cache;
+mod dentry_cache;
 mod writeback;
 
 mod data_io;
 use data_io::*;
+mod data_run;
+use data_run::{get_data_block, get_data_run, get_read_data_run};
+mod sector_count;
+use sector_count::data_sectors;
+mod inode_write;
+use inode_write::{write_inode, write_inode_existing_blocks};
+mod inode_read;
+use inode_read::read_inode;
 
 mod block_io;
 use block_io::*;
@@ -15,16 +24,27 @@ mod block_allocation;
 use block_allocation::*;
 mod block_bitmap;
 use block_bitmap::{alloc_block, free_block};
+mod bitmap_alloc;
+use bitmap_alloc::alloc_bitmap_bit;
 
 mod file_io;
 use file_io::*;
 mod directory;
 use directory::{parse_directory_entry, read_directory};
+mod directory_lookup;
+mod name_compare;
+use name_compare::bytes_eq;
+use directory_lookup::lookup_in_directory;
+mod directory_parent;
 mod namespace;
+mod path_input;
+mod link_target;
+mod readonly_open;
 mod path_walk;
 mod truncate;
 mod mapped_pages;
 mod file_versions;
+mod inode_cache;
 
 use core::cmp::min;
 use core::ptr;
@@ -170,13 +190,21 @@ struct Ext2DirectoryEntry {
 #[derive(Clone, Copy)]
 struct CachedInode {
     valid: bool,
+    previous_in_bucket: u8,
+    next_in_bucket: u8,
     inode_no: u32,
     inode: Ext2Inode,
 }
 
+// The bucket links must use the padding already present after valid/inode_no.
+const _: () = assert!(core::mem::size_of::<CachedInode>()
+    == core::mem::size_of::<Ext2Inode>() + 2 * core::mem::size_of::<u32>());
+
 impl CachedInode {
     const EMPTY: Self = Self {
         valid: false,
+        previous_in_bucket: 0,
+        next_in_bucket: 0,
         inode_no: 0,
         inode: Ext2Inode {
             mode: 0,
@@ -185,25 +213,6 @@ impl CachedInode {
             sectors: 0,
             block: [0; EXT2_INODE_BLOCK_POINTERS],
         },
-    };
-}
-
-#[derive(Clone, Copy)]
-struct CachedDentry {
-    valid: bool,
-    parent_inode: u32,
-    inode: u32,
-    name_len: u16,
-    name: [u8; EXT2_NAME_LEN_MAX],
-}
-
-impl CachedDentry {
-    const EMPTY: Self = Self {
-        valid: false,
-        parent_inode: 0,
-        inode: 0,
-        name_len: 0,
-        name: [0; EXT2_NAME_LEN_MAX],
     };
 }
 
@@ -222,10 +231,8 @@ struct Ext2Runtime {
     block_cache: block_cache::BlockCache,
     writeback: writeback::Writeback,
     frozen_by: Option<Word>,
-    inode_cache: [CachedInode; EXT2_INODE_CACHE_ENTRIES],
-    inode_cache_next: usize,
-    dentry_cache: [CachedDentry; EXT2_DENTRY_CACHE_ENTRIES],
-    dentry_cache_next: usize,
+    inode_cache: inode_cache::Cache,
+    dentry_cache: dentry_cache::Cache,
     directory_cursors: directory::Cursors,
     mapped_pages: mapped_pages::Pages,
     file_versions: file_versions::Versions,
@@ -278,10 +285,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         ),
         writeback: writeback::Writeback::new(timer_port),
         frozen_by: None,
-        inode_cache: [CachedInode::EMPTY; EXT2_INODE_CACHE_ENTRIES],
-        inode_cache_next: 0,
-        dentry_cache: [CachedDentry::EMPTY; EXT2_DENTRY_CACHE_ENTRIES],
-        dentry_cache_next: 0,
+        inode_cache: inode_cache::Cache::new(),
+        dentry_cache: dentry_cache::Cache::new(),
         directory_cursors: directory::Cursors::new(),
         mapped_pages: mapped_pages::Pages::new(),
         file_versions: file_versions::Versions::new(),
@@ -924,57 +929,19 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
 }
 
 fn load_cached_inode(runtime: &Ext2Runtime, inode_no: u32) -> Option<Ext2Inode> {
-    runtime
-        .inode_cache
-        .iter()
-        .find(|entry| entry.valid && entry.inode_no == inode_no)
-        .map(|entry| entry.inode)
+    runtime.inode_cache.load(inode_no)
 }
 
 fn store_cached_inode(runtime: &mut Ext2Runtime, inode_no: u32, inode: Ext2Inode) {
-    let index = runtime
-        .inode_cache
-        .iter()
-        .position(|entry| entry.valid && entry.inode_no == inode_no)
-        .unwrap_or_else(|| {
-            let index = runtime.inode_cache_next;
-            runtime.inode_cache_next = (runtime.inode_cache_next + 1) % runtime.inode_cache.len();
-            index
-        });
-    runtime.inode_cache[index] = CachedInode {
-        valid: true,
-        inode_no,
-        inode,
-    };
+    runtime.inode_cache.store(inode_no, inode);
 }
 
 fn invalidate_cached_inode(runtime: &mut Ext2Runtime, inode_no: u32) {
-    for entry in runtime.inode_cache.iter_mut() {
-        if entry.valid && entry.inode_no == inode_no {
-            entry.valid = false;
-        }
-    }
+    runtime.inode_cache.invalidate(inode_no);
 }
 
-unsafe fn load_cached_dentry(
-    runtime: &Ext2Runtime,
-    parent_inode: u32,
-    name: *const u8,
-    name_len: usize,
-) -> Option<Option<u32>> {
-    if name_len == 0 || name_len > EXT2_NAME_LEN_MAX {
-        return None;
-    }
-    runtime
-        .dentry_cache
-        .iter()
-        .find(|entry| {
-            entry.valid
-                && entry.parent_inode == parent_inode
-                && entry.name_len as usize == name_len
-                && bytes_eq(entry.name.as_ptr(), name, name_len)
-        })
-        .map(|entry| (entry.inode != 0).then_some(entry.inode))
+fn store_cached_dentry_query(runtime: &mut Ext2Runtime, query: Option<&dentry_cache::Query<'_>>, inode: Option<u32>) {
+    if let Some(query) = query { runtime.dentry_cache.store_query(query, inode); }
 }
 
 unsafe fn store_cached_dentry(
@@ -984,30 +951,8 @@ unsafe fn store_cached_dentry(
     name_len: usize,
     inode: Option<u32>,
 ) {
-    if name_len == 0 || name_len > EXT2_NAME_LEN_MAX {
-        return;
-    }
-    let index = runtime
-        .dentry_cache
-        .iter()
-        .position(|entry| {
-            entry.valid
-                && entry.parent_inode == parent_inode
-                && entry.name_len as usize == name_len
-                && bytes_eq(entry.name.as_ptr(), name, name_len)
-        })
-        .unwrap_or_else(|| {
-            let index = runtime.dentry_cache_next;
-            runtime.dentry_cache_next =
-                (runtime.dentry_cache_next + 1) % runtime.dentry_cache.len();
-            index
-        });
-    let entry = &mut runtime.dentry_cache[index];
-    entry.valid = true;
-    entry.parent_inode = parent_inode;
-    entry.inode = inode.unwrap_or(0);
-    entry.name_len = name_len as u16;
-    ptr::copy_nonoverlapping(name, entry.name.as_mut_ptr(), name_len);
+    if name_len == 0 || name_len > EXT2_NAME_LEN_MAX { return; }
+    runtime.dentry_cache.store(parent_inode, core::slice::from_raw_parts(name, name_len), inode);
 }
 
 unsafe fn invalidate_cached_dentry(
@@ -1016,23 +961,12 @@ unsafe fn invalidate_cached_dentry(
     name: *const u8,
     name_len: usize,
 ) {
-    for entry in runtime.dentry_cache.iter_mut() {
-        if entry.valid
-            && entry.parent_inode == parent_inode
-            && entry.name_len as usize == name_len
-            && bytes_eq(entry.name.as_ptr(), name, name_len)
-        {
-            entry.valid = false;
-        }
-    }
+    if name_len == 0 || name_len > EXT2_NAME_LEN_MAX { return; }
+    runtime.dentry_cache.invalidate(parent_inode, core::slice::from_raw_parts(name, name_len));
 }
 
 fn invalidate_cached_dentries_for_inode(runtime: &mut Ext2Runtime, inode_no: u32) {
-    for entry in runtime.dentry_cache.iter_mut() {
-        if entry.valid && (entry.parent_inode == inode_no || entry.inode == inode_no) {
-            entry.valid = false;
-        }
-    }
+    runtime.dentry_cache.invalidate_inode(inode_no);
 }
 
 fn update_cached_handle_metadata(runtime: &mut Ext2Runtime, inode_no: u32, inode: Ext2Inode) {
@@ -1044,89 +978,6 @@ fn update_cached_handle_metadata(runtime: &mut Ext2Runtime, inode_no: u32, inode
     }
 }
 
-fn read_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<Ext2Inode, RequestError> {
-    if inode_no == 0 || runtime.superblock.inodes_per_group == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    let index = inode_no as usize - 1;
-    if index >= runtime.superblock.inodes_count as usize {
-        return Err(RequestError::InvalidArgument);
-    }
-    if let Some(inode) = load_cached_inode(runtime, inode_no) {
-        return Ok(inode);
-    }
-    let group_index = index / runtime.superblock.inodes_per_group as usize;
-    if group_index >= runtime.group_count {
-        return Err(RequestError::InvalidArgument);
-    }
-    let index_in_group = index % runtime.superblock.inodes_per_group as usize;
-    let inode_offset = index_in_group * runtime.superblock.inode_size;
-    let block =
-        runtime.groups[group_index].inode_table_block as usize + inode_offset / runtime.block_size;
-    let in_block = inode_offset % runtime.block_size;
-    read_block(runtime, block)?;
-    let p = runtime.block_shm as usize + in_block;
-    let mut blocks = [0u32; EXT2_INODE_BLOCK_POINTERS];
-    let mut i = 0usize;
-    while i < EXT2_INODE_BLOCK_POINTERS {
-        blocks[i] = r32(p + 40 + i * 4);
-        i += 1;
-    }
-    let inode = Ext2Inode {
-        mode: r16(p + 0),
-        size: r32(p + 4),
-        links_count: r16(p + 26),
-        sectors: r32(p + 28),
-        block: blocks,
-    };
-    store_cached_inode(runtime, inode_no, inode);
-    Ok(inode)
-}
-
-fn write_inode(
-    runtime: &mut Ext2Runtime,
-    inode_no: u32,
-    inode: Ext2Inode,
-) -> Result<(), RequestError> {
-    // Includes chmod, unlink and allocation/reuse, even on partial I/O failure.
-    runtime.file_versions.invalidate(inode_no);
-    if inode_no == 0 || runtime.superblock.inodes_per_group == 0 {
-        return Err(RequestError::InvalidArgument);
-    }
-    let sectors = data_sectors(runtime, inode)?;
-    let mut inode = inode;
-    inode.sectors = sectors;
-    let index = inode_no as usize - 1;
-    if index >= runtime.superblock.inodes_count as usize {
-        return Err(RequestError::InvalidArgument);
-    }
-    let group_index = index / runtime.superblock.inodes_per_group as usize;
-    if group_index >= runtime.group_count {
-        return Err(RequestError::InvalidArgument);
-    }
-    let index_in_group = index % runtime.superblock.inodes_per_group as usize;
-    let inode_offset = index_in_group * runtime.superblock.inode_size;
-    let block =
-        runtime.groups[group_index].inode_table_block as usize + inode_offset / runtime.block_size;
-    let in_block = inode_offset % runtime.block_size;
-    read_block(runtime, block)?;
-    let p = runtime.block_shm as usize + in_block;
-    w16_mem(p + 0, inode.mode);
-    w32_mem(p + 4, inode.size);
-    w32_mem(p + 28, sectors);
-    w16_mem(p + 26, inode.links_count);
-    let mut i = 0usize;
-    while i < EXT2_INODE_BLOCK_POINTERS {
-        w32_mem(p + 40 + i * 4, inode.block[i]);
-        i += 1;
-    }
-    write_block(runtime, block)?;
-    invalidate_cached_inode(runtime, inode_no);
-    store_cached_inode(runtime, inode_no, inode);
-    update_cached_handle_metadata(runtime, inode_no, inode);
-    Ok(())
-}
-
 fn indirect_entries_per_block(runtime: &Ext2Runtime) -> usize {
     runtime.block_size / 4
 }
@@ -1134,44 +985,6 @@ fn indirect_entries_per_block(runtime: &Ext2Runtime) -> usize {
 fn max_file_blocks(runtime: &Ext2Runtime) -> usize {
     let entries = indirect_entries_per_block(runtime);
     EXT2_MAX_DIRECT_BLOCKS + entries + entries * entries
-}
-
-fn get_data_block(
-    runtime: &mut Ext2Runtime,
-    inode: Ext2Inode,
-    logical_block: usize,
-) -> Result<u32, RequestError> {
-    if logical_block < EXT2_MAX_DIRECT_BLOCKS {
-        return Ok(inode.block[logical_block]);
-    }
-    let indirect_index = logical_block - EXT2_MAX_DIRECT_BLOCKS;
-    let entries = indirect_entries_per_block(runtime);
-    if indirect_index < entries {
-        let indirect_block = inode.block[EXT2_SINGLE_INDIRECT_INDEX];
-        if indirect_block == 0 {
-            return Ok(0);
-        }
-        read_block(runtime, indirect_block as usize)?;
-        return Ok(r32(runtime.block_shm as usize + indirect_index * 4));
-    }
-
-    let double_index = indirect_index - entries;
-    if double_index >= entries * entries {
-        return Err(RequestError::Unsupported);
-    }
-    let double_block = inode.block[EXT2_DOUBLE_INDIRECT_INDEX];
-    if double_block == 0 {
-        return Ok(0);
-    }
-    let first_index = double_index / entries;
-    let second_index = double_index % entries;
-    read_block(runtime, double_block as usize)?;
-    let indirect_block = r32(runtime.block_shm as usize + first_index * 4);
-    if indirect_block == 0 {
-        return Ok(0);
-    }
-    read_block(runtime, indirect_block as usize)?;
-    Ok(r32(runtime.block_shm as usize + second_index * 4))
 }
 
 fn lookup_path(
@@ -1257,50 +1070,6 @@ fn lookup_parent_path(
         };
         Some((parent_inode, path.add(name_start), name_len))
     }
-}
-
-unsafe fn lookup_in_directory(
-    runtime: &mut Ext2Runtime,
-    dir_inode: u32,
-    name: *const u8,
-    name_len: usize,
-) -> Option<u32> {
-    if let Some(cached) = load_cached_dentry(runtime, dir_inode, name, name_len) {
-        return cached;
-    }
-    let inode = read_inode(runtime, dir_inode).ok()?;
-    if (inode.mode & EXT2_S_IFMT) != EXT2_S_IFDIR {
-        return None;
-    }
-    let mut logical_block = 0usize;
-    while logical_block < max_file_blocks(runtime) {
-        let block = get_data_block(runtime, inode, logical_block).ok()?;
-        if block == 0 {
-            break;
-        }
-        read_block(runtime, block as usize).ok()?;
-        let limit = min(
-            runtime.block_size,
-            inode
-                .size
-                .saturating_sub((logical_block * runtime.block_size) as u32) as usize,
-        );
-        let mut offset = 0usize;
-        while offset < limit {
-            let entry = parse_directory_entry(runtime.block_shm as usize + offset, limit - offset)?;
-            if entry.inode != 0
-                && entry.name_len == name_len
-                && bytes_eq(entry.name_ptr, name, name_len)
-            {
-                store_cached_dentry(runtime, dir_inode, name, name_len, Some(entry.inode));
-                return Some(entry.inode);
-            }
-            offset += entry.record_len;
-        }
-        logical_block += 1;
-    }
-    store_cached_dentry(runtime, dir_inode, name, name_len, None);
-    None
 }
 
 fn create_node(
@@ -1550,7 +1319,7 @@ fn insert_directory_entry(
     let needed = align4(8 + name_len);
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
-        let mut block = get_data_block(runtime, dir_inode, logical_block)
+        let mut block = get_data_block(runtime, &dir_inode, logical_block)
             .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?
             as usize;
         if block == 0 {
@@ -1641,7 +1410,7 @@ fn find_directory_entry(
     }
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
-        let block = get_data_block(runtime, inode, logical_block).ok()? as usize;
+        let block = get_data_block(runtime, &inode, logical_block).ok()? as usize;
         if block == 0 {
             break;
         }
@@ -1668,7 +1437,7 @@ fn find_directory_entry(
 fn is_directory_empty(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<bool, Word> {
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
-        let block = get_data_block(runtime, inode, logical_block)
+        let block = get_data_block(runtime, &inode, logical_block)
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
@@ -1709,7 +1478,7 @@ fn update_parent_directory_entry(
     let name = b"..";
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
-        let block = get_data_block(runtime, inode, logical_block)
+        let block = get_data_block(runtime, &inode, logical_block)
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
@@ -1781,7 +1550,7 @@ fn parent_directory_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Result<u3
     let name = b"..";
     let mut logical_block = 0usize;
     while logical_block < max_file_blocks(runtime) {
-        let block = get_data_block(runtime, inode, logical_block)
+        let block = get_data_block(runtime, &inode, logical_block)
             .map_err(|_| nanami_runtime::OS_RESPONSE_FATAL)? as usize;
         if block == 0 {
             break;
@@ -1899,30 +1668,6 @@ fn free_inode_blocks(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<(), 
         free_block(runtime, double_block)?;
     }
     Ok(())
-}
-
-fn alloc_bitmap_bit(
-    runtime: &mut Ext2Runtime,
-    bitmap_block: usize,
-    start_bit: usize,
-    limit_bits: usize,
-) -> Result<Option<usize>, RequestError> {
-    read_block(runtime, bitmap_block)?;
-    let base = runtime.block_shm as usize;
-    let mut bit = start_bit;
-    while bit < limit_bits {
-        let byte = unsafe { *((base + bit / 8) as *const u8) };
-        let mask = 1u8 << (bit % 8);
-        if byte & mask == 0 {
-            unsafe {
-                *((base + bit / 8) as *mut u8) = byte | mask;
-            }
-            write_block(runtime, bitmap_block)?;
-            return Ok(Some(bit));
-        }
-        bit += 1;
-    }
-    Ok(None)
 }
 
 fn clear_bitmap_bit(
@@ -2062,70 +1807,6 @@ fn add_signed_u16(value: u16, delta: i32) -> u16 {
     } else {
         value.saturating_sub((-delta) as u16)
     }
-}
-
-fn data_sectors(runtime: &mut Ext2Runtime, inode: Ext2Inode) -> Result<u32, RequestError> {
-    if inode.mode & EXT2_S_IFMT == EXT2_S_IFLNK
-        && inode.sectors == 0
-        && inode.size as usize <= EXT2_INODE_BLOCK_POINTERS * 4
-    {
-        return Ok(0);
-    }
-    let mut blocks = 0u32;
-    let mut i = 0usize;
-    while i < EXT2_MAX_DIRECT_BLOCKS {
-        if inode.block[i] != 0 {
-            blocks += 1;
-        }
-        i += 1;
-    }
-    if inode.block[EXT2_SINGLE_INDIRECT_INDEX] != 0 {
-        blocks += 1; // the indirect block itself
-        let indirect_block = inode.block[EXT2_SINGLE_INDIRECT_INDEX] as usize;
-        read_block(runtime, indirect_block)?;
-        let mut entry = 0usize;
-        while entry < indirect_entries_per_block(runtime) {
-            if r32(runtime.block_shm as usize + entry * 4) != 0 {
-                blocks += 1;
-            }
-            entry += 1;
-        }
-    }
-    if inode.block[EXT2_DOUBLE_INDIRECT_INDEX] != 0 {
-        blocks += 1; // the double indirect block itself
-        let double_block = inode.block[EXT2_DOUBLE_INDIRECT_INDEX] as usize;
-        let entries = indirect_entries_per_block(runtime);
-        let mut first = 0usize;
-        while first < entries {
-            read_block(runtime, double_block)?;
-            let indirect_block = r32(runtime.block_shm as usize + first * 4);
-            if indirect_block != 0 {
-                blocks += 1; // second-level indirect block
-                let indirect_block = indirect_block as usize;
-                let mut second = 0usize;
-                while second < entries {
-                    read_block(runtime, indirect_block)?;
-                    if r32(runtime.block_shm as usize + second * 4) != 0 {
-                        blocks += 1;
-                    }
-                    second += 1;
-                }
-            }
-            first += 1;
-        }
-    }
-    Ok(blocks * ((runtime.block_size / 512) as u32))
-}
-
-unsafe fn bytes_eq(a: *const u8, b: *const u8, len: usize) -> bool {
-    let mut i = 0usize;
-    while i < len {
-        if *a.add(i) != *b.add(i) {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 unsafe fn write_word(dst: *mut u8, value: Word) {

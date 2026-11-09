@@ -10,11 +10,16 @@ use crate::process::{
 };
 use crate::state::Runtime;
 
+#[path = "fault_signal.rs"]
+mod signal_reply;
+use signal_reply::signal_return;
+
 pub struct FaultEvent {
     pub identifier: Word,
     pub reason: Word,
     pub program_counter: Word,
     pub kernel_call_number: Word,
+    pub architecture_fault_code: Word,
     pub hardware_context: HardwareContext,
     pub hardware_context_count: usize,
 }
@@ -33,6 +38,19 @@ pub enum FaultAction {
 
 pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
     if fault.reason != A9N_FAULT_INVALID_KERNEL_CALL {
+        if matches!(fault.reason, 1 | 2) {
+            if let Some(process) = runtime.process_for_fault_identifier(fault.identifier) {
+                if !crate::linux::bus_fault(runtime, process.pid, fault.kernel_call_number)
+                    && crate::linux::materialize_stack_fault(runtime, process.pid,
+                        fault.kernel_call_number, fault.architecture_fault_code)
+                {
+                    return FaultAction::Continue {
+                        hardware_context: fault.hardware_context,
+                        hardware_context_count: 0,
+                    };
+                }
+            }
+        }
         if runtime
             .process_for_fault_identifier(fault.identifier)
             .is_some_and(|process| process.personality == crate::state::OsPersonality::Linux)
@@ -89,7 +107,17 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
     };
 
     let before = syscall_profile::stamp();
+    #[cfg(feature = "syscall-scope")]
+    let scoped_before = if process.personality == crate::state::OsPersonality::Linux {
+        runtime.syscall_scope.sample(nanami_runtime::diagnostics::local_stamp)
+    } else {
+        None
+    };
     let action = personality::dispatch_syscall(process.personality, runtime, pid, context);
+    #[cfg(feature = "syscall-scope")]
+    let _ = runtime.syscall_scope.record(
+        scoped_before, context.number, nanami_runtime::diagnostics::local_stamp,
+    );
     syscall_profile::record(
         pid,
         context.number,
@@ -299,55 +327,6 @@ fn synchronous_signal(runtime: &mut Runtime, fault: &FaultEvent) -> FaultAction 
     FaultAction::Terminate {
         pid,
         status: 128 + signal,
-    }
-}
-
-fn signal_return(
-    runtime: &mut Runtime,
-    pid: Word,
-    pcb: Word,
-    context: crate::process::LinuxSyscallContext,
-    value: isize,
-    mut registers: HardwareContext,
-    fast: bool,
-    parked: bool,
-) -> FaultAction {
-    if !fast {
-        registers = match crate::process::read_hardware_context(pcb) {
-            Ok(registers) => registers,
-            Err(()) => return FaultAction::Terminate { pid, status: 139 },
-        };
-    }
-    let count = configure_personality_syscall_reply(
-        &mut registers,
-        context,
-        value,
-        crate::state::OsPersonality::Linux,
-    );
-    match crate::linux::signals_runtime::deliver(
-        runtime,
-        pid,
-        &mut registers,
-        parked.then_some(context),
-    ) {
-        crate::linux::signals_runtime::Delivery::Unchanged => {
-            if parked {
-                return FaultAction::Park;
-            }
-            FaultAction::Continue {
-                hardware_context: registers,
-                hardware_context_count: count,
-            }
-        }
-        crate::linux::signals_runtime::Delivery::Handler => FaultAction::Continue {
-            hardware_context: registers,
-            hardware_context_count: registers.len(),
-        },
-        crate::linux::signals_runtime::Delivery::Stopped => FaultAction::Park,
-        crate::linux::signals_runtime::Delivery::Terminate(signal) => FaultAction::Terminate {
-            pid,
-            status: 128 + signal,
-        },
     }
 }
 

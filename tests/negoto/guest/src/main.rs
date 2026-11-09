@@ -13,6 +13,8 @@ mod files;
 mod appended_lines;
 mod frame_capture;
 mod process_perf;
+mod scope_fixture;
+mod scope_packet;
 mod framebuffer {
     pub use crate::frame_capture::Rect;
 }
@@ -222,6 +224,10 @@ fn main() -> nanami_runtime::NanamiResult {
     assert_eq!(status, OS_RESPONSE_OK);
     let client = Client { port, shm, bytes };
     let files = files::Files::connect().unwrap();
+    if nanami_runtime::process_arg(1) == Some(b"--syscall-scope-fixture") {
+        scope_fixture::run(&client, &files, timer);
+        return Ok(());
+    }
     if matches!(
         nanami_runtime::process_arg(1),
         Some(b"--tinycore" | b"--tinycore-desktop" | b"--tinycore-apps" | b"--tinycore-perf" | b"--tinycore-process-perf" | b"--tinycore-startup-perf")
@@ -568,7 +574,32 @@ fn tinycore_desktop(client: &Client, files: &files::Files, timer: Word) {
         ],
         Some(console.id),
     );
-    console.expect(b"FILE-MAPPING-PASS", timer);
+    let require_unix_faults = option_env!("NANAMI_REQUIRE_UNIX_RECVMSG_FAULTS") == Some("1");
+    let require_readlink = option_env!("NANAMI_REQUIRE_READLINK_KIND") == Some("1");
+    let require_rooted_open = option_env!("NANAMI_REQUIRE_ROOTED_OPEN") == Some("1");
+    if require_unix_faults || require_readlink || require_rooted_open {
+        let output = console.collect_until(b"FILE-MAPPING-PASS", timer);
+        if require_unix_faults {
+            assert!(output.windows(b"UNIX-RECVMSG-FAULT-PASS".len())
+                .any(|window| window == b"UNIX-RECVMSG-FAULT-PASS"),
+                "coalesced recvmsg fault regression did not report completion");
+            nanami_runtime::println!("TINYCORE-UNIX-RECVMSG-FAULT-PASS scenarios=16");
+        }
+        if require_readlink {
+            assert!(output.windows(b"READLINK-KIND-PASS".len())
+                .any(|window| window == b"READLINK-KIND-PASS"),
+                "readlink kind regression did not report completion");
+            nanami_runtime::println!("TINYCORE-READLINK-KIND-PASS");
+        }
+        if require_rooted_open {
+            assert!(output.windows(b"ROOTED-OPEN-PASS".len())
+                .any(|window| window == b"ROOTED-OPEN-PASS"),
+                "rooted open regression did not report completion");
+            nanami_runtime::println!("TINYCORE-ROOTED-OPEN-PASS");
+        }
+    } else {
+        console.expect(b"FILE-MAPPING-PASS", timer);
+    }
     native.wait(mapping, timer);
     assert!(client.command("state", "tc-mapping").is_err());
     nanami_runtime::println!("TINYCORE-FILE-MAPPING-PASS");

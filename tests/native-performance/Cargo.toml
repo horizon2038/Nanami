@@ -4,8 +4,57 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+wait-shape = []
+syscall-scope = []
+honoka-frame-events = []
+
 [lib]
 path = "heap-tests.rs"
+
+[[test]]
+name = "linux-path-translation"
+path = "linux-path-translation.rs"
+
+[[test]]
+name = "linux-exec-stack"
+path = "linux-exec-stack.rs"
+
+[[test]]
+name = "linux-program-break"
+path = "linux-program-break.rs"
+
+[[test]]
+name = "linux-exec-strings"
+path = "linux-exec-strings.rs"
+
+[[test]]
+name = "alter-launch-stack"
+path = "alter-launch-stack.rs"
+
+[[test]]
+name = "linux-path-string"
+path = "linux-path-string.rs"
+
+[[test]]
+name = "ext2-link-target"
+path = "ext2-link-target.rs"
+
+[[test]]
+name = "posix-rooted-open"
+path = "posix-rooted-open.rs"
+
+[[test]]
+name = "ext2-readonly-open"
+path = "ext2-readonly-open.rs"
+
+[[test]]
+name = "vfs-namespace-client"
+path = "vfs-namespace-client.rs"
+
+[[test]]
+name = "wait-shape"
+path = "wait-shape.rs"
 
 [[test]]
 name = "alter-dynamic"
@@ -22,6 +71,14 @@ path = "physical-allocation-index.rs"
 [[test]]
 name = "fault-reply"
 path = "fault-reply.rs"
+
+[[test]]
+name = "fault-signal-return"
+path = "fault-signal-return.rs"
+
+[[test]]
+name = "linux-anonymous-mapping"
+path = "linux-anonymous-mapping.rs"
 
 [[test]]
 name = "linux-guest-copy"
@@ -44,6 +101,14 @@ name = "linux-file-initialization"
 path = "linux-file-initialization.rs"
 
 [[test]]
+name = "linux-file-snapshot"
+path = "linux-file-snapshot.rs"
+
+[[test]]
+name = "linux-file-remap"
+path = "linux-file-remap.rs"
+
+[[test]]
 name = "alpha-private-pages"
 path = "alpha-private-pages.rs"
 
@@ -62,6 +127,10 @@ path = "alter-identity.rs"
 [[test]]
 name = "alpha-initialization-window"
 path = "alpha-initialization-window.rs"
+
+[[test]]
+name = "alpha-shared-zero"
+path = "alpha-shared-zero.rs"
 
 [[test]]
 name = "alpha-heap"
@@ -230,6 +299,18 @@ path = "linux-mappings.rs"
 [[test]]
 name = "linux-namespace"
 path = "linux-namespace.rs"
+
+[[test]]
+name = "ext2-data-run"
+path = "ext2-data-run.rs"
+
+[[test]]
+name = "ext2-sector-count"
+path = "ext2-sector-count.rs"
+
+[[test]]
+name = "ext2-inode-write"
+path = "ext2-inode-write.rs"
 
 [[test]]
 name = "posix-io"
@@ -423,6 +504,42 @@ path = "linux-guest-views.rs"
 name = "appended-lines"
 path = "appended-lines.rs"
 
+[[test]]
+name = "alter-syscall-scope"
+path = "alter-syscall-scope.rs"
+
+[[test]]
+name = "ext2-dentry-cache"
+path = "ext2-dentry-cache.rs"
+
+[[test]]
+name = "alpha-page-fill"
+path = "alpha-page-fill.rs"
+
+[[test]]
+name = "ext2-inode-read"
+path = "ext2-inode-read.rs"
+
+[[test]]
+name = "ext2-inode-cache"
+path = "ext2-inode-cache.rs"
+
+[[test]]
+name = "ext2-bitmap-alloc"
+path = "ext2-bitmap-alloc.rs"
+
+[[test]]
+name = "linux-child-wait"
+path = "linux-child-wait.rs"
+
+[[test]]
+name = "alter-process-tree"
+path = "alter-process-tree.rs"
+
+[[test]]
+name = "alter-task-resources"
+path = "alter-task-resources.rs"
+
 [dependencies]
 nanami-ui = { path = "../../nanami/servers/libs/nanami-ui" }
 embedded-graphics = "0.8.2"
@@ -436,5 +553,9 @@ rlsf = { version = "=0.2.3", default-features = false, features = ["unstable"] }
 pci-ids-rs = "=1.2026.10"
 fontdue = { version = "=0.9.3", default-features = false, features = ["hashbrown"] }
 uefi = { version = "=0.35.0", default-features = false }
+
+[[test]]
+name = "linux-file-read"
+path = "linux-file-read.rs"
 
 [workspace]

@@ -18,20 +18,21 @@ impl Alpha {
         let fresh = self
             .processes
             .vm_space_mut(destination_pid)
-            .is_some_and(|vm| vm.backed_pages(0, usize::MAX).is_empty());
+            .is_some_and(|vm| !vm.has_backed_pages(0, usize::MAX));
         if !fresh {
             return self.clone_backed_pages(source_pid, 0, destination_pid, 0, pages);
         }
         let destination = self
             .processes
-            .memory_entry(destination_pid)
+            .memory_context(destination_pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         // A raw private child is suspended and initially empty. Reserve each
         // backed run once, but copy every page into independent storage. Never
         // include sparse holes, including unbacked PROT_NONE reservations.
-        for run in pages.chunk_by(|a, b| a.0.checked_add(PAGE_SIZE) == Some(b.0)) {
+        for run in pages.chunk_by(|a, b| a.0.checked_add(PAGE_SIZE) == Some(b.0) && a.1 == b.1) {
             let base = run[0].0;
-            self.map_process_initialized_pages(
+            let permissions = run[0].1;
+            self.map_process_initialized_pages_protected(
                 destination_pid,
                 Some(base),
                 run.len(),
@@ -40,7 +41,11 @@ impl Alpha {
                     address: base,
                     bytes: run.len() * PAGE_SIZE,
                 }),
+                if permissions == 0 { 7 } else { permissions },
             )?;
+            // Nonzero rights were published by the initialized constructor.
+            // PROT_NONE retains copied backing but needs its leaf removed.
+            if permissions != 0 { continue; }
             // Publish no runnable child until all final permissions succeed.
             // Failed construction/protection remains owned by spawn rollback.
             for &(va, permissions) in run {
@@ -101,7 +106,7 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let destination = self
             .processes
-            .memory_entry(destination_pid)
+            .memory_context(destination_pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         // Sparse reservations stay sparse, including PROT_NONE. Work scales with
         // populated pages, not the size of a reserved virtual address range.

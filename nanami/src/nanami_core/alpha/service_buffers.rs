@@ -57,14 +57,8 @@ impl Effects for NativeEffects<'_> {
             .reserve_process_virtual_gap(owner, pages, PAGE_SIZE)
     }
     fn zero(&mut self, physical: Word) -> Result<(), CapabilityError> {
-        let frame = self.frame(physical)?;
-        self.alpha
-            .map_alpha_temporary_frame(frame, PROCESS_ZERO_TEMP_BASE)?;
-        unsafe {
-            ptr::write_bytes(PROCESS_ZERO_TEMP_BASE as *mut u8, 0, PAGE_SIZE);
-        }
-        self.alpha
-            .unmap_alpha_temporary_frame(frame, PROCESS_ZERO_TEMP_BASE)
+        self.frame(physical)?;
+        self.alpha.zero_physical_pages(physical, 1)
     }
     fn map(&mut self, owner: Word, address: Word, physical: Word) -> Result<(), MapError> {
         let frame = self.frame(physical).map_err(MapError::NotInstalled)?;

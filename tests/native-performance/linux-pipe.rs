@@ -8,7 +8,9 @@ const LINUX_PIPE_BYTES: usize = 4096;
 mod state {
     pub const LINUX_FD_MAX: usize = 64;
     pub mod readiness {
-        pub const READY_PIPE: usize = 1;
+        pub const READY_PIPE: usize = 8;
+        pub const READY_PIPE_READ: usize = 2048;
+        pub const READY_PIPE_WRITE: usize = 4096;
     }
 }
 #[derive(Clone, Copy, PartialEq)]
@@ -44,24 +46,12 @@ impl LinuxFile {
         }
     }
 }
-struct Pipe {
-    data: Box<[u8; LINUX_PIPE_BYTES]>,
-    readers: Word,
-    writers: Word,
-    read: usize,
-    write: usize,
-    len: usize,
-}
-impl Pipe {
-    fn read_byte(&self, index: usize) -> u8 {
-        self.data[index]
-    }
-    fn write_byte(&mut self, index: usize, byte: u8) {
-        self.data[index] = byte;
-    }
-}
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/pipe.rs"]
+mod pipe_state;
+use pipe_state::LinuxPipe as Pipe;
 struct Runtime {
     pipe: Option<Pipe>,
+    pipe_storage: Option<Box<[u8; LINUX_PIPE_BYTES]>>,
     files: [LinuxFile; 4],
     scratch: Box<[u8; 8192]>,
     posix_shm: Word,
@@ -75,6 +65,7 @@ impl Runtime {
         let posix_shm = scratch.as_mut_ptr() as Word;
         Self {
             pipe: None,
+            pipe_storage: None,
             files: [LinuxFile::EMPTY; 4],
             scratch,
             posix_shm,
@@ -87,14 +78,18 @@ impl Runtime {
         if self.pipe.is_some() {
             return None;
         }
+        // Model reused dirty allocator storage: no read may depend on zeros.
+        let mut data = Box::new([0xa5; LINUX_PIPE_BYTES]);
         self.pipe = Some(Pipe {
-            data: Box::new([0; LINUX_PIPE_BYTES]),
+            active: true,
+            buffer: data.as_mut_ptr() as Word,
             readers: 1,
             writers: 1,
             read: 0,
             write: 0,
             len: 0,
         });
+        self.pipe_storage = Some(data);
         Some(0)
     }
     fn pipe_mut(&mut self, id: Word) -> Option<&mut Pipe> {
@@ -105,6 +100,7 @@ impl Runtime {
     }
     fn release_pipe(&mut self, _: Word) {
         assert!(self.pipe.take().is_some());
+        self.pipe_storage = None;
         self.releases += 1;
     }
     fn allocate_linux_file(&mut self, _: Word, file: LinuxFile, _: Word) -> Option<Word> {
@@ -161,6 +157,107 @@ unsafe fn write_u32(address: Word, value: u32) {
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/pipe.rs"]
 mod pipe;
+
+#[test]
+fn pipe_write_burst_preserves_bytes_and_counts_readable_notifications() {
+    let mut r = Runtime::new();
+    r.allocate_pipe().unwrap();
+    let mut notifications = 0;
+    for sequence in 0..128u64 {
+        r.readiness_changes = 0x8000;
+        let bytes = sequence.to_ne_bytes();
+        assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, bytes.as_ptr() as Word, bytes.len()), Ok(8));
+        assert_ne!(r.readiness_changes & 0x8000, 0);
+        notifications += usize::from(r.readiness_changes
+            & (state::readiness::READY_PIPE | state::readiness::READY_PIPE_READ) != 0);
+    }
+    let mut output = [0u8; 128 * 8];
+    r.readiness_changes = 0;
+    assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, output.as_mut_ptr() as Word, output.len()), Ok(output.len()));
+    assert_ne!(r.readiness_changes & (state::readiness::READY_PIPE | state::readiness::READY_PIPE_WRITE), 0);
+    for (sequence, bytes) in output.chunks_exact(8).enumerate() {
+        assert_eq!(bytes, (sequence as u64).to_ne_bytes());
+    }
+    println!("pipe-burst readable-notifications={notifications}");
+}
+
+#[test]
+fn fresh_dirty_pipe_exposes_only_successfully_written_bytes() {
+    let mut r = Runtime::new();
+    for _ in 0..2 {
+        r.allocate_pipe().unwrap();
+        let mut target = [0x7bu8; 32];
+        assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, target.as_mut_ptr() as Word, target.len()), Err(EAGAIN));
+        assert_eq!(target, [0x7b; 32]);
+        let input = [0u8, 1, 2, 0xfe, 0xff];
+        r.fail_copy = true;
+        assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, input.as_ptr() as Word, input.len()), Err(EFAULT));
+        r.fail_copy = false;
+        assert_eq!(r.pipe.unwrap().len, 0);
+        assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, target.as_mut_ptr() as Word, target.len()), Err(EAGAIN));
+        assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, input.as_ptr() as Word, input.len()), Ok(input.len()));
+        assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, target.as_mut_ptr() as Word, target.len()), Ok(input.len()));
+        assert_eq!(&target[..input.len()], &input);
+        assert_eq!(&target[input.len()..], &[0x7b; 27]);
+        r.pipe.as_mut().unwrap().writers = 0;
+        assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, target.as_mut_ptr() as Word, target.len()), Ok(0));
+        assert_eq!(&target[..input.len()], &input);
+        assert_eq!(&target[input.len()..], &[0x7b; 27]);
+        r.release_pipe(0);
+    }
+}
+
+#[test]
+fn bulk_ring_matches_byte_queue_through_wrap_full_capacity_and_copy_faults() {
+    use std::collections::VecDeque;
+    let mut runtime = Runtime::new();
+    runtime.allocate_pipe().unwrap();
+    runtime.pipe.as_mut().unwrap().read = LINUX_PIPE_BYTES - 1;
+    runtime.pipe.as_mut().unwrap().write = LINUX_PIPE_BYTES - 1;
+    let mut queue = VecDeque::new();
+    let mut seed = 17u64;
+    for step in 0..5000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let count = [0, 1, 2, 7, 63, 1023, 4095, 4096, 4097][(seed >> 32) as usize % 9];
+        let before = runtime.pipe.unwrap();
+        let old_bytes = **runtime.pipe_storage.as_ref().unwrap();
+        runtime.readiness_changes = 0;
+        runtime.fail_copy = step % 13 == 0;
+        if seed & 1 == 0 {
+            let source: Vec<_> = (0..count).map(|i| (i + step) as u8).collect();
+            let available = LINUX_PIPE_BYTES - queue.len();
+            let expected = if count == 0 { Ok(0) }
+                else if available == 0 || (count <= LINUX_PIPE_BYTES && available < count) { Err(EAGAIN) }
+                else if runtime.fail_copy { Err(EFAULT) }
+                else { Ok(count.min(available)) };
+            let result = pipe::sys_pipe_write(&mut runtime, 1, 0, source.as_ptr() as Word, count);
+            assert_eq!(result, expected);
+            if let Ok(n) = result { queue.extend(&source[..n]); }
+        } else {
+            let mut target = vec![0xa5; count + 2];
+            let expected = if count == 0 { Ok(0) } else if queue.is_empty() { Err(EAGAIN) }
+                else if runtime.fail_copy { Err(EFAULT) } else { Ok(count.min(queue.len())) };
+            let result = pipe::sys_pipe_read(&mut runtime, 1, 0, target[1..].as_mut_ptr() as Word, count);
+            assert_eq!(result, expected);
+            if let Ok(n) = result {
+                for byte in &target[1..1 + n] { assert_eq!(Some(*byte), queue.pop_front()); }
+                assert!(target[1 + n..].iter().all(|b| *b == 0xa5));
+            } else { assert!(target.iter().all(|b| *b == 0xa5)); }
+            assert_eq!(target[0], 0xa5);
+        }
+        let after = runtime.pipe.unwrap();
+        assert_eq!(after.len, queue.len());
+        assert_eq!(after.write, (after.read + after.len) % LINUX_PIPE_BYTES);
+        if runtime.fail_copy {
+            assert_eq!((after.read, after.write, after.len), (before.read, before.write, before.len));
+            assert_eq!(**runtime.pipe_storage.as_ref().unwrap(), old_bytes);
+            assert_eq!(runtime.readiness_changes, 0);
+        }
+        let mut staged = vec![0; queue.len()];
+        after.copy_out(&mut staged);
+        assert!(staged.iter().copied().eq(queue.iter().copied()));
+    }
+}
 
 #[test]
 fn live_writer_is_not_eof() {

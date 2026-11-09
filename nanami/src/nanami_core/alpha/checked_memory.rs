@@ -138,10 +138,8 @@ impl Alpha {
                 .processes
                 .vm_space_mut(target_pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            for va in (align_down(target_va, PAGE_SIZE)..end).step_by(PAGE_SIZE) {
-                if vm.permissions(va) & permission == 0 {
-                    return Err(CapabilityError::PermissionDenied);
-                }
+            if !vm.user_range_allowed(target_va, end, permission) {
+                return Err(CapabilityError::PermissionDenied);
             }
         }
 

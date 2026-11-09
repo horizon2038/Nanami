@@ -9,6 +9,7 @@ const EINVAL: i32 = 22;
 const LINUX_IOVEC_LEN: usize = 16;
 const LINUX_IOV_MAX: usize = 16;
 const LINUX_MSGHDR_LEN: usize = 56;
+const LINUX_PAGE_SIZE: usize = 4096;
 struct Runtime {
     posix_shm: usize,
     posix_shm_size: usize,
@@ -17,6 +18,7 @@ struct Runtime {
 }
 impl Runtime {
     fn memory_access_allowed(&self, _: Word, address: Word, bytes: Word, _: Word) -> bool {
+        PERMISSION_CHECKS.with(|count| count.set(count.get() + 1));
         bytes == 0
             || (self.allowed
                 && self
@@ -33,13 +35,16 @@ struct Transport {
     batches: usize,
 }
 thread_local! { static TRANSPORT: RefCell<Transport> = RefCell::new(Transport::default()); }
+thread_local! { static PERMISSION_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 fn map_request_error(_: ()) -> i32 {
     EFAULT
 }
 mod guest_views {
+    pub(super) const MAX_CONTIGUOUS_READ_BYTES: usize = 16384;
     use std::cell::Cell;
     thread_local! {
         pub(super) static HIT: Cell<bool> = const { Cell::new(false) };
+        pub(super) static COPY_INPUT: Cell<bool> = const { Cell::new(false) };
         pub(super) static CALLS: Cell<usize> = const { Cell::new(0) };
         pub(super) static WRITE_HIT: Cell<bool> = const { Cell::new(false) };
         pub(super) static WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
@@ -48,19 +53,23 @@ mod guest_views {
     pub(super) fn copy_into_scratch(
         runtime: &super::Runtime,
         _: usize,
-        _: usize,
+        source: usize,
         destination: usize,
         bytes: usize,
     ) -> bool {
         CALLS.with(|calls| calls.set(calls.get() + 1));
-        if destination
+        if bytes > MAX_CONTIGUOUS_READ_BYTES || destination
             .checked_sub(runtime.posix_shm)
             .and_then(|offset| offset.checked_add(bytes))
             .is_none_or(|end| end > runtime.posix_shm_size)
         {
             return false;
         }
-        HIT.with(|hit| hit.get())
+        let hit = HIT.with(|hit| hit.get());
+        if hit && COPY_INPUT.with(|copy| copy.get()) {
+            unsafe { core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes); }
+        }
+        hit
     }
     pub(super) fn copy_into_owned(
         _: &super::Runtime,
@@ -69,7 +78,7 @@ mod guest_views {
         destination: &mut [core::mem::MaybeUninit<u8>],
     ) -> bool {
         CALLS.with(|calls| calls.set(calls.get() + 1));
-        if destination.len() > 4096 || !HIT.with(|hit| hit.get()) {
+        if destination.len() > MAX_CONTIGUOUS_READ_BYTES || !HIT.with(|hit| hit.get()) {
             return false;
         }
         for (offset, byte) in destination.iter_mut().enumerate() {
@@ -208,6 +217,7 @@ fn transfer(write: bool, pid: usize, guest: usize, server: usize, bytes: usize) 
 mod production;
 use production::*;
 fn runtime(buffer: &mut [u8]) -> Runtime {
+    guest_views::COPY_INPUT.with(|copy| copy.set(false));
     guest_views::WRITE_HIT.with(|hit| hit.set(false));
     guest_views::WRITE_CALLS.with(|calls| calls.set(0));
     guest_views::BATCH_WRITE_CALLS.with(|calls| calls.set(0));
@@ -220,6 +230,58 @@ fn runtime(buffer: &mut [u8]) -> Runtime {
         allowed: true,
         denied: None,
     }
+}
+
+#[test]
+fn posix_write_copy_retains_exact_buffer_and_checked_fallbacks() {
+    for (hit, allowed, bytes) in [(true,true,32), (false,true,32), (true,false,32), (true,true,4097), (true,true,8192), (true,true,16384), (true,true,16385), (true,true,0)] {
+        let input: Vec<u8> = (0..bytes).map(|i| (i * 37) as u8).collect();
+        let mut output = vec![0xabu8; bytes + 16];
+        let mut r = runtime(&mut output);
+        r.allowed = allowed;
+        guest_views::HIT.with(|cached| cached.set(hit));
+        guest_views::COPY_INPUT.with(|copy| copy.set(true));
+        PERMISSION_CHECKS.with(|count| count.set(0));
+        assert_eq!(copyin_posix_write(&r,7,input.as_ptr() as Word,r.posix_shm+8,bytes),Ok(()));
+        println!("POSIX-WRITE-SIZE bytes={bytes} permissions={}",PERMISSION_CHECKS.with(|count|count.replace(0)));
+        assert_eq!(&output[8..8+bytes],input.as_slice());
+        assert!(output[..8].iter().chain(&output[8+bytes..]).all(|b|*b==0xab));
+        TRANSPORT.with(|t| assert_eq!(t.borrow().calls.len(),
+            usize::from(!(hit && allowed && bytes != 0 && bytes <= guest_views::MAX_CONTIGUOUS_READ_BYTES))));
+        TRANSPORT.with(|t| println!("POSIX-WRITE-VIEW hit={hit} allowed={allowed} bytes={bytes} checked-copies={}",t.borrow().calls.len()));
+    }
+    let input = [7u8; 32];
+    let mut output = [0xabu8; 32];
+    let r = runtime(&mut output);
+    TRANSPORT.with(|t| t.borrow_mut().fail=true);
+    assert_eq!(copyin_posix_write(&r,7,input.as_ptr() as Word,r.posix_shm,32),Err(EFAULT));
+    assert_eq!(output,[0xab;32]);
+}
+
+#[test]
+fn single_iovec_storage_keeps_shared_decoder_validation_and_transfer_size() {
+    let mut scratch = [0u8; 64];
+    let mut r = runtime(&mut scratch);
+    let input = [0x1234usize, 27usize];
+    let mut bases = [99];
+    let mut lengths = [88];
+    read_linux_iovecs(&mut r, 1, input.as_ptr() as Word, 1, &mut bases, &mut lengths).unwrap();
+    assert_eq!((bases, lengths), ([0x1234], [27]));
+    TRANSPORT.with(|t| {
+        assert_eq!(t.borrow().calls.len(), 1);
+        assert_eq!(t.borrow().calls[0].4, 16);
+    });
+    TRANSPORT.with(|t| t.borrow_mut().calls.clear());
+    assert_eq!(read_linux_iovecs(&mut r, 1, 0, 2, &mut bases, &mut lengths), Err(EINVAL));
+    assert_eq!(read_linux_iovecs(&mut r, 1, 0, 1, &mut bases, &mut lengths), Err(EFAULT));
+    assert_eq!((bases, lengths), ([0x1234], [27]));
+    assert!(TRANSPORT.with(|t| t.borrow().calls.is_empty()));
+    let bad = [0usize, 1usize];
+    assert_eq!(read_linux_iovecs(&mut r, 1, bad.as_ptr() as Word, 1, &mut bases, &mut lengths), Err(EFAULT));
+    assert_eq!((bases, lengths), ([0], [1]));
+    TRANSPORT.with(|t| t.borrow_mut().calls.clear());
+    assert_eq!(read_linux_iovecs(&mut r, 1, 0, 0, &mut bases, &mut lengths), Ok(()));
+    assert!(TRANSPORT.with(|t| t.borrow().calls.is_empty()));
 }
 
 #[test]
@@ -368,7 +430,7 @@ fn owned_input_samples_fresh_bytes_directly_without_scratch_or_copy_rpc() {
 
 #[test]
 fn owned_input_misses_and_large_transfers_keep_one_checked_request() {
-    for (bytes, hit) in [(32, false), (16384, true)] {
+    for (bytes, hit) in [(32, false), (16385, true)] {
         let mut scratch = [0xabu8; 32];
         let runtime = runtime(&mut scratch);
         let guest = vec![7u8; bytes];
@@ -558,6 +620,7 @@ fn oversized_owned_vectors_use_one_checked_batch_instead_of_chunking() {
     let mut output = [0u8; 4097];
     let base = output.as_mut_ptr() as Word;
     guest_views::WRITE_HIT.with(|hit| hit.set(true));
+    PERMISSION_CHECKS.with(|count| count.set(0));
     assert_eq!(
         copyout_owned_many(
             &runtime,
@@ -566,12 +629,38 @@ fn oversized_owned_vectors_use_one_checked_batch_instead_of_chunking() {
         ),
         Ok(())
     );
+    println!("OWNED-COPYOUT-PREFLIGHT checks={}", PERMISSION_CHECKS.with(|count| count.replace(0)));
     assert_eq!(&output[..4096], &source);
     assert_eq!(output[4096], 8);
     TRANSPORT.with(|transport| {
         assert_eq!(transport.borrow().batches, 1);
         assert_eq!(transport.borrow().calls.len(), 2);
     });
+    assert_eq!(scratch, [0xab; 32]);
+}
+
+#[test]
+fn owned_vector_count_limits_empty_and_zero_fields_keep_scalar_fallback() {
+    let mut scratch = [0xabu8; 32];
+    let mut runtime = runtime(&mut scratch);
+    assert_eq!(copyout_owned_many(&runtime, 2, &[]), Ok(()));
+    TRANSPORT.with(|transport| {
+        assert_eq!(transport.borrow().batches, 0);
+        assert!(transport.borrow().calls.is_empty());
+    });
+    const N: usize = OS_MEMORY_COPY_VECTOR_MAX + 1;
+    let input = [7u8; N];
+    let mut output = [99u8; N];
+    let base = output.as_mut_ptr() as Word;
+    let vectors: [(Word, &[u8]); N] = std::array::from_fn(|i| (base + i, &input[i..i + 1]));
+    runtime.denied = Some(base + N / 2);
+    assert_eq!(copyout_owned_many(&runtime, 2, &vectors), Err(EFAULT));
+    assert!(output[..N / 2].iter().all(|b| *b == 7));
+    assert!(output[N / 2..].iter().all(|b| *b == 99));
+    TRANSPORT.with(|transport| assert_eq!(transport.borrow().batches, 0));
+    runtime.denied = None;
+    assert_eq!(copyout_owned_many(&runtime, 2, &[(0, &[][..]), (base, &[3u8][..])]), Ok(()));
+    assert_eq!(output[0], 3);
     assert_eq!(scratch, [0xab; 32]);
 }
 

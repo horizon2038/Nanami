@@ -1,5 +1,11 @@
 use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 
+#[cfg(test)]
+static VM_IMMUTABLE_LOOKUPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static VM_MUTABLE_LOOKUPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 #[path = "process/shared_memory.rs"]
 mod shared_memory;
 pub use shared_memory::SharedMemoryReservation;
@@ -78,6 +84,12 @@ pub struct ProcessEntry {
 }
 
 #[derive(Clone, Copy)]
+pub struct ProcessMemoryContext {
+    pub root_node: CapabilityDescriptor,
+    pub address_space: CapabilityDescriptor,
+}
+
+#[derive(Clone, Copy)]
 pub struct ProcessStatistics {
     pub running: usize,
     pub exited: usize,
@@ -100,6 +112,20 @@ impl ProcessEntry {
     }
 }
 
+const PROCESS_ENTRY_HINTS: usize = 64;
+const PROCESS_VM_HINTS: usize = 64;
+const LAZY_MAPPING_BUCKETS: usize = 64;
+const PROCESS_FRAME_HINTS: usize = 64;
+
+fn frame_chunk_bucket(pid: usize, chunk: usize) -> usize {
+    pid.wrapping_add(chunk.wrapping_mul(17)) % PROCESS_FRAME_HINTS
+}
+
+#[cfg(test)]
+static LAZY_MAPPING_PROBES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static FRAME_CHUNK_PROBES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 pub struct ProcessManager {
     alpha_entry: ProcessEntry,
     alpha_vm_space: *mut BootstrapVmSpace,
@@ -108,14 +134,21 @@ pub struct ProcessManager {
     next_affinity: Word,
     root_slot_limit: usize,
     reserved_root_slots: &'static [usize],
-    // Keep PID tables sorted: request-time lookups need no scan or auxiliary cache.
+    // Sorted storage remains authoritative. Hints contain index+1, never a
+    // pointer or ownership/authorization state; every hit checks exact PID/used.
     entries: Vec<ProcessEntry>,
+    entry_hints: [usize; PROCESS_ENTRY_HINTS],
     used_root_slots: Vec<usize>,
     vm_spaces: Vec<ProcessVmSpace>,
+    vm_hints: [usize; PROCESS_VM_HINTS],
     frame_chunks: Vec<ProcessFrameChunk>,
+    frame_chunk_hints: [core::cell::Cell<usize>; PROCESS_FRAME_HINTS],
     physical_allocations: PhysicalAllocations,
     shared_memory: BTreeMap<usize, SharedMemorySpace>,
     lazy_mappings: Vec<ProcessLazyMappingEntry>,
+    // Ordered index+1 chains; exact owner PID and range remain authoritative.
+    lazy_heads: [usize; LAZY_MAPPING_BUCKETS],
+    lazy_tails: [usize; LAZY_MAPPING_BUCKETS],
 }
 
 struct ProcessVmSpace {
@@ -144,7 +177,30 @@ pub struct ProcessLazyMapping {
 
 struct ProcessLazyMappingEntry {
     pid: usize,
+    next_in_bucket: usize,
     mapping: ProcessLazyMapping,
+    // Only fresh-root stack registration may mint unused-slot claims. A bit
+    // is consumed before any capability operation, never inferred from the
+    // absence of an active/deferred physical record.
+    fresh_zero_slots: Option<(CapabilityDescriptor, u64)>,
+}
+
+/// Single-use request-local claim on an original, never-used stack Frame slot.
+/// No Clone/Copy: consume before constructing the page, within the same event.
+pub struct FreshZeroFrameSlot {
+    owner: usize,
+    base: usize,
+    root: CapabilityDescriptor,
+    space: CapabilityDescriptor,
+    slot: usize,
+}
+
+impl FreshZeroFrameSlot {
+    pub fn into_parts(self, owner: usize, base: usize)
+        -> Option<(CapabilityDescriptor, CapabilityDescriptor, usize)>
+    {
+        (self.owner == owner && self.base == base).then_some((self.root, self.space, self.slot))
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -153,6 +209,9 @@ pub struct ProcessPhysicalAllocation {
     pub start_slot: usize,
     pub base_page: usize,
     pub page_count: usize,
+    // Ownership of RAM is independent of a copied capability in the task root.
+    // Sealed snapshot aliases may map the permanent Alpha pool Frame directly.
+    pub owns_frame_cap: bool,
 }
 
 /// Request-local ownership handle. Never retain across event-loop iterations.
@@ -220,12 +279,17 @@ impl ProcessManager {
             root_slot_limit,
             reserved_root_slots,
             entries: Vec::new(),
+            entry_hints: [0; PROCESS_ENTRY_HINTS],
             used_root_slots: Vec::new(),
             vm_spaces: Vec::new(),
+            vm_hints: [0; PROCESS_VM_HINTS],
             frame_chunks: Vec::new(),
+            frame_chunk_hints: core::array::from_fn(|_| core::cell::Cell::new(0)),
             physical_allocations: PhysicalAllocations::default(),
             shared_memory: BTreeMap::new(),
             lazy_mappings: Vec::new(),
+            lazy_heads: [0; LAZY_MAPPING_BUCKETS],
+            lazy_tails: [0; LAZY_MAPPING_BUCKETS],
         })
     }
 
@@ -273,27 +337,79 @@ impl ProcessManager {
     }
 
     pub fn vm_space_mut(&mut self, pid: usize) -> Option<&mut VmSpace> {
+        #[cfg(test)]
+        VM_MUTABLE_LOOKUPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let pid = self.memory_owner_pid(pid);
-        let index = self
-            .vm_spaces
-            .binary_search_by_key(&pid, |vm| vm.pid)
-            .ok()?;
+        let index = self.vm_index(pid)?;
         Some(self.vm_spaces[index].space.as_mut())
+    }
+
+    pub fn vm_space(&self, pid: usize) -> Option<&VmSpace> {
+        #[cfg(test)]
+        VM_IMMUTABLE_LOOKUPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let pid = self.memory_owner_pid(pid);
+        let index = self.vm_index(pid)?;
+        Some(self.vm_spaces[index].space.as_ref())
+    }
+
+    fn hinted_vm_index(&self, pid: usize) -> Option<usize> {
+        let index = self.vm_hints[pid % PROCESS_VM_HINTS].checked_sub(1)?;
+        self.vm_spaces.get(index).filter(|vm| vm.pid == pid).map(|_| index)
+    }
+
+    // Exact row PID, without owner resolution. Installation and failed-spawn
+    // cleanup also manipulate rows before a ProcessEntry exists.
+    fn vm_index(&self, pid: usize) -> Option<usize> {
+        self.hinted_vm_index(pid).or_else(||
+            self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid).ok())
+    }
+
+    fn remove_vm_space(&mut self, pid: usize) {
+        if let Some(index) = self.vm_index(pid) {
+            self.vm_spaces.remove(index);
+            for hint in &mut self.vm_hints {
+                if *hint == index + 1 { *hint = 0; }
+                else if *hint > index + 1 { *hint -= 1; }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn vm_hint_hit(&self, pid: usize) -> bool { self.hinted_vm_index(pid).is_some() }
+
+    #[cfg(test)]
+    pub fn take_immutable_vm_lookups(&self) -> usize {
+        VM_IMMUTABLE_LOOKUPS.swap(0, core::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn take_mutable_vm_lookups(&self) -> usize {
+        VM_MUTABLE_LOOKUPS.swap(0, core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn ensure_vm_space_for_pid(&mut self, pid: usize) -> Result<(), CapabilityError> {
         if pid == 0 {
             return Ok(());
         }
-        if let Err(index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
-            self.vm_spaces.insert(
-                index,
-                ProcessVmSpace {
-                    pid,
-                    space: Box::new(VmSpace::new()),
-                },
-            );
-        }
+        let location = match self.hinted_vm_index(pid) {
+            Some(index) => Ok(index),
+            None => self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid),
+        };
+        let index = match location {
+            Ok(index) => index,
+            Err(index) => {
+                self.vm_spaces.insert(
+                    index,
+                    ProcessVmSpace {
+                        pid,
+                        space: Box::new(VmSpace::new()),
+                    },
+                );
+                for hint in &mut self.vm_hints { if *hint > index { *hint += 1; } }
+                index
+            }
+        };
+        self.vm_hints[pid % PROCESS_VM_HINTS] = index + 1;
         Ok(())
     }
 
@@ -301,18 +417,43 @@ impl ProcessManager {
         if pid == 0 {
             return Some(&mut self.alpha_entry);
         }
-        let index = self
-            .entries
-            .binary_search_by_key(&pid, |entry| entry.pid)
-            .ok()?;
+        let index = self.entry_index(pid)?;
         self.entries.get_mut(index).filter(|entry| entry.used)
     }
 
     pub fn has_frame_chunk(&self, pid: usize, chunk_index: usize) -> bool {
         let pid = self.memory_owner_pid(pid);
-        self.frame_chunks
+        let hint = &self.frame_chunk_hints[frame_chunk_bucket(pid, chunk_index)];
+        let slot = hint.get();
+        if slot != 0 {
+            #[cfg(test)]
+            FRAME_CHUNK_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            // The current record, not a cached key, establishes residency.
+            // Retain/reuse may move rows; stale positions simply miss here.
+            if self.frame_chunks.get(slot - 1).is_some_and(|chunk|
+                chunk.pid == pid && chunk.chunk_index == chunk_index)
+            {
+                return true;
+            }
+        }
+        let found = self.frame_chunks
             .iter()
-            .any(|chunk| chunk.pid == pid && chunk.chunk_index == chunk_index)
+            .position(|chunk| {
+                #[cfg(test)]
+                FRAME_CHUNK_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                chunk.pid == pid && chunk.chunk_index == chunk_index
+            });
+        if let Some(index) = found {
+            hint.set(index + 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    pub fn take_frame_chunk_probes() -> usize {
+        FRAME_CHUNK_PROBES.swap(0, core::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn register_frame_chunk(
@@ -326,6 +467,7 @@ impl ProcessManager {
         }
         self.frame_chunks
             .push(ProcessFrameChunk { pid, chunk_index });
+        self.frame_chunk_hints[frame_chunk_bucket(pid, chunk_index)].set(self.frame_chunks.len());
         Ok(())
     }
 
@@ -344,6 +486,25 @@ impl ProcessManager {
         base_page: usize,
         page_count: usize,
     ) -> Result<(), CapabilityError> {
+        self.register_physical_allocation_with_cap(pid, base_va, start_slot, base_page, page_count, true)
+    }
+
+    pub fn register_pool_alias(
+        &mut self, pid: usize, base_va: usize, slot: usize, physical: usize,
+    ) -> Result<(), CapabilityError> {
+        self.register_pool_allocation(pid, base_va, slot, physical, 1)
+    }
+
+    pub fn register_pool_allocation(
+        &mut self, pid: usize, base_va: usize, slot: usize, physical: usize, pages: usize,
+    ) -> Result<(), CapabilityError> {
+        self.register_physical_allocation_with_cap(pid, base_va, slot, physical, pages, false)
+    }
+
+    fn register_physical_allocation_with_cap(
+        &mut self, pid: usize, base_va: usize, start_slot: usize, base_page: usize,
+        page_count: usize, owns_frame_cap: bool,
+    ) -> Result<(), CapabilityError> {
         let pid = self.memory_owner_pid(pid);
         if pid == 0 || page_count == 0 {
             return Err(CapabilityError::InvalidArgument);
@@ -356,6 +517,7 @@ impl ProcessManager {
                 start_slot,
                 base_page,
                 page_count,
+                owns_frame_cap,
             },
         );
         Ok(())
@@ -373,8 +535,11 @@ impl ProcessManager {
         if pid == 0 || page_count == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
+        let index = self.lazy_mappings.len();
         self.lazy_mappings.push(ProcessLazyMappingEntry {
             pid,
+            next_in_bucket: 0,
+            fresh_zero_slots: None,
             mapping: ProcessLazyMapping {
                 base_va,
                 page_count,
@@ -382,7 +547,78 @@ impl ProcessManager {
                 kind,
             },
         });
+        self.link_lazy_mapping(index);
         Ok(())
+    }
+
+    fn link_lazy_mapping(&mut self, index: usize) {
+        let bucket = self.lazy_mappings[index].pid % LAZY_MAPPING_BUCKETS;
+        self.lazy_mappings[index].next_in_bucket = 0;
+        let previous = self.lazy_tails[bucket];
+        if previous == 0 {
+            self.lazy_heads[bucket] = index + 1;
+        } else {
+            self.lazy_mappings[previous - 1].next_in_bucket = index + 1;
+        }
+        self.lazy_tails[bucket] = index + 1;
+    }
+
+    fn rebuild_lazy_mapping_buckets(&mut self) {
+        self.lazy_heads.fill(0);
+        self.lazy_tails.fill(0);
+        for index in 0..self.lazy_mappings.len() { self.link_lazy_mapping(index); }
+    }
+
+    /// Trusted fresh-root construction only: these original slots must never
+    /// have held Frame caps. Exec must revoke the old Frame directory first.
+    /// The fixed initial stack has at most 64 pages; other zero plans retain
+    /// the ordinary fresh-slot constructor and cannot mint this claim.
+    pub fn register_fresh_stack_mapping(
+        &mut self, pid: usize, root: CapabilityDescriptor, base: usize, pages: usize, first: usize,
+    ) -> Result<(), CapabilityError> {
+        if root == 0 || pages == 0 || pages > 64 || base & (USER_PAGE_SIZE - 1) != 0
+            || pages.checked_mul(USER_PAGE_SIZE).and_then(|size| base.checked_add(size)).is_none()
+            || first.checked_add(pages).is_none()
+        { return Err(CapabilityError::InvalidArgument); }
+        // A child that could run with its native root may have populated caps
+        // outside Alpha's records before being sealed. Only a root already
+        // sealed when this fresh directory was registered can retain claims.
+        let track = self.find_entry_by_pid(pid).is_some_and(|entry|
+            entry.capabilities_sealed && !entry.exited && !entry.resource_quarantined
+                && entry.memory_owner == pid && entry.root_node == root);
+        self.register_lazy_mapping(pid, base, pages, first, ProcessLazyMappingKind::Zero)?;
+        if track {
+            self.lazy_mappings.last_mut().unwrap().fresh_zero_slots =
+                Some((root, if pages == 64 { u64::MAX } else { (1u64 << pages) - 1 }));
+        }
+        Ok(())
+    }
+
+    pub fn take_fresh_stack_frame_slot(
+        &mut self, pid: usize, va: usize, max_slots: usize,
+    ) -> Option<FreshZeroFrameSlot> {
+        let owner = self.memory_owner_pid(pid);
+        let entry = self.find_entry_by_pid(owner)?;
+        if !entry.capabilities_sealed || entry.exited || entry.resource_quarantined
+            || entry.root_node == 0 || entry.address_space == 0 {
+            return None;
+        }
+        let (index, base, first) = self.find_lazy_mapping_plan(pid, va)?;
+        let page = (va - base) / USER_PAGE_SIZE;
+        let slot = first.checked_add(page)?;
+        if slot >= entry.next_frame_slot || slot >= max_slots { return None; }
+        if va & (USER_PAGE_SIZE - 1) != 0 || page >= 64 { return None; }
+        // Nothing has mutated the mapping list or dispatched between plan
+        // resolution and this reborrow. Consume this exact validated record.
+        let mapping = &mut self.lazy_mappings[index];
+        if !matches!(mapping.mapping.kind, ProcessLazyMappingKind::Zero) { return None; }
+        let (recorded_root, available) = mapping.fresh_zero_slots.as_mut()?;
+        if *recorded_root != entry.root_node { return None; }
+        let bit = 1u64 << page;
+        if *available & bit == 0 { return None; }
+        // Burn before any fallible capability operation can use the token.
+        *available &= !bit;
+        Some(FreshZeroFrameSlot { owner, base: va, root: entry.root_node, space: entry.address_space, slot })
     }
 
     pub fn find_lazy_mapping(
@@ -390,8 +626,79 @@ impl ProcessManager {
         pid: usize,
         virtual_address: usize,
     ) -> Option<ProcessLazyMapping> {
+        self.find_lazy_mapping_entry(pid, virtual_address).map(|(_, mapping)| *mapping)
+    }
+
+    /// Request-local location plus scalar construction fields. Callers must
+    /// not mutate lazy_mappings before consuming the borrowed kind at index.
+    pub fn find_lazy_mapping_plan(&self, pid: usize, virtual_address: usize) -> Option<(usize, usize, usize)> {
+        self.find_lazy_mapping_entry(pid, virtual_address)
+            .map(|(index, mapping)| (index, mapping.base_va, mapping.start_slot))
+    }
+
+    pub fn lazy_mapping_kind(&self, index: usize) -> Option<&ProcessLazyMappingKind> {
+        self.lazy_mappings.get(index).map(|entry| &entry.mapping.kind)
+    }
+
+    /// One plan only when every sampled page has the same first-match entry.
+    /// Earlier partial overlaps and malformed owner entries decline the hint;
+    /// callers can retain their ordinary per-page lookup in those cases.
+    pub fn uniform_lazy_mapping_plan(&self, pid: usize, start: usize, end: usize)
+        -> Option<(usize, usize, usize)> {
+        if start >= end { return None; }
+        let last = start + ((end - start - 1) / USER_PAGE_SIZE) * USER_PAGE_SIZE;
         let pid = self.memory_owner_pid(pid);
-        for entry in self.lazy_mappings.iter() {
+        let mut next = self.lazy_heads[pid % LAZY_MAPPING_BUCKETS];
+        while next != 0 {
+            let index = next - 1;
+            let entry = &self.lazy_mappings[index];
+            next = entry.next_in_bucket;
+            #[cfg(test)]
+            LAZY_MAPPING_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if entry.pid != pid { continue; }
+            let base = entry.mapping.base_va;
+            let limit = entry.mapping.page_count.checked_mul(USER_PAGE_SIZE)
+                .and_then(|bytes| base.checked_add(bytes))?;
+            let first = if base <= start {
+                start
+            } else {
+                let pages = (base - start - 1) / USER_PAGE_SIZE + 1;
+                let Some(first) = pages.checked_mul(USER_PAGE_SIZE)
+                    .and_then(|offset| start.checked_add(offset)) else { continue; };
+                first
+            };
+            if first < end && first < limit {
+                return (base <= start && last < limit)
+                    .then_some((index, base, entry.mapping.start_slot));
+            }
+        }
+        None
+    }
+
+    /// Pre-install image construction has no runnable child or concurrent
+    /// event dispatch. Prove the whole aligned range has no existing Frame
+    /// before omitting each page's presence/installed-zero/plan preflight.
+    /// The returned indices remain valid only while the lazy list is stable.
+    pub fn preinstall_lazy_mapping_plan(&self, pid: usize, start: usize, end: usize)
+        -> Option<(usize, usize, usize)> {
+        if start >= end || (start | end) & (USER_PAGE_SIZE - 1) != 0
+            || self.memory_entry(pid).is_some()
+            || self.vm_space(pid)?.has_backed_aligned_pages(start, end)
+        {
+            return None;
+        }
+        self.uniform_lazy_mapping_plan(pid, start, end)
+    }
+
+    fn find_lazy_mapping_entry(&self, pid: usize, virtual_address: usize) -> Option<(usize, &ProcessLazyMapping)> {
+        let pid = self.memory_owner_pid(pid);
+        let mut next = self.lazy_heads[pid % LAZY_MAPPING_BUCKETS];
+        while next != 0 {
+            let index = next - 1;
+            let entry = &self.lazy_mappings[index];
+            next = entry.next_in_bucket;
+            #[cfg(test)]
+            LAZY_MAPPING_PROBES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if entry.pid != pid {
                 continue;
             }
@@ -399,16 +706,66 @@ impl ProcessManager {
             let bytes = entry.mapping.page_count.checked_mul(USER_PAGE_SIZE)?;
             let end = start.checked_add(bytes)?;
             if virtual_address >= start && virtual_address < end {
-                return Some(entry.mapping);
+                return Some((index, &entry.mapping));
             }
         }
         None
+    }
+
+    #[cfg(test)]
+    pub fn take_lazy_mapping_probes() -> usize {
+        LAZY_MAPPING_PROBES.swap(0, core::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub fn linear_lazy_mapping_plan_for_test(&self, pid: usize, va: usize) -> Option<(usize, usize, usize)> {
+        let pid = self.memory_owner_pid(pid);
+        for (index, entry) in self.lazy_mappings.iter().enumerate() {
+            if entry.pid != pid { continue; }
+            let end = entry.mapping.page_count.checked_mul(USER_PAGE_SIZE)
+                .and_then(|size| entry.mapping.base_va.checked_add(size))?;
+            if va >= entry.mapping.base_va && va < end {
+                return Some((index, entry.mapping.base_va, entry.mapping.start_slot));
+            }
+        }
+        None
+    }
+
+    /// Equivalent to testing find_lazy_mapping at start, start + PAGE_SIZE, ...
+    /// below end, but resolve the memory owner and scan the mapping list once.
+    /// Preserve point lookup's early stop on a malformed owner entry. No lazy
+    /// page is materialized, and no result is retained across requests.
+    pub fn has_lazy_mapping_at_pages(&self, pid: usize, start: usize, end: usize) -> bool {
+        if start >= end { return false; }
+        let pid = self.memory_owner_pid(pid);
+        let mut next = self.lazy_heads[pid % LAZY_MAPPING_BUCKETS];
+        while next != 0 {
+            let entry = &self.lazy_mappings[next - 1];
+            next = entry.next_in_bucket;
+            if entry.pid != pid { continue; }
+            let Some(mapping_end) = entry.mapping.page_count.checked_mul(USER_PAGE_SIZE)
+                .and_then(|bytes| entry.mapping.base_va.checked_add(bytes)) else {
+                return false;
+            };
+            let first = if entry.mapping.base_va <= start {
+                start
+            } else {
+                let delta = entry.mapping.base_va - start;
+                let pages = (delta - 1) / USER_PAGE_SIZE + 1;
+                let Some(first) = pages.checked_mul(USER_PAGE_SIZE)
+                    .and_then(|offset| start.checked_add(offset)) else { continue; };
+                first
+            };
+            if first < end && first < mapping_end { return true; }
+        }
+        false
     }
 
     pub fn drop_image_lazy_mappings_for_pid(&mut self, pid: usize) {
         self.lazy_mappings.retain(|entry| {
             entry.pid != pid || !matches!(entry.mapping.kind, ProcessLazyMappingKind::Image { .. })
         });
+        self.rebuild_lazy_mapping_buckets();
     }
 
     pub fn releasable_physical_allocations_for_pid(
@@ -461,6 +818,25 @@ impl ProcessManager {
         self.physical_allocations
             .defer(pid, base_va, page_count)
             .ok_or(CapabilityError::InvalidArgument)
+    }
+
+    pub fn try_defer_physical_pages(
+        &mut self, pid: usize, start: usize, end: usize,
+        pages: &[ProcessPhysicalAllocation],
+    ) -> bool {
+        if pages.len() <= 1 { return false; }
+        let pid = self.memory_owner_pid(pid);
+        self.physical_allocations.try_defer_pages(pid, start, end, pages)
+    }
+
+    pub fn try_retire_physical_pages<E>(
+        &mut self, pid: usize, start: usize, end: usize,
+        pages: &[ProcessPhysicalAllocation],
+        release: impl FnMut(ProcessPhysicalAllocation, bool) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        if pages.len() <= 1 { return Ok(false); }
+        let pid = self.memory_owner_pid(pid);
+        self.physical_allocations.try_retire_pages(pid, start, end, pages, release)
     }
 
     pub fn take_deferred_physical_allocation(
@@ -521,6 +897,7 @@ impl ProcessManager {
         entry.exit_is_ok = 0;
         entry.exit_code = 0;
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        self.rebuild_lazy_mapping_buckets();
         self.shared_memory.remove(&pid);
         if let Some(vm) = self.vm_space_mut(pid) {
             *vm = VmSpace::new();
@@ -556,6 +933,15 @@ impl ProcessManager {
             .ok_or(CapabilityError::InvalidArgument)
     }
 
+    pub fn retire_active_physical_allocation(
+        &mut self, pid: usize, base: usize, pages: usize,
+        release: impl FnOnce(ProcessPhysicalAllocation, bool) -> Result<(), CapabilityError>,
+    ) -> Result<(), CapabilityError> {
+        self.physical_allocations.try_take(
+            AllocationState::Active, self.memory_owner_pid(pid), base, pages, release,
+        )?.ok_or(CapabilityError::InvalidArgument).map(|_| ())
+    }
+
     /// Snapshot one-page ownership references for a request-local range walk.
     /// Mapping release and ELF staging avoid a full search for every page.
     pub fn physical_pages_in_range(
@@ -565,21 +951,60 @@ impl ProcessManager {
         end_va: usize,
     ) -> Vec<ProcessPhysicalAllocation> {
         let pid = self.memory_owner_pid(pid);
-        let mut pages: Vec<_> = self
+        let mut pages = Vec::new();
+        let mut descending = true;
+        let mut previous = None;
+        for allocation in self
             .physical_allocations
-            .for_pid(AllocationState::Active, pid)
+            .pages_in_range(pid, base_va, end_va)
             .filter(|allocation| {
                 allocation.page_count == 1
                     && allocation.base_va >= base_va
                     && allocation.base_va < end_va
                     && (allocation.base_va - base_va) % USER_PAGE_SIZE == 0
             })
-            .collect();
+        {
+            if previous.is_some_and(|va| va <= allocation.base_va) { descending = false; }
+            previous = Some(allocation.base_va);
+            pages.push(allocation);
+        }
         // Stable sorting retains the newest reference at a duplicated VA,
         // matching find_active_physical_allocation_reference's existing rule.
-        pages.sort_by_key(|allocation| allocation.base_va);
-        pages.dedup_by_key(|allocation| allocation.base_va);
+        // Strict descending order also proves uniqueness. Normal sequential
+        // page construction prepends these nodes; reverse without sort scratch.
+        // Duplicates/other order retain stable sorting and newest-VA selection.
+        if descending { pages.reverse(); }
+        else {
+            pages.sort_by_key(|allocation| allocation.base_va);
+            pages.dedup_by_key(|allocation| allocation.base_va);
+        }
         pages
+    }
+
+    /// Bounded, request-local optimization metadata. Allocation failure, excess
+    /// rows or duplicate VAs decline the shortcut rather than limit mappings.
+    pub fn try_physical_pages_in_range(
+        &self, pid: usize, start: usize, end: usize, limit: usize,
+    ) -> Option<Vec<ProcessPhysicalAllocation>> {
+        let count = end.checked_sub(start)?.checked_add(USER_PAGE_SIZE - 1)? / USER_PAGE_SIZE;
+        let capacity = count.min(limit);
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(capacity).ok()?;
+        for allocation in self.physical_allocations.pages_in_range(self.memory_owner_pid(pid), start, end) {
+            if allocation.page_count == 1 && allocation.base_va >= start && allocation.base_va < end
+                && (allocation.base_va - start) % USER_PAGE_SIZE == 0
+            {
+                if pages.len() == capacity {
+                    return None;
+                }
+                pages.push(allocation);
+            }
+        }
+        pages.sort_unstable_by_key(|allocation| allocation.base_va);
+        if pages.windows(2).any(|pair| pair[0].base_va == pair[1].base_va) {
+            return None;
+        }
+        Some(pages)
     }
 
     pub fn private_page_references(
@@ -590,6 +1015,28 @@ impl ProcessManager {
     ) -> Vec<PhysicalPageReference> {
         self.physical_allocations
             .page_references(self.memory_owner_pid(pid), start, end)
+    }
+
+    #[cfg(test)]
+    pub fn take_physical_page_range_visits(&self) -> usize {
+        self.physical_allocations.take_range_visits()
+    }
+
+    pub fn private_page_reference_walk(
+        &self, pid: usize, start: usize, end: usize,
+    ) -> impl Iterator<Item = PhysicalPageReference> + '_ {
+        self.physical_allocations.page_reference_walk(self.memory_owner_pid(pid), start, end)
+    }
+
+    /// Request-local capacity hint for a source already checked as fully
+    /// backed. Collection and all caller-side ownership validation still run.
+    pub fn private_page_references_reserved(
+        &self, pid: usize, start: usize, end: usize,
+    ) -> Vec<PhysicalPageReference> {
+        let capacity = end.checked_sub(start).map_or(0, |bytes| bytes / USER_PAGE_SIZE);
+        self.physical_allocations.page_references_reserved(
+            self.memory_owner_pid(pid), start, end, capacity,
+        )
     }
 
     pub fn physical_reference_count(&self, allocation: ProcessPhysicalAllocation) -> usize {
@@ -657,10 +1104,17 @@ impl ProcessManager {
             return Ok(());
         }
 
-        match self.entries.binary_search_by_key(&pid, |entry| entry.pid) {
-            Ok(index) => self.entries[index] = entry,
-            Err(index) => self.entries.insert(index, entry),
-        }
+        let index = match self.entries.binary_search_by_key(&pid, |entry| entry.pid) {
+            Ok(index) => { self.entries[index] = entry; index }
+            Err(index) => {
+                self.entries.insert(index, entry);
+                for hint in &mut self.entry_hints {
+                    if *hint > index { *hint += 1; }
+                }
+                index
+            }
+        };
+        self.entry_hints[pid % PROCESS_ENTRY_HINTS] = index + 1;
         Ok(())
     }
 
@@ -730,11 +1184,10 @@ impl ProcessManager {
 
     pub fn discard_process_artifacts(&mut self, pid: usize, root_slot: usize) {
         self.release_process_slot_reservation(root_slot);
-        if let Ok(vm_index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
-            self.vm_spaces.remove(vm_index);
-        }
+        self.remove_vm_space(pid);
         self.frame_chunks.retain(|chunk| chunk.pid != pid);
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        self.rebuild_lazy_mapping_buckets();
         self.drop_physical_allocations_for_pid(pid);
     }
 
@@ -745,14 +1198,31 @@ impl ProcessManager {
     }
 
     pub fn find_entry_by_pid(&self, pid: usize) -> Option<ProcessEntry> {
+        self.entry_by_pid(pid).copied()
+    }
+
+    fn entry_by_pid(&self, pid: usize) -> Option<&ProcessEntry> {
         if pid == 0 && self.alpha_entry.used {
-            return Some(self.alpha_entry);
+            return Some(&self.alpha_entry);
         }
-        let index = self
-            .entries
-            .binary_search_by_key(&pid, |entry| entry.pid)
-            .ok()?;
-        self.entries.get(index).filter(|entry| entry.used).copied()
+        let index = self.entry_index(pid)?;
+        self.entries.get(index).filter(|entry| entry.used)
+    }
+
+    fn hinted_entry_index(&self, pid: usize) -> Option<usize> {
+        let index = self.entry_hints[pid % PROCESS_ENTRY_HINTS].checked_sub(1)?;
+        self.entries.get(index)
+            .filter(|entry| entry.used && entry.pid == pid).map(|_| index)
+    }
+
+    fn entry_index(&self, pid: usize) -> Option<usize> {
+        self.hinted_entry_index(pid).or_else(||
+            self.entries.binary_search_by_key(&pid, |entry| entry.pid).ok())
+    }
+
+    #[cfg(test)]
+    pub fn entry_hint_hit(&self, pid: usize) -> bool {
+        pid != 0 && self.hinted_entry_index(pid).is_some()
     }
 
     pub fn root_types_mut(&mut self, pid: usize) -> Result<&mut RootSlotTypes, CapabilityError> {
@@ -763,12 +1233,34 @@ impl ProcessManager {
     }
 
     pub fn memory_owner_pid(&self, pid: usize) -> usize {
-        self.find_entry_by_pid(pid)
+        self.entry_by_pid(pid)
             .map_or(pid, |entry| entry.memory_owner)
     }
 
     pub fn memory_entry(&self, pid: usize) -> Option<ProcessEntry> {
-        self.find_entry_by_pid(self.memory_owner_pid(pid))
+        self.memory_entry_ref(pid).copied()
+    }
+
+    fn memory_entry_ref(&self, pid: usize) -> Option<&ProcessEntry> {
+        let entry = self.entry_by_pid(pid)?;
+        if entry.memory_owner == pid { Some(entry) }
+        else { self.entry_by_pid(entry.memory_owner) }
+    }
+
+    /// Current one-hop owner's mapping descriptors, without the task's IRQ/I/O
+    /// arrays. This metadata view does not replace per-page authority checks.
+    pub fn memory_context(&self, pid: usize) -> Option<ProcessMemoryContext> {
+        let owner = self.memory_entry_ref(pid)?;
+        Some(ProcessMemoryContext {
+            root_node: owner.root_node,
+            address_space: owner.address_space,
+        })
+    }
+
+    /// Scalar view of the current memory owner's root. Keep the full owned
+    /// snapshot API for callers that need it, without copying IRQ/I/O arrays.
+    pub fn memory_root_node(&self, pid: usize) -> Option<CapabilityDescriptor> {
+        self.memory_entry_ref(pid).map(|entry| entry.root_node)
     }
 
     pub fn share_address_space(
@@ -855,6 +1347,10 @@ impl ProcessManager {
         }
         let root_slot = self.entries[index].root_slot;
         self.entries.remove(index);
+        for hint in &mut self.entry_hints {
+            if *hint == index + 1 { *hint = 0; }
+            else if *hint > index + 1 { *hint -= 1; }
+        }
 
         if release_root_slot {
             if let Some(slot_index) = self
@@ -865,11 +1361,10 @@ impl ProcessManager {
                 self.used_root_slots.swap_remove(slot_index);
             }
         }
-        if let Ok(vm_index) = self.vm_spaces.binary_search_by_key(&pid, |vm| vm.pid) {
-            self.vm_spaces.remove(vm_index);
-        }
+        self.remove_vm_space(pid);
         self.frame_chunks.retain(|chunk| chunk.pid != pid);
         self.lazy_mappings.retain(|mapping| mapping.pid != pid);
+        self.rebuild_lazy_mapping_buckets();
         self.drop_physical_allocations_for_pid(pid);
         Ok(())
     }
@@ -1017,7 +1512,7 @@ impl ProcessManager {
         let bytes = page_count
             .checked_mul(page_size)
             .ok_or(CapabilityError::InvalidArgument)?;
-        base_va
+        let end_va = base_va
             .checked_add(bytes)
             .ok_or(CapabilityError::InvalidArgument)?;
 
@@ -1025,14 +1520,43 @@ impl ProcessManager {
             if entry.next_frame_slot + page_count > max_frame_slots {
                 return Err(CapabilityError::InvalidArgument);
             }
+            let covers_cursor = base_va <= entry.user_heap_next_va && entry.user_heap_next_va < end_va;
+            if covers_cursor && end_va > entry.user_heap_limit_va {
+                return Err(CapabilityError::InvalidArgument);
+            }
             let start_slot = entry.next_frame_slot;
             entry.next_frame_slot += page_count;
+            // A fixed allocation covering the automatic cursor consumes that
+            // range too. Never hand the next automatic allocation a VA inside
+            // the newly reserved brk/private mapping. Disjoint fixed ranges
+            // leave the cursor unchanged.
+            if covers_cursor {
+                entry.user_heap_next_va = end_va;
+            }
             let result = (entry.root_node, entry.address_space, start_slot);
             self.exclude_shared_virtual_range(pid, base_va, page_count);
             return Ok(result);
         }
 
         Err(CapabilityError::InvalidArgument)
+    }
+
+    /// Exec's image slots were reserved before population. Reuse only slots
+    /// with no active/deferred owner, without advancing the allocation cursor.
+    pub fn preallocated_process_frame_slots(
+        &self, pid: usize, first: usize, pages: usize, max_slots: usize,
+    ) -> Option<(CapabilityDescriptor, CapabilityDescriptor)> {
+        let entry = self.find_entry_by_pid(pid)?;
+        let end = first.checked_add(pages)?;
+        if pages == 0 || entry.memory_owner != pid || end > entry.next_frame_slot || end > max_slots {
+            return None;
+        }
+        let occupied = self.physical_allocations.for_pid(AllocationState::Active, pid)
+            .chain(self.physical_allocations.for_pid(AllocationState::Deferred, pid))
+            .any(|allocation| allocation.start_slot.checked_add(allocation.page_count)
+                .is_none_or(|limit| first < limit && end > allocation.start_slot));
+        if occupied { return None; }
+        Some((entry.root_node, entry.address_space))
     }
 
     pub fn reserve_process_virtual_gap(

@@ -2,7 +2,6 @@
 //! Shared keys use backing identity plus byte offset, never a process's alias VA.
 use super::*;
 use crate::state::task_sync::{FutexKey, FutexWait};
-use alloc::vec::Vec;
 
 const PRIVATE: Word = 128;
 const CLOCK_REALTIME: Word = 256;
@@ -149,18 +148,25 @@ pub(super) fn next_deadline(runtime: &Runtime) -> Option<Word> {
     runtime
         .tasks
         .waiters()
-        .filter(|(pid, wait)| wait.result.is_none() && waiting(runtime, *pid))
-        .filter_map(|(_, wait)| wait.deadline)
+        .filter_map(|(pid, wait)| {
+            if wait.result.is_some() {
+                return None;
+            }
+            // An untimed wait cannot contribute to the alarm. Avoid the
+            // managed-process lookup until a deadline actually exists.
+            let deadline = wait.deadline?;
+            waiting(runtime, pid).then_some(deadline)
+        })
         .min()
 }
 
-fn complete(runtime: &mut Runtime, pid: Word, value: isize) {
+fn complete(runtime: &mut Runtime, pid: Word, value: isize, task_index: usize) {
     let Some(process) = runtime.managed_process_mut(pid) else {
         return;
     };
     let (pcb, context, personality) = (process.pcb, process.signal_context, process.personality);
     process.signal_waiting = false;
-    if let Some(task) = runtime.tasks.ensure(pid) {
+    if let Some(task) = runtime.tasks.ensure_at(task_index, pid) {
         task.wait = None;
     }
     record_syscall_result(runtime, pid, context.number, value);
@@ -171,10 +177,12 @@ fn complete(runtime: &mut Runtime, pid: Word, value: isize) {
 
 pub(super) fn pump(runtime: &mut Runtime) {
     let now = runtime.monotonic_ticks;
-    let waiters: Vec<_> = runtime.tasks.waiters().collect();
-    for (pid, wait) in waiters {
+    // This walk only updates existing Task.wait fields. No helper inserts or
+    // removes task rows, so slot order stays stable without a snapshot Vec.
+    let mut cursor = 0;
+    while let Some((pid, wait)) = runtime.tasks.next_waiter(&mut cursor) {
         if !waiting(runtime, pid) {
-            if let Some(task) = runtime.tasks.ensure(pid) {
+            if let Some(task) = runtime.tasks.ensure_at(cursor - 1, pid) {
                 task.wait = None;
             }
             continue;
@@ -188,43 +196,38 @@ pub(super) fn pump(runtime: &mut Runtime) {
             if runtime.is_signal_stopped(pid) {
                 if let Some(wait) = runtime
                     .tasks
-                    .ensure(pid)
+                    .ensure_at(cursor - 1, pid)
                     .and_then(|task| task.wait.as_mut())
                 {
                     wait.result = Some(value);
                 }
             } else {
-                complete(runtime, pid, value);
+                complete(runtime, pid, value, cursor - 1);
             }
         }
     }
 }
 
 fn wake(runtime: &mut Runtime, key: FutexKey, count: Word, bitset: u32) -> Word {
-    let waiters: Vec<_> = runtime
-        .tasks
-        .waiters()
-        .filter(|(pid, wait)| {
-            wait.result.is_none()
-                && wait.key == key
-                && wait.bitset & bitset != 0
-                && waiting(runtime, *pid)
-        })
-        .take(count)
-        .map(|(pid, _)| pid)
-        .collect();
-    let count = waiters.len();
-    for pid in waiters {
+    let mut cursor = 0;
+    let mut woken = 0;
+    while woken < count {
+        let Some((pid, wait)) = runtime.tasks.next_waiter(&mut cursor) else { break; };
+        if wait.result.is_some() || wait.key != key || wait.bitset & bitset == 0
+            || !waiting(runtime, pid) { continue; }
+        // Mark every selected result before pumping completions, as before.
+        // Updating this row does not change another row's eligibility/order.
         if let Some(wait) = runtime
             .tasks
-            .ensure(pid)
+            .ensure_at(cursor - 1, pid)
             .and_then(|task| task.wait.as_mut())
         {
             wait.result = Some(0);
         }
+        woken += 1;
     }
     pump(runtime);
-    count
+    woken
 }
 
 pub(super) fn dispatch(

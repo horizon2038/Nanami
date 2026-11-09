@@ -28,8 +28,8 @@ fn segment(runtime: &Runtime, pid: Word, id: Word) -> Result<&MemoryFile, i32> {
 }
 
 fn metadata(runtime: &mut Runtime, id: Word) -> Result<&mut SysvSegment, i32> {
-    match runtime.poll_objects.get_mut(id) {
-        Some(Object::Memory(memory)) => memory.sysv.as_mut().ok_or(EINVAL),
+    match runtime.poll_objects.memory_mut(id) {
+        Some(memory) => memory.sysv.as_mut().ok_or(EINVAL),
         _ => Err(EINVAL),
     }
 }
@@ -198,16 +198,21 @@ pub(super) fn attach(
 }
 
 pub(super) fn detach(runtime: &mut Runtime, pid: Word, address: Word) -> Result<Word, i32> {
+    // Most mappings belong to other attachments. Resolve VM groups only for
+    // matching addresses, sharing this request's target group across both scans.
+    let mut group = None;
+    let mut matches = |m: &crate::state::poll_objects::MemoryMapping| {
+        m.attachment == Some(address)
+            && (m.pid == pid
+                || runtime.vm_group(m.pid) == *group.get_or_insert_with(|| runtime.vm_group(pid)))
+    };
     let found = runtime
         .poll_objects
         .iter()
         .find_map(|(id, object)| match object {
             Object::Memory(memory)
                 if memory.sysv.is_some()
-                    && memory.maps.iter().any(|m| {
-                        runtime.vm_group(m.pid) == runtime.vm_group(pid)
-                            && m.attachment == Some(address)
-                    }) =>
+                    && memory.maps.iter().any(&mut matches) =>
             {
                 Some(id)
             }
@@ -217,9 +222,7 @@ pub(super) fn detach(runtime: &mut Runtime, pid: Word, address: Word) -> Result<
     let ranges: Vec<_> = segment(runtime, pid, found)?
         .maps
         .iter()
-        .filter(|m| {
-            runtime.vm_group(m.pid) == runtime.vm_group(pid) && m.attachment == Some(address)
-        })
+        .filter(|m| matches(m))
         .map(|m| (m.base, m.bytes))
         .collect();
     let time = now(runtime);
@@ -329,29 +332,7 @@ pub(super) fn context_exit(runtime: &mut Runtime, pid: Word) {
 }
 
 pub(super) fn inherited(runtime: &mut Runtime, pid: Word) {
-    let ids: Vec<_> = runtime
-        .poll_objects
-        .iter()
-        .filter_map(|(id, object)| match object {
-            Object::Memory(memory)
-                if memory.sysv.is_some()
-                    && memory.maps.iter().any(|mapping| mapping.pid == pid) =>
-            {
-                Some(id)
-            }
-            _ => None,
-        })
-        .collect();
-    if ids.is_empty() {
-        return;
-    }
-    let time = now(runtime);
-    for id in ids {
-        if let Ok(info) = metadata(runtime, id) {
-            info.attached = time;
-            info.last_pid = pid;
-        }
-    }
+    update_attachment_times(runtime, pid, true);
 }
 
 pub(super) fn leaving_vm(runtime: &mut Runtime, pid: Word) {
@@ -360,26 +341,26 @@ pub(super) fn leaving_vm(runtime: &mut Runtime, pid: Word) {
     }) {
         return;
     }
-    let ids: Vec<_> = runtime
-        .poll_objects
-        .iter()
-        .filter_map(|(id, object)| match object {
-            Object::Memory(memory)
-                if memory.sysv.is_some()
-                    && memory.maps.iter().any(|mapping| mapping.pid == pid) =>
-            {
-                Some(id)
-            }
-            _ => None,
-        })
-        .collect();
-    if ids.is_empty() {
-        return;
-    }
-    let time = now(runtime);
-    for id in ids {
+    update_attachment_times(runtime, pid, false);
+}
+
+fn update_attachment_times(runtime: &mut Runtime, pid: Word, attached: bool) {
+    // Only metadata changes below; clock refresh also leaves objects/mappings
+    // untouched. Slots remain stable, so resume after the previous match.
+    let mut cursor = 0;
+    let mut time = None;
+    loop {
+        let next = runtime.poll_objects.iter().enumerate().skip(cursor)
+            .find_map(|(index, (id, object))| match object {
+                Object::Memory(memory) if memory.sysv.is_some()
+                    && memory.maps.iter().any(|mapping| mapping.pid == pid) => Some((index + 1, id)),
+                _ => None,
+            });
+        let Some((next, id)) = next else { break; };
+        cursor = next;
+        let time = *time.get_or_insert_with(|| now(runtime));
         if let Ok(info) = metadata(runtime, id) {
-            info.detached = time;
+            if attached { info.attached = time; } else { info.detached = time; }
             info.last_pid = pid;
         }
     }

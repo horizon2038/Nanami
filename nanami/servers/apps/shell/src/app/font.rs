@@ -1,5 +1,4 @@
-use alloc::boxed::Box;
-
+#[cfg(test)]
 use fontdue::{Font, FontSettings};
 use nanami_runtime::Word;
 
@@ -7,10 +6,12 @@ use super::{COLS, FONT_W};
 
 // MIT License
 // Copyright (c) 2018 Source Foundry Authors
+#[cfg(test)]
 const FONT_BYTES: &[u8] = include_bytes!("../../../honoka/assets/fonts/hack.ttf");
+#[cfg(test)]
 const FONT_SIZE: f32 = 12.0;
+#[cfg(test)]
 const FONT_BASELINE: i32 = 10;
-const ENABLE_FONTDUE: bool = true;
 const FIRST: usize = 32;
 const COUNT: usize = 96;
 const MAX_GLYPH_W: usize = 20;
@@ -28,6 +29,7 @@ struct CachedGlyph {
     bitmap: [u8; MAX_GLYPH_W * MAX_GLYPH_H],
 }
 
+#[cfg(test)]
 impl CachedGlyph {
     const EMPTY: Self = Self {
         cached: false,
@@ -40,8 +42,74 @@ impl CachedGlyph {
     };
 }
 
+// Preserve the padded drawing layout while expanding only at compile time.
+const fn shell_bitmap(pixels: &[u8], width: usize, height: usize) -> [u8; MAX_GLYPH_W * MAX_GLYPH_H] {
+    assert!(width <= MAX_GLYPH_W && height <= MAX_GLYPH_H);
+    assert!(pixels.len() == width * height);
+    let mut bitmap = [0; MAX_GLYPH_W * MAX_GLYPH_H];
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            bitmap[y * MAX_GLYPH_W + x] = pixels[y * width + x];
+            x += 1;
+        }
+        y += 1;
+    }
+    bitmap
+}
+
+include!("shell_glyphs.rs");
+
+const fn shell_ink_bounds() -> (i32, i32) {
+    let mut bounds = (0, 12);
+    let mut index = 0;
+    while index < COUNT {
+        let glyph = &SHELL_GLYPHS[index];
+        if glyph.cached {
+            if glyph.y_offset < bounds.0 {
+                bounds.0 = glyph.y_offset;
+            }
+            let bottom = glyph.y_offset + glyph.height as i32;
+            if bottom > bounds.1 {
+                bounds.1 = bottom;
+            }
+        }
+        index += 1;
+    }
+    bounds
+}
+const SHELL_INK_BOUNDS: (i32, i32) = shell_ink_bounds();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_glyphs_match_live_fontdue_all_metrics_and_bitmap_bytes() {
+        let font = Font::from_bytes(FONT_BYTES, font_settings()).unwrap();
+        for (index, actual) in SHELL_GLYPHS.iter().enumerate() {
+            let expected = rasterize_glyph(&font, (FIRST + index) as u8);
+            assert_eq!((actual.cached, actual.width, actual.height, actual.advance,
+                actual.x_offset, actual.y_offset),
+                (expected.cached, expected.width, expected.height, expected.advance,
+                expected.x_offset, expected.y_offset), "slot={index}");
+            assert_eq!(actual.bitmap, expected.bitmap, "slot={index}");
+        }
+        let renderer = TextRenderer::new();
+        let expected_bounds = SHELL_GLYPHS.iter().filter(|glyph| glyph.cached)
+            .fold((0i32, 12i32), |bounds, glyph| (
+                bounds.0.min(glyph.y_offset),
+                bounds.1.max(glyph.y_offset + glyph.height as i32),
+            ));
+        assert_eq!(renderer.row_ink_bounds(), expected_bounds);
+        std::println!("SHELL-STATIC-FONT slots={} cache-bytes={} row-ink={expected_bounds:?}",
+            COUNT, core::mem::size_of_val(&SHELL_GLYPHS));
+    }
+}
+
 pub struct TextRenderer {
-    glyphs: Box<[CachedGlyph; COUNT]>,
+    glyphs: &'static [CachedGlyph; COUNT],
     use_fontdue: bool,
     row_ink_bounds: (i32, i32),
 }
@@ -49,39 +117,11 @@ pub struct TextRenderer {
 impl TextRenderer {
     pub fn new() -> Self {
         log_heap_stats("[shell] font init begin");
-        let mut glyphs = allocate_glyph_cache();
-        let use_fontdue = if !ENABLE_FONTDUE {
-            nanami_runtime::println!("[shell] fontdue disabled; using bitmap fallback");
-            false
-        } else if FONT_BYTES.is_empty() {
-            nanami_runtime::println!("[shell] font missing; using bitmap fallback");
-            false
-        } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
-            nanami_runtime::println!("[shell] fontdue ready bytes={:#x}", FONT_BYTES.len());
-            prerasterize_glyph_cache(&mut glyphs, &font);
-            true
-        } else {
-            nanami_runtime::println!("[shell] fontdue parse failed; using bitmap fallback");
-            false
-        };
         log_heap_stats("[shell] font init end");
-        let row_ink_bounds = if use_fontdue {
-            glyphs
-                .iter()
-                .filter(|glyph| glyph.cached)
-                .fold((0i32, 12i32), |bounds, glyph| {
-                    (
-                        bounds.0.min(glyph.y_offset),
-                        bounds.1.max(glyph.y_offset + glyph.height as i32),
-                    )
-                })
-        } else {
-            (0, 12)
-        };
         Self {
-            glyphs,
-            use_fontdue,
-            row_ink_bounds,
+            glyphs: &SHELL_GLYPHS,
+            use_fontdue: true,
+            row_ink_bounds: SHELL_INK_BOUNDS,
         }
     }
 
@@ -202,6 +242,7 @@ impl TextRenderer {
     }
 }
 
+#[cfg(test)]
 fn font_settings() -> FontSettings {
     FontSettings {
         scale: FONT_SIZE,
@@ -221,26 +262,7 @@ fn log_heap_stats(prefix: &str) {
     );
 }
 
-fn allocate_glyph_cache() -> Box<[CachedGlyph; COUNT]> {
-    let mut glyphs = Box::<[CachedGlyph; COUNT]>::new_uninit();
-    let first = glyphs.as_mut_ptr().cast::<CachedGlyph>();
-    for index in 0..COUNT {
-        unsafe { first.add(index).write(CachedGlyph::EMPTY) };
-    }
-    // Every element was initialized in place, without a cache-sized stack copy.
-    unsafe { glyphs.assume_init() }
-}
-
-fn prerasterize_glyph_cache(glyphs: &mut [CachedGlyph; COUNT], font: &Font) {
-    let mut i = 0usize;
-    while i < COUNT {
-        let ch = (FIRST + i) as u8;
-        let glyph = rasterize_glyph(font, ch);
-        glyphs[i] = glyph;
-        i += 1;
-    }
-}
-
+#[cfg(test)]
 fn rasterize_glyph(font: &Font, ch: u8) -> CachedGlyph {
     let (metrics, bitmap) = font.rasterize(ch as char, FONT_SIZE);
     let mut glyph = CachedGlyph::EMPTY;
@@ -367,6 +389,7 @@ fn get_pixel(vaddr: Word, fb_width: usize, x: usize, y: usize) -> u32 {
     unsafe { core::ptr::read_volatile((vaddr + (index * 4) as Word) as *const u32) }
 }
 
+#[cfg(test)]
 fn ceil_positive(value: f32) -> i32 {
     let truncated = value as i32;
     if value > truncated as f32 {

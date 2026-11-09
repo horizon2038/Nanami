@@ -4,6 +4,12 @@ use nanami_runtime::Word;
 
 use super::state::*;
 
+pub(crate) fn can_allocate_open_file_and_fd(runtime: &Runtime, session_index: usize) -> bool {
+    runtime.open_files.iter().any(|file| !file.active)
+        && runtime.sessions.get(session_index)
+            .is_some_and(|session| lowest_open_fd(session).is_some())
+}
+
 pub(crate) fn alloc_open_file_and_fd(
     runtime: &mut Runtime,
     session_index: usize,
@@ -170,19 +176,15 @@ fn alloc_open_file(runtime: &mut Runtime, kind: FdKind, vfs_handle: Word) -> Opt
 }
 
 fn alloc_fd(session: &mut Session, open_file: usize) -> (Word, Word, Word) {
-    let mut fd = 3usize;
-    while fd < session.fds.len() {
-        if !session.fds[fd].active {
-            session.fds[fd] = FileDescriptor {
-                active: true,
-                open_file,
-                flags: 0,
-            };
-            return (nanami_runtime::OS_RESPONSE_OK, fd as Word, 0);
-        }
-        fd += 1;
-    }
-    (nanami_runtime::OS_RESPONSE_FATAL, 0, 0)
+    let Some(fd) = lowest_open_fd(session) else {
+        return (nanami_runtime::OS_RESPONSE_FATAL, 0, 0);
+    };
+    session.fds[fd] = FileDescriptor { active: true, open_file, flags: 0 };
+    (nanami_runtime::OS_RESPONSE_OK, fd as Word, 0)
+}
+
+fn lowest_open_fd(session: &Session) -> Option<usize> {
+    (3..session.fds.len()).find(|&fd| !session.fds[fd].active)
 }
 
 fn duplicate_fd(

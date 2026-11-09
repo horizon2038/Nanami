@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-fontdue = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
 nanami-runtime = { path = "../../libs/nanami-runtime" }
 nanami-client = { path = "../../libs/nanami-client" }
+
+[dev-dependencies]
+fontdue = { version = "0.9.3", default-features = false, features = ["hashbrown"] }
 
 [profile.dev]
 panic = "abort"

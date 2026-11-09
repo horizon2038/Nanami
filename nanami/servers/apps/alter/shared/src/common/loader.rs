@@ -25,9 +25,9 @@ struct FileSnapshot {
     metadata: Option<ElfMetadata>,
 }
 
-/// mmap uses a fresh identity from its own FD. Only fill on a whole-file read,
-/// never prefetch a large file for a small mapping. Alter owns the snapshots:
-/// guests receive copies, or private readonly aliases of opt-in immutable RAM.
+/// mmap uses a fresh identity from its own FD. Writable cold mappings fill
+/// only on a whole-file read. Alter owns the snapshots:
+/// guests receive copies, or private readonly aliases of immutable RAM.
 pub fn file_mapping_source(
     runtime: &mut Runtime,
     fd: Word,
@@ -36,21 +36,53 @@ pub fn file_mapping_source(
     offset: Word,
     bytes: Word,
 ) -> Result<Option<Word>, LoadError> {
+    mapping_source(runtime, fd, identity, size, offset, bytes, false)
+}
+
+/// A readonly mapping can amortize a larger immutable snapshot through aliases.
+/// An almost-whole aligned prefix may include one partial trailing file page;
+/// writable cold mappings retain whole-file admission and the ordinary cap.
+pub fn readonly_file_mapping_source(
+    runtime: &mut Runtime, fd: Word, identity: Word, size: Word, offset: Word, bytes: Word,
+) -> Result<Option<Word>, LoadError> {
+    mapping_source(runtime, fd, identity, size, offset, bytes, true)
+}
+
+fn mapping_source(
+    runtime: &mut Runtime, fd: Word, identity: Word, size: Word, offset: Word, bytes: Word,
+    readonly_alias: bool,
+) -> Result<Option<Word>, LoadError> {
     if offset.checked_add(bytes).is_none_or(|end| end > size) {
         return Err(LoadError::InvalidArgument);
     }
     if let Some(cached) = runtime.image_cache.get(identity, size) {
         return Ok(Some(cached.address + offset));
     }
+    // DSO LOAD spans can end a few bytes before nonloaded file metadata.
+    // Admit at most one partial trailing page, only for immutable readonly
+    // aliases. Keep offset mappings, small probes and writable fills unchanged.
+    let readonly_tail = readonly_alias && super::image_cache::IMMUTABLE_STORAGE
+        && bytes >= 4096 && bytes & 4095 == 0
+        && size.saturating_sub(bytes) < 4096;
     if identity >> 32 == 0
         || size == 0
-        || size > super::image_cache::MAX_IMAGE_BYTES
         || offset != 0
-        || bytes != size
+        || (bytes != size && !readonly_tail)
     {
         return Ok(None);
     }
-    let file = load_file_snapshot(runtime, fd, identity, size, ImageBuffer::Reusable)?;
+    let Some(slot) = runtime.image_cache.replacement_mapping(size, readonly_alias, identity) else {
+        return Ok(None);
+    };
+    // No I/O or cache mutation separates selection from filling. Reuse this
+    // decision instead of repeating both the miss lookup and victim selection.
+    let file = fill_file_snapshot(runtime, fd, identity, size,
+        ImageBuffer::Mapping { readonly_alias }, Some(slot))?;
+    #[cfg(target_os = "none")]
+    if bytes != size && option_env!("NANAMI_READONLY_TAIL_DIAG") == Some("1") {
+        nanami_runtime::println!("[loader] readonly-tail-snapshot fd={} size={} prefix={} extra={}",
+            fd, size, bytes, size - bytes);
+    }
     Ok(Some(file.address))
 }
 
@@ -58,6 +90,7 @@ pub fn file_mapping_source(
 enum ImageBuffer {
     Reusable,
     Interpreter { main_address: Word },
+    Mapping { readonly_alias: bool },
 }
 
 pub fn load_interpreter_elf_image(
@@ -184,14 +217,29 @@ fn load_file_snapshot(
         });
     }
     let protected_address = match buffer {
-        ImageBuffer::Reusable => None,
+        ImageBuffer::Reusable | ImageBuffer::Mapping { .. } => None,
         ImageBuffer::Interpreter { main_address } => Some(main_address),
     };
     let cache_slot = if identity >> 32 != 0 {
-        runtime.image_cache.replacement(size, protected_address)
+        if let ImageBuffer::Mapping { readonly_alias } = buffer {
+            runtime.image_cache.replacement_mapping(size, readonly_alias, identity)
+        } else {
+            runtime.image_cache.replacement(size, protected_address, identity)
+        }
     } else {
         None
     };
+    fill_file_snapshot(runtime, fd, identity, size, buffer, cache_slot)
+}
+
+fn fill_file_snapshot(
+    runtime: &mut Runtime,
+    fd: Word,
+    identity: Word,
+    size: Word,
+    buffer: ImageBuffer,
+    cache_slot: Option<usize>,
+) -> Result<FileSnapshot, LoadError> {
     let (image, allocation_size) = if let Some(slot) = cache_slot {
         if super::image_cache::IMMUTABLE_STORAGE {
             create_immutable_snapshot(runtime, slot, size)?
@@ -230,6 +278,11 @@ fn load_file_snapshot(
             allocation
         }
     } else {
+        // Mapping admission was preflighted without yielding. Do not silently
+        // add an uncached whole-file copy if that invariant ever changes.
+        if matches!(buffer, ImageBuffer::Mapping { .. }) {
+            return Err(LoadError::Io);
+        }
         let (address, capacity) = if matches!(buffer, ImageBuffer::Interpreter { .. }) {
             (
                 &mut runtime.interpreter_image_buffer,
@@ -278,7 +331,14 @@ fn load_file_snapshot(
             // Publish only after a complete fill/version recheck and readonly
             // protection. A failed/partial protection leaves identity zero
             // and its exact allocation owned, but unusable as a cache hit.
-            let owner = nanami_runtime::get_self_pid().map_err(|_| LoadError::Io)?;
+            let owner = match runtime.image_cache.owner_pid {
+                Some(owner) => owner,
+                None => {
+                    let owner = nanami_runtime::get_self_pid().map_err(|_| LoadError::Io)?;
+                    runtime.image_cache.owner_pid = Some(owner);
+                    owner
+                }
+            };
             nanami_runtime::request_process_mapping_protect(owner, image, allocation_size, 1)
                 .map_err(|_| LoadError::Io)?;
         }
@@ -322,9 +382,9 @@ fn create_immutable_snapshot(
 }
 
 fn read_image(runtime: &mut Runtime, fd: Word, image: Word, size: Word) -> Result<(), LoadError> {
-    let chunk_limit = runtime
-        .posix_read_buffer_size()
-        .saturating_sub(ALTER_IO_OFFSET as Word);
+    // The FD is already open and the caller owns its path bytes separately.
+    // No pathname needs to survive in the read window during a snapshot fill.
+    let chunk_limit = runtime.posix_read_buffer_size();
     if chunk_limit == 0 {
         return Err(LoadError::InvalidArgument);
     }
@@ -334,7 +394,7 @@ fn read_image(runtime: &mut Runtime, fd: Word, image: Word, size: Word) -> Resul
         let chunk = (size - copied).min(chunk_limit);
         // Positioned reads make direct-buffer fallback idempotent: a failed
         // transport cannot silently advance the descriptor's sequential offset.
-        let (read, source) = match runtime.pread_posix(fd, ALTER_IO_OFFSET as Word, chunk, copied) {
+        let (read, source) = match runtime.pread_posix(fd, 0, chunk, copied) {
             Ok((read, source)) if read != 0 && read <= chunk => (read, source),
             _ => {
                 return Err(LoadError::Io);

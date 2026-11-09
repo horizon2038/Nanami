@@ -185,6 +185,76 @@ mod process {
 #[path = "../../../nanami/servers/apps/posix-server/src/io.rs"]
 mod io;
 
+fn directory_runtime(cursor: Word) -> (Runtime, Vec<u8>, Vec<u8>) {
+    let mut runtime = runtime();
+    let mut source = vec![0x31u8; 65536];
+    let mut output = vec![0xaau8; 65536];
+    runtime.vfs_shm = source.as_mut_ptr() as Word;
+    runtime.vfs_shm_size = source.len();
+    runtime.sessions[0].shm_local = output.as_mut_ptr() as Word;
+    runtime.sessions[0].shm_size = output.len();
+    runtime.open_files[0].kind = FdKind::Directory;
+    runtime.open_files[0].offset = cursor;
+    (runtime, source, output)
+}
+
+#[test]
+fn biased_readdir_translates_the_shared_open_description_without_seek_requests() {
+    let (mut runtime, _source, output) = directory_runtime(6);
+    BACKEND.with(|b| b.borrow_mut().dir_reply = Some(Ok((2, 5))));
+    let mut request = request(POSIX_REQUEST_READ_DIR_BIASED, 3, 2, 0);
+    request.arg3 = 3;
+    assert_eq!(io::handle_read_dir_biased(&mut runtime, request), (OS_RESPONSE_OK, 2, 5));
+    assert_eq!(runtime.open_files[0].offset, 8);
+    let bytes = 2 * vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+    assert!(output[..bytes].iter().all(|byte| *byte == 0x31));
+    assert!(output[bytes..].iter().all(|byte| *byte == 0xaa));
+    BACKEND.with(|b| { let b = b.borrow(); assert_eq!(b.calls.len(), 1); assert_eq!(b.calls[0].offset, 3); });
+    request.arg0 = 4; // dup shares exactly the same biased cursor.
+    BACKEND.with(|b| b.borrow_mut().dir_reply = Some(Ok((0, 5))));
+    assert_eq!(io::handle_read_dir_biased(&mut runtime, request), (OS_RESPONSE_OK, 0, 5));
+    BACKEND.with(|b| assert_eq!(b.borrow().calls[1].offset, 5));
+    assert_eq!(runtime.open_files[0].offset, 8);
+}
+
+#[test]
+fn biased_readdir_wraps_genuine_invalid_argument_without_a_legacy_fallback_signal() {
+    let (mut runtime, _source, output) = directory_runtime(2);
+    let mut request = request(POSIX_REQUEST_READ_DIR_BIASED, 3, 2, 0);
+    request.arg3 = 3;
+    assert_eq!(io::handle_read_dir_biased(&mut runtime, request), (POSIX_READ_DIR_BIASED_ERROR, OS_RESPONSE_INVALID_ARGUMENT, 0));
+    assert_eq!(runtime.open_files[0].offset, 2);
+    assert!(output.iter().all(|byte| *byte == 0xaa));
+    BACKEND.with(|b| assert!(b.borrow().calls.is_empty()));
+}
+
+#[test]
+fn biased_readdir_rejects_oversized_and_overflowing_replies_before_copy_or_commit() {
+    for reply in [(3, 9), (2, 1), (1, Word::MAX)] {
+        let (mut runtime, _source, output) = directory_runtime(6);
+        BACKEND.with(|b| b.borrow_mut().dir_reply = Some(Ok(reply)));
+        let mut request = request(POSIX_REQUEST_READ_DIR_BIASED, 3, 2, 0);
+        request.arg3 = 3;
+        assert_eq!(io::handle_read_dir_biased(&mut runtime, request).0, POSIX_READ_DIR_BIASED_ERROR);
+        assert_eq!(runtime.open_files[0].offset, 6);
+        assert!(output.iter().all(|byte| *byte == 0xaa));
+    }
+}
+
+#[test]
+fn biased_readdir_preserves_cursor_on_storage_failure_and_validates_ownership() {
+    let (mut runtime, _source, output) = directory_runtime(6);
+    BACKEND.with(|b| b.borrow_mut().dir_reply = Some(Err(RequestError::Status(OS_RESPONSE_INVALID_ARGUMENT))));
+    let mut request = request(POSIX_REQUEST_READ_DIR_BIASED, 3, 2, 0);
+    request.arg3 = 3;
+    assert_eq!(io::handle_read_dir_biased(&mut runtime, request), (POSIX_READ_DIR_BIASED_ERROR, OS_RESPONSE_INVALID_ARGUMENT, 0));
+    assert_eq!(runtime.open_files[0].offset, 6);
+    assert!(output.iter().all(|byte| *byte == 0xaa));
+    request.identifier = 999;
+    assert_eq!(io::handle_read_dir_biased(&mut runtime, request).0, POSIX_READ_DIR_BIASED_ERROR);
+    BACKEND.with(|b| assert_eq!(b.borrow().calls.len(), 1));
+}
+
 fn runtime() -> Runtime {
     reset();
     let mut runtime = Runtime {

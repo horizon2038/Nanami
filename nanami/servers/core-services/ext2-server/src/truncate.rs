@@ -85,7 +85,7 @@ fn zero_tail(
     if in_block == 0 {
         return Ok(());
     }
-    let block = get_data_block(runtime, inode, offset / runtime.block_size)?;
+    let block = get_data_block(runtime, &inode, offset / runtime.block_size)?;
     if block != 0 {
         read_block(runtime, block as usize)?;
         unsafe {

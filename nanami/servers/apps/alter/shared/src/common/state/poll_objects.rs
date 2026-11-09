@@ -5,6 +5,14 @@ use alloc::vec::Vec;
 
 pub const OBJECT_LIMIT: usize = 256;
 pub const WATCH_LIMIT: usize = super::LINUX_FD_MAX;
+const TIMER_WORDS: usize = OBJECT_LIMIT.div_ceil(64);
+
+#[cfg(test)]
+static TIMER_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub fn take_timer_inspections() -> usize {
+    TIMER_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy)]
 pub struct EventCounter {
@@ -101,6 +109,8 @@ pub struct Watch {
 pub struct Epoll {
     pub watches: Vec<Watch>,
     pub cursor: usize,
+    // Derived only from armed watch kinds/events, never from live readiness.
+    pub source_mask: core::cell::Cell<Option<Word>>,
 }
 
 pub struct IoUring {
@@ -130,6 +140,15 @@ pub enum Object {
 pub struct Objects {
     entries: Vec<(Word, Object)>,
     next_id: Word,
+    // Slot hints never establish identity. IDs are monotonic and collisions
+    // fall back to the authoritative entries without changing their order.
+    slots: [u16; OBJECT_LIMIT],
+    // Derived membership only. Generic mutable access may replace any variant,
+    // so invalidate before handing out &mut Object; rebuild on the next query.
+    timer_slots: core::cell::Cell<Option<[u64; TIMER_WORDS]>>,
+    // None: unknown. Some(None): no armed timers. Some(Some(t)): no timer
+    // can expire before t. Removal may leave this conservative bound early.
+    expiry_bound: Option<Option<Word>>,
 }
 
 impl Objects {
@@ -137,6 +156,9 @@ impl Objects {
         Self {
             entries: Vec::new(),
             next_id: 1,
+            slots: [u16::MAX; OBJECT_LIMIT],
+            timer_slots: core::cell::Cell::new(Some([0; TIMER_WORDS])),
+            expiry_bound: Some(None),
         }
     }
 
@@ -144,22 +166,59 @@ impl Objects {
         self.entries.is_empty()
     }
 
+    fn timer_slots(&self) -> [u64; TIMER_WORDS] {
+        if let Some(slots) = self.timer_slots.get() {
+            return slots;
+        }
+        let mut slots = [0; TIMER_WORDS];
+        for (index, (_, object)) in self.entries.iter().enumerate() {
+            #[cfg(test)]
+            TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if matches!(object, Object::Timer(_)) {
+                slots[index / 64] |= 1u64 << (index % 64);
+            }
+        }
+        self.timer_slots.set(Some(slots));
+        slots
+    }
+
+    fn timer_indices(slots: [u64; TIMER_WORDS]) -> impl Iterator<Item = usize> {
+        slots.into_iter().enumerate().flat_map(|(word, mut bits)| {
+            core::iter::from_fn(move || {
+                if bits == 0 {
+                    return None;
+                }
+                let index = word * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                #[cfg(test)]
+                TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                Some(index)
+            })
+        })
+    }
+
     pub fn timer_deadline(&self) -> Option<Word> {
-        self.entries
-            .iter()
-            .filter_map(|(_, object)| match object {
+        Self::timer_indices(self.timer_slots())
+            .filter_map(|index| match &self.entries[index].1 {
                 Object::Timer(timer) => timer.deadline,
                 _ => None,
-            })
-            .min()
+            }).min()
     }
 
     pub fn expire_timers(&mut self, now: Word) {
-        for (_, object) in &mut self.entries {
-            if let Object::Timer(timer) = object {
+        if self.expiry_bound.is_some_and(|bound| bound.is_none_or(|deadline| now < deadline)) {
+            return;
+        }
+        let mut next: Option<Word> = None;
+        for index in Self::timer_indices(self.timer_slots()) {
+            if let Object::Timer(timer) = &mut self.entries[index].1 {
                 timer.expire(now);
+                if let Some(deadline) = timer.deadline {
+                    next = Some(next.map_or(deadline, |previous| previous.min(deadline)));
+                }
             }
         }
+        self.expiry_bound = Some(next);
     }
 
     pub fn insert(&mut self, object: Object) -> Option<Word> {
@@ -170,14 +229,35 @@ impl Objects {
         let id = self.next_id;
         self.next_id += 1;
         self.entries.push((id, object));
+        let index = self.entries.len() - 1;
+        self.slots[id % OBJECT_LIMIT] = index as u16;
+        #[cfg(test)]
+        TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let is_timer = matches!(&self.entries[index].1, Object::Timer(_));
+        if is_timer {
+            self.expiry_bound = None;
+        }
+        if let Some(mut slots) = self.timer_slots.get() {
+            let bit = 1u64 << (index % 64);
+            slots[index / 64] &= !bit;
+            if is_timer {
+                slots[index / 64] |= bit;
+            }
+            self.timer_slots.set(Some(slots));
+        }
         Some(id)
     }
 
+    fn index(&self, id: Word) -> Option<usize> {
+        let slot = self.slots[id % OBJECT_LIMIT] as usize;
+        if self.entries.get(slot).is_some_and(|(key, _)| *key == id) {
+            return Some(slot);
+        }
+        self.entries.iter().position(|(key, _)| *key == id)
+    }
+
     pub fn get(&self, id: Word) -> Option<&Object> {
-        self.entries
-            .iter()
-            .find(|(key, _)| *key == id)
-            .map(|(_, object)| object)
+        self.index(id).map(|slot| &self.entries[slot].1)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (Word, &Object)> {
@@ -185,29 +265,105 @@ impl Objects {
     }
 
     pub fn get_mut(&mut self, id: Word) -> Option<&mut Object> {
-        self.entries
-            .iter_mut()
-            .find(|(key, _)| *key == id)
-            .map(|(_, object)| object)
+        let slot = self.index(id)?;
+        self.timer_slots.set(None);
+        self.expiry_bound = None;
+        Some(&mut self.entries[slot].1)
     }
 
     pub fn remove(&mut self, id: Word) {
-        if let Some(index) = self.entries.iter().position(|(key, _)| *key == id) {
+        if let Some(index) = self.index(id) {
+            let last = self.entries.len() - 1;
             self.entries.swap_remove(index);
+            if let Some(mut slots) = self.timer_slots.get() {
+                slots[index / 64] &= !(1u64 << (index % 64));
+                slots[last / 64] &= !(1u64 << (last % 64));
+                if let Some((_, object)) = self.entries.get(index) {
+                    #[cfg(test)]
+                    TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if matches!(object, Object::Timer(_)) {
+                        slots[index / 64] |= 1u64 << (index % 64);
+                    }
+                }
+                self.timer_slots.set(Some(slots));
+            }
+            if let Some((moved, _)) = self.entries.get(index) {
+                self.slots[*moved % OBJECT_LIMIT] = index as u16;
+            }
         }
+    }
+
+    // These references cannot replace the enum variant, so timer membership
+    // remains valid even when a Timer's deadline or other fields change.
+    pub fn counter_mut(&mut self, id: Word) -> Option<&mut EventCounter> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 { Object::Counter(value) => Some(value), _ => None }
+    }
+    pub fn timer_mut(&mut self, id: Word) -> Option<&mut Timer> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 {
+            Object::Timer(value) => { self.expiry_bound = None; Some(value) },
+            _ => None,
+        }
+    }
+    pub fn clear_timer_expirations(&mut self, id: Word) -> bool {
+        let Some(slot) = self.index(id) else { return false; };
+        match &mut self.entries[slot].1 {
+            // Consuming a count cannot move any future expiration earlier.
+            Object::Timer(timer) => { timer.expirations = 0; true },
+            _ => false,
+        }
+    }
+    pub fn signals_mut(&mut self, id: Word) -> Option<&mut SignalFd> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 { Object::Signals(value) => Some(value), _ => None }
+    }
+    pub fn memory_mut(&mut self, id: Word) -> Option<&mut MemoryFile> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 { Object::Memory(value) => Some(value), _ => None }
+    }
+    pub fn epoll_mut(&mut self, id: Word) -> Option<&mut Epoll> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 { Object::Epoll(value) => Some(value), _ => None }
+    }
+    pub fn ring_mut(&mut self, id: Word) -> Option<&mut IoUring> {
+        let slot = self.index(id)?;
+        match &mut self.entries[slot].1 { Object::Ring(value) => Some(value), _ => None }
+    }
+    pub fn set_nonblocking(&mut self, id: Word, value: bool) -> bool {
+        let Some(slot) = self.index(id) else { return false; };
+        match &mut self.entries[slot].1 {
+            Object::Counter(counter) => counter.nonblocking = value,
+            Object::Timer(timer) => timer.nonblocking = value,
+            Object::Signals(signals) => signals.nonblocking = value,
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn has_file_watch(&self, file: LinuxFile, terminal: Word) -> bool {
+        self.entries.iter().any(|(_, object)| match object {
+            Object::Epoll(epoll) => epoll.watches.iter().any(|watch| watch_matches_file(watch, file, terminal)),
+            _ => false,
+        })
     }
 
     pub fn forget_file(&mut self, file: LinuxFile, terminal: Word) {
         for (_, object) in &mut self.entries {
             if let Object::Epoll(epoll) = object {
-                epoll.watches.retain(|watch| {
-                    watch.file.kind != file.kind
-                        || watch.file.posix_fd != file.posix_fd
-                        || watch.file.resource != file.resource
-                        || (file.kind == super::LinuxFileKind::Terminal
-                            && watch.terminal != terminal)
-                });
+                let previous = epoll.watches.len();
+                epoll.watches.retain(|watch| !watch_matches_file(watch, file, terminal));
+                if epoll.watches.len() != previous {
+                    epoll.source_mask.set(None);
+                }
             }
         }
     }
+}
+
+fn watch_matches_file(watch: &Watch, file: LinuxFile, terminal: Word) -> bool {
+    watch.file.kind == file.kind
+        && watch.file.posix_fd == file.posix_fd
+        && watch.file.resource == file.resource
+        && (file.kind != super::LinuxFileKind::Terminal || watch.terminal == terminal)
 }

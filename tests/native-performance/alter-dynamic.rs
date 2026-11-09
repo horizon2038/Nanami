@@ -340,4 +340,121 @@ mod tests {
             BACKEND.with(|backend| assert_eq!(backend.borrow().calls, fail_at + 1));
         }
     }
+
+    fn check_source(source: &[u8], image: &Interpreter, segments: &[LoadSegment]) {
+        let low = segments.iter().filter(|s| s.memory_size != 0)
+            .map(|s| s.virtual_address & !(PAGE - 1)).min().unwrap();
+        let high = segments.iter().filter(|s| s.memory_size != 0)
+            .map(|s| (s.virtual_address + s.memory_size).next_multiple_of(PAGE)).max().unwrap();
+        let mut expected = vec![0; high - low];
+        for s in segments {
+            if s.file_size != 0 {
+                let start = s.virtual_address - low;
+                expected[start..start+s.file_size].copy_from_slice(&source[s.offset..s.offset+s.file_size]);
+            }
+        }
+        BACKEND.with(|backend| *backend.borrow_mut() = Backend::default());
+        install(7, image).unwrap();
+        BACKEND.with(|backend| {
+            let backend=backend.borrow();
+            assert_eq!(backend.pages.len()*PAGE,expected.len());
+            for (index,expected) in expected.chunks(PAGE).enumerate() {
+                assert_eq!(&backend.pages[&(BASE+index*PAGE)][..],expected);
+            }
+        });
+    }
+
+    fn clear_file_gaps(source: &mut [u8], segments: &[LoadSegment]) {
+        let low=segments.iter().filter(|s| s.memory_size!=0)
+            .map(|s|s.virtual_address & !(PAGE-1)).min().unwrap();
+        let first=segments.iter().find(|s|s.file_size!=0).unwrap();
+        let offset=first.offset-(first.virtual_address-low);
+        let mut covered=0;
+        for s in segments.iter().filter(|s|s.file_size!=0) {
+            let start=s.virtual_address-low;
+            source[offset+covered..offset+start].fill(0);
+            covered=start+s.file_size;
+        }
+    }
+
+    #[test]
+    fn linear_zero_padded_interpreter_uses_one_constructor_and_no_write_requests() {
+        for (low,offset) in [(0,0),(0x8000,0x1000)] {
+            let mut segments=[segment(low+17, PAGE+31, PAGE+500),
+                segment(low+3*PAGE+731,2*PAGE,4*PAGE),segment(low+9*PAGE,0,3*PAGE)];
+            for s in &mut segments { s.offset=offset+s.virtual_address-low; }
+            let (mut source,image)=fixture(&segments);
+            clear_file_gaps(&mut source,&segments);
+            check_source(&source,&image,&segments);
+            BACKEND.with(|b| {
+                let b=b.borrow(); assert_eq!((b.calls,b.initialized,b.anonymous,b.writes),(1,1,0,0));
+                let copied=3*PAGE+731+2*PAGE;
+                assert_eq!(b.zeroed,12*PAGE-copied);
+            });
+            // A failed initialized map is terminal even if it installed a prefix.
+            BACKEND.with(|b| *b.borrow_mut()=Backend {fail_at:Some(0),..Backend::default()});
+            assert!(matches!(install(7,&image),Err(LoadError::Io)));
+            BACKEND.with(|b|assert_eq!(b.borrow().calls,1));
+        }
+    }
+
+    #[test]
+    fn nonzero_file_padding_and_non_linear_offsets_keep_legacy_zeroes_and_write_order() {
+        let segments=[segment(0,155,3000),segment(2*PAGE+731,128,256)];
+        let (mut source,image)=fixture(&segments);
+        clear_file_gaps(&mut source,&segments);
+        source[PAGE+7]=0x7f;
+        check_source(&source,&image,&segments);
+        BACKEND.with(|b| {
+            let b=b.borrow();assert_eq!((b.calls,b.initialized,b.anonymous,b.writes),(3,0,1,2));
+        });
+        let mut second=segment(2*PAGE,128,256);second.offset=4*PAGE;
+        let segments=[segment(0,155,3000),second];
+        let (mut source,image)=fixture(&segments);source[155..2*PAGE].fill(0);
+        check_source(&source,&image,&segments);
+        BACKEND.with(|b|assert_eq!(b.borrow().anonymous,1));
+    }
+
+    #[test]
+    fn generated_zero_gap_layouts_match_legacy_bytes_with_one_request() {
+        let mut seed=129_u64;
+        for _ in 0..256 {
+            let mut segments=Vec::new();let mut end=0;
+            for _ in 0..4 {
+                seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let start=end+(seed as usize%PAGE);
+                let file=1+(seed>>19) as usize%(3*PAGE);
+                segments.push(segment(start,file,file+(seed>>41) as usize%PAGE));
+                end=(start+file+PAGE).next_multiple_of(PAGE);
+            }
+            let (mut source,image)=fixture(&segments);clear_file_gaps(&mut source,&segments);
+            check_source(&source,&image,&segments);
+            BACKEND.with(|b|assert_eq!(b.borrow().calls,1));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires NANAMI_INTERPRETER_ELF artifact; work model, not wall time"]
+    fn real_interpreter_initialization_work() {
+        let source=std::fs::read(std::env::var("NANAMI_INTERPRETER_ELF").unwrap()).unwrap();
+        let metadata=crate::elf::parse_elf64_image(&source).unwrap();
+        LOADED.with(|image|*image.borrow_mut()=Some(LoadedElfImage {
+            address:source.as_ptr() as Word,size:source.len(),metadata,
+        }));
+        let path=b"/ld.so\0";let mut main=metadata;
+        main.has_interpreter=true;main.interpreter_offset=0;main.interpreter_size=path.len();main.load_segment_count=0;
+        let executable=LoadedElfImage {address:path.as_ptr() as Word,size:path.len(),metadata:main};
+        let image=prepare_in_root(&mut state::Runtime,&executable,b"").unwrap().unwrap();
+        check_source(&source,&image,&metadata.segments[..metadata.load_segment_count]);
+        let low=metadata.segments[..metadata.load_segment_count].iter().filter(|s|s.memory_size!=0)
+            .map(|s|s.virtual_address & !(PAGE-1)).min().unwrap();
+        let high=metadata.segments[..metadata.load_segment_count].iter().filter(|s|s.memory_size!=0)
+            .map(|s|(s.virtual_address+s.memory_size).next_multiple_of(PAGE)).max().unwrap();
+        let legacy_writes=metadata.segments[..metadata.load_segment_count].iter().filter(|s|s.file_size!=0).count();
+        let legacy_copied:usize=metadata.segments[..metadata.load_segment_count].iter().map(|s|s.file_size).sum();
+        BACKEND.with(|b| {
+            let b=b.borrow();assert_eq!((b.calls,b.initialized,b.anonymous,b.writes),(1,1,0,0));
+            std::println!("INTERPRETER-LINEAR-MODEL legacy-requests={} requests={} legacy-zeroed={} zeroed={} legacy-copied={} copied={} bytes-match=true",legacy_writes+1,b.calls,high-low,b.zeroed,legacy_copied,high-low-b.zeroed);
+        });
+    }
 }

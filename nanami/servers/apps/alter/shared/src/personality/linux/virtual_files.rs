@@ -1,7 +1,7 @@
 use super::{
     align_up_word, ensure_graphics_session, ensure_input, graphics_enabled, input_resource,
-    is_linux_virtual_path, map_request_error, virtual_fs, write_target_memory, write_u16,
-    write_u64, LinuxFile, LinuxFileKind, Runtime, VirtualNode, Word, EBADF, EINVAL, EISDIR, EMFILE,
+    is_linux_virtual_path, map_request_error, virtual_fs, write_target_memory,
+    LinuxFile, LinuxFileKind, Runtime, VirtualNode, Word, EBADF, EINVAL, EISDIR, EMFILE,
     ENOENT, ENOTDIR, EROFS, ESRCH, LINUX_DIRENT64_NAME_OFFSET, LINUX_DT_CHR, LINUX_DT_DIR,
     LINUX_DT_REG, LINUX_FD_CLOEXEC, LINUX_O_ACCMODE, LINUX_O_CLOEXEC, LINUX_O_CREAT,
     LINUX_O_DIRECTORY, LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_TRUNC,
@@ -55,26 +55,18 @@ pub(super) fn sys_virtual_getdents(
             }
             break;
         }
-        unsafe {
-            let base = runtime.posix_shm + out as Word;
-            ::core::ptr::write_bytes(base as *mut u8, 0, reclen);
-            write_u64(base, entry.resource);
-            write_u64(base + 8, entry.next);
-            write_u16(base + 16, reclen as u16);
-            let dtype = if node.is_directory() {
-                LINUX_DT_DIR
-            } else if node.is_regular_file() {
-                LINUX_DT_REG
-            } else {
-                LINUX_DT_CHR
-            };
-            ::core::ptr::write((base + 18) as *mut u8, dtype as u8);
-            ::core::ptr::copy_nonoverlapping(
-                entry.name.as_ptr(),
-                (base + LINUX_DIRENT64_NAME_OFFSET as Word) as *mut u8,
-                entry.name.len(),
-            );
-        }
+        let dtype = if node.is_directory() {
+            LINUX_DT_DIR
+        } else if node.is_regular_file() {
+            LINUX_DT_REG
+        } else {
+            LINUX_DT_CHR
+        };
+        // The common writer initializes NUL/padding only; its header/name
+        // writes cover every other byte of the already capacity-checked record.
+        super::directory::write_entry(
+            runtime.posix_shm + out as Word, entry.resource, entry.next, dtype, entry.name,
+        );
         out += reclen;
         index = entry.next;
     }
@@ -100,18 +92,21 @@ pub(super) fn sys_virtual_read(
     if file.resource >> 32 != 0 && node != VirtualNode::ProcSelfExe
         || node == VirtualNode::ProcUptime
     {
-        let mut buffer = [0u8; 4096];
-        let limit = len.min(buffer.len()).min(runtime.posix_shm_size);
-        let amount = super::procfs::read(
-            runtime,
-            pid,
-            file.resource,
-            file.offset,
-            &mut buffer[..limit],
-        )?;
-        unsafe {
-            core::ptr::copy_nonoverlapping(buffer.as_ptr(), runtime.posix_shm as *mut u8, amount);
-        }
+        let amount = if let Some(result) = super::procfs::try_read_current_shm(
+            runtime, pid, file.resource, file.offset, len,
+        ) {
+            result?
+        } else {
+            let mut buffer = [0u8; 4096];
+            let limit = len.min(buffer.len()).min(runtime.posix_shm_size);
+            let amount = super::procfs::read(
+                runtime, pid, file.resource, file.offset, &mut buffer[..limit],
+            )?;
+            unsafe {
+                core::ptr::copy_nonoverlapping(buffer.as_ptr(), runtime.posix_shm as *mut u8, amount);
+            }
+            amount
+        };
         write_target_memory(runtime, pid, user_buffer, amount)?;
         file.offset = file.offset.checked_add(amount).ok_or(EINVAL)?;
         if !runtime.set_linux_file(pid, fd, file) {

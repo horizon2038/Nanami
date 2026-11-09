@@ -51,6 +51,12 @@ impl Alpha {
         pages: usize,
         source: Option<PageSource>,
     ) -> Result<usize, CapabilityError> {
+        self.map_process_initialized_pages_protected(pid, base, pages, source, 7)
+    }
+    fn map_process_initialized_pages_protected(
+        &mut self, pid: usize, base: Option<usize>, pages: usize,
+        source: Option<PageSource>, permissions: usize,
+    ) -> Result<usize, CapabilityError> {
         let base = base.unwrap();
         let source = source.unwrap();
         assert_eq!(source.bytes, pages * PAGE_SIZE);
@@ -61,7 +67,7 @@ impl Alpha {
         let source_owner = self.processes.memory_owner_pid(source.pid);
         for offset in (0..source.bytes).step_by(PAGE_SIZE) {
             let value = *self.data[&(source_owner, source.address + offset)];
-            self.page(pid, base + offset, 0, 7);
+            self.page(pid, base + offset, 0, permissions);
             let owner = self.processes.memory_owner_pid(pid);
             *self.data.get_mut(&(owner, base + offset)).unwrap() = Box::new(value);
         }
@@ -155,20 +161,19 @@ fn bounded_clone_does_not_quarantine_an_unrelated_source_range() {
 }
 
 #[test]
-fn contiguous_private_snapshot_uses_one_constructor_and_preserves_every_permission() {
+fn contiguous_private_snapshot_groups_final_permissions_and_preserves_every_byte() {
     let mut a = Alpha::new();
     for (i, permission) in [5, 3, 0, 7].into_iter().enumerate() {
         a.page(1, (i + 1) * PAGE_SIZE, i as u8 + 10, permission);
     }
     a.clone_process_vm(1, 2).unwrap();
-    assert_eq!(a.allocations.len(), 1);
-    assert_eq!(a.allocations[0].2, 4);
+    assert_eq!(a.allocations.len(), 4);
     for i in 1..=4 {
         assert_eq!(a.data[&(1, i * PAGE_SIZE)], a.data[&(2, i * PAGE_SIZE)]);
     }
     assert_eq!(
         a.protections,
-        [(0x1000, 5), (0x2000, 3), (0x3000, 0), (0x4000, 7)]
+        [(0x3000, 0)]
     );
     a.data.get_mut(&(1, 0x1000)).unwrap()[0] = 90;
     a.data.get_mut(&(2, 0x2000)).unwrap()[0] = 91;
@@ -260,7 +265,7 @@ fn shared_vm_source_resolves_the_owner_but_child_storage_is_independent() {
     a.page(1, 0x2000, 45, 1);
     a.processes.share_address_space(3, 1).unwrap();
     a.clone_process_vm(3, 2).unwrap();
-    assert_eq!(a.allocations.len(), 1);
+    assert_eq!(a.allocations.len(), 2);
     a.data.get_mut(&(1, 0x1000)).unwrap()[0] = 99;
     assert_eq!(a.data[&(2, 0x1000)][0], 44);
 }
@@ -292,7 +297,7 @@ fn constructor_failure_stops_before_protection_or_source_mutation() {
 fn protection_failure_keeps_copied_child_pages_accounted_for_task_rollback() {
     let mut a = Alpha::new();
     for va in [0x1000, 0x2000, 0x3000] {
-        a.page(1, va, 31, 5);
+        a.page(1, va, 31, 0);
     }
     a.fail_protect = Some(1);
     assert_eq!(a.clone_process_vm(1, 2), Err(CapabilityError::Fatal));
@@ -304,7 +309,7 @@ fn protection_failure_keeps_copied_child_pages_accounted_for_task_rollback() {
             .len(),
         3
     );
-    assert_eq!(a.protections, [(0x1000, 5)]);
+    assert_eq!(a.protections, [(0x1000, 0)]);
     assert_eq!(a.data[&(1, 0x3000)][0], 31);
 }
 

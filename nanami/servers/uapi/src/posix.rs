@@ -73,6 +73,15 @@ pub const POSIX_REQUEST_MAP_READ_PAGE: Word = 0xa13f;
 pub const POSIX_REQUEST_UNMAP_READ_PAGE: Word = 0xa140;
 /// arg0: FD. Writes vfs::FilesystemStats at offset zero of client SHM.
 pub const POSIX_REQUEST_FSTATFS: Word = 0xa141;
+/// READ_DIR with arg3 subtracted from the shared open-file cursor for VFS I/O.
+/// Reply detail1 is the raw VFS cursor; the stored cursor includes arg3 again.
+pub const POSIX_REQUEST_READ_DIR_BIASED: Word = 0xa143;
+/// detail0 carries the ordinary status. Distinguishes real errors from an old
+/// service rejecting the new request with OS_RESPONSE_INVALID_ARGUMENT.
+pub const POSIX_READ_DIR_BIASED_ERROR: Word = 0xa143_0001;
+/// Rooted read-only open. Separate from PATH so older proxies cannot forward
+/// an operation whose returned VFS handle they do not know how to own/translate.
+pub const POSIX_REQUEST_OPEN_ROOTED: Word = 0xa142;
 pub const POSIX_FLOCK_SHARED: Word = 1;
 pub const POSIX_FLOCK_EXCLUSIVE: Word = 2;
 pub const POSIX_FLOCK_UNLOCK: Word = 8;

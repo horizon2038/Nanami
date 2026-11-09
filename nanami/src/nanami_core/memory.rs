@@ -60,6 +60,12 @@ pub struct MemoryManager {
     node_pool: NodePool,
     bootstrap_frames: Option<FrameRange>,
     physical_frames: BTreeMap<usize, FrameRange>,
+    // Completed pool ranges are permanent. Cache identity/descriptor metadata,
+    // never RAM contents, allocation ownership or process mapping authority.
+    ready_frame_range: core::cell::Cell<Option<FrameRange>>,
+    ready_frame_range_other: core::cell::Cell<Option<FrameRange>>,
+    #[cfg(test)]
+    frame_range_index_lookups: core::cell::Cell<usize>,
     physical_sources: BTreeMap<(usize, usize), PhysicalSource>,
     page_tables: PageTables,
     process_arena_directory: CapabilityDescriptor,
@@ -176,6 +182,10 @@ impl MemoryManager {
             node_pool: NodePool::new(initial_frame_leaf_pool),
             bootstrap_frames: None,
             physical_frames: BTreeMap::new(),
+            ready_frame_range: core::cell::Cell::new(None),
+            ready_frame_range_other: core::cell::Cell::new(None),
+            #[cfg(test)]
+            frame_range_index_lookups: core::cell::Cell::new(0),
             physical_sources: BTreeMap::new(),
             page_tables: PageTables::new(page_table_pool_node, page_table_generics),
             process_arena_directory,
@@ -262,12 +272,22 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        self.map_frame_strict_with_attribute(address_space, frame_descriptor, virtual_address, Attribute::ALL, vm_space)
+    }
+
+    pub fn map_frame_strict_with_attribute(
+        &mut self,
+        address_space: CapabilityDescriptor,
+        frame_descriptor: CapabilityDescriptor,
+        virtual_address: usize,
+        attribute: Attribute,
+        vm_space: &mut impl VmTracker,
+    ) -> CapabilityResult {
         if !vm_space.page_tables_ready(virtual_address) {
             self.ensure_page_tables(address_space, virtual_address, vm_space)?;
         }
 
-        let attr = Attribute::ALL;
-        match arch::address_space::map(address_space, frame_descriptor, virtual_address, attr) {
+        match arch::address_space::map(address_space, frame_descriptor, virtual_address, attribute) {
             Ok(()) => {
                 vm_space
                     .record_frame(virtual_address, frame_descriptor)

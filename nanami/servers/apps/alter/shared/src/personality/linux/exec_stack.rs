@@ -42,9 +42,6 @@ pub(super) fn rewrite_linux_stack(
         runtime.exec_stack_buffer_size = mapped;
     }
     let stack_buffer = runtime.exec_stack_buffer;
-    unsafe {
-        ::core::ptr::write_bytes(stack_buffer as *mut u8, 0, LINUX_EXEC_STACK_BYTES);
-    }
 
     let mut argc = snapshot.argc;
     let stack_base = LINUX_STACK_TOP - LINUX_EXEC_STACK_BYTES as Word;
@@ -170,7 +167,13 @@ pub(super) fn rewrite_linux_stack(
     out = write_aux(stack_buffer, out, AT_RANDOM, random_guest as Word);
     out = write_aux(stack_buffer, out, AT_EXECFN, execfn_guest as Word);
     out = write_aux(stack_buffer, out, AT_PLATFORM, platform_guest as Word);
-    let _ = write_aux(stack_buffer, out, AT_NULL, 0);
+    out = write_aux(stack_buffer, out, AT_NULL, 0);
+    // Strings initialize their payload, terminator and alignment padding. The
+    // table overwrites every word; only its gap to the strings still needs zero.
+    // Bytes below sp_offset never leave this reusable private work buffer.
+    unsafe {
+        ::core::ptr::write_bytes((stack_buffer + out) as *mut u8, 0, cursor - out);
+    }
 
     let guest_sp = stack_base + sp_offset as Word;
     nanami_runtime::request_process_memory_write(
@@ -250,7 +253,11 @@ pub(super) fn push_bytes_to_stack(
         ::core::ptr::write((stack_buffer as usize + next + bytes.len()) as *mut u8, 0);
     }
     *guest_address = stack_base as usize + next;
-    next = align_down_usize(next, 8);
+    let aligned = align_down_usize(next, 8);
+    unsafe {
+        ::core::ptr::write_bytes((stack_buffer + aligned) as *mut u8, 0, next - aligned);
+    }
+    next = aligned;
     Ok(next)
 }
 

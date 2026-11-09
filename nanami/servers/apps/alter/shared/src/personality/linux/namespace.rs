@@ -8,6 +8,14 @@ const PATH: Word = DESCRIPTOR + 512;
 const TARGET: Word = DESCRIPTOR + 1024;
 const OUTPUT: Word = DESCRIPTOR + 8192;
 
+#[cfg(test)]
+static REPLY_STAGING_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn take_reply_staging_bytes() -> usize {
+    REPLY_STAGING_BYTES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) fn path_error(error: PathError) -> i32 {
     match error {
         PathError::Transport(error) => map_request_error(error),
@@ -36,6 +44,55 @@ pub(super) fn request_path(
     flags: Word,
     output_bytes: Word,
 ) -> Result<(Word, Word), i32> {
+    let details = request_path_reply(runtime, pid, operation, directory, path, target, flags, output_bytes)?;
+    if matches!(operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK | VFS_PATH_OPEN_READONLY) {
+        copy_reply_to_shm(runtime, details.0);
+    }
+    Ok(details)
+}
+
+pub(super) fn readlink_current_path(
+    runtime: &mut Runtime,
+    pid: Word,
+    path_bytes: Word,
+    output_bytes: Word,
+) -> Result<Word, i32> {
+    if path_bytes >= LINUX_CWD_MAX {
+        return Err(ENAMETOOLONG);
+    }
+    let details = {
+        // Request fields and reply occupy separate high SHM offsets. Finish
+        // borrowing the prefix before staging the reply over that prefix.
+        let path = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, path_bytes) };
+        request_path_reply(runtime, pid, VFS_PATH_READLINK, VFS_PATH_DIRECTORY_ROOT,
+            path, &[], 0, output_bytes)?
+    };
+    copy_reply_to_shm(runtime, details.0);
+    Ok(details.0)
+}
+
+fn copy_reply_to_shm(runtime: &Runtime, bytes: Word) {
+    // Only called after request_path_reply has validated the reply extent.
+    #[cfg(test)]
+    REPLY_STAGING_BYTES.fetch_add(bytes, core::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        core::ptr::copy((runtime.posix_shm + OUTPUT) as *const u8,
+            runtime.posix_shm as *mut u8, bytes);
+    }
+}
+
+// Keep the validated wire reply in OUTPUT so resolve_inner can decode its
+// metadata there and commit the canonical path without staging it twice.
+fn request_path_reply(
+    runtime: &mut Runtime,
+    pid: Word,
+    operation: Word,
+    directory: Word,
+    path: &[u8],
+    target: &[u8],
+    flags: Word,
+    output_bytes: Word,
+) -> Result<(Word, Word), i32> {
     if path.len() >= LINUX_CWD_MAX
         || target.len() > 4096
         || output_bytes > 4096
@@ -44,6 +101,9 @@ pub(super) fn request_path(
             .is_none_or(|end| end > runtime.posix_shm_size)
     {
         return Err(ENAMETOOLONG);
+    }
+    if operation == VFS_PATH_OPEN_READONLY && output_bytes < core::mem::size_of::<PathOpenResult>() {
+        return Err(EINVAL);
     }
     let root = guest_root_for_process(runtime, pid)?;
     if root.len() > PATH - ROOT {
@@ -82,18 +142,35 @@ pub(super) fn request_path(
             (runtime.posix_shm + DESCRIPTOR) as *mut PathRequest,
             request,
         );
-    }
-    let details = posix_path_request(runtime.posix_port, DESCRIPTOR).map_err(path_error)?;
-    if matches!(operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK) {
-        if details.0 > output_bytes {
-            return Err(EIO);
-        }
-        unsafe {
-            core::ptr::copy(
-                (runtime.posix_shm + OUTPUT) as *const u8,
-                runtime.posix_shm as *mut u8,
-                details.0,
+        if operation == VFS_PATH_OPEN_READONLY {
+            core::ptr::write_unaligned(
+                (runtime.posix_shm + OUTPUT) as *mut PathOpenResult,
+                PathOpenResult { descriptor: VFS_PATH_OPEN_NONE },
             );
+        }
+    }
+    #[cfg(feature = "wait-shape")]
+    match operation {
+        VFS_PATH_RESOLVE => super::wait_shape::path_step(runtime, pid, 0),
+        VFS_PATH_READLINK => super::wait_shape::path_step(runtime, pid, 1),
+        _ => {},
+    }
+    let details = if operation == VFS_PATH_OPEN_READONLY {
+        posix_rooted_open_request(runtime.posix_port, DESCRIPTOR)
+    } else {
+        posix_path_request(runtime.posix_port, DESCRIPTOR)
+    }.map_err(path_error)?;
+    if matches!(operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK | VFS_PATH_OPEN_READONLY) {
+        if details.0 > output_bytes
+            || (operation == VFS_PATH_OPEN_READONLY && details.0 <= core::mem::size_of::<PathOpenResult>())
+        {
+            if operation == VFS_PATH_OPEN_READONLY {
+                let fd = unsafe {
+                    core::ptr::read_unaligned((runtime.posix_shm + OUTPUT) as *const PathOpenResult).descriptor
+                };
+                if fd != VFS_PATH_OPEN_NONE { let _ = posix::posix_close(runtime.posix_port, fd); }
+            }
+            return Err(EIO);
         }
     }
     Ok(details)
@@ -129,6 +206,27 @@ pub(super) fn resolve_at(
 pub(super) struct ResolvedPath {
     pub bytes: Word,
     pub metadata: Option<PathMetadata>,
+    pub file_type: Word,
+    pub opened: Option<Word>,
+}
+
+pub(super) fn resolve_for_readlink(
+    runtime: &mut Runtime, pid: Word, dirfd: Word, input_bytes: Word,
+) -> Result<ResolvedPath, i32> {
+    resolve_at_with_metadata(runtime, pid, dirfd, input_bytes, false, false)
+}
+
+pub(super) fn resolve_for_check(
+    runtime: &mut Runtime, pid: Word, dirfd: Word, input_bytes: Word, follow: bool,
+) -> Result<ResolvedPath, i32> {
+    resolve_at_with_metadata(runtime, pid, dirfd, input_bytes, follow, false)
+}
+
+pub(super) fn resolve_for_open(
+    runtime: &mut Runtime, pid: Word, dirfd: Word, input_bytes: Word,
+    follow: bool, open_flags: Word,
+) -> Result<ResolvedPath, i32> {
+    resolve_inner(runtime, pid, dirfd, input_bytes, follow, false, Some(open_flags))
 }
 
 pub(super) fn decode_metadata(
@@ -177,6 +275,18 @@ fn resolve_at_with_metadata(
     input_bytes: Word,
     follow: bool,
     with_metadata: bool,
+) -> Result<ResolvedPath, i32> {
+    resolve_inner(runtime, pid, dirfd, input_bytes, follow, with_metadata, None)
+}
+
+fn resolve_inner(
+    runtime: &mut Runtime,
+    pid: Word,
+    dirfd: Word,
+    input_bytes: Word,
+    follow: bool,
+    with_metadata: bool,
+    open_flags: Option<Word>,
 ) -> Result<ResolvedPath, i32> {
     if input_bytes == 0 {
         return Err(ENOENT);
@@ -234,22 +344,28 @@ fn resolve_at_with_metadata(
             return Ok(ResolvedPath {
                 bytes,
                 metadata: None,
+                file_type: VFS_FILE_TYPE_UNKNOWN,
+                opened: None,
             });
         }
-        return resolve_at_with_metadata(
+        return resolve_inner(
             runtime,
             pid,
             LINUX_AT_FDCWD,
             bytes,
             follow,
             with_metadata,
+            open_flags,
         );
     }
     let mut flags = VFS_PATH_ALLOW_MISSING;
     if follow {
         flags |= VFS_PATH_FOLLOW_FINAL;
     }
-    let metadata_bytes = if with_metadata {
+    let mut open = open_flags;
+    let mut metadata_bytes = if open.is_some() {
+        core::mem::size_of::<PathOpenResult>()
+    } else if with_metadata {
         core::mem::size_of::<PathMetadata>()
     } else {
         0
@@ -257,25 +373,54 @@ fn resolve_at_with_metadata(
     if with_metadata {
         flags |= VFS_PATH_WITH_METADATA;
     }
-    let (output_bytes, file_type) = request_path(
+    let target = open.unwrap_or(0).to_le_bytes();
+    let operation = if open.is_some() { VFS_PATH_OPEN_READONLY } else { VFS_PATH_RESOLVE };
+    let result = request_path_reply(
         runtime,
         pid,
-        VFS_PATH_RESOLVE,
+        operation,
         directory,
         &path[..total],
-        &[],
+        if open.is_some() { &target } else { &[] },
         flags,
         metadata_bytes + LINUX_CWD_MAX - 1,
-    )?;
+    );
+    let (output_bytes, file_type) = match result {
+        // Unsupported means the older service did not acquire a descriptor.
+        // Reuse our owned path bytes; never repeat after a transport/other error.
+        Err(EOPNOTSUPP) if open.is_some() => {
+            open = None;
+            metadata_bytes = 0;
+            request_path_reply(runtime, pid, VFS_PATH_RESOLVE, directory, &path[..total],
+                &[], flags, LINUX_CWD_MAX - 1)?
+        }
+        other => other?,
+    };
+    let opened = if open.is_some() && output_bytes >= metadata_bytes {
+        let descriptor = unsafe {
+            core::ptr::read_unaligned((runtime.posix_shm + OUTPUT) as *const PathOpenResult).descriptor
+        };
+        if descriptor == VFS_PATH_OPEN_NONE { None } else { Some(descriptor) }
+    } else {
+        None
+    };
     if output_bytes <= metadata_bytes {
+        copy_reply_to_shm(runtime, output_bytes);
+        if let Some(fd) = opened { let _ = posix::posix_close(runtime.posix_port, fd); }
         return Err(EIO);
     }
-    if with_metadata && unsafe { *((runtime.posix_shm + metadata_bytes) as *const u8) } != b'/' {
+    if (with_metadata || open.is_some())
+        && (unsafe { *((runtime.posix_shm + OUTPUT + metadata_bytes) as *const u8) } != b'/'
+            || (opened.is_some() && !matches!(file_type, VFS_FILE_TYPE_REGULAR | VFS_FILE_TYPE_DIRECTORY)))
+    {
+        copy_reply_to_shm(runtime, output_bytes);
+        if let Some(fd) = opened { let _ = posix::posix_close(runtime.posix_port, fd); }
         return Err(EIO);
     }
     let metadata = if with_metadata {
-        let value = unsafe { core::ptr::read_unaligned(runtime.posix_shm as *const PathMetadata) };
+        let value = unsafe { core::ptr::read_unaligned((runtime.posix_shm + OUTPUT) as *const PathMetadata) };
         if value.file_type != file_type {
+            copy_reply_to_shm(runtime, output_bytes);
             return Err(EIO);
         }
         Some(value)
@@ -284,14 +429,20 @@ fn resolve_at_with_metadata(
     };
     let bytes = output_bytes - metadata_bytes;
     unsafe {
+        // Retain even the old scratch tail after the canonical path. Only the
+        // metadata-sized tail needs restoring; the path itself is copied once.
+        if metadata_bytes != 0 {
+            core::ptr::copy((runtime.posix_shm + OUTPUT + bytes) as *const u8,
+                (runtime.posix_shm + bytes) as *mut u8, metadata_bytes);
+        }
         core::ptr::copy(
-            (runtime.posix_shm + metadata_bytes) as *const u8,
+            (runtime.posix_shm + OUTPUT + metadata_bytes) as *const u8,
             runtime.posix_shm as *mut u8,
             bytes,
         );
         *((runtime.posix_shm + bytes) as *mut u8) = 0;
     }
-    Ok(ResolvedPath { bytes, metadata })
+    Ok(ResolvedPath { bytes, metadata, file_type, opened })
 }
 
 pub(super) fn fchdir(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
@@ -299,9 +450,9 @@ pub(super) fn fchdir(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word,
         *(runtime.posix_shm as *mut u8) = b'.';
     }
     let bytes = resolve_at(runtime, pid, fd, 1, true)?;
-    let path =
-        unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, bytes) }.to_vec();
-    if !runtime.set_cwd(pid, &path) {
+    // set_cwd only copies into process records; it does not mutate SHM or do I/O.
+    let path = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, bytes) };
+    if !runtime.set_cwd(pid, path) {
         return Err(ENAMETOOLONG);
     }
     Ok(0)
@@ -333,14 +484,15 @@ pub(super) fn symlink(
     let path_bytes = read_c_string(runtime, pid, path)?;
     let bytes = resolve_at(runtime, pid, dirfd, path_bytes, false)?;
     reject_virtual_fs_mutation(runtime, pid, runtime.posix_shm, bytes)?;
-    let path =
-        unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, bytes) }.to_vec();
+    // SYMLINK has no reply payload to stage over this prefix. Request fields
+    // and the target are copied into the disjoint high SHM regions.
+    let path = unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, bytes) };
     request_path(
         runtime,
         pid,
         VFS_PATH_SYMLINK,
         VFS_PATH_DIRECTORY_ROOT,
-        &path,
+        path,
         &target,
         0,
         0,

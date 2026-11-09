@@ -733,6 +733,32 @@ pub fn request_process_map_initialized_at(
     source: Word,
     source_bytes: Word,
 ) -> Result<(), RequestError> {
+    request_map_initialized(target_pid, base, mapped_bytes, source, source_bytes, None)
+}
+
+/// Trusted supervisor only: publish freshly initialized pages with final rights.
+pub fn request_process_map_initialized_protected_at(
+    target_pid: Word,
+    base: Word,
+    mapped_bytes: Word,
+    source: Word,
+    source_bytes: Word,
+    permissions: Word,
+) -> Result<(), RequestError> {
+    if permissions == 0 || permissions & !7 != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    request_map_initialized(target_pid, base, mapped_bytes, source, source_bytes, Some(permissions))
+}
+
+fn request_map_initialized(
+    target_pid: Word,
+    base: Word,
+    mapped_bytes: Word,
+    source: Word,
+    source_bytes: Word,
+    permissions: Option<Word>,
+) -> Result<(), RequestError> {
     if base == 0
         || mapped_bytes == 0
         || (base | mapped_bytes) & 4095 != 0
@@ -741,9 +767,9 @@ pub fn request_process_map_initialized_at(
     {
         return Err(RequestError::InvalidArgument);
     }
-    let initializer = [source, source_bytes];
+    let initializer = [source, source_bytes, permissions.unwrap_or(7)];
     let (status, address, bytes) = call_os_port(
-        OS_REQUEST_PROCESS_MAP_ANONYMOUS,
+        if permissions.is_some() { OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED } else { OS_REQUEST_PROCESS_MAP_ANONYMOUS },
         target_pid,
         mapped_bytes,
         base,

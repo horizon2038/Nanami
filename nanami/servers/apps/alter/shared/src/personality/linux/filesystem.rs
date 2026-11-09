@@ -1,10 +1,10 @@
 use super::{
     bounded_len, current_virtual_node, is_linux_virtual_path, map_create_request_error,
-    map_link_request_error, map_path_request_error, map_request_error, map_unit, move_shm_bytes,
-    posix, read_c_string, reject_virtual_fs_mutation, resolve_path, translate_guest_path_at,
-    translate_guest_path_for_vfs, write_target_memory, Runtime, Word, EFAULT, EINVAL, ENAMETOOLONG,
-    ENOENT, ENOSYS, ENOTDIR, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW,
-    LINUX_CWD_MAX, LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
+    map_link_request_error, map_request_error, map_unit, move_shm_bytes,
+    posix, read_c_string, reject_virtual_fs_mutation, translate_guest_path_at,
+    translate_guest_path_for_vfs, write_target_memory, Runtime, Word, EFAULT, EINVAL,
+    ENOSYS, ERANGE, ESRCH, LINUX_AT_REMOVEDIR, LINUX_AT_SYMLINK_FOLLOW,
+    LINUX_SECOND_PATH_OFFSET, LINUX_S_IFBLK, LINUX_S_IFCHR, LINUX_S_IFMT,
 };
 
 pub(super) fn sys_access(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
@@ -25,42 +25,8 @@ pub(super) fn sys_faccessat(
 }
 
 pub(super) fn sys_chdir(runtime: &mut Runtime, pid: Word, path_ptr: Word) -> Result<Word, i32> {
-    let len = resolve_path(runtime, pid, path_ptr)?;
-    let mut guest_path = [0u8; LINUX_CWD_MAX];
-    if len as usize >= guest_path.len() {
-        return Err(ENAMETOOLONG);
-    }
-    unsafe {
-        ::core::ptr::copy_nonoverlapping(
-            runtime.posix_shm as *const u8,
-            guest_path.as_mut_ptr(),
-            len as usize,
-        );
-    }
-    if let Some(node) = current_virtual_node(runtime, pid, len) {
-        if !node.is_directory() {
-            return Err(ENOTDIR);
-        }
-        return if runtime.set_cwd(pid, &guest_path[..len as usize]) {
-            Ok(0)
-        } else {
-            Err(EINVAL)
-        };
-    }
-    if is_linux_virtual_path(runtime.posix_shm, len) {
-        return Err(ENOENT);
-    }
-    let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    let stat = posix::posix_stat(runtime.posix_port, 0, vfs_len).map_err(map_path_request_error)?;
-    if stat.2 != posix::POSIX_FILE_TYPE_DIRECTORY {
-        return Err(ENOTDIR);
-    }
-    let path = &guest_path[..len as usize];
-    if runtime.set_cwd(pid, path) {
-        Ok(0)
-    } else {
-        Err(EINVAL)
-    }
+    let bytes = read_c_string(runtime, pid, path_ptr)?;
+    super::path_checks::chdir(runtime, pid, bytes)
 }
 
 pub(super) fn creation_mode(runtime: &Runtime, pid: Word, mode: Word) -> Result<Word, i32> {
@@ -306,30 +272,6 @@ pub(super) fn sys_renameat(
     .map_err(map_request_error)
 }
 
-pub(super) fn sys_readlink(
-    runtime: &mut Runtime,
-    pid: Word,
-    path_ptr: Word,
-    user_buffer: Word,
-    len: Word,
-) -> Result<Word, i32> {
-    let path_len = super::resolve_nofollow(runtime, pid, path_ptr)?;
-    readlink_from_current_path(runtime, pid, path_len, user_buffer, len)
-}
-
-pub(super) fn sys_readlinkat(
-    runtime: &mut Runtime,
-    pid: Word,
-    dirfd: Word,
-    path_ptr: Word,
-    user_buffer: Word,
-    len: Word,
-) -> Result<Word, i32> {
-    let raw_len = read_c_string(runtime, pid, path_ptr)?;
-    let path_len = super::resolve_at(runtime, pid, dirfd, raw_len, false)?;
-    readlink_from_current_path(runtime, pid, path_len, user_buffer, len)
-}
-
 pub(super) fn readlink_from_current_path(
     runtime: &mut Runtime,
     pid: Word,
@@ -403,18 +345,7 @@ pub(super) fn readlink_from_current_path(
     if len == 0 {
         return Err(EINVAL);
     }
-    let path =
-        unsafe { core::slice::from_raw_parts(runtime.posix_shm as *const u8, path_len) }.to_vec();
-    let (bytes, _) = super::namespace::request_path(
-        runtime,
-        pid,
-        nanami_client::vfs::VFS_PATH_READLINK,
-        nanami_client::vfs::VFS_PATH_DIRECTORY_ROOT,
-        &path,
-        &[],
-        0,
-        len.min(4096),
-    )?;
+    let bytes = super::namespace::readlink_current_path(runtime, pid, path_len, len.min(4096))?;
     write_target_memory(runtime, pid, user_buffer, bytes)?;
     Ok(bytes)
 }
@@ -441,17 +372,7 @@ pub(super) fn sys_utime_at(
         return Ok(0);
     }
     let bytes = read_c_string(runtime, pid, path_ptr)?;
-    let len = super::namespace::resolve_at(runtime, pid, dirfd, bytes, flags & 0x100 == 0)?;
-    if current_virtual_node(runtime, pid, len).is_some() {
-        return Ok(0);
-    }
-    if is_linux_virtual_path(runtime.posix_shm, len) {
-        return Err(ENOENT);
-    }
-    let vfs_len = translate_guest_path_for_vfs(runtime, pid, len)?;
-    posix::posix_stat(runtime.posix_port, 0, vfs_len)
-        .map(|_| 0)
-        .map_err(map_path_request_error)
+    super::path_checks::check_times(runtime, pid, dirfd, bytes, flags & 0x100 == 0)
 }
 
 pub(super) fn sys_getcwd(

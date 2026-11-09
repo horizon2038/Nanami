@@ -408,6 +408,25 @@ fn all_pages_are_permission_checked_before_any_byte_transfer() {
 }
 
 #[test]
+fn bulk_checked_copy_rejects_a_late_exception_before_transfer_and_keeps_one_copy() {
+    let mut alpha = Alpha::new();
+    let bytes = 16 * 1024 * 1024;
+    let last = 0x1000 + bytes - PAGE_SIZE;
+    alpha.page(last, 0);
+    for write in [false, true] {
+        assert_eq!(alpha.request(0x1001, bytes - 1, write), Err(CapabilityError::PermissionDenied));
+    }
+    assert!(alpha.copies.is_empty());
+    alpha.page(last, 1);
+    assert_eq!(alpha.request(0x1001, bytes - 1, false), Ok(()));
+    assert_eq!(alpha.copies, [(2, 0x1001, 1, 0x9000, bytes - 1)]);
+    alpha.processes.vm_space_mut(2).unwrap().mark_mapping_uncertain(last);
+    alpha.page(last, 7);
+    assert_eq!(alpha.request(0x1001, bytes - 1, false), Err(CapabilityError::PermissionDenied));
+    assert_eq!(alpha.copies.len(), 1);
+}
+
+#[test]
 fn current_protection_changes_are_observed_without_a_personality_cache() {
     let mut alpha = Alpha::new();
     for permissions in [3, 0, 1, 7, 0] {

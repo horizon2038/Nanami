@@ -14,6 +14,8 @@ mod arp;
 mod arp_cache;
 #[path = "app/backend.rs"]
 mod backend;
+#[path = "app/backend_connect.rs"]
+mod backend_connect;
 #[path = "app/dhcp.rs"]
 mod dhcp;
 #[path = "app/dns.rs"]
@@ -1091,20 +1093,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let timer_port = connect_timer_service();
 
     nanami_runtime::print!("[net-server] connect backend: net-device\n");
-    let backend_pid = loop {
-        match nanami_client::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT) {
-            Ok(pid) => {
-                nanami_runtime::print!("[net-server] backend connected pid=");
-                nanami_runtime::print!("{:#x}", pid);
-                nanami_runtime::print!("\n");
-                break pid;
-            }
-            Err(e) => {
-                log_request_error("[net-server] backend connect failed: ", e);
-                sleep_ms(timer_port, BACKOFF_MS);
-            }
-        }
-    };
+    let backend_pid = backend_connect::connect(
+        || nanami_client::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT),
+        |error, consecutive| nanami_runtime::println!(
+            "[net-server] backend connect failed: {} consecutive={}", error, consecutive),
+        || sleep_ms(timer_port, BACKOFF_MS),
+    );
+    nanami_runtime::println!("[net-server] backend connected pid={:#x}", backend_pid);
 
     let net_device_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NET_DEVICE_PORT);
     let (backend_local_vaddr, backend_peer_vaddr) = loop {

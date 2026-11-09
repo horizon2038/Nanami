@@ -33,19 +33,23 @@ pub(super) fn read_poll_set(
                 }
             }
         }
-        for fd in 0..nfds {
+        // Walk only requested descriptors, preserving ascending FD order.
+        // Higher bits are ignored exactly as by the old 0..nfds scan.
+        let mut pending = sets[0] | sets[1] | sets[2];
+        while pending != 0 {
+            let fd = pending.trailing_zeros() as usize;
+            if fd >= nfds { break; }
+            pending &= pending - 1;
             let bit = 1usize << fd;
             let events = (if sets[0] & bit != 0 { LINUX_POLLIN } else { 0 })
                 | (if sets[1] & bit != 0 { LINUX_POLLOUT } else { 0 })
                 | (if sets[2] & bit != 0 { LINUX_POLLPRI } else { 0 });
-            if events != 0 {
-                wait.entries[wait.count] = PollFd {
-                    fd: fd as i32,
-                    events,
-                    revents: 0,
-                };
-                wait.count += 1;
-            }
+            wait.entries[wait.count] = PollFd {
+                fd: fd as i32,
+                events,
+                revents: 0,
+            };
+            wait.count += 1;
         }
     } else {
         let [ptr, count, ..] = context.args;

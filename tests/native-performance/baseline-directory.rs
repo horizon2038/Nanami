@@ -1,5 +1,52 @@
 //! Pre-optimization directory reader, retained only as a test oracle.
 use super::*;
+
+pub(super) fn parent_name(runtime:&mut Ext2Runtime,parent:u32,directory:u32)
+    ->Result<Vec<u8>,path_walk::Error> {
+    use path_walk::Error;
+    let inode=read_inode(runtime,parent).map_err(|_|Error::Io)?;
+    for logical in 0..(inode.size as usize).div_ceil(runtime.block_size) {
+        let block=get_data_block(runtime,inode,logical).map_err(|_|Error::Io)?;
+        if block==0 {return Err(Error::Io);}
+        read_block(runtime,block as usize).map_err(|_|Error::Io)?;
+        let mut offset=0;
+        while offset<runtime.block_size {
+            let entry=parse_directory_entry(runtime.block_shm+offset,runtime.block_size-offset).ok_or(Error::Io)?;
+            let name=unsafe {core::slice::from_raw_parts(entry.name_ptr,entry.name_len)};
+            if entry.inode==directory && name!=b"." && name!=b".." {return Ok(name.to_vec());}
+            offset+=entry.record_len;
+        }
+    }
+    Err(Error::Missing)
+}
+
+pub(super) unsafe fn lookup_in_directory(
+    runtime:&mut Ext2Runtime, parent:u32, name:*const u8, len:usize,
+)->Option<u32> {
+    if let Some(cached)=load_cached_dentry(runtime,parent,name,len) {return cached;}
+    let inode=read_inode(runtime,parent).ok()?;
+    if inode.mode & EXT2_S_IFMT != EXT2_S_IFDIR {return None;}
+    let mut logical=0;
+    while logical<max_file_blocks(runtime) {
+        let block=get_data_block(runtime,inode,logical).ok()?;
+        if block==0 {break;}
+        read_block(runtime,block as usize).ok()?;
+        let limit=min(runtime.block_size,inode.size.saturating_sub((logical*runtime.block_size) as u32) as usize);
+        let mut offset=0;
+        while offset<limit {
+            let entry=parse_directory_entry(runtime.block_shm+offset,limit-offset)?;
+            if entry.inode!=0 && entry.name_len==len && bytes_eq(entry.name_ptr,name,len) {
+                store_cached_dentry(runtime,parent,name,len,Some(entry.inode));
+                return Some(entry.inode);
+            }
+            offset+=entry.record_len;
+        }
+        logical+=1;
+    }
+    store_cached_dentry(runtime,parent,name,len,None);
+    None
+}
+
 pub(super) fn read_directory(
     runtime: &mut Ext2Runtime,
     session: ClientSession,

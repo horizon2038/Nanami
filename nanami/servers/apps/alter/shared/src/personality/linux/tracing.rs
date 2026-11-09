@@ -27,6 +27,11 @@ pub(super) fn trace_syscall_action(
     context: LinuxSyscallContext,
     action: EmulationAction,
 ) {
+    #[cfg(feature = "wait-shape")]
+    runtime.wait_shape.path_result(pid, context.number, match action {
+        EmulationAction::Return(value) => Some(value),
+        _ => None,
+    });
     if !runtime.trace_ever_enabled {
         return;
     }

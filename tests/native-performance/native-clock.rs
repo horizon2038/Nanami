@@ -98,6 +98,25 @@ fn fixture() -> Box<Page> {
 }
 
 #[test]
+fn integral_and_fractional_counter_scaling_match_wide_oracle_at_overflow_boundaries() {
+    let check = |raw, period| {
+        let expected = (u128::from(raw) * u128::from(period) / 1_000_000)
+            .min(Word::MAX as u128) as Word;
+        assert_eq!(counter::scale_counter(raw, period), expected, "raw={raw} period={period}");
+    };
+    for nanos in 1u64..=100 {
+        for raw in [0, 1, u32::MAX as u64, u64::MAX / nanos, (u64::MAX / nanos).saturating_add(1), u64::MAX] {
+            for period in [nanos * 1_000_000 - 1, nanos * 1_000_000, nanos * 1_000_000 + 1] { check(raw, period); }
+        }
+    }
+    let mut rng = 0x3782_8635_1947_2ab1u64;
+    for _ in 0..100_000 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        check(rng, (rng.rotate_left(17) % 100_000_000) + 1);
+    }
+}
+
+#[test]
 fn fresh_local_reads_advance_without_rpc_and_never_program_the_device() {
     let mut page = fixture();
     let mut reader = MonotonicReader::new();

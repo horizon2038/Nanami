@@ -62,7 +62,11 @@ const fn mask() -> [[(u8, u8); CURSOR_WIDTH as usize]; CURSOR_HEIGHT as usize] {
                 }
                 sy += 1;
             }
-            result[y][x] = ((outer * 255 / 16) as u8, (inner * 255 / 16) as u8);
+            let outer = outer * 255 / 16;
+            let inner = inner * 255 / 16;
+            let ratio = if outer == 0 { 0 } else { inner * 255 / outer };
+            let ratio = if ratio > 255 { 255 } else { ratio };
+            result[y][x] = (outer as u8, ratio as u8);
             x += 1;
         }
         y += 1;
@@ -70,11 +74,12 @@ const fn mask() -> [[(u8, u8); CURSOR_WIDTH as usize]; CURSOR_HEIGHT as usize] {
     result
 }
 
+// Coverage and fill/outline mix are both fixed for every drawing operation.
 const MASK: [[(u8, u8); CURSOR_WIDTH as usize]; CURSOR_HEIGHT as usize] = mask();
 
 pub(super) fn draw(fb: &Framebuffer, x: i32, y: i32, fill: u32, outline: u32, clip: Rect) {
     for (row, samples) in MASK.iter().enumerate() {
-        for (column, &(outer, inner)) in samples.iter().enumerate() {
+        for (column, &(outer, ratio)) in samples.iter().enumerate() {
             let px = x + column as i32;
             let py = y + row as i32;
             if outer == 0
@@ -87,7 +92,7 @@ pub(super) fn draw(fb: &Framebuffer, x: i32, y: i32, fill: u32, outline: u32, cl
             }
             // Mix the outline/fill first, then composite once over the restored
             // background. Repainting a clipped region cannot darken old edges.
-            let ratio = (inner as u32 * 255 / outer as u32).min(255);
+            let ratio = ratio as u32;
             let mut color = 0;
             for shift in [0, 8, 16] {
                 let a = (fill >> shift) & 255;
@@ -112,6 +117,66 @@ mod tests {
         assert_eq!(MASK[8][3], (255, 255));
         assert!(MASK[22].iter().any(|&(a, _)| a != 0));
         assert_eq!(MASK[23][17], (0, 0));
+    }
+
+    #[test]
+    fn cursor_matches_original_coverage_ratio_for_colors_formats_and_clips() {
+        let mut old = [[(0u8, 0u8); CURSOR_WIDTH as usize]; CURSOR_HEIGHT as usize];
+        for y in 0..CURSOR_HEIGHT as usize {
+            for x in 0..CURSOR_WIDTH as usize {
+                let mut outer = 0;
+                let mut inner = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let px = x as i32 * 8 + sx * 2 + 1;
+                        let py = y as i32 * 8 + sy * 2 + 1;
+                        outer += inside(&OUTER, px, py) as u32;
+                        inner += inside(&INNER, px, py) as u32;
+                    }
+                }
+                old[y][x] = ((outer * 255 / 16) as u8, (inner * 255 / 16) as u8);
+            }
+        }
+        let (width, height, stride) = (36, 34, 39);
+        for (rp, rs, gp, gs, bp, bs) in [(16, 8, 8, 8, 0, 8), (11, 5, 5, 6, 0, 5)] {
+            let screen = ScreenInfo { width, height, stride_bytes: stride * 4, bits_per_pixel: 32,
+                red_position: rp, red_size: rs, green_position: gp, green_size: gs,
+                blue_position: bp, blue_size: bs };
+            for fill in [0, 0xffffff, 0x123456, 0xff00ff00, u32::MAX] {
+                for outline in [0, 0xffffff, 0x654321, 0xff0000ff, u32::MAX] {
+                    for (x, y) in [(5, 4), (-9, -9), (29, 28)] {
+                        for clip in [Rect::new(0, 0, 36, 34), Rect::new(7, 9, 11, 13),
+                            Rect::new(0, 0, 1, 1), Rect::EMPTY] {
+                            let mut expected = vec![0xa579317fu32; stride * height];
+                            let mut actual = expected.clone();
+                            let output = Framebuffer::new(1, actual.as_mut_ptr() as usize,
+                                actual.len() * 4, screen).ok().unwrap();
+                            let reference = Framebuffer::new(1, expected.as_mut_ptr() as usize,
+                                expected.len() * 4, screen).ok().unwrap();
+                            draw(&output, x, y, fill, outline, clip);
+                            for (row, samples) in old.iter().enumerate() {
+                                for (column, &(outer, inner)) in samples.iter().enumerate() {
+                                    let px = x + column as i32;
+                                    let py = y + row as i32;
+                                    if outer == 0 || px < clip.x || py < clip.y
+                                        || px >= clip.x.saturating_add(clip.width)
+                                        || py >= clip.y.saturating_add(clip.height) { continue; }
+                                    let ratio = (inner as u32 * 255 / outer as u32).min(255);
+                                    let mut color = 0;
+                                    for shift in [0, 8, 16] {
+                                        let a = (fill >> shift) & 255;
+                                        let b = (outline >> shift) & 255;
+                                        color |= ((a * ratio + b * (255 - ratio) + 127) / 255) << shift;
+                                    }
+                                    reference.blend_pixel(px, py, color, outer);
+                                }
+                            }
+                            assert_eq!(actual, expected);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -17,6 +17,8 @@ struct Calls {
     leaves: BTreeSet<usize>,
     caps: BTreeSet<usize>,
     fail_unmap: Option<usize>,
+    fail_unmap_after: bool,
+    first_unmap_allocations: Option<usize>,
     fail_revoke: Option<usize>,
     fail_free: Option<usize>,
     free_attempts: usize,
@@ -37,10 +39,14 @@ mod arch {
             CALLS.with(|calls| {
                 let mut calls = calls.borrow_mut();
                 calls.events.push(Call::Unmap(va));
-                if calls.fail_unmap == Some(va) {
+                if calls.first_unmap_allocations.is_none() {
+                    calls.first_unmap_allocations=PROTECT_ALLOCATIONS.with(|count|count.get());
+                }
+                if calls.fail_unmap == Some(va) && !calls.fail_unmap_after {
                     return Err(CapabilityError::Fatal);
                 }
                 assert!(calls.leaves.remove(&va));
+                if calls.fail_unmap == Some(va) {return Err(CapabilityError::Fatal);}
                 Ok(())
             })
         }
@@ -175,6 +181,40 @@ fn sealed_exec_unmaps_then_bulk_clears_chunks_before_releasing_ram() {
         a.processes.deferred_physical_allocations_for_pid(1).count(),
         0
     );
+}
+
+#[test]
+fn sealed_exec_starts_unmapping_without_allocating_a_frame_snapshot() {
+    let mut a=Alpha::new();for slot in 0..513 {a.page(slot,1000+slot,if slot%7==0 {0}else{5});}
+    CALLS.with_borrow_mut(|calls|calls.events.reserve(4096));
+    PROTECT_ALLOCATIONS.with(|count|count.set(Some(0)));
+    let result=a.retire();
+    PROTECT_ALLOCATIONS.with(|count|count.set(None));
+    assert_eq!(result,Ok(()));
+    CALLS.with_borrow(|calls|{
+        assert_eq!(calls.first_unmap_allocations,Some(0));
+        let actual:Vec<_>=calls.events.iter().filter_map(|call|if let Call::Unmap(va)=call {Some(*va)}else{None}).collect();
+        let expected:Vec<_>=(0..513).filter(|slot|slot%7!=0).map(|slot|(slot+1)*PAGE_SIZE).collect();
+        assert_eq!(actual,expected);assert_eq!(calls.freed.len(),513);
+    });
+}
+
+#[test]
+fn sealed_exec_unmap_failure_keeps_all_backing_and_stops_before_revoke_or_free() {
+    for after in [false,true] {for failed in [0,1,256,512] {
+        let mut a=Alpha::new();for slot in 0..513 {a.page(slot,1000+slot,3);}
+        let failed_va=(failed+1)*PAGE_SIZE;
+        CALLS.with_borrow_mut(|calls|{calls.fail_unmap=Some(failed_va);calls.fail_unmap_after=after;});
+        assert_eq!(a.retire(),Err(CapabilityError::Fatal));
+        assert!(a.processes.vm_space_mut(1).unwrap().mapping_is_uncertain(failed_va));
+        assert_eq!(a.processes.vm_space_mut(1).unwrap().backed_pages(0,usize::MAX).len(),513);
+        assert_eq!(a.processes.releasable_physical_allocations_for_pid(1).len(),513);
+        CALLS.with_borrow(|calls|{
+            assert_eq!(calls.events.len(),failed+2);assert_eq!(calls.events.last(),Some(&Call::Unmap(failed_va)));
+            assert_eq!(calls.leaves.len(),513-failed-usize::from(after));assert!(calls.freed.is_empty());
+            assert_eq!(calls.caps.len(),129);
+        });
+    }}
 }
 
 #[test]

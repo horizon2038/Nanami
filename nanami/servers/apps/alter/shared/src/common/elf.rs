@@ -98,14 +98,17 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
     let mut i = 0usize;
     while i < phnum {
         let base = phoff + i * phentsize;
-        let p_type = read_u32(image, base)?;
+        let header = image
+            .get(base..base + ELF64_PHDR_SIZE)
+            .ok_or(ElfError::Invalid)?;
+        let p_type = read_u32(header, 0)?;
         if p_type == PT_LOAD {
             let segment = LoadSegment {
-                flags: read_u32(image, base + 4)? as Word,
-                offset: read_u64(image, base + 8)? as Word,
-                virtual_address: read_u64(image, base + 16)? as Word,
-                file_size: read_u64(image, base + 32)? as Word,
-                memory_size: read_u64(image, base + 40)? as Word,
+                flags: read_u32(header, 4)? as Word,
+                offset: read_u64(header, 8)? as Word,
+                virtual_address: read_u64(header, 16)? as Word,
+                file_size: read_u64(header, 32)? as Word,
+                memory_size: read_u64(header, 40)? as Word,
             };
             if segment.memory_size < segment.file_size {
                 return Err(ElfError::Invalid);
@@ -136,8 +139,8 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
                 return Err(ElfError::Invalid);
             }
             has_interpreter = true;
-            interpreter_offset = read_u64(image, base + 8)? as Word;
-            interpreter_size = read_u64(image, base + 32)? as Word;
+            interpreter_offset = read_u64(header, 8)? as Word;
+            interpreter_size = read_u64(header, 32)? as Word;
             if interpreter_size < 2
                 || interpreter_size > 256
                 || interpreter_offset.checked_add(interpreter_size).is_none()
@@ -145,12 +148,12 @@ pub fn parse_elf64_header(image: &[u8]) -> Result<ElfMetadata, ElfError> {
                 return Err(ElfError::Invalid);
             }
         } else if p_type == PT_PHDR {
-            program_header_vaddr = read_u64(image, base + 16)? as Word;
+            program_header_vaddr = read_u64(header, 16)? as Word;
         } else if p_type == PT_TLS {
-            tls_vaddr = read_u64(image, base + 16)? as Word;
-            tls_file_size = read_u64(image, base + 32)? as Word;
-            tls_memory_size = read_u64(image, base + 40)? as Word;
-            tls_align = read_u64(image, base + 48)? as Word;
+            tls_vaddr = read_u64(header, 16)? as Word;
+            tls_file_size = read_u64(header, 32)? as Word;
+            tls_memory_size = read_u64(header, 40)? as Word;
+            tls_align = read_u64(header, 48)? as Word;
         }
         i += 1;
     }

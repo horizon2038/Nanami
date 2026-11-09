@@ -28,7 +28,7 @@ pub fn prepare_in_root(
     executable: &LoadedElfImage,
     root: &[u8],
 ) -> Result<Option<Interpreter>, LoadError> {
-    let meta = executable.metadata;
+    let meta = &executable.metadata;
     if !meta.has_interpreter {
         return Ok(None);
     }
@@ -137,6 +137,19 @@ pub fn prepare_in_root(
 }
 
 pub fn install(pid: Word, interpreter: &Interpreter) -> Result<(), LoadError> {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(interpreter.image.address as *const u8, interpreter.image.size as usize)
+    };
+    if let Some((offset, copied)) = linear_file_prefix(
+        bytes, &interpreter.image.metadata, interpreter.base - interpreter.load_bias, interpreter.size,
+    ) {
+        // One constructor supplies the same zeroed span and ordered file bytes.
+        // On failure the caller discards this image; never retry a partial map.
+        return nanami_runtime::request_process_map_initialized_at(
+            pid, interpreter.base, interpreter.size,
+            if copied == 0 { 0 } else { interpreter.image.address + offset }, copied,
+        ).map_err(|_| LoadError::Io);
+    }
     let (base, size) =
         nanami_runtime::request_process_map_anonymous_at(pid, interpreter.base, interpreter.size)
             .map_err(|_| LoadError::Io)?;
@@ -161,6 +174,82 @@ pub fn install(pid: Word, interpreter: &Interpreter) -> Result<(), LoadError> {
         }
     }
     Ok(())
+}
+
+/// A single file prefix is equivalent only when every LOAD uses one linear
+/// translation and every byte outside its file spans is already zero. Keep
+/// nonzero padding and reordered/overlapping spans on the ordered write path.
+fn linear_file_prefix(
+    image: &[u8], metadata: &ElfMetadata, low: Word, size: Word,
+) -> Option<(Word, Word)> {
+    let mut source_offset = None;
+    let mut covered = 0;
+    for segment in metadata.segments.iter().take(metadata.load_segment_count) {
+        if segment.file_size == 0 { continue; }
+        let start = segment.virtual_address.checked_sub(low)?;
+        let end = start.checked_add(segment.file_size)?;
+        if start < covered || end > size { return None; }
+        let offset = segment.offset.checked_sub(start)?;
+        if source_offset.is_some_and(|previous| previous != offset) { return None; }
+        source_offset = Some(offset);
+        let gap_start = offset.checked_add(covered)? as usize;
+        let gap_end = offset.checked_add(start)? as usize;
+        let file_end = offset.checked_add(end)? as usize;
+        // Bounds are checked before reading even a zero-length gap.
+        if file_end > image.len() || !zero_filled(image.get(gap_start..gap_end)?) {
+            return None;
+        }
+        covered = end;
+    }
+    Some((source_offset.unwrap_or(0), covered))
+}
+
+// Only owned, initialized image bytes reach this check. Slice chunks keep all
+// word loads inside the gap, including unaligned starts and a short tail.
+fn zero_filled(bytes: &[u8]) -> bool {
+    let mut blocks = bytes.chunks_exact(32);
+    for block in &mut blocks {
+        let words = u64::from_ne_bytes(block[0..8].try_into().unwrap())
+            | u64::from_ne_bytes(block[8..16].try_into().unwrap())
+            | u64::from_ne_bytes(block[16..24].try_into().unwrap())
+            | u64::from_ne_bytes(block[24..32].try_into().unwrap());
+        if words != 0 {
+            return false;
+        }
+    }
+    let mut words = blocks.remainder().chunks_exact(8);
+    for word in &mut words {
+        if u64::from_ne_bytes(word.try_into().unwrap()) != 0 {
+            return false;
+        }
+    }
+    words.remainder().iter().all(|byte| *byte == 0)
+}
+
+#[cfg(test)]
+mod zero_tests {
+    extern crate alloc;
+    use self::alloc::vec;
+
+    #[test]
+    fn word_zero_scan_matches_bytes_at_all_tail_and_poison_positions() {
+        for offset in 0..32 {
+            for len in [0, 1, 7, 8, 9, 15, 16, 23, 24, 31, 32, 33, 63, 64, 65, 127, 128, 129, 4095, 4096] {
+                let mut storage = vec![0xa5; offset + len + 32];
+                storage[offset..offset + len].fill(0);
+                let check = |storage: &[u8]| {
+                    let input = &storage[offset..offset + len];
+                    assert_eq!(super::zero_filled(input), input.iter().all(|byte| *byte == 0), "offset={offset} len={len}");
+                };
+                check(&storage);
+                for index in 0..len {
+                    storage[offset + index] = 1 << (index % 8);
+                    check(&storage);
+                    storage[offset + index] = 0;
+                }
+            }
+        }
+    }
 }
 
 pub fn track(

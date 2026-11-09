@@ -1,11 +1,33 @@
 //! Production clone3 decoding / prctl; only guest-memory copying and fork are mocked.
 #![allow(dead_code)]
+#[cfg(feature = "syscall-scope")]
+extern crate alloc;
+#[cfg(feature = "syscall-scope")]
+extern crate self as nanami_runtime;
+#[cfg(feature = "syscall-scope")]
+pub use std::println;
+#[cfg(feature = "syscall-scope")]
+mod diagnostics {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TICKS: AtomicU64 = AtomicU64::new(100);
+    pub fn local_stamp() -> Option<u64> { Some(TICKS.fetch_add(10, Ordering::Relaxed)) }
+}
+#[cfg(feature = "syscall-scope")]
+#[path = "../../nanami/servers/apps/alter/shared/src/common/syscall_scope.rs"]
+pub(crate) mod syscall_scope;
+#[cfg(feature = "syscall-scope")]
+#[path = "../../nanami/servers/apps/alter/shared/src/common/scope_controller.rs"]
+pub(crate) mod scope_controller;
+#[cfg(feature = "syscall-scope")]
+mod common { pub(crate) use crate::{scope_controller, syscall_scope}; }
 type Word = usize;
 const EINVAL: i32 = 22;
 const EFAULT: i32 = 14;
 const ESRCH: i32 = 3;
 const ENOSYS: i32 = 38;
 const EOPNOTSUPP: i32 = 95;
+const EPERM: i32 = 1;
+const ENOMEM: i32 = 12;
 const LINUX_PAGE_SIZE: usize = 4096;
 const LINUX_PROT_WRITE: usize = 2;
 const SYS_CLONE: usize = 56;
@@ -20,6 +42,8 @@ struct Process {
     no_new_privs: bool,
 }
 struct Runtime {
+    #[cfg(feature = "syscall-scope")]
+    syscall_scope: scope_controller::Controller,
     process: Process,
     posix_shm: usize,
     scratch: Box<[u8; 4096]>,
@@ -29,6 +53,8 @@ impl Runtime {
     fn new() -> Self {
         let mut scratch = Box::new([0; 4096]);
         Self {
+            #[cfg(feature = "syscall-scope")]
+            syscall_scope: scope_controller::Controller::new(),
             process: Process {
                 comm: [0; 16],
                 no_new_privs: false,
@@ -84,10 +110,39 @@ fn sys_fork(runtime: &mut Runtime, _: usize, context: LinuxSyscallContext) -> Re
     runtime.captured = Some(context);
     Ok(77)
 }
+#[cfg(feature = "syscall-scope")]
+fn copyout_owned(runtime: &Runtime, pid: usize, destination: usize, source: &[u8]) -> Result<(), i32> {
+    copyout_from(runtime, pid, destination, source.as_ptr() as usize, source.len())
+}
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/clone3.rs"]
 mod clone3;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/prctl.rs"]
 mod prctl;
+
+#[cfg(feature = "syscall-scope")]
+#[test]
+fn scope_controls_follow_successful_checked_name_copy_and_owner_lookup() {
+    let mut runtime = Runtime::new();
+    assert_eq!(prctl::prctl(&mut runtime, 1, [15, 1, 0, 0, 0, 0]), Err(EFAULT));
+    assert!(runtime.syscall_scope.sample(|| panic!("unarmed clock")).is_none());
+    let count = b"nscope.count\0";
+    assert_eq!(prctl::prctl(&mut runtime, 2, [15, count.as_ptr() as usize, 0, 0, 0, 0]), Err(ESRCH));
+    assert!(runtime.syscall_scope.sample(|| panic!("unarmed clock")).is_none());
+    assert_eq!(prctl::prctl(&mut runtime, 1, [15, count.as_ptr() as usize, 0, 0, 0, 0]), Ok(0));
+    let sample = runtime.syscall_scope.sample(|| panic!("count clock"));
+    runtime.syscall_scope.record(sample, 39, || panic!("count clock")).unwrap();
+    let stop = b"nscope.stop\0";
+    assert_eq!(prctl::prctl(&mut runtime, 1, [15, stop.as_ptr() as usize, 0, 0, 0, 0]), Ok(0));
+    assert_eq!(runtime.syscall_scope.totals().unwrap()[39].calls, 1);
+    assert!(runtime.syscall_scope.sample(|| panic!("closed clock")).is_none());
+    let mut packet = vec![0u8; scope_controller::REPORT_BYTES];
+    assert_eq!(prctl::prctl(&mut runtime, 1, [0x4e53_0001, 1, packet.len(), 0, 0, 0]), Err(EFAULT));
+    assert_eq!(prctl::prctl(&mut runtime, 1, [0x4e53_0001, packet.as_mut_ptr() as usize, 16, 0, 0, 0]), Err(EINVAL));
+    assert_eq!(prctl::prctl(&mut runtime, 1, [0x4e53_0001, packet.as_mut_ptr() as usize, packet.len(), 0, 0, 0]), Ok(packet.len()));
+    assert_eq!(u64::from_le_bytes(packet[..8].try_into().unwrap()), scope_controller::REPORT_MAGIC);
+    assert_eq!(prctl::prctl(&mut runtime, 1, [0x4e53_0001, packet.as_mut_ptr() as usize, packet.len(), 1, 0, 0]), Err(EINVAL));
+    assert_eq!(prctl::prctl(&mut runtime, 1, [0x4e53_0001, packet.as_mut_ptr() as usize, packet.len(), 0, 0, usize::MAX]), Ok(packet.len()));
+}
 
 fn clone(runtime: &mut Runtime, words: &[u64; 12], bytes: usize) -> Result<usize, i32> {
     clone3::clone3(

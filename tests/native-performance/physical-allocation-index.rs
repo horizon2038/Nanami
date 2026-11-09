@@ -46,6 +46,113 @@ mod production {
         use super::*;
         const BASE: usize = 4096;
 
+        fn status(result: Result<(), PhysicalAllocError>) -> u8 {
+            match result {
+                Ok(()) => 0,
+                Err(PhysicalAllocError::InvalidArgument) => 1,
+                Err(PhysicalAllocError::PermissionDenied) => 2,
+                Err(PhysicalAllocError::OutOfMemory) => 3,
+            }
+        }
+
+        // Original complete preflight followed by a fresh first search.
+        fn original_allocate(pool: &mut BuddyPool, base: usize, pages: usize)
+            -> Result<(), PhysicalAllocError>
+        {
+            if pages == 0 { return Err(PhysicalAllocError::InvalidArgument); }
+            let end = base.checked_add(pages).ok_or(PhysicalAllocError::InvalidArgument)?;
+            let mut current = base;
+            while current < end {
+                let Some((order, _, block)) = pool.find_containing_block(current) else {
+                    return Err(PhysicalAllocError::OutOfMemory);
+                };
+                let count = block_pages(order).map_err(|_| PhysicalAllocError::OutOfMemory)?;
+                let limit = block.checked_add(count).ok_or(PhysicalAllocError::OutOfMemory)?;
+                current = limit.min(end);
+            }
+            current = base;
+            while current < end {
+                let (order, index, block) = pool.find_containing_block(current)
+                    .ok_or(PhysicalAllocError::OutOfMemory)?;
+                let limit = block.checked_add(block_pages(order)?)
+                    .ok_or(PhysicalAllocError::InvalidArgument)?;
+                pool.free_lists[order].swap_remove(index);
+                if block < current { pool.add_range(block, current - block)?; }
+                let allocated_end = limit.min(end);
+                if allocated_end < limit { pool.add_range(allocated_end, limit - allocated_end)?; }
+                current = allocated_end;
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn buddy_range_preflight_and_mutation_match_original_exact_lists() {
+            let pools = [
+                vec![vec![100, 101], vec![102], vec![104]],
+                vec![vec![0, 1, 1], vec![2], vec![4]],
+                vec![vec![], vec![], vec![8, 0]],
+                vec![vec![usize::MAX], vec![usize::MAX - 1]],
+            ];
+            let mut cases = 0;
+            for lists in pools {
+                for base in [0, 1, 3, 8, 99, 100, 101, 102, 105, usize::MAX - 1] {
+                    for pages in [0, 1, 2, 3, 8, 16, usize::MAX] {
+                        let mut actual = BuddyPool { free_lists: lists.clone() };
+                        let mut expected = BuddyPool { free_lists: lists.clone() };
+                        let before = actual.free_lists.clone();
+                        let a = status(actual.allocate_range(base, pages));
+                        let b = status(original_allocate(&mut expected, base, pages));
+                        assert_eq!(a, b, "base={base} pages={pages}");
+                        assert_eq!(actual.free_lists, expected.free_lists);
+                        if a != 0 { assert_eq!(actual.free_lists, before); }
+                        cases += 1;
+                    }
+                }
+            }
+            println!("BUDDY-VALIDATED exact-list-cases={cases}");
+            let mut actual = BuddyPool::new();
+            actual.add_range(BASE, 512).unwrap_or_else(|_| panic!("test region"));
+            let mut expected = BuddyPool { free_lists: actual.free_lists.clone() };
+            let mut live = Vec::new();
+            let mut seed = 0x9a72_13f5u32;
+            for step in 0..10_000 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                if seed % 3 == 0 && !live.is_empty() {
+                    let (base, pages) = live.swap_remove(seed as usize % live.len());
+                    assert_eq!(status(actual.add_range(base, pages)),
+                        status(expected.add_range(base, pages)));
+                } else {
+                    let base = BASE + (seed as usize >> 4) % 512;
+                    let pages = 1 + (seed as usize >> 15) % 32;
+                    let result = status(actual.allocate_range(base, pages));
+                    assert_eq!(result, status(original_allocate(&mut expected, base, pages)));
+                    if result == 0 { live.push((base, pages)); }
+                }
+                assert_eq!(actual.free_lists, expected.free_lists, "step={step}");
+            }
+            println!("BUDDY-VALIDATED churn-steps=10000");
+        }
+
+        #[test]
+        fn buddy_range_search_work_keeps_full_preflight_before_any_mutation() {
+            let mut counts = Vec::new();
+            for (base, pages) in [(105, 1), (100, 8), (100, 9)] {
+                let mut pool = BuddyPool { free_lists: vec![vec![100, 101], vec![102], vec![104]] };
+                let before = pool.free_lists.clone();
+                take_containing_searches();
+                let result = status(pool.allocate_range(base, pages));
+                counts.push(take_containing_searches());
+                if pages == 9 {
+                    assert_eq!(result, 3);
+                    assert_eq!(pool.free_lists, before);
+                } else {
+                    assert_eq!(result, 0);
+                }
+            }
+            println!("BUDDY-VALIDATED single/multi/hole-searches={counts:?}");
+            assert_eq!(counts, [1, 7, 5]);
+        }
+
         fn allocator(pages: usize) -> PhysicalAllocator {
             let mut allocator = PhysicalAllocator::new();
             assert!(allocator

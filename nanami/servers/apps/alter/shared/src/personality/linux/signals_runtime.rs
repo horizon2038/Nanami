@@ -30,20 +30,20 @@ pub fn queue_group(runtime: &mut Runtime, pid: Word, info: Info) -> Result<(), i
         .map(|process| process.pid)
         .ok_or(ESRCH)?;
     if signals::stop_signal(info.signal()) || info.signal() == signals::SIGCONT {
-        let targets: alloc::vec::Vec<_> = runtime
-            .managed
-            .iter()
-            .filter(|process| process.pid != 0 && !process.exited && process.tgid == group)
-            .map(|process| process.pid)
-            .collect();
         // Default job-control actions affect every task, not just one recipient.
         if runtime
             .managed_process(target)
             .and_then(|process| process.signals())
             .is_none_or(|signals| signals.action(info.signal()).handler == signals::SIG_DFL)
         {
-            for tid in targets {
-                queue_to(runtime, tid, info, false)?;
+            // queue_to only changes signal state/notification flags: it cannot
+            // add/remove tasks or change PID, group, or exited membership.
+            for index in 0..runtime.managed.len() {
+                let process = &runtime.managed[index];
+                if process.pid != 0 && !process.exited && process.tgid == group {
+                    let tid = process.pid;
+                    queue_to(runtime, tid, info, false)?;
+                }
             }
             return Ok(());
         }
@@ -419,23 +419,31 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
     }
     let mut continued = false;
     for index in 0..runtime.managed.len() {
-        let process = runtime.managed[index];
+        let process = &runtime.managed[index];
         if process.pid == 0 || process.exited {
             continue;
         }
         let Some(state) = process.signals() else {
             continue;
         };
+        // Preserve the pre-notification context without copying the process's
+        // file, mapping and readiness tables into every delivery iteration.
+        let (pid, pcb, prepared, waiting) = (
+            process.pid,
+            process.pcb,
+            process.rootfs.prepared,
+            process.parked_context(),
+        );
         if let Some(status) = state.child_event.filter(|_| state.child_notify) {
             continued |= status == 0xffff;
             notify_child(
                 runtime,
-                process.pid,
+                pid,
                 if status == 0xffff { 6 } else { 5 },
                 (status >> 8) as Word,
             );
         }
-        if process.pid == excluded {
+        if pid == excluded {
             continue;
         }
         let state = runtime.managed[index].signals().unwrap();
@@ -444,15 +452,14 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
         } else {
             None
         };
-        let waiting = process.parked_context();
         let pending_mask = state.pending_mask();
         let kill = pending_mask & signals::bit(signals::SIGKILL) != 0;
         if kill {
-            terminate(runtime, process.pid, 9);
+            terminate(runtime, pid, 9);
             continue;
         }
         // A created OCI process must not start merely because it has a signal.
-        if process.rootfs.prepared {
+        if prepared {
             continue;
         }
         let eligible = pending_mask & (!state.blocked | state.wait_mask.unwrap_or(0));
@@ -460,35 +467,35 @@ pub fn pump(runtime: &mut Runtime, excluded: Word) {
             continue;
         }
         let suspended = saved.is_none() && waiting.is_none();
-        if suspended && a9n_abi::arch::process_control_block::suspend(process.pcb).is_err() {
+        if suspended && a9n_abi::arch::process_control_block::suspend(pcb).is_err() {
             // Do not inspect a context without the remote CPU's stop ACK.
             // Leave its pending signals intact so a later pump can retry.
             continue;
         }
         let mut registers = match saved
             .map(Ok)
-            .unwrap_or_else(|| read_hardware_context(process.pcb))
+            .unwrap_or_else(|| read_hardware_context(pcb))
         {
             Ok(registers) => registers,
             Err(()) => {
-                terminate(runtime, process.pid, 11);
+                terminate(runtime, pid, 11);
                 continue;
             }
         };
         let interrupted = if saved.is_some() { None } else { waiting };
-        let delivery = deliver(runtime, process.pid, &mut registers, interrupted);
+        let delivery = deliver(runtime, pid, &mut registers, interrupted);
         match delivery {
-            Delivery::Terminate(signal) => terminate(runtime, process.pid, signal),
+            Delivery::Terminate(signal) => terminate(runtime, pid, signal),
             Delivery::Stopped => {}
             Delivery::Handler | Delivery::Unchanged
                 if suspended || saved.is_some() || matches!(delivery, Delivery::Handler) =>
             {
                 runtime.managed[index].signals_mut().stopped_context = None;
                 let changed = saved.is_some() || matches!(delivery, Delivery::Handler);
-                if (changed && write_hardware_context(process.pcb, &registers).is_err())
-                    || a9n_abi::arch::process_control_block::resume(process.pcb).is_err()
+                if (changed && write_hardware_context(pcb, &registers).is_err())
+                    || a9n_abi::arch::process_control_block::resume(pcb).is_err()
                 {
-                    terminate(runtime, process.pid, 11);
+                    terminate(runtime, pid, 11);
                 }
             }
             _ => {}

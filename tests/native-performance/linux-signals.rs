@@ -26,6 +26,175 @@ mod x86;
 use signals::*;
 
 #[test]
+fn late_signal_membership_preserves_local_group_fifo_and_last_duplicate() {
+    let mut counts = Vec::new();
+    for group in [false, true] {
+        for copies in [1, 2] {
+            let mut state = Signals::new();
+            for sender in 0..128-copies {
+                let info = Info::new(34, -1, sender);
+                assert!(if group { state.enqueue_group(info) } else { state.enqueue(info) });
+            }
+            for sender in 0..copies {
+                let info = Info::new(35, -1, 1000 + sender);
+                assert!(if group { state.enqueue_group(info) } else { state.enqueue(info) });
+            }
+            take_signal_reads();
+            let selected = state.take_matching_record(bit(35));
+            counts.push(take_signal_reads());
+            assert_eq!(selected, Some((Info::new(35, -1, 1000), group)));
+            assert_eq!(state.pending_mask(), bit(34) | if copies == 2 { bit(35) } else { 0 });
+            if copies == 2 {
+                assert_eq!(state.take_matching_record(bit(35)), Some((Info::new(35, -1, 1001), group)));
+            }
+            assert_eq!(state.take_matching(bit(35)), None);
+            assert_eq!(state.pending_mask(), bit(34));
+            assert_eq!(state.take_matching(bit(34)), Some(Info::new(34, -1, 0)));
+        }
+    }
+    println!("SIGNAL-TAIL local1/local2/group1/group2 reads={counts:?}");
+}
+
+#[test]
+fn draining_realtime_head_keeps_remaining_records_in_place() {
+    let mut state = Signals::new();
+    for sender in 0..128 {
+        assert!(state.enqueue(Info::new(34, -1, sender)));
+    }
+    let mut displaced = 0;
+    for sender in 0..128 {
+        let before = state.pending.record_addresses();
+        assert_eq!(state.take_matching(bit(34)), Some(Info::new(34, -1, sender)));
+        let after = state.pending.record_addresses();
+        for (info, address) in after {
+            let original = before.iter().find(|(other, _)| *other == info).unwrap().1;
+            if address != original {
+                displaced += core::mem::size_of::<Info>();
+            }
+        }
+    }
+    assert_eq!(state.pending_mask(), 0);
+    println!("SIGNAL-PENDING-DEQUE records=128 displaced-retained-record-bytes={displaced}");
+    assert_eq!(displaced, 0);
+}
+
+#[test]
+fn pending_mask_and_realtime_head_selection_avoid_full_record_scans() {
+    let mut state = Signals::new();
+    for sender in 0..128 {
+        assert!(state.enqueue(Info::new(34, -1, sender)));
+    }
+    take_signal_reads();
+    assert_eq!(state.pending_mask(), bit(34));
+    let selected = state.take_matching(bit(34));
+    let reads = take_signal_reads();
+    assert_eq!(selected, Some(Info::new(34, -1, 0)));
+    assert_eq!(state.pending.len(), 127);
+    assert_eq!(state.pending_mask(), bit(34));
+    println!("SIGNAL-PENDING-MASK records=128 mask-and-take-signal-reads={reads}");
+    assert_eq!(reads, 2);
+}
+
+#[test]
+fn pending_membership_matches_record_oracle_across_shared_thread_queues() {
+    fn discard(queue: &mut Vec<Info>, signal: usize) {
+        queue.retain(|info| info.signal() != signal);
+    }
+    fn stops(queue: &mut Vec<Info>) {
+        queue.retain(|info| !stop_signal(info.signal()));
+    }
+    fn enqueue(queue: &mut Vec<Info>, info: Info) -> bool {
+        if info.signal() < 32 && queue.iter().any(|other| other.signal() == info.signal()) {
+            return true;
+        }
+        if info.signal() >= 32 && queue.len() >= 128 {
+            return false;
+        }
+        queue.push(info);
+        true
+    }
+    fn candidate(queue: &[Info], mask: u64) -> Option<(usize, usize)> {
+        queue.iter().enumerate()
+            .filter(|(_, info)| mask & bit(info.signal()) != 0)
+            .min_by_key(|(_, info)| info.signal())
+            .map(|(index, info)| (index, info.signal()))
+    }
+    let leader = Signals::new();
+    let thread = leader.clone_task(true, true);
+    let mut states = [leader, thread];
+    let mut local = [Vec::new(), Vec::new()];
+    let mut group = Vec::new();
+    let mut taken = [None; 2];
+    let numbers = [1, 9, 18, 19, 20, 21, 22, 31, 32, 34, 35, 64];
+    let mut random = 0x9a31_4527u64;
+    for step in 0..20_000 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let owner = (random >> 17) as usize & 1;
+        let signal = numbers[(random >> 32) as usize % numbers.len()];
+        let info = Info::new(signal, -1, step);
+        match (random >> 24) % 8 {
+            0 | 1 => {
+                if signal == SIGCONT {
+                    stops(&mut local[owner]);
+                    stops(&mut group);
+                } else if stop_signal(signal) {
+                    discard(&mut local[owner], SIGCONT);
+                    discard(&mut group, SIGCONT);
+                }
+                assert_eq!(states[owner].enqueue(info), enqueue(&mut local[owner], info));
+            }
+            2 => assert_eq!(states[owner].enqueue_group(info), enqueue(&mut group, info)),
+            3 => {
+                states[owner].discard(signal);
+                discard(&mut local[owner], signal);
+                discard(&mut group, signal);
+            }
+            4 => {
+                states[owner].discard_stops();
+                stops(&mut local[owner]);
+                stops(&mut group);
+            }
+            5 => {
+                let mask = random.rotate_left(11);
+                let l = candidate(&local[owner], mask);
+                let g = candidate(&group, mask);
+                let expected = match (l, g) {
+                    (Some((index, s)), other) if other.is_none_or(|(_, gs)| s <= gs) =>
+                        Some((local[owner].remove(index), false)),
+                    (_, Some((index, _))) => Some((group.remove(index), true)),
+                    _ => None,
+                };
+                assert_eq!(states[owner].take_matching_record(mask), expected);
+                taken[owner] = expected;
+            }
+            6 => {
+                if let Some((info, shared)) = taken[owner].take() {
+                    states[owner].restore_pending(info, shared);
+                    if shared {
+                        group.insert(0, info);
+                    } else {
+                        local[owner].insert(0, info);
+                    }
+                }
+            }
+            _ => {
+                let child = states[owner].fork();
+                assert_eq!(child.pending_mask(), 0);
+                assert!(!child.has_pending());
+                states[owner].exec();
+            }
+        }
+        for owner in 0..2 {
+            let expected = local[owner].iter().chain(group.iter())
+                .fold(0, |mask, info| mask | bit(info.signal()));
+            assert_eq!(states[owner].pending_mask(), expected, "step {step}");
+            assert_eq!(states[owner].pending.len(), local[owner].len());
+            assert_eq!(states[owner].has_pending(), !local[owner].is_empty() || !group.is_empty());
+        }
+    }
+}
+
+#[test]
 fn masks_cannot_block_kill_or_stop() {
     assert_eq!(blockable(u64::MAX) & (bit(SIGKILL) | bit(SIGSTOP)), 0);
     assert_ne!(blockable(u64::MAX) & bit(SIGCONT), 0);

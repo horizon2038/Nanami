@@ -542,6 +542,21 @@ fn attempt(
     pid: Word,
     context: LinuxSyscallContext,
 ) -> Option<Result<Word, i32>> {
+    // This handler is tried before the generic Linux syscall dispatcher, and
+    // again when a poll/select wait completes. Most of those calls have no
+    // socket FD in args[0]. Reject them before walking the process/FD tables;
+    // classification of actual socket operations still uses the live FD.
+    if option_env!("NANAMI_UNIX_DISPATCH_FILTER") != Some("0")
+        && !matches!(
+            context.number,
+            SYS_BIND | SYS_LISTEN | SYS_CONNECT | SYS_ACCEPT | SYS_ACCEPT4 | SYS_SHUTDOWN
+                | SYS_GETSOCKNAME | SYS_GETPEERNAME | SYS_SETSOCKOPT | SYS_GETSOCKOPT
+                | SYS_READ | SYS_WRITE | SYS_READV | SYS_WRITEV | SYS_SENDTO | SYS_RECVFROM
+                | SYS_SENDMSG | SYS_RECVMSG
+        )
+    {
+        return None;
+    }
     let file = runtime.linux_file(pid, context.args[0])?;
     if file.kind != LinuxFileKind::SocketUnix {
         return None;
@@ -678,7 +693,8 @@ pub(super) fn collect(runtime: &mut Runtime) {
     // Queued descriptions in unreachable endpoints are not GC roots. Exclude
     // them during the sweep so cleanup needs no allocation or recursion.
     runtime.unix_sockets.set_sweeping(true);
-    while let Some(socket) = runtime.unix_sockets.take_unmarked() {
+    let mut cursor = 0;
+    while let Some(socket) = runtime.unix_sockets.take_unmarked_from(&mut cursor) {
         super::epoll::forget_closed(runtime, 0, file(socket.id, 0));
         if let Some(pin) = socket.inode_pin {
             let _ = posix::posix_close(runtime.posix_port, pin);

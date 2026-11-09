@@ -27,22 +27,17 @@ pub(super) fn sys_pipe_read(
             Err(EAGAIN)
         };
     }
-    let mut done = 0usize;
-    let mut cursor = pipe.read;
     let count = max.min(pipe.len);
-    while done < count {
-        unsafe {
-            ::core::ptr::write((shm + done as Word) as *mut u8, pipe.read_byte(cursor));
-        }
-        cursor = (cursor + 1) % LINUX_PIPE_BYTES;
-        done += 1;
-    }
-    write_target_memory(runtime, pid, user_buffer, done as Word)?;
+    let target = unsafe { core::slice::from_raw_parts_mut(shm as *mut u8, count) };
+    let cursor = pipe.copy_out(target);
+    write_target_memory(runtime, pid, user_buffer, count as Word)?;
     let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
     pipe.read = cursor;
-    pipe.len -= done;
-    runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
-    Ok(done as Word)
+    pipe.len -= count;
+    // Atomic writes can remain blocked even while some space is available.
+    // Every consuming read must notify writers, but cannot help readers.
+    runtime.readiness_changes |= crate::state::readiness::READY_PIPE_WRITE;
+    Ok(count as Word)
 }
 
 pub(super) fn sys_pipe_write(
@@ -75,16 +70,13 @@ pub(super) fn sys_pipe_write(
     if pipe.readers == 0 {
         return Err(EPIPE);
     }
-    let mut done = 0usize;
-    while done < accepted {
-        let byte = unsafe { ::core::ptr::read((shm + done as Word) as *const u8) };
-        pipe.write_byte(pipe.write, byte);
-        pipe.write = (pipe.write + 1) % LINUX_PIPE_BYTES;
-        pipe.len += 1;
-        done += 1;
+    let source = unsafe { core::slice::from_raw_parts(shm as *const u8, accepted) };
+    let became_readable = pipe.len == 0;
+    pipe.copy_in(source);
+    if became_readable {
+        runtime.readiness_changes |= crate::state::readiness::READY_PIPE_READ;
     }
-    runtime.readiness_changes |= crate::state::readiness::READY_PIPE;
-    Ok(done as Word)
+    Ok(accepted as Word)
 }
 
 pub(super) fn sys_pipe(

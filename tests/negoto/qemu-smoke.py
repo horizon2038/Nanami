@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Exercise Negoto's real management service and unmodified BusyBox inside QEMU."""
 import argparse
+import hashlib
+import json
 import os
 import pathlib
 import re
@@ -9,11 +11,30 @@ import shutil
 import subprocess
 import tempfile
 import time
+import host_stats
+import scope_report
+import scope_disk
+import host_affinity
+import files_paint
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--image", type=pathlib.Path, required=True)
 parser.add_argument("--smp", type=int, choices=[1, 4], default=4)
+parser.add_argument("--accel", choices=["tcg", "kvm", "hvf"], default="tcg")
+parser.add_argument("--cpu", help="override CPU model (max for TCG, host for KVM/HVF)")
+parser.add_argument("--host-process-stats", action="store_true",
+                    help="diagnostic Linux QEMU CPU-accounting snapshots around app launch")
+parser.add_argument("--host-cpus",
+                    help="Linux KVM host CPU list for taskset, e.g. 0,2,4,6,8 (record as a distinct baseline)")
+parser.add_argument("--host-vcpu-cpus", help="diagnostic per-vCPU CPU list, e.g. 0,2,4,6; requires --host-io-cpu")
+parser.add_argument("--host-io-cpu", type=int, help="diagnostic CPU for QEMU main/auxiliary threads")
 parser.add_argument("--timeout", type=float, default=180)
+parser.add_argument("--host-poll-ms", type=int, default=200,
+                    help="host serial observation interval (1..1000 ms); native relay remains 100 ms")
+parser.add_argument("--scope-disk-readout", action="store_true",
+                    help="retain private qcow2 overlay and extract fixture packets after QEMU exits (diagnostic only)")
+parser.add_argument("--app-syscall-scope", choices=["baseline", "off", "count", "time"],
+                    help="diagnostic aw-scope owner from before observer READY to first ping, with post-VM packet extraction")
 parser.add_argument("--normal-devices", action="store_true",
                     help="match xtask's default PS/2 and virtio-net user network")
 parser.add_argument("--net", choices=["none", "user"],
@@ -24,7 +45,11 @@ parser.add_argument("--app-launch-ready", choices=["viewable", "ping"], default=
                     help="launch completion gate: first window, or an advertised EWMH event-loop response")
 parser.add_argument("--app-launch-timeline", action="store_true",
                     help="diagnostic Files screenshots and real keyboard challenge after ping; not a painted/readiness assertion")
+parser.add_argument("--app-launch-rtt", action="store_true",
+                    help="require post-ping raw/Xlib128 results (image built with --with-launch-rtt)")
 profile = parser.add_mutually_exclusive_group()
+profile.add_argument("--syscall-scope-fixture", choices=["active", "off"],
+                     help="functional native scope/standard-prctl control; requires test bundle")
 profile.add_argument("--tinycore", action="store_true", help="test the Tiny Core Alter boot profile")
 profile.add_argument("--tinycore-desktop", action="store_true", help="test the real Xfbdev/FLWM desktop")
 profile.add_argument("--tinycore-file-mapping", action="store_true",
@@ -39,6 +64,45 @@ profile.add_argument("--ram-sharing-reuse", action="store_true", help="check pri
 profile.add_argument("--ram-alias-retirement", action="store_true", help="check RAM reclamation when its final owner holds two aliases")
 profile.add_argument("--private-readonly-fork", action="store_true", help="verify real RO-fork RAM savings and privileged-write isolation")
 args = parser.parse_args()
+if args.host_vcpu_cpus is not None or args.host_io_cpu is not None:
+    if (args.accel != "kvm" or not hasattr(os, "sched_setaffinity") or not args.tinycore_app_launch_perf
+            or args.host_cpus is not None or args.host_vcpu_cpus is None or args.host_io_cpu is None):
+        parser.error("explicit CPU placement requires Linux KVM app-launch, both CPU options, and excludes --host-cpus")
+    try:
+        args.host_vcpu_cpus = [int(value) for value in args.host_vcpu_cpus.split(",")]
+    except ValueError:
+        parser.error("--host-vcpu-cpus requires comma-separated CPU numbers")
+    selected = args.host_vcpu_cpus + [args.host_io_cpu]
+    if (len(args.host_vcpu_cpus) != args.smp or len(set(selected)) != len(selected)
+            or not set(selected).issubset(os.sched_getaffinity(0)) or shutil.which("taskset") is None):
+        parser.error("explicit CPU placement requires one distinct available CPU per vCPU plus I/O, and taskset")
+if args.scope_disk_readout and not args.syscall_scope_fixture:
+    parser.error("--scope-disk-readout requires --syscall-scope-fixture")
+if args.app_syscall_scope:
+    if not args.tinycore_app_launch_perf or args.app_launch_ready != "ping" or args.app_launch_timeline:
+        parser.error("--app-syscall-scope requires app-launch perf/ping and excludes timeline input")
+if not 1 <= args.host_poll_ms <= 1000:
+    parser.error("--host-poll-ms must be between 1 and 1000")
+if args.app_launch_rtt and (not args.tinycore_app_launch_perf or args.app_launch_ready != "ping"):
+    parser.error("--app-launch-rtt requires --tinycore-app-launch-perf and --app-launch-ready ping")
+if args.app_launch_rtt and args.app_launch_timeline:
+    parser.error("--app-launch-rtt cannot overlap timeline screenshots and keyboard input")
+if args.host_process_stats and not args.tinycore_app_launch_perf:
+    parser.error("--host-process-stats requires --tinycore-app-launch-perf")
+if args.host_cpus is not None:
+    if args.accel != "kvm" or not hasattr(os, "sched_getaffinity"):
+        parser.error("--host-cpus requires Linux KVM")
+    try:
+        host_cpus = [int(value) for value in args.host_cpus.split(",")]
+    except ValueError:
+        parser.error("--host-cpus requires comma-separated CPU numbers")
+    if len(host_cpus) != len(set(host_cpus)) or not set(host_cpus).issubset(os.sched_getaffinity(0)):
+        parser.error("--host-cpus must be distinct available CPUs")
+    if shutil.which("taskset") is None:
+        parser.error("--host-cpus requires taskset")
+    args.host_cpus = ",".join(str(cpu) for cpu in host_cpus)
+if args.tcg_threads is not None and args.accel != "tcg":
+    parser.error("--tcg-threads requires --accel tcg")
 if args.app_launch_ready != "viewable" and not args.tinycore_app_launch_perf:
     parser.error("--app-launch-ready requires --tinycore-app-launch-perf")
 if args.app_launch_timeline and (args.tinycore_app_launch_perf != "files" or args.app_launch_ready != "ping"):
@@ -51,14 +115,21 @@ firmware = repo / "spencer/a9nloader-rs/tools"
 shutil.copyfile(firmware / "OVMF_VARS.fd", logs / "OVMF_VARS.fd")
 serial = logs / "serial.log"
 print(f"Test logs: {logs}", flush=True)
-command = ["qemu-system-x86_64", "-machine", "hpet=on,i8042=off", "-cpu", "max", "-smp", str(args.smp),
+cpu = args.cpu or ("max" if args.accel == "tcg" else "host")
+disk = f"format=raw,snapshot=on,file={args.image.resolve()}"
+if args.scope_disk_readout or args.app_syscall_scope:
+    overlay = logs / "scope-overlay.qcow2"
+    subprocess.run(["qemu-img", "create", "-f", "qcow2", "-F", "raw", "-b",
+                    str(args.image.resolve()), str(overlay)], check=True, capture_output=True)
+    disk = f"format=qcow2,file={overlay}"
+command = ["qemu-system-x86_64", "-machine", "hpet=on,i8042=off", "-cpu", cpu, "-smp", str(args.smp),
            "-m", "4G", "-display", "none", "-serial", f"file:{serial}", "-monitor", "stdio", "-nic", "none",
            "-fw_cfg", "name=opt/ovmf/X-PciMmio64Mb,string=0", "-device", "qemu-xhci,id=xhci,addr=6,msi=off,msix=off",
            "-device", "usb-kbd,bus=xhci.0,port=1", "-device", "usb-mouse,bus=xhci.0,port=2",
            "-drive", f"if=pflash,format=raw,readonly=on,file={firmware / 'OVMF_CODE.fd'}",
            "-drive", f"if=pflash,format=raw,file={logs / 'OVMF_VARS.fd'}",
            "-device", "ich9-ahci,id=ahci,addr=3",
-           "-drive", f"if=none,id=disk,format=raw,snapshot=on,file={args.image.resolve()}",
+           "-drive", f"if=none,id=disk,{disk}",
            "-device", "ide-hd,drive=disk,bus=ahci.0,bootindex=1", "-no-reboot", "-no-shutdown"]
 if args.normal_devices:
     command[command.index("hpet=on,i8042=off")] = "hpet=on"
@@ -68,8 +139,24 @@ if args.net == "user" or (args.net is None and args.normal_devices):
                          "virtio-net-pci,netdev=net0,addr=5,disable-legacy=off,disable-modern=on"]
 if args.tcg_threads is not None:
     command += ["-accel", f"tcg,thread={args.tcg_threads}"]
+else:
+    command += ["-accel", args.accel]
+if args.host_cpus is not None:
+    command = ["taskset", "--cpu-list", args.host_cpus, *command]
+if args.host_vcpu_cpus is not None:
+    command = ["taskset", "--cpu-list", ",".join(map(str, args.host_vcpu_cpus + [args.host_io_cpu])), *command]
+(logs / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+(logs / "host-manifest.json").write_text(json.dumps(dict(
+    runner_sha256=hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest(),
+    host_stats_sha256=hashlib.sha256(pathlib.Path(host_stats.__file__).read_bytes()).hexdigest(),
+    scope_report_sha256=hashlib.sha256(pathlib.Path(scope_report.__file__).read_bytes()).hexdigest(),
+    scope_disk_sha256=hashlib.sha256(pathlib.Path(scope_disk.__file__).read_bytes()).hexdigest(),
+    host_affinity_sha256=hashlib.sha256(pathlib.Path(host_affinity.__file__).read_bytes()).hexdigest(),
+    kernel_release=os.uname().release if hasattr(os, "uname") else None,
+    machine=os.uname().machine if hasattr(os, "uname") else None), indent=2) + "\n")
 with (logs / "qemu.log").open("w") as diagnostics:
-    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=diagnostics)
+    process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=diagnostics, env=dict(os.environ, TMPDIR=str(logs)))
     try:
         def checked_serial():
             if process.poll() is not None:
@@ -77,6 +164,8 @@ with (logs / "qemu.log").open("w") as diagnostics:
             text = serial.read_text(errors="replace") if serial.exists() else ""
             plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
             if ("NEGOTO-SMOKE-FAIL" in plain or "FATAL FAULT" in plain or "[view.err]" in plain
+                    or (args.app_launch_rtt and "APP-X11-RTT-FAIL" in plain)
+                    or (args.app_syscall_scope and "APP-SCOPE-FAIL" in plain)
                     or ((args.tinycore_desktop or args.tinycore_file_mapping or args.tinycore_startup_perf or args.tinycore_app_launch_perf) and ("[proc.err] spawn failed" in plain
                                                  or "[shm.err] share rollback" in plain))
                     or re.search(r"\bPANIC\b|\bpanic(?:ked)?\b", plain, re.IGNORECASE)):
@@ -89,21 +178,32 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 text = checked_serial()
                 if predicate(text):
                     return
-                time.sleep(0.2)
-            send(f"screendump {logs / 'timeout.png'} -f png")
+                time.sleep(args.host_poll_ms / 1000)
             raise RuntimeError("QEMU timed out; see serial.log and timeout.png")
 
-        def send(value):
-            process.stdin.write(value.encode() + b"\n")
-            process.stdin.flush()
+        def send(value=None):
+            status = process.poll()
+            if status is not None:
+                raise RuntimeError(f"QEMU exited status={status}; see qemu.log")
+            if value is not None:
+                try:
+                    process.stdin.write(value.encode() + b"\n")
+                    process.stdin.flush()
+                except BrokenPipeError as error:
+                    raise RuntimeError("QEMU monitor closed while sending command") from error
             data = b""
+            deadline = time.monotonic() + 5
             while b"(qemu)" not in data:
-                if not select.select([process.stdout], [], [], 5)[0]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
                     raise RuntimeError("QEMU monitor timed out")
-                data += os.read(process.stdout.fileno(), 4096)
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    raise RuntimeError(f"QEMU monitor closed; status={process.poll()}")
+                data += chunk
             return data
 
-        def click_at(x, y, click=True):
+        def click_at(x, y, click=True, before_press=None):
             for _ in range(30):
                 send("mouse_move -100 -100")
                 time.sleep(0.08)
@@ -114,6 +214,8 @@ with (logs / "qemu.log").open("w") as diagnostics:
                 y -= dy
                 time.sleep(0.1)
             if click:
+                if before_press is not None:
+                    before_press()
                 pressed = time.monotonic_ns()
                 send("mouse_button 1")
                 time.sleep(0.1)
@@ -144,7 +246,24 @@ with (logs / "qemu.log").open("w") as diagnostics:
             # A later screenshot is evidence to inspect, never an input PASS.
             challenge = time.monotonic_ns()
             send('sendkey ctrl-l 40')
-            time.sleep(0.2)
+            acknowledged = time.monotonic_ns()
+            short_captures = []
+            # The installed Xfe configuration binds Ctrl-L to clear_location.
+            # One real chord should visibly clear /root; decode after VM exit.
+            # These captures perturb subsequent work and are diagnostic only.
+            for delay_ms in (50, 500):
+                time.sleep(max(0, (challenge + delay_ms * 1_000_000 - time.monotonic_ns()) / 1e9))
+                path = logs / f'app-launch-files-clear-location-{delay_ms}ms.png'
+                begin, end = screenshot_at(path)
+                short_captures.append(dict(screenshot=path.name, requested_ms=delay_ms,
+                    capture_begin_ns=begin - pressed, capture_end_ns=end - pressed))
+                print(f'APP-LAUNCH-TIMELINE phase=clear-location requested-ms={delay_ms} input-begin-ns={challenge - pressed} input-command-ack-ns={acknowledged - pressed} capture-begin-ns={begin - pressed} capture-end-ns={end - pressed} screenshot={path.name}', flush=True)
+            (logs / 'app-launch-single-input.json').write_text(json.dumps(dict(
+                command='sendkey ctrl-l 40', hold_ms=40,
+                input_begin_ns=challenge - pressed, input_command_ack_ns=acknowledged - pressed,
+                precondition_screenshot='app-launch-files-after-ping-2000ms.png',
+                captures=short_captures, painted_input_readiness_verified=False,
+                performance_admitted=False), indent=2) + '\n')
             send('sendkey ctrl-a 40')
             time.sleep(0.1)
             for character in '/usr/local\n':
@@ -180,25 +299,43 @@ with (logs / "qemu.log").open("w") as diagnostics:
             send(f"screendump {logs / screenshot} -f png")
             raise RuntimeError("X terminal did not execute its command")
 
+        # Consume the unsolicited greeting before sending any command. Otherwise
+        # the first send can return this prompt instead of its own response.
+        (logs / "monitor-greeting.log").write_bytes(send())
+
         # SMP serial output can interleave inside Negoto's one-off startup
         # line. The guest verifies its service connection directly; use GUI
         # readiness here only to avoid typing before the shell accepts input.
         # Honoka's final online line can interleave too; completed initial
         # rendering is the preceding, equally useful readiness observation.
-        wait_for(lambda text: re.search(r"\[\s*shell\] font init end", text)
-                 and ("[              honoka] online" in text
-                      or "[              honoka] initial render done" in text))
+        if (args.scope_disk_readout or args.app_syscall_scope or args.tinycore_file_mapping
+                or args.app_launch_timeline):
+            # Diagnostic command delivery only: font logs can split mid-tag.
+            # This fixed settle is not a boot/readiness timing observation.
+            # File-mapping/timeline are also functional-only: the font line can
+            # interleave despite a visible input prompt. Native execution,
+            # assertions and cleanup remain mandatory below.
+            wait_for(lambda text: "[              honoka] initial render done" in text)
+            time.sleep(10)
+        else:
+            wait_for(lambda text: re.search(r"\[\s*shell\] font init end", text)
+                     and ("[              honoka] online" in text
+                          or "[              honoka] initial render done" in text))
         time.sleep(2)
         if args.tinycore_app_launch_perf:
-            # The initial monitor prompt can precede the first response. Query
-            # twice and retain both raw responses, before any timed click.
-            cpu_info = send("info cpus") + send("info cpus")
+            cpu_info = send("info cpus")
             (logs / "vcpu-threads.txt").write_bytes(cpu_info)
+            if args.host_vcpu_cpus is not None:
+                vcpu_tids = host_affinity.parse_vcpus(cpu_info.decode(errors="strict"), args.smp)
+                placement = {"before_workload": host_affinity.apply(process.pid, vcpu_tids, args.host_vcpu_cpus, args.host_io_cpu)}
+                (logs / "host-explicit-affinity.json").write_text(json.dumps(placement, indent=2) + "\n")
             # Darwin QEMU can report getpid() for every CPU's thread_id.
             # Preserve raw data, but do not infer host concurrency from it.
-            print(f"APP-TCG-REQUEST mode={args.tcg_threads or 'default'}", flush=True)
+            print(f"APP-ACCEL-REQUEST accel={args.accel} cpu={cpu} tcg-threads={args.tcg_threads or 'default'}", flush=True)
         keys = {"/": "slash", "-": "minus", ".": "dot", "\n": "ret"}
         guest = "/alter/linux/bin/negoto-smoke"
+        if args.syscall_scope_fixture:
+            guest += f" --syscall-scope-fixture {args.syscall_scope_fixture}"
         if args.ram_sharing_reuse:
             guest = "/alter/linux/bin/ram-share-smoke --ram-sharing-reuse"
         if args.ram_alias_retirement:
@@ -221,6 +358,22 @@ with (logs / "qemu.log").open("w") as diagnostics:
         for character in guest + "\n":
             send(f"sendkey {keys.get(character, character)} 40")
             time.sleep(0.25)
+        if args.syscall_scope_fixture:
+            enabled = args.syscall_scope_fixture == "active"
+            marker = f"SYSCALL-SCOPE-FIXTURE-PASS cleanup=true enabled={int(enabled)} readout={2 if enabled else 0}"
+            wait_for(lambda text: re.search(r"(?m)^" + re.escape(marker) + r"\r?\n", text))
+            result = scope_report.validate_checked_fixture(checked_serial(), enabled)
+            if args.scope_disk_readout:
+                # The native fixture syncs VFS before the footer. All host
+                # conversion/extraction happens after this VM has been reaped.
+                process.terminate()
+                process.wait(timeout=5)
+                result.update(schema=3, report_transport="synced-private-overlay",
+                              bootstrap="diagnostic-compositor-render-plus-fixed-10s-settle",
+                              raw_packets=scope_disk.extract(overlay, logs, enabled))
+            (logs / "scope-fixture-result.json").write_text(json.dumps(result, indent=2) + "\n")
+            print(f"PASS scope fixture enabled={int(enabled)} smp={args.smp}; no performance admission", flush=True)
+            raise SystemExit(0)
         if args.tinycore_file_mapping:
             marker = "TINYCORE-FILE-MAPPING-PASS"
             wait_for(lambda text: marker in text)
@@ -275,10 +428,23 @@ with (logs / "qemu.log").open("w") as diagnostics:
         if args.tinycore_app_launch_perf:
             label = args.tinycore_app_launch_perf
             wait_for(lambda text: "TINYCORE-APPLICATIONS-READY" in text)
+            if args.host_vcpu_cpus is not None:
+                placement["before_launch"] = host_affinity.apply(process.pid, vcpu_tids, args.host_vcpu_cpus, args.host_io_cpu)
+                (logs / "host-explicit-affinity.json").write_text(json.dumps(placement, indent=2) + "\n")
+            if args.host_cpus is not None:
+                expected = {int(cpu) for cpu in args.host_cpus.split(",")}
+                affinities = {int(path.name): sorted(os.sched_getaffinity(int(path.name)))
+                              for path in pathlib.Path(f"/proc/{process.pid}/task").iterdir()}
+                if not affinities or any(set(cpus) != expected for cpus in affinities.values()):
+                    raise RuntimeError("QEMU thread affinity does not match --host-cpus")
+                (logs / "host-affinity.json").write_text(json.dumps(dict(
+                    expected=sorted(expected), observed_threads=affinities), indent=2) + "\n")
             click_at(300, 300)
             keys.update({">": "shift-dot", "&": "shift-7", " ": "spc"})
             observer_mode = " ping" if args.app_launch_ready == "ping" else ""
             command_text = f"/bin/aw {label}{observer_mode} &\n"
+            if args.app_syscall_scope and args.app_syscall_scope != "baseline":
+                command_text = f"/bin/aw-scope {label} ping {args.app_syscall_scope} &\n"
             for character in command_text:
                 send(f"sendkey {keys.get(character, character)} 40")
                 time.sleep(0.25)
@@ -287,20 +453,81 @@ with (logs / "qemu.log").open("w") as diagnostics:
             if args.app_launch_ready == "ping":
                 completion = f"APP-EVENTLOOP-REPLY {label}"
             assert completion not in checked_serial(), "stale window observation"
-            pressed, release_begin, released = click_at(*dock_at(label.capitalize()))
+            if args.host_vcpu_cpus is not None:
+                placement["at_press"] = host_affinity.verify(process.pid, vcpu_tids, args.host_vcpu_cpus, args.host_io_cpu)
+                (logs / "host-explicit-affinity.json").write_text(json.dumps(placement, indent=2) + "\n")
+            host_samples = {}
+
+            def sample_before_press():
+                host_samples["cpu_cost_admitted"] = False
+                host_samples["physical_cpu_attribution_verified"] = False
+                host_samples["before"] = host_stats.snapshot(process.pid)
+                host_samples["before_threads"] = host_stats.thread_snapshot(process.pid, cpu_info, args.smp)
+
+            pressed, release_begin, released = click_at(*dock_at(label.capitalize()),
+                before_press=sample_before_press if args.host_process_stats else None)
             wait_for(lambda text: re.search(r"(?m)^" + re.escape(completion) + r"(?: ping-roundtrip-ns=\d+)?\r?\n", text))
             ready_at = time.monotonic_ns()
             elapsed = ready_at - pressed
+            if args.host_process_stats:
+                host_samples["after"] = host_stats.snapshot(process.pid)
+                host_samples["after_threads"] = host_stats.thread_snapshot(process.pid, cpu_info, args.smp)
+                host_samples["interval"] = host_stats.interval(host_samples["before"], host_samples["after"])
+                host_samples["thread_interval"] = host_stats.thread_interval(
+                    host_samples["before_threads"], host_samples["after_threads"], host_samples["interval"])
+                (logs / "host-process-stats.json").write_text(json.dumps(host_samples, indent=2) + "\n")
+            (logs / "app-launch-result.json").write_text(json.dumps(dict(
+                application=label, endpoint=args.app_launch_ready,
+                accel=args.accel, cpu=cpu, smp=args.smp,
+                host_ns=elapsed, release_begin_ns=release_begin - pressed,
+                release_end_ns=released - pressed,
+                host_poll_ms=args.host_poll_ms, native_observer_poll_ms=100,
+                diagnostic_timeline=args.app_launch_timeline, performance_admitted=False,
+                host_from_release_ack_ns=ready_at - released), indent=2) + "\n")
             screenshot = logs / f'app-launch-{label}.png'
-            screenshot_at(screenshot)
-            print(f"APP-LAUNCH-PERF application={label} host-ns={elapsed} release-command-begin-ns={release_begin - pressed} release-command-end-ns={released - pressed} host-from-release-ack-ns={ready_at - released} native-observer-poll-ms=100 host-poll-ms=200 window={args.app_launch_ready}", flush=True)
+            capture_begin, capture_end = screenshot_at(screenshot)
+            (logs / "app-launch-capture.json").write_text(json.dumps(dict(
+                screenshot=screenshot.name, capture_begin_ns=capture_begin - pressed,
+                capture_end_ns=capture_end - pressed, first_ping_observed_ns=ready_at - pressed,
+                painted_input_readiness_verified=False,
+            ), indent=2) + "\n")
+            print(f"APP-LAUNCH-PERF application={label} host-ns={elapsed} release-command-begin-ns={release_begin - pressed} release-command-end-ns={released - pressed} host-from-release-ack-ns={ready_at - released} native-observer-poll-ms=100 host-poll-ms={args.host_poll_ms} window={args.app_launch_ready}", flush=True)
             if args.app_launch_ready == "ping":
                 print(next(line for line in checked_serial().splitlines() if line.startswith(completion)), flush=True)
             if args.app_launch_timeline:
                 launch_timeline(ready_at, pressed)
+            if args.app_launch_rtt:
+                wait_for(lambda text: re.search(r"(?m)^APP-X11-RTT-PASS count=128 raw-ns=\d+,\d+,\d+ xlib-ns=\d+,\d+,\d+\r?\n", text))
+                report = next(line for line in checked_serial().splitlines() if line.startswith("APP-X11-RTT-PASS "))
+                (logs / "app-launch-rtt.txt").write_text(report + "\n")
+                print(report, flush=True)
+            if args.host_vcpu_cpus is not None:
+                placement["after_measurement"] = host_affinity.verify(process.pid, vcpu_tids, args.host_vcpu_cpus, args.host_io_cpu)
+                (logs / "host-explicit-affinity.json").write_text(json.dumps(placement, indent=2) + "\n")
+            if args.app_syscall_scope:
+                if args.app_syscall_scope != "baseline":
+                    wait_for(lambda text: re.search(r"(?m)^APP-SCOPE-SAVED " + re.escape(label) + r"\r?\n", text))
+                process.terminate()
+                process.wait(timeout=5)
+                packets = {}
+                if args.app_syscall_scope != "baseline":
+                    packets = scope_disk.extract(overlay, logs, args.app_syscall_scope != "off",
+                                                 application_mode=args.app_syscall_scope)
+                (logs / "app-syscall-scope-result.json").write_text(json.dumps(dict(
+                    schema=1, application=label, mode=args.app_syscall_scope,
+                    functional=True, performance_admitted=False, raw_packets=packets,
+                    boundary="before-observer-ready-through-first-ping-reply",
+                    coverage="all-linux-dispatch-in-one-alter-including-background",
+                    bootstrap="diagnostic-compositor-render-plus-fixed-10s-settle",
+                    counter_identity="local-unverified"), indent=2) + "\n")
             # This cold-launch measurement ends with the VM, not an OCI-reuse
             # assertion. The independent desktop regression covers cleanup.
-            print(f"APP-LAUNCH-PERFORMANCE-PASS application={label}", flush=True)
+            if args.app_launch_timeline:
+                print(f"APP-LAUNCH-TIMELINE-FUNCTIONAL-PASS application={label}; painted/input readiness unverified; no performance admission", flush=True)
+            elif args.app_syscall_scope:
+                print(f"APP-LAUNCH-SCOPE-FUNCTIONAL-PASS application={label}; no performance admission", flush=True)
+            else:
+                print(f"APP-LAUNCH-PERFORMANCE-PASS application={label}", flush=True)
             raise SystemExit(0)
 
         if args.tinycore_apps:
@@ -458,12 +685,21 @@ with (logs / "qemu.log").open("w") as diagnostics:
             print(f"PASS Tiny Core init, stock dynamic BusyBox, private root, symlinks, fork/exec, pipes, interactive shell, Ctrl-C and cleanup (smp={args.smp})", flush=True)
         else:
             print(f"PASS OCI lifecycle, rootfs/cwd/env, fork/exec, readonly, asynchronous signals/GPRs/ABI, 20 reuse cycles, native CLI and interactive shell (smp={args.smp})", flush=True)
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
+        (logs / "failure.json").write_text(json.dumps(dict(
+            exception=type(error).__name__, message=str(error), qemu_status=process.poll(),
+        ), indent=2) + "\n")
         if process.poll() is None:
+            for query in ["info status", "info cpus", "info registers", "info block"]:
+                try:
+                    (logs / (query.replace(" ", "-") + ".log")).write_bytes(send(query))
+                except Exception as monitor_error:
+                    (logs / "monitor-failure.log").write_text(str(monitor_error) + "\n")
+                    break
             try:
-                send(f"screendump {logs / 'failure.png'} -f png")
-            except Exception:
-                pass
+                screenshot_at(logs / "timeout.png")
+            except Exception as screenshot_error:
+                (logs / "screenshot-failure.log").write_text(str(screenshot_error) + "\n")
         raise
     finally:
         process.terminate()
@@ -472,3 +708,9 @@ with (logs / "qemu.log").open("w") as diagnostics:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+        if args.app_launch_timeline:
+            # Decode only after wait(): pixel comparison must not compete with
+            # the VM. Captured-state matches are not a readiness/latency PASS.
+            report = files_paint.audit_timeline(logs)
+            (logs / "app-launch-paint-reference.json").write_text(
+                json.dumps(report, indent=2) + "\n")

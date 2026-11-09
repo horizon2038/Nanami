@@ -10,7 +10,12 @@ pub(super) fn file_sources(file: LinuxFile, events: i16) -> Word {
     match file.kind {
         LinuxFileKind::Terminal => READY_TERMINAL,
         LinuxFileKind::PtyMaster | LinuxFileKind::PtySlave => READY_PTY,
-        LinuxFileKind::PipeRead | LinuxFileKind::PipeWrite => READY_PIPE,
+        LinuxFileKind::PipeRead => READY_PIPE | if events & (LINUX_POLLIN | LINUX_POLLRDNORM) != 0 {
+            READY_PIPE_READ
+        } else { 0 },
+        LinuxFileKind::PipeWrite => READY_PIPE | if events & (LINUX_POLLOUT | LINUX_POLLWRNORM) != 0 {
+            READY_PIPE_WRITE
+        } else { 0 },
         LinuxFileKind::EventFd | LinuxFileKind::Epoll => READY_OBJECT,
         LinuxFileKind::IoUring => READY_OBJECT,
         LinuxFileKind::TimerFd => READY_OBJECT | READY_TIMER,
@@ -99,7 +104,7 @@ pub(super) fn fd_readiness(
             super::fd_events::readiness(runtime, pid, file)?
         }
         LinuxFileKind::Epoll => {
-            if super::epoll::ready(runtime, pid, file.resource)? {
+            if super::epoll::ready(runtime, pid, file.resource, input_pumped)? {
                 read
             } else {
                 0

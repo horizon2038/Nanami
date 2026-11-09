@@ -50,6 +50,10 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
     let original = unsafe {
         core::ptr::read_unaligned((session.shm_local + message.arg0) as *const PathRequest)
     };
+    if (message.code == POSIX_REQUEST_OPEN_ROOTED) != (original.operation == VFS_PATH_OPEN_READONLY) {
+        // The legacy PATH entry must not silently acquire/return raw VFS handles.
+        return (VFS_PATH_RESPONSE_ERROR, VFS_PATH_ERROR_UNSUPPORTED, 0);
+    }
     if !copy_input(
         runtime,
         session,
@@ -95,7 +99,7 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
         }
         file.vfs_handle
     };
-    let request = PathRequest {
+    let mut request = PathRequest {
         directory,
         root_offset: ROOT_OFFSET,
         path_offset: PATH_OFFSET,
@@ -106,19 +110,99 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
             .min(runtime.vfs_shm_size.saturating_sub(OUTPUT_OFFSET)),
         ..original
     };
+    let client_output = session.shm_local + original.output_offset;
+    let open_prefix = core::mem::size_of::<PathOpenResult>();
+    let requested_open = request.operation == VFS_PATH_OPEN_READONLY;
+    let output_limit = request.output_bytes;
+    let resolve_only = requested_open && !can_allocate_open_file_and_fd(runtime, index);
+    if requested_open {
+        if request.output_bytes < open_prefix || request.target_bytes != core::mem::size_of::<Word>()
+            || request.flags & !(VFS_PATH_FOLLOW_FINAL | VFS_PATH_ALLOW_MISSING) != 0
+        {
+            return invalid;
+        }
+        let options = unsafe {
+            core::ptr::read_unaligned((runtime.vfs_shm + TARGET_OFFSET) as *const Word)
+        };
+        if Word::from_le(options) & !VFS_OPEN_DIRECTORY != 0 {
+            return invalid;
+        }
+        // A malformed reply must not expose an old descriptor left in SHM.
+        unsafe {
+            core::ptr::write_unaligned(
+                (runtime.vfs_shm + OUTPUT_OFFSET) as *mut PathOpenResult,
+                PathOpenResult { descriptor: VFS_PATH_OPEN_NONE },
+            );
+        }
+        if resolve_only {
+            // Preserve virtual/fallback opens even when this proxy cannot own
+            // another FD. No VFS handle may be acquired on this route.
+            request.operation = VFS_PATH_RESOLVE;
+            request.output_offset += open_prefix;
+            request.output_bytes -= open_prefix;
+        }
+    }
     unsafe {
         core::ptr::write_unaligned(runtime.vfs_shm as *mut PathRequest, request);
     }
     match vfs_path_request(runtime.vfs_port, 0) {
-        Ok((detail0, detail1)) => {
-            if matches!(request.operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK) {
+        Ok((mut detail0, detail1)) => {
+            if resolve_only {
+                let Some(total) = detail0.checked_add(open_prefix) else { return invalid; };
+                detail0 = total;
+            }
+            if requested_open {
+                let opened = unsafe {
+                    core::ptr::read_unaligned(
+                        (runtime.vfs_shm + OUTPUT_OFFSET) as *const PathOpenResult,
+                    )
+                };
+                if detail0 <= open_prefix || detail0 > output_limit
+                    || unsafe { *((runtime.vfs_shm + OUTPUT_OFFSET + open_prefix) as *const u8) } != b'/'
+                    || (opened.descriptor != VFS_PATH_OPEN_NONE
+                        && !matches!(detail1, VFS_FILE_TYPE_REGULAR | VFS_FILE_TYPE_DIRECTORY))
+                {
+                    if opened.descriptor != VFS_PATH_OPEN_NONE {
+                        let _ = vfs_close(runtime.vfs_port, opened.descriptor);
+                    }
+                    return invalid;
+                }
+                let descriptor = if opened.descriptor == VFS_PATH_OPEN_NONE {
+                    VFS_PATH_OPEN_NONE
+                } else {
+                    let kind = if detail1 == VFS_FILE_TYPE_DIRECTORY {
+                        FdKind::Directory
+                    } else {
+                        FdKind::Regular
+                    };
+                    let (status, fd, _) = alloc_open_file_and_fd(
+                        runtime, index, kind, opened.descriptor, 0,
+                    );
+                    if status != nanami_runtime::OS_RESPONSE_OK {
+                        // The allocator closes the VFS handle on either failure.
+                        return (status, 0, 0);
+                    }
+                    fd
+                };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (runtime.vfs_shm + OUTPUT_OFFSET) as *const u8,
+                        client_output as *mut u8,
+                        detail0,
+                    );
+                    core::ptr::write_unaligned(
+                        client_output as *mut PathOpenResult,
+                        PathOpenResult { descriptor },
+                    );
+                }
+            } else if matches!(request.operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK) {
                 if detail0 > request.output_bytes {
                     return invalid;
                 }
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         (runtime.vfs_shm + OUTPUT_OFFSET) as *const u8,
-                        (session.shm_local + original.output_offset) as *mut u8,
+                        client_output as *mut u8,
                         detail0,
                     );
                 }

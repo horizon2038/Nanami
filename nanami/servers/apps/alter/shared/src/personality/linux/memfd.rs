@@ -11,6 +11,13 @@ const SEAL_GROW: Word = 4;
 const SEAL_WRITE: Word = 8;
 const SEALS: Word = SEAL_SEAL | SEAL_SHRINK | SEAL_GROW | SEAL_WRITE;
 
+#[cfg(test)]
+static COLLECT_RING_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub fn take_collect_ring_inspections() -> usize {
+    COLLECT_RING_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 fn object(runtime: &Runtime, id: Word) -> Result<&MemoryFile, i32> {
     match runtime.poll_objects.get(id) {
         Some(Object::Memory(file)) => Ok(file),
@@ -19,10 +26,7 @@ fn object(runtime: &Runtime, id: Word) -> Result<&MemoryFile, i32> {
 }
 
 fn object_mut(runtime: &mut Runtime, id: Word) -> Result<&mut MemoryFile, i32> {
-    match runtime.poll_objects.get_mut(id) {
-        Some(Object::Memory(file)) => Ok(file),
-        _ => Err(EBADF),
-    }
+    runtime.poll_objects.memory_mut(id).ok_or(EBADF)
 }
 
 pub(super) fn create(
@@ -405,7 +409,8 @@ pub(super) fn map_read_file(
     result
 }
 
-fn mappings(runtime: &Runtime, pid: Word) -> Vec<(Word, MemoryMapping)> {
+fn mappings(runtime: &Runtime, pid: Word) -> impl Iterator<Item = (Word, MemoryMapping)> + '_ {
+    let mut group = None;
     runtime
         .poll_objects
         .iter()
@@ -416,13 +421,17 @@ fn mappings(runtime: &Runtime, pid: Word) -> Vec<(Word, MemoryMapping)> {
             };
             maps.iter()
                 .copied()
-                .filter(move |mapping| runtime.vm_group(mapping.pid) == runtime.vm_group(pid))
-                .map(move |mut mapping| {
-                    mapping.pid = pid;
-                    (id, mapping)
-                })
+                .map(move |mapping| (id, mapping))
         })
-        .collect()
+        .filter(move |(_, mapping)| {
+            mapping.pid == pid
+                || runtime.vm_group(mapping.pid)
+                    == *group.get_or_insert_with(|| runtime.vm_group(pid))
+        })
+        .map(move |(id, mut mapping)| {
+            mapping.pid = pid;
+            (id, mapping)
+        })
 }
 
 pub(super) fn sync_files(runtime: &Runtime, pid: Word, base: Word, bytes: Word) -> Result<(), i32> {
@@ -442,6 +451,7 @@ pub(super) fn mapping_at(
     pid: Word,
     address: Word,
 ) -> Option<(Word, MemoryMapping)> {
+    let mut group = None;
     runtime
         .poll_objects
         .iter()
@@ -451,9 +461,11 @@ pub(super) fn mapping_at(
                 .iter()
                 .copied()
                 .find(|mapping| {
-                    runtime.vm_group(mapping.pid) == runtime.vm_group(pid)
-                        && address >= mapping.base
+                    address >= mapping.base
                         && address - mapping.base < mapping.bytes
+                        && (mapping.pid == pid
+                            || runtime.vm_group(mapping.pid)
+                                == *group.get_or_insert_with(|| runtime.vm_group(pid)))
                 })
                 .map(|mut mapping| {
                     mapping.pid = pid;
@@ -544,7 +556,8 @@ pub(crate) fn bus_fault(runtime: &Runtime, pid: Word, address: Word) -> bool {
 }
 
 pub(super) fn inherit(runtime: &mut Runtime, parent: Word, child: Word) -> Result<(), i32> {
-    for (id, mapping) in mappings(runtime, parent) {
+    let maps: Vec<_> = mappings(runtime, parent).collect();
+    for (id, mapping) in maps {
         object_mut(runtime, id)?
             .maps
             .try_reserve(1)
@@ -598,7 +611,23 @@ pub(super) fn protect(
     prot: Word,
 ) -> Result<(), i32> {
     let end = base.checked_add(bytes).ok_or(ENOMEM)?;
-    let maps = mappings(runtime, pid);
+    // Out-of-range mappings cannot contain cursor or shorten a chunk ending
+    // at/before end. Preserve relative order among every relevant mapping.
+    let maps: Vec<_> = mappings(runtime, pid).filter(|(_, mapping)| {
+        mapping.base < end && mapping.base + mapping.bytes > base
+    }).collect();
+    // Ordinary private VMAs have no memfd EOF holes or seals to preserve.
+    // Alpha already snapshots per-page rights and rolls back a failed range
+    // transition. Do not split that transaction at each logical VMA boundary.
+    if bytes != 0 && (base | bytes) & (LINUX_PAGE_SIZE - 1) == 0
+        && maps.is_empty()
+    {
+        if !runtime.has_mapping(pid, base, bytes) {
+            return Err(ENOMEM);
+        }
+        return nanami_runtime::request_process_mapping_protect(pid, base, bytes, prot)
+            .map_err(map_request_error);
+    }
     // Reject a sealed shared mapping before touching any permission.
     for (id, mapping) in &maps {
         if mapping.base < end
@@ -663,7 +692,8 @@ pub(super) fn protect(
 
 pub(super) fn unmap(runtime: &mut Runtime, pid: Word, base: Word, bytes: Word) -> Result<(), i32> {
     let end = base.checked_add(bytes).ok_or(EINVAL)?;
-    for (id, mapping) in mappings(runtime, pid) {
+    let maps: Vec<_> = mappings(runtime, pid).collect();
+    for (id, mapping) in maps {
         let start = base.max(mapping.base);
         let stop = end.min(mapping.base + mapping.bytes);
         if start >= stop {
@@ -719,10 +749,12 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
     {
         return Err(EPERM);
     }
-    let maps = memory.maps.clone();
+    let mapping_count = memory.maps.len();
     let old_pages = align_up_word(old, LINUX_PAGE_SIZE);
     let new_pages = align_up_word(length, LINUX_PAGE_SIZE);
-    for mapping in &maps {
+    for index in 0..mapping_count {
+        // Invalidation and page changes leave this mapping list unchanged.
+        let mapping = object(runtime, file.resource)?.maps[index];
         super::guest_views::invalidate(runtime, mapping.pid);
         let first = old_pages
             .min(new_pages)
@@ -741,7 +773,7 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
                 )
                 .map_err(map_request_error)?;
             } else if mapping.shared {
-                alias_page(runtime, file.resource, *mapping, offset)?;
+                alias_page(runtime, file.resource, mapping, offset)?;
             } else {
                 nanami_runtime::request_process_map_anonymous_at(
                     mapping.pid,
@@ -764,7 +796,10 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
     }
     if length < old {
         // Clear truncated bytes, including the partial final page, so regrowth cannot expose them.
-        for (&index, &address) in &object(runtime, file.resource)?.pages {
+        for (&index, &address) in object(runtime, file.resource)?
+            .pages
+            .range(length / LINUX_PAGE_SIZE..)
+        {
             let page_start = index * LINUX_PAGE_SIZE;
             if page_start + LINUX_PAGE_SIZE > length {
                 let start = length.saturating_sub(page_start).min(LINUX_PAGE_SIZE);
@@ -783,11 +818,6 @@ pub(super) fn truncate(runtime: &mut Runtime, file: LinuxFile, length: Word) -> 
 }
 
 pub(super) fn collect(runtime: &mut Runtime, id: Word) {
-    if runtime.poll_objects.iter().any(
-        |(_, object)| matches!(object, Object::Ring(ring) if ring.memory == id || ring.sqes == id),
-    ) {
-        return;
-    }
     let Ok(memory) = object(runtime, id) else {
         return;
     };
@@ -795,6 +825,15 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
         return;
     }
     if !memory.maps.is_empty() {
+        return;
+    }
+    // These local retention gates cannot reclaim anything. Search all ring
+    // pins only once the memory is otherwise eligible for collection.
+    if runtime.poll_objects.iter().any(|(_, object)| {
+        #[cfg(test)]
+        COLLECT_RING_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        matches!(object, Object::Ring(ring) if ring.memory == id || ring.sqes == id)
+    }) {
         return;
     }
     let file = LinuxFile {
@@ -814,18 +853,19 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
     {
         return;
     }
-    let pages: Vec<_> = memory
-        .pages
-        .iter()
-        .map(|(&index, &address)| (index, address))
-        .collect();
-    for (index, address) in pages {
+    loop {
+        let Some((index, address, backing)) = object(runtime, id).ok().and_then(|memory| {
+            memory.pages.first_key_value().map(|(&index, &address)| {
+                (index, address, memory.backing)
+            })
+        }) else {
+            break;
+        };
         if address != 0
             && nanami_runtime::request_mapping_release(address, LINUX_PAGE_SIZE).is_err()
         {
             return;
         }
-        let backing = object(runtime, id).ok().and_then(|memory| memory.backing);
         if let Some(fd) = backing {
             // Record local release before IPC so a failed lease release can
             // be retried without attempting to release the same alias twice.
@@ -852,16 +892,6 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
 
 pub(super) fn forget_process(runtime: &mut Runtime, pid: Word) {
     // Alpha tears down the address space at exec/exit. Drop only the bookkeeping here.
-    let replacement = runtime
-        .managed
-        .iter()
-        .find(|process| {
-            process.pid != pid
-                && process.pid != 0
-                && !process.exited
-                && process.vm_group == runtime.vm_group(pid)
-        })
-        .map(|process| process.pid);
     let ids: Vec<_> = runtime
         .poll_objects
         .iter()
@@ -873,6 +903,22 @@ pub(super) fn forget_process(runtime: &mut Runtime, pid: Word) {
             }
         })
         .collect();
+    if ids.is_empty() {
+        return;
+    }
+    // Without memory objects there is no mapping ownership to transfer. When
+    // needed, query the departing task's stable group once, at the first peer.
+    let mut group = None;
+    let replacement = runtime
+        .managed
+        .iter()
+        .find(|process| {
+            process.pid != pid
+                && process.pid != 0
+                && !process.exited
+                && process.vm_group == *group.get_or_insert_with(|| runtime.vm_group(pid))
+        })
+        .map(|process| process.pid);
     for id in ids {
         if let Ok(memory) = object_mut(runtime, id) {
             if let Some(replacement) = replacement {

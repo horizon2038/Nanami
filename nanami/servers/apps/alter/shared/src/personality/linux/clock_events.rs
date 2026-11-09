@@ -18,24 +18,21 @@ pub(super) fn arm_clock_timer(runtime: &mut Runtime) -> Result<(), i32> {
     let deadline = runtime
         .managed
         .iter()
-        .filter(|process| {
-            process.pid != 0 && process.sleep_waiting && !runtime.is_signal_stopped(process.pid)
+        .filter_map(|process| {
+            if process.pid == 0 { return None; }
+            let sleep = process.sleep_waiting.then_some(process.sleep_deadline);
+            let readiness = if process.exited { None } else {
+                process.readiness_wait.as_ref().and_then(|wait| wait.deadline)
+            };
+            let deadline = match (sleep, readiness) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+                (None, None) => None,
+            };
+            // No deadline means this row cannot affect the alarm. A process
+            // with both waits needs only one current stopped-state lookup.
+            deadline.filter(|_| !runtime.is_signal_stopped(process.pid))
         })
-        .map(|process| process.sleep_deadline)
-        .chain(
-            runtime
-                .managed
-                .iter()
-                .filter(|process| {
-                    process.pid != 0 && !process.exited && !runtime.is_signal_stopped(process.pid)
-                })
-                .filter_map(|process| {
-                    process
-                        .readiness_wait
-                        .as_ref()
-                        .and_then(|wait| wait.deadline)
-                }),
-        )
         .chain(runtime.framebuffer_deadline)
         .chain(super::signal_timers::next_deadline(runtime))
         .chain(runtime.poll_objects.timer_deadline())
@@ -93,9 +90,9 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
     for index in 0..runtime.managed.len() {
         let process = &runtime.managed[index];
         if process.pid == 0
-            || runtime.is_signal_stopped(process.pid)
             || !process.sleep_waiting
             || process.sleep_deadline > runtime.monotonic_ticks
+            || runtime.is_signal_stopped(process.pid)
         {
             continue;
         }
@@ -120,4 +117,6 @@ pub fn handle_timer_notification(runtime: &mut Runtime, identifier: Word) {
     if let Err(errno) = arm_clock_timer(runtime) {
         nanami_runtime::println!("[alter/linux] timer alarm failed errno={}", errno);
     }
+    #[cfg(feature = "wait-shape")]
+    super::wait_shape::report(runtime);
 }

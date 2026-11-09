@@ -99,7 +99,9 @@ impl Runtime {
         while i < self.pipes.len() {
             if !self.pipes[i].active {
                 let layout = ::core::alloc::Layout::new::<[u8; LINUX_PIPE_BYTES]>();
-                let buffer = unsafe { alloc::alloc::alloc_zeroed(layout) };
+                // len starts at zero. copy_in initializes bytes before making
+                // them readable, so unused capacity need not be zeroed.
+                let buffer = unsafe { alloc::alloc::alloc(layout) };
                 if buffer.is_null() {
                     return None;
                 }

@@ -1,6 +1,6 @@
 use super::{
     map_request_error, Runtime, Word, EFAULT, EINVAL, LINUX_IOVEC_LEN, LINUX_IOV_MAX,
-    LINUX_MSGHDR_LEN,
+    LINUX_MSGHDR_LEN, LINUX_PAGE_SIZE,
 };
 use core::mem::MaybeUninit;
 
@@ -23,15 +23,15 @@ pub(super) fn read_linux_msghdr(
     Ok((name, name_len, iov, iov_count))
 }
 
-pub(super) fn read_linux_iovecs(
+pub(super) fn read_linux_iovecs<const N: usize>(
     runtime: &mut Runtime,
     pid: Word,
     iov: Word,
     iov_count: Word,
-    bases: &mut [Word; LINUX_IOV_MAX as usize],
-    lens: &mut [Word; LINUX_IOV_MAX as usize],
+    bases: &mut [Word; N],
+    lens: &mut [Word; N],
 ) -> Result<(), i32> {
-    if iov_count > LINUX_IOV_MAX {
+    if iov_count > LINUX_IOV_MAX || iov_count > N {
         return Err(EINVAL);
     }
     if iov_count != 0 && iov == 0 {
@@ -78,6 +78,24 @@ pub(super) fn copyin_into(
         return Ok(());
     }
     nanami_runtime::request_process_memory_read_checked(pid, user_ptr, destination, len)
+        .map_err(|_| EFAULT)
+}
+
+/// Optional read lease into an owned POSIX write buffer. Keep the original
+/// checked transfer for every ineligible range, including logical-preflight
+/// misses; this qualifier does not change the file-I/O fallback's error policy.
+pub(super) fn copyin_posix_write(
+    runtime: &Runtime, pid: Word, source: Word, destination: Word, bytes: Word,
+) -> Result<(), i32> {
+    // The bounded view cannot serve larger input. Keep that size test ahead
+    // of the optional logical-eligibility lookup on the checked-copy path.
+    if bytes != 0 && bytes <= super::guest_views::MAX_CONTIGUOUS_READ_BYTES
+        && runtime.memory_access_allowed(pid, source, bytes, 1)
+        && super::guest_views::copy_into_scratch(runtime, pid, source, destination, bytes)
+    {
+        return Ok(());
+    }
+    nanami_runtime::request_process_memory_read_checked(pid, source, destination, bytes)
         .map_err(|_| EFAULT)
 }
 
@@ -188,9 +206,10 @@ pub(super) fn copyout_owned_many<const N: usize>(
     pid: Word,
     buffers: &[(Word, &[u8]); N],
 ) -> Result<(), i32> {
-    if buffers.iter().all(|(target, source)| {
+    let permissions_valid = buffers.iter().all(|(target, source)| {
         !source.is_empty() && runtime.memory_access_allowed(pid, *target, source.len(), 2)
-    }) && super::guest_views::copy_from_owned_many(runtime, pid, buffers)
+    });
+    if permissions_valid && super::guest_views::copy_from_owned_many(runtime, pid, buffers)
     {
         return Ok(());
     }
@@ -199,6 +218,15 @@ pub(super) fn copyout_owned_many<const N: usize>(
         local: source.as_ptr() as Word,
         bytes: source.len(),
     });
+    // View acquisition does not dispatch requests or mutate the personality
+    // mappings. Reuse that logical preflight; Alpha still checks every field
+    // against current backing/ownership before its ordered vector copy.
+    if permissions_valid && !transfers.is_empty()
+        && transfers.len() <= nanami_runtime::OS_MEMORY_COPY_VECTOR_MAX
+    {
+        return nanami_runtime::request_process_memory_writev_checked(pid, &transfers)
+            .map_err(|_| EFAULT);
+    }
     copyout_many(runtime, pid, &transfers)
 }
 

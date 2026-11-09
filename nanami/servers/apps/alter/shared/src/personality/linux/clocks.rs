@@ -255,5 +255,7 @@ pub(super) fn refresh_clock(runtime: &mut Runtime) -> Result<(), i32> {
     }
     runtime.monotonic_ticks = ticks;
     runtime.monotonic_tick_hz = tick_hz;
+    #[cfg(feature = "wait-shape")]
+    super::wait_shape::clock(runtime, ticks, tick_hz);
     Ok(())
 }

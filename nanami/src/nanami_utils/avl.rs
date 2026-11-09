@@ -54,6 +54,23 @@ impl AvlTree {
         removed
     }
 
+    /// Existence in a half-open interval, without collecting or visiting all
+    /// matching nodes. Each rejected node excludes one entire subtree.
+    pub fn has_range(&self, start: usize, end: usize) -> bool {
+        if start >= end { return false; }
+        let mut cursor = self.root.as_deref();
+        while let Some(node) = cursor {
+            if node.key < start {
+                cursor = node.right.as_deref();
+            } else if node.key >= end {
+                cursor = node.left.as_deref();
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn visit_range(&self, start: usize, end: usize, mut visit: impl FnMut(usize, usize)) {
         fn walk(
             node: Option<&AvlNode>,

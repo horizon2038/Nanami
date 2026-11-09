@@ -26,7 +26,7 @@ impl Alpha {
         }
         let page = align_down(address, PAGE_SIZE);
         let frame = self.process_frame_for_write(pid, page)?;
-        let mapped = self.map_process_copy_frame(pid, frame, None)?;
+        let mapped = self.map_process_transfer_frame(pid, frame, None)?;
         // Four-byte alignment guarantees that the atomic cannot cross a page.
         let atomic = unsafe { &*((mapped + address - page) as *const AtomicU32) };
         let previous = match atomic.compare_exchange(
@@ -96,32 +96,6 @@ impl Alpha {
             guard_base + USER_HEAP_GUARD_PAGES * PAGE_SIZE,
         );
         Ok((heap_base, mapped_size))
-    }
-
-    pub(super) fn zero_process_frames(
-        &mut self,
-        process_root: CapabilityDescriptor,
-        start_slot: usize,
-        page_count: usize,
-    ) -> Result<(), CapabilityError> {
-        let mut i = 0usize;
-        while i < page_count {
-            let frame = process_frame_descriptor(process_root, start_slot + i);
-            let temp_va = PROCESS_ZERO_TEMP_BASE;
-            self.map_alpha_temporary_frame(frame, temp_va)?;
-            unsafe {
-                ptr::write_bytes(temp_va as *mut u8, 0, PAGE_SIZE);
-            }
-            if let Err(e) = self.unmap_alpha_temporary_frame(frame, temp_va) {
-                error!(
-                    "[proc.err] unmap zero temp frame={:#018x} temp={:#018x} err={:?}",
-                    frame, temp_va, e
-                );
-                return Err(e);
-            }
-            i += 1;
-        }
-        Ok(())
     }
 
     pub(super) fn handle_dma_request(
@@ -304,6 +278,10 @@ impl Alpha {
         let target_pid = request.arg0;
         let size_bytes = request.arg1;
         let requested_base = request.arg2;
+        let protected = request.code == nanami_uapi::os::OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED;
+        if protected && (requested_base == 0 || request.arg3 == 0) {
+            return Err(CapabilityError::InvalidArgument);
+        }
         if caller_pid == 0 || target_pid == 0 || size_bytes == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -324,10 +302,15 @@ impl Alpha {
             let descriptor = self.read_process_memory_into_static_buffer(
                 caller_pid,
                 request.arg3,
-                nanami_uapi::os::OS_MAP_INITIALIZER_WORDS * core::mem::size_of::<Word>(),
+                (if protected { 3 } else { nanami_uapi::os::OS_MAP_INITIALIZER_WORDS }) * core::mem::size_of::<Word>(),
             )?;
             let source = unsafe { ptr::read_unaligned(descriptor.as_ptr() as *const [Word; 2]) };
-            self.map_process_initialized_pages(
+            let permissions = if protected {
+                unsafe { ptr::read_unaligned(descriptor.as_ptr().add(2 * core::mem::size_of::<Word>()) as *const Word) }
+            } else {
+                7
+            };
+            self.map_process_initialized_pages_protected(
                 target_pid,
                 (requested_base != 0).then_some(requested_base),
                 page_count,
@@ -336,6 +319,7 @@ impl Alpha {
                     address: source[0],
                     bytes: source[1],
                 }),
+                permissions,
             )?
         } else if requested_base == 0 {
             self.map_process_heap_pages(target_pid, page_count)
@@ -366,80 +350,6 @@ impl Alpha {
             base + mapped_size
         );
         Ok((base, mapped_size))
-    }
-
-    pub(super) fn copy_process_memory(
-        &mut self,
-        source_pid: usize,
-        source_va: usize,
-        destination_pid: usize,
-        destination_va: usize,
-        size_bytes: usize,
-    ) -> Result<(), CapabilityError> {
-        if source_pid == destination_pid && source_va == destination_va {
-            return Ok(());
-        }
-        let source_end = source_va
-            .checked_add(size_bytes)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let _ = destination_va
-            .checked_add(size_bytes)
-            .ok_or(CapabilityError::InvalidArgument)?;
-        let copy_backward = source_pid == destination_pid
-            && destination_va > source_va
-            && destination_va < source_end;
-        let mut copied = 0usize;
-        while copied < size_bytes {
-            let (src, dst, chunk) = if copy_backward {
-                let remaining = size_bytes - copied;
-                let src_end = source_va + remaining;
-                let dst_end = destination_va + remaining;
-                let src_page_tail = ((src_end - 1) & (PAGE_SIZE - 1)) + 1;
-                let dst_page_tail = ((dst_end - 1) & (PAGE_SIZE - 1)) + 1;
-                let chunk = min_usize(remaining, min_usize(src_page_tail, dst_page_tail));
-                (src_end - chunk, dst_end - chunk, chunk)
-            } else {
-                let src = source_va + copied;
-                let dst = destination_va + copied;
-                let src_offset = src & (PAGE_SIZE - 1);
-                let dst_offset = dst & (PAGE_SIZE - 1);
-                let chunk = min_usize(
-                    size_bytes - copied,
-                    min_usize(PAGE_SIZE - src_offset, PAGE_SIZE - dst_offset),
-                );
-                (src, dst, chunk)
-            };
-            let src_page = align_down(src, PAGE_SIZE);
-            let dst_page = align_down(dst, PAGE_SIZE);
-            let src_offset = src - src_page;
-            let dst_offset = dst - dst_page;
-            let src_frame = self.process_frame_for_page(source_pid, src_page)?;
-            let dst_frame = self.process_frame_for_write(destination_pid, dst_page)?;
-            let src_temp_va = self.map_process_copy_frame(source_pid, src_frame, None)?;
-
-            if src_frame == dst_frame {
-                unsafe {
-                    ptr::copy(
-                        (src_temp_va + src_offset) as *const u8,
-                        (src_temp_va + dst_offset) as *mut u8,
-                        chunk,
-                    );
-                }
-            } else {
-                let dst_temp_va =
-                    self.map_process_copy_frame(destination_pid, dst_frame, Some(src_temp_va))?;
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        (src_temp_va + src_offset) as *const u8,
-                        (dst_temp_va + dst_offset) as *mut u8,
-                        chunk,
-                    );
-                }
-            }
-            copied += chunk;
-        }
-
-        Ok(())
     }
 
     pub(super) fn map_process_page_into_alpha(
@@ -497,7 +407,7 @@ impl Alpha {
             None => {
                 let entry = self
                     .processes
-                    .memory_entry(pid)
+                    .memory_context(pid)
                     .ok_or(CapabilityError::InvalidArgument)?;
                 self.materialize_lazy_page(pid, entry.root_node, entry.address_space, page_va)?;
                 self.processes

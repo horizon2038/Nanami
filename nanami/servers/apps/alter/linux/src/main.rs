@@ -152,6 +152,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 reason,
                 program_counter,
                 fault_address,
+                architecture_fault_code,
                 hardware_context,
                 hardware_context_count,
                 ..
@@ -173,6 +174,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                         reason,
                         program_counter,
                         kernel_call_number: fault_address,
+                        architecture_fault_code,
                         hardware_context,
                         hardware_context_count,
                     },

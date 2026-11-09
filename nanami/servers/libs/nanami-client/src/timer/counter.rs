@@ -141,10 +141,17 @@ impl Counter {
         let raw = coherent_counter(|offset| unsafe {
             core::ptr::read_volatile((self.base + 0xf0 + offset) as *const u32)
         })?;
-        Some(
-            (u128::from(raw) * u128::from(self.period_fs) / 1_000_000).min(Word::MAX as u128)
-                as Word,
-        )
+        Some(scale_counter(raw, self.period_fs))
+    }
+}
+
+pub(super) fn scale_counter(raw: u64, period_fs: u64) -> Word {
+    // Integral-nanosecond periods need no wide fractional conversion. Saturate
+    // before narrowing exactly as in the general femtosecond calculation.
+    if period_fs % 1_000_000 == 0 {
+        raw.saturating_mul(period_fs / 1_000_000).min(Word::MAX as u64) as Word
+    } else {
+        (u128::from(raw) * u128::from(period_fs) / 1_000_000).min(Word::MAX as u128) as Word
     }
 }
 

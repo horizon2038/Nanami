@@ -219,7 +219,7 @@ impl Alpha {
             }
         }
         let mut peer = if request.arg3 == 0 {
-            self.reserve_shared_mapping(peer_pid, pages)?
+            self.reserve_shared_mapping(peer_pid, pages, true)?
         } else {
             let entry = self
                 .processes
@@ -240,16 +240,11 @@ impl Alpha {
                         .ok_or(CapabilityError::InvalidArgument)?,
                 )
                 .ok_or(CapabilityError::InvalidArgument)?;
-            for va in (request.arg3..end).step_by(PAGE_SIZE) {
-                if self.processes.find_lazy_mapping(peer_pid, va).is_some()
-                    || self
-                        .processes
-                        .vm_space_mut(peer_pid)
-                        .and_then(|vm| vm.find_frame(va))
-                        .is_some()
-                {
-                    return Err(CapabilityError::IllegalOperation);
-                }
+            if self.processes.has_lazy_mapping_at_pages(peer_pid, request.arg3, end)
+                || self.processes.vm_space_mut(peer_pid)
+                    .is_some_and(|vm| vm.has_backed_aligned_pages(request.arg3, end))
+            {
+                return Err(CapabilityError::IllegalOperation);
             }
             let reservation = self.processes.reserve_shared_memory_at(
                 peer_pid,
@@ -290,7 +285,12 @@ impl Alpha {
                         slot / PROCESS_FRAME_CHUNK_PAGES,
                     ),
                     (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                    process_frame_descriptor(source.root_node, allocation.start_slot + page),
+                    if allocation.owns_frame_cap {
+                        process_frame_descriptor(source.root_node, allocation.start_slot + page)
+                    } else {
+                        self.memory.physical_frame_descriptor_from_index(allocation.base_page + page)
+                            .ok_or(CapabilityError::InvalidArgument)?
+                    },
                 )?;
                 peer.copied += 1;
             }
@@ -304,14 +304,17 @@ impl Alpha {
                     return Err(CapabilityError::IllegalOperation);
                 }
                 peer.mapped += 1;
-                self.memory.map_frame_strict(
+                if let Err(error) = self.memory.map_frame_strict(
                     peer.entry.address_space,
                     self.memory
                         .physical_frame_descriptor_from_index(allocation.base_page + page)
                         .ok_or(CapabilityError::InvalidArgument)?,
                     va,
                     vm,
-                )?;
+                ) {
+                    vm.mark_mapping_uncertain(va);
+                    return Err(error);
+                }
             }
             Ok(())
         })();
@@ -345,11 +348,11 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?
             & !(PAGE_SIZE - 1);
         let pages = bytes / PAGE_SIZE;
-        let caller = self.reserve_shared_mapping(pid, pages)?;
+        let caller = self.reserve_shared_mapping(pid, pages, peer_pid != 0)?;
         let mut mappings = Vec::with_capacity(2);
         mappings.push(caller);
         if peer_pid != 0 {
-            match self.reserve_shared_mapping(peer_pid, pages) {
+            match self.reserve_shared_mapping(peer_pid, pages, true) {
                 Ok(peer) => mappings.push(peer),
                 Err(error) => {
                     self.processes
@@ -372,13 +375,11 @@ impl Alpha {
         // been removed, including when installation needs to be rolled back.
         for mapping in &mappings {
             let r = mapping.reservation;
-            self.processes.register_physical_allocation(
-                mapping.entry.pid,
-                r.base_va,
-                r.start_slot,
-                base_page,
-                pages,
-            )?;
+            if r.owns_frame_caps() {
+                self.processes.register_physical_allocation(mapping.entry.pid, r.base_va, r.start_slot, base_page, pages)?;
+            } else {
+                self.processes.register_pool_allocation(mapping.entry.pid, r.base_va, r.start_slot, base_page, pages)?;
+            }
         }
         if let Err(error) = self.install_shared_memory(&mut mappings, base_page) {
             for mapping in &mut mappings {
@@ -406,14 +407,17 @@ impl Alpha {
         &mut self,
         pid: usize,
         pages: usize,
+        owns_frame_caps: bool,
     ) -> Result<SharedMapping, CapabilityError> {
         let entry = self
             .processes
             .memory_entry(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let reservation =
-            self.processes
-                .reserve_shared_memory(pid, pages, PROCESS_FRAME_TOTAL_PAGES)?;
+        let reservation = if owns_frame_caps {
+            self.processes.reserve_shared_memory(pid, pages, PROCESS_FRAME_TOTAL_PAGES)?
+        } else {
+            self.processes.reserve_owned_pool_memory(pid, pages, PROCESS_FRAME_TOTAL_PAGES)?
+        };
         Ok(SharedMapping {
             entry,
             reservation,
@@ -465,12 +469,12 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let pages = mappings[0].reservation.page_count;
         for mapping in mappings.iter() {
-            self.ensure_process_frame_chunks(
+            if mapping.reservation.owns_frame_caps() { self.ensure_process_frame_chunks(
                 mapping.entry.pid,
                 mapping.entry.root_node,
                 mapping.reservation.start_slot,
                 pages,
-            )?;
+            )?; } else { self.process_root_slot(mapping.entry.root_node)?; }
         }
         for page in 0..pages {
             // Materialize each physical frame once, then copy to both peers.
@@ -481,6 +485,7 @@ impl Alpha {
                 .physical_frame_descriptor_from_index(base_page + page)
                 .ok_or(CapabilityError::InvalidArgument)?;
             for mapping in mappings.iter_mut() {
+                if !mapping.reservation.owns_frame_caps() { continue; }
                 let slot = mapping.reservation.start_slot + page;
                 arch::node::copy(
                     process_frame_chunk_descriptor(
@@ -494,11 +499,7 @@ impl Alpha {
             }
         }
         // Recycled physical pages must not disclose a previous owner's data.
-        self.zero_process_frames(
-            mappings[0].entry.root_node,
-            mappings[0].reservation.start_slot,
-            pages,
-        )?;
+        self.zero_physical_pages(base_page, pages)?;
         for mapping in mappings.iter_mut() {
             let vm = self
                 .processes
@@ -518,8 +519,11 @@ impl Alpha {
                 // A failed map may have installed its PTE before failing a TLB
                 // update; rollback must attempt to unmap this page as well.
                 mapping.mapped += 1;
-                self.memory
-                    .map_frame_strict(mapping.entry.address_space, frame, va, vm)?;
+                if page == 0 || (va >> 12) & 63 == 0 { vm.prepare_frame_word(va, pages - page); }
+                if let Err(error) = self.memory.map_frame_strict(mapping.entry.address_space, frame, va, vm) {
+                    vm.mark_mapping_uncertain(va);
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -533,7 +537,7 @@ impl Alpha {
         self.remove_shared_mapping(&mut SharedMapping {
             entry,
             reservation,
-            copied: reservation.page_count,
+            copied: if reservation.owns_frame_caps() { reservation.page_count } else { 0 },
             mapped: reservation.page_count,
         })
     }
@@ -560,6 +564,7 @@ impl Alpha {
                 || pages.iter().enumerate().any(|(offset, page)| {
                     page.base_va != r.base_va + offset * PAGE_SIZE
                         || page.start_slot != r.start_slot + offset
+                        || page.owns_frame_cap != r.owns_frame_caps()
                         || self.processes.physical_reference_count(*page) == 0
                 })
             {
@@ -567,28 +572,46 @@ impl Alpha {
                 // owner set is quarantined, not mistaken for already freed RAM.
                 return Err(CapabilityError::IllegalOperation);
             }
-            Some(pages)
+            Some((pages, end))
         } else {
             None
         };
+        let pool_extent = if !r.owns_frame_caps() && !r.has_page_references() {
+            Some(self.processes.find_active_physical_allocation_reference(entry.pid, r.base_va, r.page_count)
+                .filter(|allocation| !allocation.owns_frame_cap && allocation.start_slot == r.start_slot)
+                .ok_or(CapabilityError::IllegalOperation)?)
+        } else { None };
         self.invalidate_process_copy_mappings(entry.pid)?;
+        // Synchronous UNMAP calls cannot dispatch another Alpha process event;
+        // the VM identity stays fixed throughout this cleanup. Empty mappings
+        // still require copy invalidation, but need no VM lookup.
+        let mut vm = if mapping.mapped == 0 {
+            None
+        } else {
+            self.processes.vm_space_mut(entry.pid)
+        };
         while mapping.mapped != 0 {
             let page = mapping.mapped - 1;
             let va = r.base_va + page * PAGE_SIZE;
-            let frame = process_frame_descriptor(entry.root_node, r.start_slot + page);
-            if self
-                .processes
-                .vm_space_mut(entry.pid)
-                .is_none_or(|vm| vm.mapping_is_uncertain(va) || vm.permissions(va) != 0)
+            let frame = if r.owns_frame_caps() {
+                process_frame_descriptor(entry.root_node, r.start_slot + page)
+            } else {
+                let physical = if let Some((pages, _)) = &canonical_pages { pages[page].base_page }
+                    else { pool_extent.ok_or(CapabilityError::Fatal)?.base_page + page };
+                self.memory.physical_frame_descriptor_from_index(physical).ok_or(CapabilityError::Fatal)?
+            };
+            if vm
+                .as_ref()
+                .is_none_or(|vm| vm.frame_may_be_present(va))
             {
                 if let Err(error) = arch::address_space::unmap(entry.address_space, frame, va) {
-                    if let Some(vm) = self.processes.vm_space_mut(entry.pid) {
+                    if let Some(vm) = vm.as_mut() {
                         vm.mark_mapping_uncertain(va);
                     }
                     return Err(error);
                 }
             }
-            if let Some(vm) = self.processes.vm_space_mut(entry.pid) {
+            if let Some(vm) = vm.as_mut() {
                 vm.forget_frame(va);
             }
             mapping.mapped -= 1;
@@ -602,26 +625,31 @@ impl Alpha {
             )?;
             mapping.copied -= 1;
         }
-        if let Some(pages) = canonical_pages {
-            for page in pages.into_iter().rev() {
-                if self.processes.physical_reference_count(page) == 1 {
-                    // Keep the reference until the allocator confirms release.
-                    self.memory
-                        .free_physical(page.base_page * PAGE_SIZE, PAGE_SIZE)?;
+        if let Some((pages, end)) = canonical_pages {
+            let memory = &mut self.memory;
+            let retired = self.processes.try_retire_physical_pages(
+                entry.pid, r.base_va, end, &pages, |page, last| {
+                    if last { memory.free_physical(page.base_page * PAGE_SIZE, PAGE_SIZE) }
+                    else { Ok(()) }
+                },
+            )?;
+            if !retired {
+                for page in pages.into_iter().rev() {
+                    if self.processes.physical_reference_count(page) == 1 {
+                        // Keep the reference until the allocator confirms release.
+                        self.memory
+                            .free_physical(page.base_page * PAGE_SIZE, PAGE_SIZE)?;
+                    }
+                    self.processes
+                        .release_physical_allocation_reference(entry.pid, page.base_va, 1)?;
                 }
-                self.processes
-                    .release_physical_allocation_reference(entry.pid, page.base_va, 1)?;
             }
         } else {
-            let (allocation, last) = self.processes.release_physical_allocation_reference(
-                entry.pid,
-                r.base_va,
-                r.page_count,
-            )?;
-            if last {
-                self.memory
-                    .free_physical(allocation.base_page * PAGE_SIZE, r.page_count * PAGE_SIZE)?;
-            }
+            let memory = &mut self.memory;
+            self.processes.retire_active_physical_allocation(entry.pid, r.base_va, r.page_count, |allocation, last| {
+                if last { memory.free_physical(allocation.base_page * PAGE_SIZE, r.page_count * PAGE_SIZE) }
+                else { Ok(()) }
+            })?;
         }
         self.processes.recycle_shared_memory(entry.pid, r);
         Ok(())

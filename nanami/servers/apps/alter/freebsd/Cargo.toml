@@ -3,6 +3,10 @@ name = "alter-freebsd"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+wait-shape = []
+syscall-scope = []
+
 [dependencies]
 a9n_abi = "0.8.0"
 nanami-runtime = { path = "../../../libs/nanami-runtime" }

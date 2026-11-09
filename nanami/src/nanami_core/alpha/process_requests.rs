@@ -92,7 +92,7 @@ impl Alpha {
             .process_arena_descriptor(self.process_root_slot(process_root)?)
     }
 
-    fn process_root_slot(
+    pub(super) fn process_root_slot(
         &self,
         process_root: CapabilityDescriptor,
     ) -> Result<usize, CapabilityError> {
@@ -108,7 +108,7 @@ impl Alpha {
         Ok(root_slot)
     }
 
-    fn allocate_process_frame(
+    pub(super) fn allocate_process_frame(
         &mut self,
         pid: usize,
         process_root: CapabilityDescriptor,
@@ -131,10 +131,16 @@ impl Alpha {
         auto_resume: bool,
         priority_override: Option<Word>,
         policy: ProcessPolicy,
+        preinstall_image_permissions: bool,
+        prepared_source: Option<(PageSource, crate::nanami_core::elf_loader::ElfImage)>,
     ) -> Result<usize, CapabilityError> {
         let priority = policy.priority(priority_override)?;
         info!("[proc] parse elf: {}", image_name);
-        let elf = parse_elf64(image_bytes)?;
+        let elf = match prepared_source {
+            Some((_, elf)) => elf,
+            None => parse_elf64(image_bytes)?,
+        };
+        let image_source = prepared_source.map(|(source, _)| source);
         info!(
             "[proc] elf entry={:#018x} segments={:>2}",
             elf.entry_point, elf.segment_count
@@ -294,6 +300,7 @@ impl Alpha {
         let initial_stack_pointer = stack_top - 32;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
         let raw_fault_process = elf.ipc_buffer_start.is_none() && resolver_port.is_some();
+        let prepared_pool = memory_pages::prepared_pool_allowed(raw_fault_process, auto_resume, preinstall_image_permissions);
         spawn_stage = "ipc-buffer";
         let (has_ipc_buffer, ipc_buffer_va, ipc_buffer_frame_slot, ipc_buffer_tls_base) =
             match elf.ipc_buffer_start {
@@ -331,16 +338,12 @@ impl Alpha {
 
         spawn_stage = "vm-tracking";
         spawn_try!(self.processes.ensure_vm_space_for_pid(pid));
-        spawn_try!(self.processes.register_lazy_mapping(
-            pid,
-            image_base,
-            image_pages,
-            0,
-            ProcessLazyMappingKind::Image {
-                image: image_bytes,
-                elf,
-            },
-        ));
+        if image_source.is_none() {
+            spawn_try!(self.processes.register_lazy_mapping(
+                pid, image_base, image_pages, 0,
+                ProcessLazyMappingKind::Image { image: image_bytes, elf },
+            ));
+        }
         spawn_try!(self.processes.register_lazy_mapping(
             pid,
             USER_STACK_BASE,
@@ -351,12 +354,52 @@ impl Alpha {
         info!("[proc] lazy vm tracker ready pid={:>3}", pid);
 
         spawn_stage = "image-pages";
-        let mut image_page = 0usize;
-        while image_page < image_pages {
-            let image_va = image_base + image_page * PAGE_SIZE;
-            spawn_try!(self.materialize_lazy_page(pid, child_root, child_address_space, image_va));
-            image_page += 1;
+        let image_source_pages = self.prepare_image_initialization_source(image_source);
+        // New image pages share one stable lazy plan. Existing backing,
+        // overlapping plans, or an installed owner retain the ordinary path.
+        // No image-page materialization below mutates the lazy mapping list.
+        let image_plan = if image_source.is_none() {
+            self.processes.preinstall_lazy_mapping_plan(pid, image_base, image_end)
+        } else {
+            None
+        };
+        let mut image_batch = if prepared_pool && (image_source.is_some() || image_plan.is_some()) {
+            spawn_try!(self.prepare_preinstall_pool_batch(pid, child_root, image_base, image_pages))
+        } else { None };
+        let image_result = (|| -> Result<(), CapabilityError> {
+            let mut image_page = 0usize;
+            while image_page < image_pages {
+                let image_va = image_base + image_page * PAGE_SIZE;
+                let permissions = if raw_fault_process && preinstall_image_permissions {
+                    elf.spawn_page_permissions(image_va, PAGE_SIZE)
+                } else { 7 };
+                if image_source.is_some() {
+                    self.materialize_exec_image_page(
+                        pid, child_root, child_address_space,
+                        &ProcessLazyMappingKind::Image { image: image_bytes, elf },
+                        image_va, image_page, permissions, image_source, prepared_pool,
+                        image_source_pages.as_ref(), image_batch.as_mut(),
+                    )?;
+                } else if let Some(plan) = image_plan {
+                    self.materialize_lazy_page_from_plan(
+                        pid, child_root, child_address_space, image_va, permissions, prepared_pool, plan,
+                        image_batch.as_mut(),
+                    )?;
+                } else {
+                    self.materialize_lazy_page_with_permissions(
+                        pid, child_root, child_address_space, image_va, permissions, prepared_pool,
+                    )?;
+                }
+                image_page += 1;
+            }
+            Ok(())
+        })();
+        if image_result.is_err() {
+            if let Some(batch) = image_batch.take() {
+                spawn_try!(self.release_preinstall_pool_batch_tail(batch));
+            }
         }
+        spawn_try!(image_result);
         self.processes.drop_image_lazy_mappings_for_pid(pid);
         let ipc_buffer_frame = if has_ipc_buffer {
             process_frame_descriptor(child_root, ipc_buffer_frame_slot)
@@ -364,10 +407,14 @@ impl Alpha {
             0
         };
         spawn_stage = "stack-pages";
-        let mut stack_page = 0usize;
+        let mut stack_page = stack_population::first_page(raw_fault_process, USER_STACK_PAGES);
         while stack_page < USER_STACK_PAGES {
             let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
-            spawn_try!(self.materialize_lazy_page(pid, child_root, child_address_space, stack_va));
+            spawn_try!(self.materialize_lazy_page_with_permissions(
+                pid, child_root, child_address_space, stack_va,
+                stack_population::initial_permissions(raw_fault_process && preinstall_image_permissions),
+                prepared_pool,
+            ));
             stack_page += 1;
         }
 
@@ -491,6 +538,8 @@ impl Alpha {
             auto_resume,
             priority_override,
             self.process_policies.for_image(entry.name),
+            false,
+            None,
         )
     }
 
@@ -592,6 +641,18 @@ impl Alpha {
         address_space: CapabilityDescriptor,
         page_va: usize,
     ) -> Result<CapabilityDescriptor, CapabilityError> {
+        self.materialize_lazy_page_with_permissions(pid, process_root, address_space, page_va, 7, false)
+    }
+
+    fn materialize_lazy_page_with_permissions(
+        &mut self,
+        pid: usize,
+        process_root: CapabilityDescriptor,
+        address_space: CapabilityDescriptor,
+        page_va: usize,
+        initial_permissions: usize,
+        prepared_pool: bool,
+    ) -> Result<CapabilityDescriptor, CapabilityError> {
         if page_va & (PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
@@ -602,28 +663,30 @@ impl Alpha {
         {
             return Ok(frame);
         }
-        let mapping = self
+        let (mapping_index, mapping_base, mapping_slot) = self
             .processes
-            .find_lazy_mapping(pid, page_va)
+            .find_lazy_mapping_plan(pid, page_va)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let page_offset = (page_va - mapping.base_va) / PAGE_SIZE;
-        let frame_slot = mapping.start_slot + page_offset;
-        let base_page = self.allocate_process_frame(pid, process_root, frame_slot)?;
-        self.processes
-            .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
-
-        let frame = process_frame_descriptor(process_root, frame_slot);
+        if self.processes.memory_entry(pid).is_some()
+            && matches!(self.processes.lazy_mapping_kind(mapping_index), Some(ProcessLazyMappingKind::Zero))
         {
-            let vm = self
-                .processes
-                .vm_space_mut(pid)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            self.memory.map_frame(address_space, frame, page_va, vm)?;
+            // Copyin/copyout and guest-view grants can populate the stack too,
+            // while a VM peer runs. Use the initialized constructor on every
+            // installed-process zero-plan path, not just the supervisor's
+            // page-fault request. Pre-install spawn has no runnable child or
+            // peers yet and uses the original reserved-slot construction below.
+            let permissions = self.processes.vm_space_mut(pid)
+                .ok_or(CapabilityError::InvalidArgument)?.permissions(page_va);
+            let reserved = self.processes.take_fresh_stack_frame_slot(pid, page_va, PROCESS_FRAME_TOTAL_PAGES);
+            self.map_process_initialized_pages_with_stack_slot(pid, Some(page_va), 1, None, permissions, reserved)?;
+            return self.processes.vm_space_mut(pid).and_then(|vm| vm.find_frame(page_va))
+                .ok_or(CapabilityError::Fatal);
         }
-
-        let temp_va = self.map_initialization_page(base_page)?;
-        fill_lazy_page(mapping.kind, page_va, temp_va)?;
-        Ok(frame)
+        self.materialize_lazy_page_from_plan(
+            pid, process_root, address_space, page_va, initial_permissions, prepared_pool,
+            (mapping_index, mapping_base, mapping_slot),
+            None,
+        )
     }
 
     pub(super) fn handle_exit_request(
@@ -712,6 +775,8 @@ impl Alpha {
             true,
             Some(priority),
             ProcessPolicy::default(),
+            false,
+            None,
         )?;
         info!(
             "[proc] spawned from memory caller={:>3} pid={:>3} bytes={:#x} priority={:>2}",
@@ -764,6 +829,8 @@ impl Alpha {
             false,
             Some(priority),
             ProcessPolicy::default(),
+            false,
+            None,
         )?;
         let child = self
             .processes
@@ -786,6 +853,42 @@ impl Alpha {
             request.identifier, pid, destination_slot, size_bytes, priority
         );
         Ok(pid)
+    }
+
+    fn stage_spawn_image(
+        &mut self, caller: usize, address: usize, bytes: usize,
+    ) -> Result<(&'static [u8], Option<(PageSource, crate::nanami_core::elf_loader::ElfImage)>), CapabilityError> {
+        use crate::nanami_core::elf_loader::{parse_elf64_reader, ElfReader, staging::StagedImage};
+        if bytes > PROCESS_SPAWN_MEMORY_MAX_BYTES {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let stream = cfg!(target_arch = "x86_64") && address & (PAGE_SIZE - 1) == 0
+            && bytes.checked_add(PAGE_SIZE - 1).is_some_and(|size| {
+                self.check_private_snapshot_source(caller, address, size & !(PAGE_SIZE - 1)).is_ok()
+            });
+        if !stream {
+            return self.read_process_memory_into_static_buffer(caller, address, bytes)
+                .map(|image| (image, None));
+        }
+        // Immutable owned RAM stays in the caller throughout this serialized
+        // spawn. No source slice or authority is retained in the child.
+        let buffer = unsafe {
+            core::slice::from_raw_parts_mut(
+                core::ptr::addr_of_mut!(PROCESS_MEMORY_IMAGE_BUFFER) as *mut u8, bytes,
+            )
+        };
+        let mut image = StagedImage::new(buffer, PAGE_SIZE, |offset, destination: &mut [u8]| {
+            let source = address.checked_add(offset).ok_or(CapabilityError::InvalidArgument)?;
+            self.copy_process_memory_into(caller, source, destination)
+        })?;
+        let elf = parse_elf64_reader(&mut image)?;
+        let source = if elf.ipc_buffer_start.is_none() {
+            Some((PageSource { pid: caller, address, bytes }, elf))
+        } else {
+            image.read(0, bytes)?;
+            None
+        };
+        Ok((image.finish(), source))
     }
 
     pub(super) fn handle_process_spawn_memory_fault_handler_suspended_request(
@@ -828,11 +931,7 @@ impl Alpha {
             PROCESS_ROOT_RADIX,
             PROCESS_SLOT_SERVICE_PORT,
         );
-        let image_bytes = self.read_process_memory_into_static_buffer(
-            request.identifier,
-            image_vaddr,
-            size_bytes,
-        )?;
+        let (image_bytes, image_source) = self.stage_spawn_image(request.identifier, image_vaddr, size_bytes)?;
         let pid = self.spawn_process_from_elf(
             "rootfs-linux.elf",
             image_bytes,
@@ -841,6 +940,8 @@ impl Alpha {
             false,
             Some(priority),
             ProcessPolicy::default(),
+            true,
+            image_source,
         )?;
         let child = self
             .processes
@@ -902,9 +1003,40 @@ impl Alpha {
             return Err(CapabilityError::IllegalOperation);
         }
 
-        let image_bytes =
-            self.read_process_memory_into_static_buffer(caller_pid, image_vaddr, size_bytes)?;
-        self.replace_process_image_from_memory(target_pid, target, image_bytes, priority)
+        let snapshot_source = (cfg!(target_arch = "x86_64") && target.capabilities_sealed
+            && caller_pid != target_pid && image_vaddr & (PAGE_SIZE - 1) == 0)
+            .then_some((caller_pid, image_vaddr))
+            .filter(|(caller, source)| {
+                size_bytes.checked_add(PAGE_SIZE - 1).is_some_and(|bytes| {
+                    self.check_private_snapshot_source(*caller, *source, bytes & !(PAGE_SIZE - 1)).is_ok()
+                })
+            });
+        let (image_bytes, elf) = if snapshot_source.is_some() {
+            use crate::nanami_core::elf_loader::{parse_elf64_reader, ElfReader, staging::StagedImage};
+            let buffer = unsafe {
+                core::slice::from_raw_parts_mut(
+                    core::ptr::addr_of_mut!(PROCESS_MEMORY_IMAGE_BUFFER) as *mut u8, size_bytes,
+                )
+            };
+            let mut image = StagedImage::new(buffer, PAGE_SIZE, |offset, destination: &mut [u8]| {
+                let source = image_vaddr.checked_add(offset).ok_or(CapabilityError::InvalidArgument)?;
+                self.copy_process_memory_into(caller_pid, source, destination)
+            })?;
+            let elf = parse_elf64_reader(&mut image)?;
+            if elf.ipc_buffer_start.is_some() {
+                image.read(0, size_bytes)?;
+            } else {
+                image.stage_private_pages(&elf)?;
+            }
+            (image.finish(), elf)
+        } else {
+            let image = self.read_process_memory_into_static_buffer(caller_pid, image_vaddr, size_bytes)?;
+            (image, parse_elf64(image)?)
+        };
+        self.replace_process_image_from_memory(
+            target_pid, target, image_bytes, elf, priority,
+            snapshot_source.filter(|_| elf.ipc_buffer_start.is_none()),
+        )
     }
 
     pub(super) fn replace_process_image_from_memory(
@@ -912,14 +1044,15 @@ impl Alpha {
         pid: usize,
         target: crate::nanami_core::process::ProcessEntry,
         image_bytes: &'static [u8],
+        elf: crate::nanami_core::elf_loader::ElfImage,
         _priority: Word,
+        image_source: Option<(usize, usize)>,
     ) -> Result<usize, CapabilityError> {
         if self.managed_buffers.has_mapping(pid)
             || self.communication.bindings.has_provider_authority(pid)
         {
             return Err(CapabilityError::IllegalOperation);
         }
-        let elf = parse_elf64(image_bytes)?;
         let mut image_base = usize::MAX;
         let mut image_end = 0usize;
         let mut i = 0usize;
@@ -940,6 +1073,10 @@ impl Alpha {
         let total_frames = image_pages + USER_STACK_PAGES;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
 
+        // Request-local admission selected the staging path. Every alias
+        // commit below still revalidates the source after replacing the VM.
+        let snapshot_source = image_source;
+
         let installation = (|| -> Result<usize, CapabilityError> {
             let begin = exec_profile::stamp();
             self.drop_process_runtime_mappings(pid, target)?;
@@ -953,12 +1090,12 @@ impl Alpha {
                 USER_HEAP_LIMIT,
             )?;
             self.processes.ensure_vm_space_for_pid(pid)?;
-            self.processes.register_lazy_mapping(
+            self.processes.register_fresh_stack_mapping(
                 pid,
+                target.root_node,
                 USER_STACK_BASE,
                 USER_STACK_PAGES,
                 image_pages,
-                ProcessLazyMappingKind::Zero,
             )?;
 
             let image_kind = ProcessLazyMappingKind::Image {
@@ -969,21 +1106,49 @@ impl Alpha {
             let mut image_page = 0usize;
             while image_page < image_pages {
                 let image_va = image_base + image_page * PAGE_SIZE;
+                if let Some((caller, source)) = snapshot_source {
+                    if let Some((offset, permissions)) = elf.snapshot_page(image_va, PAGE_SIZE) {
+                        let mut pages = 1usize;
+                        while image_page + pages < image_pages
+                            && elf.snapshot_page(image_va + pages * PAGE_SIZE, PAGE_SIZE)
+                                == Some((offset + pages * PAGE_SIZE, permissions))
+                        { pages += 1; }
+                        // Source eligibility was checked before replacing the
+                        // image. Commit revalidates ownership; any error is fatal
+                        // to this exec, never a copy fallback after aliases exist.
+                        self.map_process_private_snapshot_in_slots(
+                            caller, pid, source + offset, image_va, pages * PAGE_SIZE, permissions, Some(image_page),
+                        )?;
+                        image_page += pages;
+                        continue;
+                    }
+                }
                 self.materialize_exec_image_page(
                     pid,
                     target.root_node,
                     target.address_space,
-                    image_kind,
+                    &image_kind,
                     image_va,
                     image_page,
+                    elf.exec_page_permissions(target.capabilities_sealed, image_va, PAGE_SIZE),
+                    None,
+                    false,
+                    None,
+                    None,
                 )?;
                 image_page += 1;
             }
             let image_done = exec_profile::stamp();
-            let mut stack_page = 0usize;
+            let mut stack_page = stack_population::exec_first_page(
+                target.capabilities_sealed, elf.ipc_buffer_start.is_some(), USER_STACK_PAGES,
+            );
             while stack_page < USER_STACK_PAGES {
                 let stack_va = USER_STACK_BASE + stack_page * PAGE_SIZE;
-                self.materialize_lazy_page(pid, target.root_node, target.address_space, stack_va)?;
+                self.materialize_lazy_page_with_permissions(
+                    pid, target.root_node, target.address_space, stack_va,
+                    stack_population::initial_permissions(target.capabilities_sealed && elf.ipc_buffer_start.is_none()),
+                    false,
+                )?;
                 stack_page += 1;
             }
             let stack_done = exec_profile::stamp();
@@ -1012,28 +1177,40 @@ impl Alpha {
         pid: usize,
         process_root: CapabilityDescriptor,
         address_space: CapabilityDescriptor,
-        kind: ProcessLazyMappingKind,
+        kind: &ProcessLazyMappingKind,
         page_va: usize,
         page_index: usize,
+        initial_permissions: usize,
+        source: Option<PageSource>,
+        prepared_pool: bool,
+        source_pages: Option<&memory_image::ImageSourceAliases>,
+        batch: Option<&mut memory_pages::PreinstallPoolBatch>,
     ) -> Result<(), CapabilityError> {
         let frame_slot = page_index;
-        let base_page = self.allocate_process_frame(pid, process_root, frame_slot)?;
-        self.processes
-            .register_physical_allocation(pid, page_va, frame_slot, base_page, 1)?;
-
-        let frame = process_frame_descriptor(process_root, frame_slot);
+        let raw_image = matches!(kind, ProcessLazyMappingKind::Image { elf, .. } if elf.ipc_buffer_start.is_none());
+        let (base_page, frame) = if let Some(batch) = batch {
+            if !prepared_pool || !raw_image {
+                return Err(CapabilityError::InvalidArgument);
+            }
+            self.claim_preinstall_pool_frame(pid, process_root, page_va, frame_slot, batch)?
+        } else if prepared_pool && raw_image {
+            self.allocate_preinstall_pool_frame(pid, process_root, page_va, frame_slot)?
+        } else {
+            self.allocate_image_page_frame(pid, process_root, page_va, frame_slot, raw_image)?
+        };
         {
             let vm = self
                 .processes
                 .vm_space_mut(pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
+            let attributes = nun::capability_call::address_space::Attribute::from_bits(initial_permissions)
+                .ok_or(CapabilityError::InvalidArgument)?;
             self.memory
-                .map_frame_strict(address_space, frame, page_va, vm)?;
+                .map_frame_strict_with_attribute(address_space, frame, page_va, attributes, vm)?;
+            vm.set_permissions(page_va, initial_permissions);
         }
 
-        let temp_va = self.map_initialization_page(base_page)?;
-        fill_lazy_page(kind, page_va, temp_va)?;
-        Ok(())
+        self.initialize_exec_image_page_content(base_page, kind, page_va, source, source_pages)
     }
 
     pub(super) fn recreate_process_address_space_for_exec(
@@ -1099,7 +1276,12 @@ impl Alpha {
             let mut i = 0usize;
             while i < allocation.page_count {
                 let slot = allocation.start_slot + i;
-                let frame = process_frame_descriptor(target.root_node, slot);
+                let frame = if allocation.owns_frame_cap {
+                    process_frame_descriptor(target.root_node, slot)
+                } else {
+                    self.memory.physical_frame_descriptor_from_index(allocation.base_page + i)
+                        .ok_or(CapabilityError::Fatal)?
+                };
                 let va = allocation.base_va + i * PAGE_SIZE;
                 let before_unmap = exec_profile::stamp();
                 if let Err(e) = arch::address_space::unmap(target.address_space, frame, va) {
@@ -1109,13 +1291,13 @@ impl Alpha {
                     );
                 }
                 let after_unmap = exec_profile::stamp();
-                if let Err(e) = arch::node::remove(
+                if let Err(e) = if allocation.owns_frame_cap { arch::node::remove(
                     process_frame_chunk_descriptor(
                         target.root_node,
                         slot / PROCESS_FRAME_CHUNK_PAGES,
                     ),
                     (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                ) {
+                ) } else { Ok(()) } {
                     info!(
                         "[proc.exec.warn] frame cap remove failed pid={:>3} frame={:#018x} slot={} err={:?}",
                         pid, frame, slot, e

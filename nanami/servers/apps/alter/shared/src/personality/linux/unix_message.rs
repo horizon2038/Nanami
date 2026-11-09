@@ -3,14 +3,44 @@ use super::unix::*;
 use super::*;
 use crate::state::readiness::{READY_UNIX_READ, READY_UNIX_WRITE};
 use crate::state::unix_sockets::{
-    Address, Kind, Packet, QUEUE_BYTES, QUEUE_MESSAGES, RIGHTS_LIMIT,
+    Address, Kind, Packet, Socket, QUEUE_BYTES, QUEUE_MESSAGES, RIGHTS_LIMIT,
 };
 use alloc::vec::Vec;
 
-struct Message {
-    bases: [Word; LINUX_IOV_MAX as usize],
-    lengths: [Word; LINUX_IOV_MAX as usize],
-    count: usize,
+// Gather eligible multi-packet payloads once, keeping ordered checked-copy and
+// queue commit semantics. =0 restores the original path for comparison.
+const BATCH_COALESCED_RECVMSG: bool = match option_env!("NANAMI_UNIX_COALESCED_RECVMSG") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => true,
+};
+
+#[cfg(target_os = "none")]
+fn diagnostic_files_receiver(runtime: &Runtime, pid: Word) -> bool {
+    runtime.managed_process(pid).is_some_and(|process| {
+        process.image_name.get(..process.image_name_len).is_some_and(|name| {
+            name.rsplit(|byte| *byte == b'/').next() == Some(&b"xfe"[..])
+        })
+    })
+}
+
+enum Vectors<'a> {
+    One { base: Word, length: Word },
+    Many {
+        bases: &'a [Word],
+        lengths: &'a [Word],
+    },
+}
+impl Vectors<'_> {
+    fn parts(&self) -> (&[Word], &[Word]) {
+        match self {
+            Self::One { base, length } => (core::slice::from_ref(base), core::slice::from_ref(length)),
+            Self::Many { bases, lengths } => (bases, lengths),
+        }
+    }
+}
+
+struct Message<'a> {
+    vectors: Vectors<'a>,
     control: Word,
     control_len: Word,
     name: Word,
@@ -19,7 +49,7 @@ struct Message {
 }
 
 fn length(message: &Message) -> Result<usize, i32> {
-    message.lengths[..message.count]
+    message.vectors.parts().1
         .iter()
         .try_fold(0usize, |sum, length| {
             sum.checked_add(*length)
@@ -35,45 +65,120 @@ fn copy_in(
     len: usize,
 ) -> Result<Vec<u8>, i32> {
     let mut data: Vec<u8> = Vec::new();
-    data.try_reserve_exact(len).map_err(|_| ENOMEM)?;
-    for index in 0..message.count {
-        let count = message.lengths[index].min(len - data.len());
-        let mut done = 0;
-        while done < count {
-            let chunk = (count - done).min(runtime.posix_shm_size);
-            let initialized = data.len();
-            guest_memory::copyin_owned(
-                runtime,
-                pid,
-                message.bases[index].checked_add(done).ok_or(EFAULT)?,
-                &mut data.spare_capacity_mut()[..chunk],
-            )
-            .map_err(|_| EFAULT)?;
-            // Expose bytes only after copyin succeeded; failed transfers never
-            // commit a packet or reveal uninitialized allocation contents.
-            unsafe {
-                data.set_len(initialized + chunk);
-            }
-            done += chunk;
-        }
-        if data.len() == len {
-            break;
-        }
-    }
+    copy_in_append(runtime, pid, message, len, &mut data)?;
     Ok(data)
+}
+
+fn copy_in_append(
+    runtime: &mut Runtime,
+    pid: Word,
+    message: &Message,
+    len: usize,
+    data: &mut Vec<u8>,
+) -> Result<(), i32> {
+    let original = data.len();
+    let (bases, lengths) = message.vectors.parts();
+    data.try_reserve_exact(len).map_err(|_| ENOMEM)?;
+    let result = (|| {
+        let mut copied = 0;
+        for index in 0..bases.len() {
+            let count = lengths[index].min(len - copied);
+            let mut done = 0;
+            while done < count {
+                let chunk = (count - done).min(runtime.posix_shm_size);
+                let initialized = data.len();
+                guest_memory::copyin_owned(
+                    runtime,
+                    pid,
+                    bases[index].checked_add(done).ok_or(EFAULT)?,
+                    &mut data.spare_capacity_mut()[..chunk],
+                )
+                .map_err(|_| EFAULT)?;
+                // Expose bytes only after copyin succeeded; failures restore
+                // the old length before queued storage becomes visible again.
+                unsafe {
+                    data.set_len(initialized + chunk);
+                }
+                done += chunk;
+                copied += chunk;
+            }
+            if copied == len {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        data.truncate(original);
+    }
+    result
+}
+
+// A stream has no record boundaries without ancillary data. Reuse the last
+// packet's owned storage, restoring it on every failure before returning.
+fn append_stream(
+    runtime: &mut Runtime, pid: Word, destination: Word, source: Address,
+    message: &Message, count: usize,
+) -> Option<Result<Word, i32>> {
+    let (mut data, offset) = {
+        let target = runtime.unix_sockets.get_mut(destination)?;
+        let tail = target.packets.back_mut()?;
+        if !tail.rights.is_empty() || tail.source != source {
+            return None;
+        }
+        (core::mem::take(&mut tail.data), tail.offset)
+    };
+    let mut next_offset = offset;
+    let result = (|| {
+        let required = data.len().checked_add(count).ok_or(ENOMEM)?;
+        if required > 2 * QUEUE_BYTES {
+            // A large read may have left a long consumed prefix. Prepare new
+            // storage transactionally rather than changing old bytes on fault.
+            let mut compact = Vec::new();
+            compact.try_reserve_exact(data.len() - offset + count).map_err(|_| ENOMEM)?;
+            compact.extend_from_slice(&data[offset..]);
+            copy_in_append(runtime, pid, message, count, &mut compact)?;
+            data = compact;
+            next_offset = 0;
+            return Ok(());
+        }
+        if required > data.capacity() {
+            let capacity = data.capacity().saturating_mul(2).max(required).min(2 * QUEUE_BYTES);
+            data.try_reserve_exact(capacity - data.len()).map_err(|_| ENOMEM)?;
+        }
+        // No reentrant service dispatch occurs while the owned tail is taken.
+        copy_in_append(runtime, pid, message, count, &mut data)?;
+        // Amortize compaction: tiny interleaved reads/writes must not move the
+        // entire live queue on each send. Never compact before a fallible copy.
+        if offset != 0 && offset >= data.len().div_ceil(2) {
+            data.copy_within(offset.., 0);
+            data.truncate(data.len() - offset);
+            next_offset = 0;
+        }
+        Ok(())
+    })();
+    let target = runtime.unix_sockets.get_mut(destination).unwrap();
+    let tail = target.packets.back_mut().unwrap();
+    tail.data = data;
+    if result.is_ok() {
+        tail.offset = next_offset;
+        target.queued_bytes += count;
+    }
+    Some(result.map(|()| count))
 }
 
 fn copy_out(runtime: &Runtime, pid: Word, message: &Message, data: &[u8]) -> Result<(), i32> {
     let mut copied = 0;
-    for index in 0..message.count {
-        let count = message.lengths[index].min(data.len() - copied);
+    let (bases, lengths) = message.vectors.parts();
+    for index in 0..bases.len() {
+        let count = lengths[index].min(data.len() - copied);
         let mut done = 0;
         while done < count {
             let chunk = (count - done).min(runtime.posix_shm_size);
             guest_memory::copyout_owned(
                 runtime,
                 pid,
-                message.bases[index].checked_add(done).ok_or(EFAULT)?,
+                bases[index].checked_add(done).ok_or(EFAULT)?,
                 &data[copied..copied + chunk],
             )
             .map_err(|_| EFAULT)?;
@@ -106,6 +211,27 @@ fn copy_queued_payload(
             &first.data[first.offset..first.offset + bytes],
         );
     }
+    if let Some(data) = coalesced_scratch(runtime, this, bytes)? {
+        return copy_out(runtime, pid, message, data);
+    }
+    let data = coalesced_payload(this, bytes)?;
+    copy_out(runtime, pid, message, &data)
+}
+
+fn coalesced_scratch<'a>(runtime: &'a Runtime, this: &Socket, bytes: usize) -> Result<Option<&'a [u8]>, i32> {
+    if runtime.posix_shm == 0 || bytes > runtime.posix_shm_size || bytes > isize::MAX as usize {
+        return Ok(None);
+    }
+    // Message/iovec/control planning has finished. This is owned native scratch,
+    // not a guest view. Payload copyout and write_receive_result use independent
+    // stack descriptors and Alpha transfers; neither overwrites this source.
+    // No service dispatch occurs until these bytes have been consumed.
+    let output = unsafe { core::slice::from_raw_parts_mut(runtime.posix_shm as *mut u8, bytes) };
+    gather_payload(this, output)?;
+    Ok(Some(output))
+}
+
+fn coalesced_payload(this: &Socket, bytes: usize) -> Result<Vec<u8>, i32> {
     // Coalesce plain stream writes as before: borrowing each packet separately
     // would add copyout requests when one guest iovec spans several packets.
     let mut data = Vec::new();
@@ -117,7 +243,23 @@ fn copy_queued_payload(
             break;
         }
     }
-    copy_out(runtime, pid, message, &data)
+    Ok(data)
+}
+
+fn gather_payload(this: &Socket, output: &mut [u8]) -> Result<(), i32> {
+    let mut copied = 0;
+    for packet in &this.packets {
+        let count = (packet.data.len() - packet.offset).min(output.len() - copied);
+        output[copied..copied + count]
+            .copy_from_slice(&packet.data[packet.offset..packet.offset + count]);
+        copied += count;
+        if copied == output.len() {
+            return Ok(());
+        }
+    }
+    // A receive plan cannot outlive or mutate its queue. If that invariant is
+    // ever broken, fail before publishing a short/zero-filled payload.
+    Err(EAGAIN)
 }
 
 fn rights(runtime: &mut Runtime, pid: Word, message: &Message) -> Result<Vec<LinuxFile>, i32> {
@@ -249,7 +391,48 @@ fn send(
         return Err(EAGAIN);
     }
     let count = total.min(available);
-    let data = copy_in(runtime, pid, message, count)?;
+    if option_env!("NANAMI_UNIX_STREAM_APPEND") != Some("0")
+        && kind == Kind::Stream && files.is_empty()
+    {
+        if let Some(result) = append_stream(runtime, pid, destination, source, message, count) {
+            #[cfg(target_os = "none")]
+            if result.is_ok() && option_env!("NANAMI_UNIX_STREAM_APPEND_DIAG") == Some("1")
+                && diagnostic_files_receiver(runtime, pid)
+            {
+                use core::sync::atomic::{AtomicBool, Ordering};
+                static FILES: AtomicBool = AtomicBool::new(false);
+                if !FILES.swap(true, Ordering::Relaxed) {
+                    nanami_runtime::println!("[linux.unix] stream-append-files pid={} bytes={}", pid, count);
+                }
+            }
+            return result;
+        }
+    }
+    let data = if kind == Kind::Stream && files.is_empty() {
+        let mut data = runtime.unix_sockets.get_mut(destination).unwrap().take_stream_buffer();
+        let result = (|| {
+            // A drained spare is empty. Amortize increasing small roundtrips
+            // without growing beyond the endpoint's existing retention bound.
+            // Fresh and large messages keep exact-sized allocation.
+            if count > data.capacity() && data.capacity() != 0
+                && count <= crate::state::unix_sockets::STREAM_SPARE_BYTES
+            {
+                let capacity = data.capacity().saturating_mul(2).max(count)
+                    .min(crate::state::unix_sockets::STREAM_SPARE_BYTES);
+                data.try_reserve_exact(capacity).map_err(|_| ENOMEM)?;
+            }
+            copy_in_append(runtime, pid, message, count, &mut data)
+        })();
+        if let Err(error) = result {
+            // A late iovec fault exposes no packet and restores ownership of
+            // the empty spare. No dispatch can change this destination here.
+            runtime.unix_sockets.get_mut(destination).unwrap().recycle_stream_buffer(data);
+            return Err(error);
+        }
+        data
+    } else {
+        copy_in(runtime, pid, message, count)?
+    };
     runtime
         .unix_sockets
         .get_mut(destination)
@@ -281,11 +464,27 @@ fn send(
         source,
     });
     // More data in an already-readable queue cannot wake another reader.
-    // Receive still notifies writers when byte, packet or rights capacity frees.
+    // Receive still notifies writers when constrained capacity frees.
     if became_readable {
         runtime.readiness_changes |= READY_UNIX_READ;
     }
     Ok(count)
+}
+
+fn writer_notification_needed(runtime: &Runtime, id: Word) -> bool {
+    let Some(this) = runtime.unix_sockets.get(id) else { return true; };
+    // Record sends may need more space even while POLLOUT is set. Ancillary
+    // sends may need any number of rights slots. Keep those wakeups unchanged.
+    if this.kind != Kind::Stream || this.queued_rights != 0
+        || this.packets.len() >= QUEUE_MESSAGES
+    {
+        return true;
+    }
+    let Some(peer) = this.peer.and_then(|peer| runtime.unix_sockets.get(peer)) else { return true; };
+    if peer.kind != Kind::Stream || peer.peer != Some(id) { return true; }
+    // A plain stream send accepts a partial payload whenever any byte fits.
+    // With packet/rights room too, it could not have parked for this queue.
+    this.queued_bytes >= this.receive_limit.min(peer.send_limit)
 }
 
 fn receive(
@@ -386,6 +585,32 @@ fn receive(
         output_flags |= MSG_CTRUNC;
     }
     let output = (|| {
+        #[cfg(target_os = "none")]
+        if option_env!("NANAMI_UNIX_RECVMSG_DIAG") == Some("1")
+            && diagnostic_files_receiver(runtime, pid)
+        {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            // At most four lines, keyed by receive operation rather than PID
+            // modulus. This diagnoses shape, never frequency or CPU cost.
+            static REPORTED: AtomicUsize = AtomicUsize::new(0);
+            let bit = match context.number {
+                SYS_READ => 1,
+                SYS_READV => 2,
+                SYS_RECVFROM => 4,
+                SYS_RECVMSG => 8,
+                _ => 0,
+            };
+            if bit != 0 && REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+                let this = socket(runtime, file.resource)?;
+                let first = this.packets.front().ok_or(EAGAIN)?;
+                nanami_runtime::println!(
+                    "[unix.files] recv-shape pid={} call={} iov={} queued={} first={} rights={} name={} header={}",
+                    pid, context.number, message.vectors.parts().0.len(), queued,
+                    first.data.len() - first.offset, files.len(), message.name != 0,
+                    message.header.is_some(),
+                );
+            }
+        }
         // The usual X11 receive has one bounded iovec, one queued packet and
         // no address/rights output. Keep borrowing that payload, and append
         // the result fields to the same ordered checked-copy request. Bound
@@ -394,12 +619,12 @@ fn receive(
         if let Some(header) = message.header {
             if message.name == 0
                 && files.is_empty()
-                && message.count == 1
+                && message.vectors.parts().0.len() == 1
                 && queued != 0
                 && queued <= runtime.posix_shm_size
             {
-                let packet = socket(runtime, file.resource)?
-                    .packets
+                let this = socket(runtime, file.resource)?;
+                let packet = this.packets
                     .front()
                     .ok_or(EAGAIN)?;
                 if queued <= packet.data.len() - packet.offset {
@@ -411,9 +636,51 @@ fn receive(
                         0,
                         output_flags as u32,
                         Some((
-                            message.bases[0],
+                            message.vectors.parts().0[0],
                             &packet.data[packet.offset..packet.offset + queued],
                         )),
+                    );
+                }
+                if BATCH_COALESCED_RECVMSG {
+                    // The legacy payload copy already gathers these bytes into
+                    // one owned buffer and preflights one bounded chunk. Keep
+                    // that exact chunk, then append metadata in the same order.
+                    // Actual Files traffic includes64-byte coalesced receives.
+                    // Keep small gathered bytes in bounded owned stack storage;
+                    // larger chunks reuse owned transfer scratch, with the
+                    // original fallible allocation if scratch is unavailable.
+                    let mut small = [0u8; 256];
+                    let large;
+                    let data: &[u8] = if queued <= small.len() {
+                        gather_payload(this, &mut small[..queued])?;
+                        &small[..queued]
+                    } else {
+                        if let Some(scratch) = coalesced_scratch(runtime, this, queued)? {
+                            scratch
+                        } else {
+                            large = coalesced_payload(this, queued)?;
+                            &large
+                        }
+                    };
+                    #[cfg(target_os = "none")]
+                    if option_env!("NANAMI_UNIX_RECVMSG_DIAG") == Some("1") {
+                        use core::sync::atomic::{AtomicBool, Ordering};
+                        static REPORTED: AtomicBool = AtomicBool::new(false);
+                        if !REPORTED.swap(true, Ordering::Relaxed) {
+                            nanami_runtime::println!("[unix.recvmsg] coalesced-result-batch");
+                        }
+                        static FILES_REPORTED: AtomicBool = AtomicBool::new(false);
+                        if diagnostic_files_receiver(runtime, pid)
+                            && !FILES_REPORTED.swap(true, Ordering::Relaxed)
+                        {
+                            nanami_runtime::println!(
+                                "[unix.files] coalesced-result-batch pid={} bytes={}", pid, queued,
+                            );
+                        }
+                    }
+                    return write_receive_result(
+                        runtime, pid, header, 0, 0, output_flags as u32,
+                        Some((message.vectors.parts().0[0], data)),
                     );
                 }
             }
@@ -476,6 +743,7 @@ fn receive(
         return Err(error);
     }
     if flags & MSG_PEEK == 0 {
+        let notify_writers = writer_notification_needed(runtime, file.resource);
         let mut remaining = queued;
         let mut collect_sockets = false;
         loop {
@@ -491,7 +759,10 @@ fn receive(
             this.queued_bytes -= consumed;
             this.queued_rights -= rights.len();
             if packet.offset == packet.data.len() {
-                this.packets.pop_front();
+                let packet = this.packets.pop_front().unwrap();
+                if !datagram && rights.is_empty() {
+                    this.recycle_stream_buffer(packet.data);
+                }
             }
             for file in rights {
                 collect_sockets |= file.kind == LinuxFileKind::SocketUnix;
@@ -505,7 +776,9 @@ fn receive(
         if collect_sockets {
             super::unix::collect(runtime);
         }
-        runtime.readiness_changes |= READY_UNIX_WRITE;
+        if notify_writers {
+            runtime.readiness_changes |= READY_UNIX_WRITE;
+        }
     }
     if flags & MSG_TRUNC != 0 && datagram {
         Ok(packet_length)
@@ -556,9 +829,7 @@ pub(super) fn io(
     context: LinuxSyscallContext,
 ) -> Result<Word, i32> {
     let mut message = Message {
-        bases: [0; LINUX_IOV_MAX as usize],
-        lengths: [0; LINUX_IOV_MAX as usize],
-        count: 1,
+        vectors: Vectors::One { base: 0, length: 0 },
         control: 0,
         control_len: 0,
         name: 0,
@@ -580,18 +851,21 @@ pub(super) fn io(
         _ => None,
     };
     if let Some((iov, count)) = vector {
-        read_linux_iovecs(
-            runtime,
-            pid,
-            iov,
-            count,
-            &mut message.bases,
-            &mut message.lengths,
-        )?;
-        message.count = count;
+        if count == 1 {
+            let mut bases = [0; 1];
+            let mut lengths = [0; 1];
+            read_linux_iovecs(runtime, pid, iov, count, &mut bases, &mut lengths)?;
+            message.vectors = Vectors::One { base: bases[0], length: lengths[0] };
+        } else if count == 0 {
+            let mut bases = [];
+            let mut lengths = [];
+            read_linux_iovecs(runtime, pid, iov, count, &mut bases, &mut lengths)?;
+            message.vectors = Vectors::Many { bases: &[], lengths: &[] };
+        } else {
+            return io_many(runtime, pid, file, context, message, iov, count);
+        }
     } else {
-        message.bases[0] = a[1];
-        message.lengths[0] = a[2];
+        message.vectors = Vectors::One { base: a[1], length: a[2] };
         if a[1] == 0 && a[2] != 0 {
             return Err(EFAULT);
         }
@@ -600,6 +874,41 @@ pub(super) fn io(
             message.name_len = a[5];
         }
     }
+    transfer(runtime, pid, file, context, &message)
+}
+
+// Keep the maximum-sized arrays out of scalar and single-iovec stack frames.
+#[inline(never)]
+fn io_many(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    context: LinuxSyscallContext,
+    metadata: Message<'_>,
+    iov: Word,
+    count: Word,
+) -> Result<Word, i32> {
+    let mut bases = [0; LINUX_IOV_MAX as usize];
+    let mut lengths = [0; LINUX_IOV_MAX as usize];
+    read_linux_iovecs(runtime, pid, iov, count, &mut bases, &mut lengths)?;
+    let message = Message {
+        vectors: Vectors::Many { bases: &bases[..count], lengths: &lengths[..count] },
+        control: metadata.control,
+        control_len: metadata.control_len,
+        name: metadata.name,
+        name_len: metadata.name_len,
+        header: metadata.header,
+    };
+    transfer(runtime, pid, file, context, &message)
+}
+
+fn transfer(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    context: LinuxSyscallContext,
+    message: &Message<'_>,
+) -> Result<Word, i32> {
     let flags = match context.number {
         SYS_SENDMSG | SYS_RECVMSG => context.args[2],
         SYS_SENDTO | SYS_RECVFROM => context.args[3],
@@ -607,14 +916,15 @@ pub(super) fn io(
     };
     match context.number {
         SYS_WRITE | SYS_WRITEV | SYS_SENDTO | SYS_SENDMSG => {
-            send(runtime, pid, file, &message, flags)
+            send(runtime, pid, file, message, flags)
         }
-        _ => receive(runtime, pid, file, &message, flags, context),
+        _ => receive(runtime, pid, file, message, flags, context),
     }
 }
 
 pub(super) fn discard(runtime: &mut Runtime, id: Word) {
     if let Some(socket) = runtime.unix_sockets.get_mut(id) {
+        drop(socket.take_stream_buffer());
         let packets = core::mem::take(&mut socket.packets);
         socket.queued_bytes = 0;
         socket.queued_rights = 0;

@@ -14,11 +14,17 @@ pub struct SharedMemoryReservation {
 enum ReferenceUnit {
     Extent,
     Page,
+    PoolExtent,
+    PoolPage,
 }
 
 impl SharedMemoryReservation {
     pub fn has_page_references(self) -> bool {
-        self.references == ReferenceUnit::Page
+        matches!(self.references, ReferenceUnit::Page | ReferenceUnit::PoolPage)
+    }
+
+    pub fn owns_frame_caps(self) -> bool {
+        matches!(self.references, ReferenceUnit::Extent | ReferenceUnit::Page)
     }
 }
 
@@ -143,6 +149,17 @@ impl ProcessManager {
         max_frame_slots: usize,
     ) -> Result<SharedMemoryReservation, CapabilityError> {
         self.reserve_shared_memory_at(pid, page_count, max_frame_slots, 0)
+    }
+
+    pub fn reserve_owned_pool_memory(
+        &mut self, pid: usize, pages: usize, max_slots: usize,
+    ) -> Result<SharedMemoryReservation, CapabilityError> {
+        let reservation = self.reserve_shared_memory(pid, pages, max_slots)?;
+        let owner = self.memory_owner_pid(pid);
+        let stored = self.shared_memory.get_mut(&owner).unwrap().active
+            .get_mut(&reservation.base_va).unwrap();
+        stored.references = ReferenceUnit::PoolExtent;
+        Ok(*stored)
     }
 
     pub fn reserve_shared_memory_at(
@@ -312,7 +329,8 @@ impl ProcessManager {
                 reservation.base_va,
                 reservation.page_count,
             )
-            .filter(|allocation| allocation.start_slot == reservation.start_slot)
+            .filter(|allocation| allocation.start_slot == reservation.start_slot
+                && allocation.owns_frame_cap == reservation.owns_frame_caps())
             .ok_or(CapabilityError::IllegalOperation)?;
         self.physical_allocations
             .split_unique_extent(pid, allocation)
@@ -323,7 +341,7 @@ impl ProcessManager {
             .active
             .get_mut(&reservation.base_va)
             .unwrap()
-            .references = ReferenceUnit::Page;
+            .references = if reservation.owns_frame_caps() { ReferenceUnit::Page } else { ReferenceUnit::PoolPage };
         Ok(())
     }
 

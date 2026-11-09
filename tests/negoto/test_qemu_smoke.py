@@ -2,7 +2,11 @@
 import ast
 from pathlib import Path
 import re
+import subprocess
+import sys
 import unittest
+import io
+from types import SimpleNamespace
 
 
 class FakeClock:
@@ -22,6 +26,120 @@ class FakeClock:
 
 
 class LaunchObservationTests(unittest.TestCase):
+    def test_paint_decoding_waits_for_vm_reap_even_after_forced_kill(self):
+        source = ast.parse(Path(__file__).with_name("qemu-smoke.py").read_text())
+        finalizers = [node.finalbody for node in ast.walk(source) if isinstance(node, ast.Try)
+                      and any(isinstance(value, ast.Attribute) and value.attr == "audit_timeline"
+                              for statement in node.finalbody for value in ast.walk(statement))]
+        self.assertEqual(len(finalizers), 1)
+        code = compile(ast.Module(body=finalizers[0], type_ignores=[]), "vm-finalizer", "exec")
+        import json
+        import tempfile
+        for forced in (False, True):
+            events = []
+            def wait(timeout=None):
+                events.append("wait")
+                if forced and timeout is not None:
+                    raise subprocess.TimeoutExpired("qemu", timeout)
+                events.append("reaped")
+            def audit(directory):
+                self.assertEqual(events[-1], "reaped")
+                events.append("audit")
+                return {"performance_admitted": False}
+            with tempfile.TemporaryDirectory() as temporary:
+                logs = Path(temporary)
+                process = SimpleNamespace(terminate=lambda: events.append("terminate"),
+                                          kill=lambda: events.append("kill"), wait=wait)
+                exec(code, dict(process=process, subprocess=subprocess,
+                                args=SimpleNamespace(app_launch_timeline=True), logs=logs,
+                                files_paint=SimpleNamespace(audit_timeline=audit), json=json))
+                self.assertFalse(json.loads((logs / "app-launch-paint-reference.json").read_text())
+                                 ["performance_admitted"])
+            self.assertEqual(events[-1], "audit")
+            self.assertEqual("kill" in events, forced)
+
+    def test_file_mapping_delivery_accepts_compositor_with_interleaved_font_log(self):
+        source = ast.parse(Path(__file__).with_name("qemu-smoke.py").read_text())
+        branches = [node for node in ast.walk(source) if isinstance(node, ast.If)
+                    and {"scope_disk_readout", "app_syscall_scope", "tinycore_file_mapping"}.issubset(
+                        {value.attr for value in ast.walk(node.test) if isinstance(value, ast.Attribute)})]
+        self.assertEqual(len(branches), 1)
+        code = compile(ast.Module(body=branches, type_ignores=[]), "functional-bootstrap", "exec")
+        serial = "[shell] font init e[another service] nd\n[              honoka] initial render done\n"
+        for file_mapping, timeline in [(True, False), (False, True), (False, False)]:
+            clock, observations = FakeClock(), []
+            args = SimpleNamespace(scope_disk_readout=False, app_syscall_scope=None,
+                                   tinycore_file_mapping=file_mapping, app_launch_timeline=timeline)
+            exec(code, dict(args=args, time=clock, re=re,
+                            wait_for=lambda predicate: observations.append(bool(predicate(serial)))))
+            diagnostic = file_mapping or timeline
+            self.assertEqual(observations, [diagnostic])
+            self.assertEqual(clock.now, 10_000_000_000 if diagnostic else 0)
+
+    def test_greeting_is_consumed_before_command_and_reply_is_not_one_command_late(self):
+        process = SimpleNamespace(stdin=io.BytesIO(), stdout=SimpleNamespace(fileno=lambda: 17), poll=lambda: None)
+        reads = iter([b"QEMU greeting\r\n(qe", b"mu) ", b"VM status: running\r\n(qemu) "])
+        send = self.runner_function("send", process=process, time=FakeClock(),
+                                    select=SimpleNamespace(select=lambda *args: ([process.stdout], [], [])),
+                                    os=SimpleNamespace(read=lambda *args: next(reads)))
+        self.assertIn(b"QEMU greeting", send())
+        self.assertEqual(process.stdin.getvalue(), b"")
+        self.assertIn(b"VM status: running", send("info status"))
+        self.assertEqual(process.stdin.getvalue(), b"info status\n")
+        source = Path(__file__).with_name("qemu-smoke.py").read_text()
+        tree = ast.parse(source)
+        greeting = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name) and node.func.id == "send" and not node.args)
+        wait = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == "wait_for")
+        self.assertLess(greeting.lineno, wait.lineno)
+
+    def test_monitor_eof_and_exited_process_fail_without_spinning(self):
+        process = SimpleNamespace(stdin=io.BytesIO(), stdout=SimpleNamespace(fileno=lambda: 17), poll=lambda: None)
+        clock = FakeClock()
+        reads = iter([b"partial reply", b""])
+        send = self.runner_function("send", process=process, time=clock,
+                                    select=SimpleNamespace(select=lambda *args: ([process.stdout], [], [])),
+                                    os=SimpleNamespace(read=lambda *args: next(reads)))
+        with self.assertRaisesRegex(RuntimeError, "monitor closed"):
+            send("screendump failed.png")
+        self.assertEqual(process.stdin.getvalue(), b"screendump failed.png\n")
+        process.stdin = io.BytesIO()
+        process.poll = lambda: -11
+        with self.assertRaisesRegex(RuntimeError, "status=-11"):
+            send("info cpus")
+        self.assertEqual(process.stdin.getvalue(), b"")
+
+    def test_monitor_deadline_covers_continuous_partial_replies(self):
+        clock = FakeClock()
+        process = SimpleNamespace(stdin=io.BytesIO(), stdout=SimpleNamespace(fileno=lambda: 17), poll=lambda: None)
+        def select_ready(*args):
+            clock.sleep(1)
+            return ([process.stdout], [], [])
+        send = self.runner_function("send", process=process, time=clock,
+                                    select=SimpleNamespace(select=select_ready),
+                                    os=SimpleNamespace(read=lambda *args: b"incomplete"))
+        with self.assertRaisesRegex(RuntimeError, "monitor timed out"):
+            send("info cpus")
+        self.assertEqual(clock.now, 5_000_000_000)
+
+    def test_monitor_prompt_can_span_multiple_reads(self):
+        process = SimpleNamespace(stdin=io.BytesIO(), stdout=SimpleNamespace(fileno=lambda: 17), poll=lambda: None)
+        reads = iter([b"reply(qe", b"mu)"])
+        send = self.runner_function("send", process=process, time=FakeClock(),
+                                    select=SimpleNamespace(select=lambda *args: ([process.stdout], [], [])),
+                                    os=SimpleNamespace(read=lambda *args: next(reads)))
+        self.assertEqual(send("info cpus"), b"reply(qemu)")
+
+    def test_host_wait_uses_declared_poll_interval(self):
+        clock = FakeClock()
+        replies = iter(["waiting", "waiting", "ready"])
+        args = type("Arguments", (), dict(timeout=1, host_poll_ms=10))()
+        wait = self.runner_function("wait_for", time=clock, args=args,
+                                    checked_serial=lambda: next(replies))
+        wait(lambda text: text == "ready")
+        self.assertEqual(clock.now, 20_000_000)
+
     def test_hmp_paths_translate_period_instead_of_silently_losing_it(self):
         source = Path(__file__).with_name("qemu-smoke.py").read_text()
         maps = [node.value for node in ast.walk(ast.parse(source))
@@ -48,7 +166,10 @@ class LaunchObservationTests(unittest.TestCase):
                   if isinstance(node, ast.If)
                   and any(isinstance(value, ast.Attribute)
                           and value.attr == "app_launch_timeline"
-                          for value in ast.walk(node.test))]
+                          for value in ast.walk(node.test))
+                  and not any(isinstance(value, ast.Attribute)
+                              and value.attr == "app_launch_rtt"
+                              for value in ast.walk(node.test))]
         self.assertEqual(len(guards), 1)
         code = compile(ast.Module(body=guards, type_ignores=[]), "timeline-guard", "exec")
 
@@ -133,22 +254,60 @@ class LaunchObservationTests(unittest.TestCase):
             clock.now += 1_000_000
             return begin, clock.now
 
-        observe = self.runner_function(
-            "launch_timeline", time=clock, send=commands.append,
-            screenshot_at=capture, logs=Path("/test-only"),
-            keys={"/": "slash", "\n": "ret"},
-            print=lambda line, **_: reports.append(line),
-        )
-        observe(0, 0)
-        self.assertEqual(len(captures), 5)
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            observe = self.runner_function(
+                "launch_timeline", time=clock, send=commands.append,
+                screenshot_at=capture, logs=Path(temporary), json=json,
+                keys={"/": "slash", "\n": "ret"},
+                print=lambda line, **_: reports.append(line),
+            )
+            observe(0, 0)
+            short = json.loads((Path(temporary) / "app-launch-single-input.json").read_text())
+        self.assertEqual(len(captures), 7)
         self.assertIn("requested-ms=200 capture-begin-ns=900000000", reports[0])
         self.assertEqual(commands[:2], ["sendkey ctrl-l 40", "sendkey ctrl-a 40"])
         self.assertEqual(commands[-1], "sendkey ret 40")
         self.assertIn("phase=keyboard-challenge", reports[-1])
         self.assertNotIn("PASS", "\n".join(reports))
+        self.assertEqual(short["command"], "sendkey ctrl-l 40")
+        self.assertFalse(short["painted_input_readiness_verified"])
+        self.assertFalse(short["performance_admitted"])
+        self.assertEqual([item["requested_ms"] for item in short["captures"]], [50, 500])
+        self.assertEqual(short["captures"][0]["capture_begin_ns"] - short["input_begin_ns"],
+                         50_000_000)
 
 
 class PerformanceReportTests(unittest.TestCase):
+    def test_cli_rejects_input_or_tcg_work_in_kvm_rtt_trials(self):
+        runner = str(Path(__file__).with_name("qemu-smoke.py"))
+        for flags, message in [
+            (["--accel", "kvm", "--tcg-threads", "multi"], "--tcg-threads requires --accel tcg"),
+            (["--tinycore-app-launch-perf", "files", "--app-launch-ready", "ping",
+              "--app-launch-rtt", "--app-launch-timeline"], "cannot overlap timeline"),
+        ]:
+            result = subprocess.run([sys.executable, runner, "--image", "/nonexistent", *flags],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn(message, result.stderr)
+
+    def test_rtt_requires_all_six_samples_and_a_complete_line(self):
+        source = Path(__file__).with_name("qemu-smoke.py").read_text()
+        candidates = [node for node in ast.walk(ast.parse(source))
+                      if isinstance(node, ast.Lambda)
+                      and any(isinstance(value, ast.Constant) and isinstance(value.value, str)
+                              and value.value.startswith("(?m)^APP-X11-RTT-PASS")
+                              for value in ast.walk(node))]
+        self.assertEqual(len(candidates), 1)
+        complete = eval(compile(ast.Expression(candidates[0]), "rtt-predicate", "eval"), {"re": re})
+        for report in ["APP-X11-RTT-FAIL files\n",
+                       "APP-X11-RTT-PASS count=128 raw-ns=1,2,3 xlib-ns=4,5\n",
+                       "APP-X11-RTT-PASS count=128 raw-ns=1,2,3 xlib-ns=4,5,6"]:
+            self.assertFalse(complete(report))
+        for newline in ["\n", "\r\n"]:
+            self.assertTrue(complete("APP-X11-RTT-PASS count=128 raw-ns=1,2,3 xlib-ns=4,5,6" + newline))
+
     @classmethod
     def setUpClass(cls):
         source = Path(__file__).with_name("qemu-smoke.py").read_text()

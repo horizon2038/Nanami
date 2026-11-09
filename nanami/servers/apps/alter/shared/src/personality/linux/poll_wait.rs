@@ -5,6 +5,45 @@ use super::{
 };
 use crate::state::readiness::*;
 
+#[cfg(test)]
+static PENDING_WAIT_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) fn take_pending_wait_bytes() -> usize {
+    PENDING_WAIT_BYTES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
+fn retain_pending_wait(runtime: &mut Runtime, index: usize, wait: &ReadinessWait) {
+    // Small ordinary waitsets retain their immutable interest snapshot. The
+    // scan updates only sources/revents; publish the deadline as well. I/O
+    // retry contexts keep the original whole-snapshot replacement below.
+    let number = wait.context.number;
+    // Bound the strided field stores; larger sets keep the contiguous copy.
+    if wait.count <= 8 && (matches!(number,
+        super::SYS_POLL | super::SYS_PPOLL | super::SYS_SELECT | super::SYS_PSELECT6)
+        || super::epoll::is_wait(number))
+    {
+        if let Some(stored) = runtime.managed[index].readiness_wait.as_mut() {
+            stored.sources = wait.sources;
+            stored.deadline = wait.deadline;
+            for (target, scanned) in stored.entries[..wait.count].iter_mut()
+                .zip(&wait.entries[..wait.count])
+            {
+                target.revents = scanned.revents;
+            }
+            #[cfg(test)]
+            PENDING_WAIT_BYTES.fetch_add(
+                core::mem::size_of_val(&wait.sources) + core::mem::size_of_val(&wait.deadline)
+                    + wait.count * core::mem::size_of::<i16>(),
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+    runtime.managed[index].readiness_wait = Some(*wait);
+    #[cfg(test)]
+    PENDING_WAIT_BYTES.fetch_add(core::mem::size_of::<ReadinessWait>(), core::sync::atomic::Ordering::Relaxed);
+}
+
 pub(super) fn sys_poll_action(
     runtime: &mut Runtime,
     pid: Word,
@@ -47,6 +86,33 @@ fn restore_signal_mask(runtime: &mut Runtime, pid: Word) {
     }
 }
 
+fn completion_needs_clock(context: LinuxSyscallContext) -> bool {
+    // Integer poll/epoll timeouts are input-only. Other wait contexts retain
+    // their completion sample, including APIs that write remaining time.
+    context.number != super::SYS_POLL && !super::epoll::is_wait(context.number)
+}
+
+fn scan_wait(
+    runtime: &mut Runtime, pid: Word, wait: &mut ReadinessWait,
+) -> Result<(Word, Option<Word>), i32> {
+    if super::epoll::is_wait(wait.context.number) {
+        if let Some(file) = runtime.linux_file(pid, wait.context.args[0])
+            .filter(|file| file.kind == super::LinuxFileKind::Epoll)
+        {
+            // complete() changes cursor/ONESHOT only after successful output;
+            // an empty collection has no output or commit. The full empty
+            // scan also attaches the same input interests before parking.
+            wait.sources = READY_OBJECT | super::epoll::sources(runtime, file.resource);
+            let value = super::epoll::complete(runtime, pid, wait.context)?;
+            let ready = Word::from(value != 0);
+            wait.entries[0].revents = if ready != 0 { super::LINUX_POLLIN } else { 0 };
+            return Ok((ready, Some(value)));
+        }
+    }
+    // A closed or recycled descriptor keeps the ordinary scan/error path.
+    scan_readiness(runtime, pid, wait).map(|ready| (ready, None))
+}
+
 fn start_wait(
     runtime: &mut Runtime,
     pid: Word,
@@ -62,12 +128,17 @@ fn start_wait(
             nanos,
         ));
     }
-    let ready = scan_readiness(runtime, pid, &mut wait)?;
+    let (ready, completion) = scan_wait(runtime, pid, &mut wait)?;
     if ready != 0 || timeout == Some(0) {
-        if wait.deadline.is_some() {
+        if wait.deadline.is_some() && completion_needs_clock(context) {
             refresh_clock(runtime)?;
         }
-        return complete_wait(runtime, pid, &wait).map(Some);
+        #[cfg(feature = "wait-shape")]
+        super::wait_shape::note(runtime, pid, &wait, 0, timeout, Some(ready), 0, false, 0);
+        return match completion {
+            Some(value) => Ok(Some(value)),
+            None => complete_wait(runtime, pid, &wait).map(Some),
+        };
     }
     // Notifications are attached before the readiness query. IPC preserves
     // notifications received during the query, closing the check/park race.
@@ -79,6 +150,8 @@ fn start_wait(
         runtime.managed_process_mut(pid).unwrap().readiness_wait = None;
         return Err(errno);
     }
+    #[cfg(feature = "wait-shape")]
+    super::wait_shape::note(runtime, pid, &wait, 1, timeout, Some(ready), 0, false, 0);
     Ok(None)
 }
 
@@ -121,9 +194,17 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
         let mut wait = *wait;
         let previous_deadline = wait.deadline;
         super::pty::update_deadline(runtime, pid, &mut wait);
-        deadline_changed |= previous_deadline != wait.deadline;
-        runtime.managed[index].readiness_wait = Some(wait);
-        let result = scan_readiness(runtime, pid, &mut wait).and_then(|ready| {
+        if previous_deadline != wait.deadline {
+            deadline_changed = true;
+            // update_deadline changes only this field. Publish it before the
+            // scan/PTY retry without copying the entire interest snapshot.
+            runtime.managed[index].readiness_wait.as_mut().unwrap().deadline = wait.deadline;
+        }
+        #[cfg(feature = "wait-shape")]
+        let mut scanned = None;
+        let result = scan_wait(runtime, pid, &mut wait).and_then(|(ready, completion)| {
+            #[cfg(feature = "wait-shape")]
+            { scanned = Some(ready); }
             if let Some(result) = super::pty::retry(runtime, pid, wait.context) {
                 return match result {
                     Err(EAGAIN) => Ok(None),
@@ -156,21 +237,37 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
             if ready == 0 && !expired {
                 return Ok(None);
             }
-            if wait.deadline.is_some() && !clock_sampled {
+            if wait.deadline.is_some()
+                && !clock_sampled
+                && completion_needs_clock(wait.context)
+            {
                 refresh_clock(runtime)?;
                 clock_sampled = true;
             }
-            match complete_wait(runtime, pid, &wait) {
+            let result = match completion {
+                Some(value) => Ok(value),
+                None => complete_wait(runtime, pid, &wait),
+            };
+            match result {
                 Err(EAGAIN) => Ok(None),
                 result => result.map(Some),
             }
         });
+        #[cfg(feature = "wait-shape")]
+        {
+            let (phase, value) = match result {
+                Ok(None) => (2, 0),
+                Ok(Some(value)) => (3, value as isize),
+                Err(errno) => (4, -(errno as isize)),
+            };
+            super::wait_shape::note(runtime, pid, &wait, phase, None, scanned, sources, expired, value);
+        }
         let value = match result {
             Ok(None) => {
                 // Another process can modify a shared epoll interest set.
                 // Retain the newly discovered notification sources even when
                 // this change did not immediately make an FD ready.
-                runtime.managed[index].readiness_wait = Some(wait);
+                retain_pending_wait(runtime, index, &wait);
                 continue;
             }
             Ok(Some(value)) => value as isize,

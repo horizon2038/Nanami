@@ -22,6 +22,42 @@ pub struct ScreenInfo {
     pub blue_size: usize,
 }
 
+impl ScreenInfo {
+    fn packed_rgb888(self) -> bool {
+        self.bits_per_pixel == 32 && self.red_size == 8 && self.green_size == 8
+            && self.blue_size == 8 && self.green_position == 8
+            && ((self.red_position == 16 && self.blue_position == 0)
+                || (self.red_position == 0 && self.blue_position == 16))
+    }
+}
+
+// Two independent 16-bit lanes hold the low/high color numerators. Their
+// maximum is 255*255+127, so the exact /255 reduction cannot carry across lanes.
+struct Rgb888Blend {
+    outer: u32,
+    middle: u32,
+    inverse: u32,
+}
+
+impl Rgb888Blend {
+    fn new(foreground: u32, alpha: u8) -> Self {
+        let alpha = alpha as u32;
+        Self {
+            outer: (foreground & 0x00ff00ff) * alpha + 0x007f007f,
+            middle: ((foreground >> 8) & 255) * alpha + 127,
+            inverse: 255 - alpha,
+        }
+    }
+
+    fn over(&self, background: u32) -> u32 {
+        let outer = self.outer + (background & 0x00ff00ff) * self.inverse;
+        let middle = self.middle + ((background >> 8) & 255) * self.inverse;
+        let outer = ((outer + 0x00010001 + ((outer >> 8) & 0x00ff00ff)) >> 8) & 0x00ff00ff;
+        let middle = ((middle + 1 + (middle >> 8)) >> 8) << 8;
+        (background & 0xff000000) | outer | middle
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Rect {
     pub x: i32,
@@ -291,6 +327,23 @@ impl Framebuffer {
             }
         }
 
+        // Full-stride rows form one contiguous owned RAM extent. Preserve the
+        // scalar path's complete-row rule when the last row is truncated.
+        if x0 == 0 && y0 < y1 && self.screen.stride_bytes == row_pixels.saturating_mul(4) {
+            let offset = (y0 as usize).saturating_mul(self.screen.stride_bytes);
+            let rows = ((y1 - y0) as usize)
+                .min((self.bytes as usize).saturating_sub(offset) / self.screen.stride_bytes);
+            if let Some(count) = rows.checked_mul(row_pixels)
+                .filter(|count| *count <= isize::MAX as usize / 4)
+            {
+                if count != 0 {
+                    let base = (self.vaddr as usize).saturating_add(offset);
+                    unsafe { core::slice::from_raw_parts_mut(base as *mut u32, count).fill(color); }
+                }
+                return;
+            }
+        }
+
         let mut py = y0;
         while py < y1 {
             let offset = (py as usize)
@@ -317,7 +370,7 @@ impl Framebuffer {
             self.fill_rect(x, y, width, height, color);
             return;
         }
-        if alpha == 0 || width <= 0 || height <= 0 {
+        if self.gpu_failed.get() || alpha == 0 || width <= 0 || height <= 0 {
             return;
         }
 
@@ -325,12 +378,53 @@ impl Framebuffer {
         let y0 = clamp_i32(y, 0, self.screen.height as i32);
         let x1 = clamp_i32(x.saturating_add(width), 0, self.screen.width as i32);
         let y1 = clamp_i32(y.saturating_add(height), 0, self.screen.height as i32);
+        if x0 >= x1 || y0 >= y1 { return; }
+        // Solid foreground terms and channel masks do not vary per pixel.
+        // Keep the original /255 rounding and preservation of non-RGB bits.
+        let channels = [
+            (self.screen.red_size, self.screen.red_position),
+            (self.screen.green_size, self.screen.green_position),
+            (self.screen.blue_size, self.screen.blue_position),
+        ].map(|(size, position)| {
+            let mask = channel_mask(size, position);
+            let foreground = if mask == 0 { 0 }
+                else { ((color & mask) >> position) as u64 * alpha as u64 + 127 };
+            (mask, position, foreground)
+        });
+        let rgb_mask = channels.iter().fold(0, |mask, channel| mask | channel.0);
+        let inverse = 255 - alpha as u64;
+        let packed = if self.screen.packed_rgb888() { Some(Rgb888Blend::new(color, alpha)) } else { None };
         let mut py = y0;
         while py < y1 {
-            let mut px = x0;
-            while px < x1 {
-                self.blend_pixel(px, py, color, alpha);
-                px += 1;
+            let offset = (py as usize).saturating_mul(self.screen.stride_bytes)
+                .saturating_add((x0 as usize).saturating_mul(4));
+            let count = ((x1 - x0) as usize)
+                .min((self.bytes as usize).saturating_sub(offset) / 4);
+            let row = (self.vaddr as usize).saturating_add(offset) as *mut u32;
+            if let Some(blend) = &packed {
+                for pixel in 0..count {
+                    unsafe {
+                        let pointer = row.add(pixel);
+                        pointer.write(blend.over(pointer.read()));
+                    }
+                }
+                py += 1;
+                continue;
+            }
+            for pixel in 0..count {
+                unsafe {
+                    let pointer = row.add(pixel);
+                    let background = pointer.read();
+                    let mut output = background & !rgb_mask;
+                    for &(mask, position, foreground) in &channels {
+                        if mask != 0 {
+                            let value = (foreground
+                                + ((background & mask) >> position) as u64 * inverse) / 255;
+                            output |= ((value as u32) << position) & mask;
+                        }
+                    }
+                    pointer.write(output);
+                }
             }
             py += 1;
         }
@@ -380,6 +474,36 @@ impl Framebuffer {
             return;
         }
 
+        // Full-width opaque rows can be copied once. Require complete bounds
+        // and disjoint whole extents; row-wise copies can legally overlap a
+        // different row, so those cases must retain the old sequential path.
+        if alpha == u8::MAX && src_x == 0 && dst_x == 0
+            && self.screen.stride_bytes == row_bytes
+            && src_stride_pixels.checked_mul(4) == Some(row_bytes)
+        {
+            let flat = (|| {
+                let bytes = height.checked_mul(row_bytes)?;
+                if bytes > isize::MAX as usize { return None; }
+                let source_offset = src_y.checked_mul(row_bytes)?;
+                let destination_offset = dst_y.checked_mul(row_bytes)?;
+                if source_offset.checked_add(bytes)? > src_bytes
+                    || destination_offset.checked_add(bytes)? > self.bytes { return None; }
+                let source = src_vaddr.checked_add(source_offset)?;
+                let destination = self.vaddr.checked_add(destination_offset)?;
+                let source_end = source.checked_add(bytes)?;
+                let destination_end = destination.checked_add(bytes)?;
+                if source < destination_end && destination < source_end { return None; }
+                Some((source, destination, bytes))
+            })();
+            if let Some((source, destination, bytes)) = flat {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes);
+                }
+                return;
+            }
+        }
+
+        let packed_rgb888 = self.screen.packed_rgb888();
         let mut y = 0usize;
         while y < height {
             let sy = src_y.saturating_add(y);
@@ -411,14 +535,39 @@ impl Framebuffer {
                 y += 1;
                 continue;
             }
+            if packed_rgb888 {
+                let source = src_base as *const u32;
+                let destination = dst_base as *mut u32;
+                for x in 0..width {
+                    unsafe {
+                        let pointer = destination.add(x);
+                        pointer.write(Rgb888Blend::new(source.add(x).read(), alpha).over(pointer.read()));
+                    }
+                }
+                y += 1;
+                continue;
+            }
+            // Both row extents were checked above. Opaque rows bypass this
+            // setup; translucent pixels share one current color-format decode.
+            let [red, green, blue] = [
+                (self.screen.red_size, self.screen.red_position),
+                (self.screen.green_size, self.screen.green_position),
+                (self.screen.blue_size, self.screen.blue_position),
+            ].map(|(size, position)| (channel_mask(size, position), position));
+            let rgb_mask = red.0 | green.0 | blue.0;
+            let source = src_base as *const u32;
+            let destination = dst_base as *mut u32;
             let mut x = 0usize;
             while x < width {
                 unsafe {
-                    let pixel =
-                        core::ptr::read(src_base.saturating_add(x.saturating_mul(4)) as *const u32);
-                    let dst_ptr = dst_base.saturating_add(x.saturating_mul(4)) as *mut u32;
-                    let background = core::ptr::read(dst_ptr);
-                    core::ptr::write(dst_ptr, self.blend_color(background, pixel, alpha));
+                    let pixel = source.add(x).read();
+                    let dst_ptr = destination.add(x);
+                    let background = dst_ptr.read();
+                    let output = (background & !rgb_mask)
+                        | blend_channel(background, pixel, red.0, red.1, alpha)
+                        | blend_channel(background, pixel, green.0, green.1, alpha)
+                        | blend_channel(background, pixel, blue.0, blue.1, alpha);
+                    dst_ptr.write(output);
                 }
                 x += 1;
             }

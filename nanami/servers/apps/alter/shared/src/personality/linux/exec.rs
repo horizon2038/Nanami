@@ -81,6 +81,8 @@ pub(super) fn sys_execve(
         crate::common::dynamic::prepare_in_root(runtime, &loaded, root).map_err(map_load_error)?;
     let preferred_image_base = preferred_exec_image_base(personality, &loaded.metadata);
     let exec_elf = current_elf_metadata_from_loaded(&loaded.metadata, preferred_image_base);
+    let main_may_share = personality == OsPersonality::Linux
+        && runtime.image_cache.immutable_range(loaded.address, loaded.size);
     super::guest_views::invalidate(runtime, pid);
     if let Err(error) =
         nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
@@ -104,6 +106,12 @@ pub(super) fn sys_execve(
     super::memfd::forget_process(runtime, pid);
     if !runtime.reset_process_runtime_for_exec(pid) {
         return Err(ExecError::ImageReplaced);
+    }
+    if main_may_share {
+        // Alpha may alias complete readonly main pages from this immutable
+        // cache entry. Keep every later private write on the existing COW path,
+        // including a protection change before any library mmap has run.
+        super::private_memory::mark_shared(runtime, pid);
     }
     if let Some(interpreter) = interpreter.as_ref() {
         if crate::common::dynamic::install(pid, interpreter).is_err() {

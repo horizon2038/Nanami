@@ -75,7 +75,7 @@ pub(super) fn read(
         write_u64(runtime.posix_shm, value as Word);
     }
     write_target_memory(runtime, pid, buffer, 8).map_err(|_| EFAULT)?;
-    let Some(Object::Counter(counter)) = runtime.poll_objects.get_mut(file.resource) else {
+    let Some(counter) = runtime.poll_objects.counter_mut(file.resource) else {
         return Err(EBADF);
     };
     counter.value -= value;
@@ -98,7 +98,7 @@ pub(super) fn write(
     if value == u64::MAX {
         return Err(EINVAL);
     }
-    let Some(Object::Counter(counter)) = runtime.poll_objects.get_mut(file.resource) else {
+    let Some(counter) = runtime.poll_objects.counter_mut(file.resource) else {
         return Err(EBADF);
     };
     counter.value = counter
@@ -138,11 +138,8 @@ pub(super) fn set_nonblocking(
     file: LinuxFile,
     value: bool,
 ) -> Result<(), i32> {
-    match runtime.poll_objects.get_mut(file.resource) {
-        Some(Object::Counter(counter)) => counter.nonblocking = value,
-        Some(Object::Timer(timer)) => timer.nonblocking = value,
-        Some(Object::Signals(signals)) => signals.nonblocking = value,
-        _ => return Err(EBADF),
+    if !runtime.poll_objects.set_nonblocking(file.resource, value) {
+        return Err(EBADF);
     }
     Ok(())
 }

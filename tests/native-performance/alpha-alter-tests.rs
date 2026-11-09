@@ -238,10 +238,10 @@ fn check_page_table_hint(vm: &mut impl VmTracker) {
 }
 
 #[test]
-fn page_table_hint_covers_only_the_last_successfully_mapped_region() {
+fn page_table_hint_retains_successfully_mapped_regions() {
     let mut vm = VmSpace::new();
     check_page_table_hint(&mut vm);
-    assert!(!vm.page_tables_ready(0x68000000)); // Ordinary VM keeps one region.
+    assert!(vm.page_tables_ready(0x68000000));
 }
 
 #[test]

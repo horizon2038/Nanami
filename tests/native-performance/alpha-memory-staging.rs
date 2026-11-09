@@ -85,6 +85,7 @@ struct Alpha {
     pool_maps: usize,
     cached_maps: usize,
     fail_cached_map: bool,
+    ready_initialization_frames: std::collections::BTreeSet<usize>,
 }
 impl Alpha {
     fn new() -> Self {
@@ -111,6 +112,7 @@ impl Alpha {
             pool_maps: 0,
             cached_maps: 0,
             fail_cached_map: false,
+            ready_initialization_frames: Default::default(),
         }
     }
     fn page(&mut self, va: usize, slot: usize, page: usize, byte: u8) {
@@ -161,6 +163,18 @@ impl Alpha {
             .get(&frame)
             .ok_or(CapabilityError::InvalidArgument)?;
         Ok(self.memory.pages[page].as_ptr() as usize)
+    }
+    fn cached_initialization_frame(&self, frame: usize) -> Option<usize> {
+        if !self.ready_initialization_frames.contains(&frame) { return None; }
+        let page=self.frame_pages.get(&frame)?;
+        Some(self.memory.pages.get(page)?.as_ptr() as usize)
+    }
+    fn ready_pool_page(&mut self, va: usize, slot: usize, physical: usize, byte: u8) {
+        self.page(va,slot,physical,byte);
+        let frame=self.memory.physical_frame_descriptor_from_index(physical).unwrap();
+        self.frames.insert((1,va),frame);
+        self.frame_pages.insert(frame,physical);
+        self.ready_initialization_frames.insert(frame);
     }
     fn map_alpha_temporary_frame(&mut self, _: usize, _: usize) -> Result<(), CapabilityError> {
         self.temporary_maps += 1;
@@ -528,6 +542,46 @@ fn repeated_same_frame_reads_observe_changed_bytes_not_cached_contents() {
         &[b'B'; 16]
     );
     assert_eq!(alpha.cached_maps, 2);
+}
+
+#[test]
+fn ready_pool_sources_copy_fresh_bytes_and_unaligned_edges_without_a_second_window() {
+    let mut alpha=Alpha::new();
+    for i in 0..4 {alpha.ready_pool_page(0x1000+i*PAGE_SIZE,i,100+i,b'A'+i as u8);}
+    alpha.fail_cached_map=true;
+    let bytes=alpha.read_process_memory_into_static_buffer(1,0x1011,3*PAGE_SIZE+31).unwrap();
+    assert!(bytes[..PAGE_SIZE-17].iter().all(|b|*b==b'A'));
+    assert!(bytes[PAGE_SIZE-17..2*PAGE_SIZE-17].iter().all(|b|*b==b'B'));
+    assert!(bytes[2*PAGE_SIZE-17..3*PAGE_SIZE-17].iter().all(|b|*b==b'C'));
+    assert!(bytes[3*PAGE_SIZE-17..].iter().all(|b|*b==b'D'));
+    alpha.memory.pages.get_mut(&100).unwrap().fill(b'Z');
+    assert_eq!(alpha.read_process_memory_into_static_buffer(1,0x1010,16).unwrap(),&[b'Z';16]);
+    assert_eq!((alpha.pool_maps,alpha.temporary_maps,alpha.cached_maps),(0,0,0));
+    assert_eq!((alpha.processes.searches.get(),alpha.processes.snapshots.get()),(0,0));
+}
+
+#[test]
+fn stale_ready_source_cannot_override_the_frame_resolved_during_this_read() {
+    let mut alpha=Alpha::new();alpha.ready_pool_page(0x1000,0,100,b'A');
+    alpha.replace_on_lookup=Some((0x1000,9,109,b'C'));
+    assert_eq!(alpha.read_process_memory_into_static_buffer(1,0x1010,16).unwrap(),&[b'C';16]);
+    assert_eq!(alpha.cached_maps,1);
+    alpha.fail_cached_map=true;
+    assert_eq!(alpha.read_process_memory_into_static_buffer(1,0x1010,16),Err(CapabilityError::Fatal));
+    assert_eq!(alpha.cached_maps,2);
+}
+
+#[test]
+fn ready_prefix_then_copy_window_failure_keeps_the_exact_committed_prefix() {
+    let mut alpha=Alpha::new();alpha.ready_pool_page(0x1000,0,100,b'A');alpha.page(0x2000,1,101,b'B');
+    unsafe {ptr::write_bytes(core::ptr::addr_of_mut!(PROCESS_MEMORY_IMAGE_BUFFER) as *mut u8,0xee,PROCESS_SPAWN_MEMORY_MAX_BYTES);}
+    alpha.fail_cached_map=true;
+    assert_eq!(alpha.read_process_memory_into_static_buffer(1,0x1000,2*PAGE_SIZE),Err(CapabilityError::Fatal));
+    let output=unsafe {core::slice::from_raw_parts(core::ptr::addr_of!(PROCESS_MEMORY_IMAGE_BUFFER) as *const u8,2*PAGE_SIZE)};
+    assert!(output[..PAGE_SIZE].iter().all(|b|*b==b'A'));
+    assert!(output[PAGE_SIZE..].iter().all(|b|*b==0xee));
+    assert_eq!(alpha.cached_maps,1);
+    assert_eq!((alpha.processes.searches.get(),alpha.processes.snapshots.get()),(0,0));
 }
 
 #[test]

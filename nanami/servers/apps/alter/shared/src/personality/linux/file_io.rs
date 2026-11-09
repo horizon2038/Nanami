@@ -71,22 +71,12 @@ pub(super) fn sys_read(
         }
         LinuxFileKind::Empty => return Err(EBADF),
     }
-    let mut done = 0;
-    while done < len {
-        let chunk = ::core::cmp::min(len - done, runtime.posix_read_buffer_size().max(1));
-        let (bytes, source) = runtime
-            .read_posix(file.posix_fd, 0, chunk)
-            .map_err(map_request_error)?;
-        if bytes > chunk {
-            return Err(EIO);
-        }
-        if bytes == 0 {
-            break;
-        }
-        super::copyout_from(runtime, pid, user_buffer + done, source, bytes)?;
-        done += bytes;
-    }
-    Ok(done)
+    super::file_read::read(
+        len,
+        runtime.posix_read_buffer_size(),
+        |chunk| runtime.read_posix(file.posix_fd, 0, chunk).map_err(map_request_error),
+        |done, source, bytes| super::copyout_from(runtime, pid, user_buffer + done, source, bytes),
+    )
 }
 
 pub(super) fn sys_positioned_io(
@@ -135,13 +125,13 @@ pub(super) fn sys_positioned_io(
             return if done != 0 { Ok(done) } else { Err(EIO) };
         }
         let result = if write {
-            nanami_runtime::request_process_memory_read_checked(
+            super::guest_memory::copyin_posix_write(
+                runtime,
                 pid,
                 buffer + done,
                 runtime.posix_write_buffer().0,
                 chunk,
             )
-            .map_err(|_| EFAULT)
             .and_then(|_| {
                 runtime
                     .write_posix(file.posix_fd, 0, chunk, Some(offset + done))
@@ -310,13 +300,13 @@ pub(super) fn sys_write(
         if chunk == 0 {
             return Err(EIO);
         }
-        nanami_runtime::request_process_memory_read_checked(
+        super::guest_memory::copyin_posix_write(
+            runtime,
             pid,
             user_buffer + done,
             destination,
             chunk,
-        )
-        .map_err(|_| EFAULT)?;
+        )?;
         let written = runtime
             .write_posix(file.posix_fd, 0, chunk, None)
             .map_err(map_request_error)?;
@@ -356,13 +346,13 @@ pub(super) fn sys_writev(
                 iovecs,
                 capacity,
                 |source, offset, len| {
-                    nanami_runtime::request_process_memory_read_checked(
+                    super::guest_memory::copyin_posix_write(
+                        runtime,
                         pid,
                         source,
                         destination + offset,
                         len,
                     )
-                    .map_err(|_| EFAULT)
                 },
                 |len| {
                     runtime

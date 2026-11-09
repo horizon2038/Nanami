@@ -1,6 +1,30 @@
 //! Production signal pump, with synchronous-stop and guest-memory mocks.
 #![allow(dead_code, private_interfaces)]
 extern crate alloc;
+thread_local! {
+    static GROUP_ALLOCATIONS: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+}
+struct CountingAllocator;
+fn note_group_allocation() {
+    let _ = GROUP_ALLOCATIONS.try_with(|count| {
+        if let Some(value) = count.get() { count.set(Some(value + 1)); }
+    });
+}
+unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        note_group_allocation();
+        unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        note_group_allocation();
+        unsafe { std::alloc::GlobalAlloc::realloc(&std::alloc::System, ptr, layout, size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+    }
+}
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 extern crate self as a9n_abi;
 extern crate self as nanami_client;
 extern crate self as nanami_runtime;
@@ -543,6 +567,86 @@ fn blocked_group_pending_keeps_delivery_cache_live_until_a_temporary_mask_unbloc
     delivery::pump(&mut runtime, 0);
     assert_eq!(calls(), ["suspend", "read", "write", "resume"]);
     assert!(!runtime.signals_pending);
+}
+
+fn signal_group_runtime(count: usize) -> Runtime {
+    let mut r = Runtime::new();
+    let template = r.managed[0];
+    for i in 1..count {
+        r.managed.push(ManagedProcess {
+            pid: 10 + i, pcb: 42 + i,
+            signal_state: Box::into_raw(Box::new(Signals::new())) as Word,
+            ..template
+        });
+    }
+    r
+}
+
+#[test]
+fn job_control_group_queue_avoids_temporary_pid_allocations() {
+    for handler in [signals::SIG_DFL, 0x2000] {
+        let mut counts = Vec::new();
+        for tasks in [1, 8, 64, 256] {
+            let mut r = signal_group_runtime(tasks);
+            for p in &mut r.managed {
+                let state = p.signals_mut();
+                state.set_action(20, Action { handler, ..Action::default() });
+                assert!(state.enqueue(Info::new(20, 0, 0)));
+                assert!(state.enqueue_group(Info::new(20, 0, 0)));
+                state.discard(20); // Keep queue capacity, isolate only the PID snapshot.
+            }
+            GROUP_ALLOCATIONS.with(|count| count.set(Some(0)));
+            assert_eq!(delivery::queue_group(&mut r, 10, Info::new(20, 0, 99)), Ok(()));
+            counts.push(GROUP_ALLOCATIONS.with(|count| count.replace(None).unwrap()));
+            for (i, p) in r.managed.iter_mut().enumerate() {
+                let record = p.signals_mut().take_matching_record(signals::bit(20));
+                if handler == signals::SIG_DFL || i == 0 {
+                    let (info, group) = record.unwrap();
+                    assert_eq!(info.signal(), 20); assert_eq!(group, handler != signals::SIG_DFL);
+                } else { assert!(record.is_none()); }
+            }
+        }
+        println!("job-control handler={handler} PID allocations1/8/64/256: {counts:?}");
+        assert_eq!(counts, [0; 4]);
+    }
+}
+
+#[test]
+fn job_control_group_queue_preserves_recipient_filter_and_stop_continue_cancellation() {
+    for signal in [signals::SIGSTOP, 20, signals::SIGCONT] {
+        for handler in [signals::SIG_DFL, signals::SIG_IGN, 0x2000] {
+            if signal == signals::SIGSTOP && handler != signals::SIG_DFL { continue; }
+            let mut r = signal_group_runtime(6);
+            r.managed[1].pid = 0;
+            r.managed[2].exited = true;
+            r.managed[3].tgid = 99;
+            for p in &mut r.managed {
+                let state = p.signals_mut();
+                state.set_action(signal, Action { handler, ..Action::default() });
+                state.stopped = true;
+                state.blocked = signals::bit(signals::SIGCONT);
+                let opposite = if signal == signals::SIGCONT { signals::SIGSTOP } else { signals::SIGCONT };
+                assert!(state.enqueue(Info::new(opposite, 0, 7)));
+            }
+            assert_eq!(delivery::queue_group(&mut r, 10, Info::new(signal, 0, 99)), Ok(()));
+            for (i, p) in r.managed.iter_mut().enumerate() {
+                let eligible = [0, 4, 5].contains(&i);
+                let notified = if handler == signals::SIG_DFL { eligible } else { i == 0 };
+                let state = p.signals_mut();
+                let opposite = if signal == signals::SIGCONT { signals::SIGSTOP } else { signals::SIGCONT };
+                assert_eq!(state.pending_mask() & signals::bit(opposite) != 0, !notified);
+                assert_eq!(state.stopped, !(notified && signal == signals::SIGCONT));
+                let record = state.take_matching_record(signals::bit(signal));
+                if notified && handler != signals::SIG_IGN {
+                    let (info, group) = record.unwrap();
+                    assert_eq!(info.signal(), signal); assert_eq!(group, handler != signals::SIG_DFL);
+                } else { assert!(record.is_none()); }
+            }
+            assert!(r.signals_pending);
+            assert_eq!(r.readiness_changes & state::readiness::READY_OBJECT, state::readiness::READY_OBJECT);
+            assert!(calls().is_empty()); // Queueing never starts delivery/suspend.
+        }
+    }
 }
 
 #[test]

@@ -92,7 +92,7 @@ fn table_get(r: &mut Ext2Runtime, block: u32, index: usize) -> Result<u32, Reque
 }
 fn get_data_block(
     r: &mut Ext2Runtime,
-    inode: Ext2Inode,
+    inode: &Ext2Inode,
     logical: usize,
 ) -> Result<u32, RequestError> {
     if logical < 12 {
@@ -231,7 +231,7 @@ fn shrinking_across_every_block_tree_boundary_frees_only_unreachable_blocks() {
         assert_eq!(inode.size as usize, length);
         assert_eq!(references(&r).len() + r.freed.len(), allocated);
         for logical in 0..50 {
-            let b = get_data_block(&mut r, inode, logical).unwrap() as usize;
+            let b = get_data_block(&mut r, &inode, logical).unwrap() as usize;
             if logical < length.div_ceil(BLOCK_SIZE) {
                 assert_ne!(b, 0);
                 for (i, byte) in r.disk[b].iter().copied().enumerate() {
@@ -260,7 +260,7 @@ fn shrink_then_grow_preserves_prefix_zeroes_tail_and_keeps_holes_sparse() {
     assert_eq!(&r.disk[inode.block[0] as usize][..5], &[0x73; 5]);
     assert!(r.disk[inode.block[0] as usize][5..].iter().all(|b| *b == 0));
     for logical in 1..50 {
-        assert_eq!(get_data_block(&mut r, inode, logical), Ok(0));
+        assert_eq!(get_data_block(&mut r, &inode, logical), Ok(0));
     }
 }
 #[test]

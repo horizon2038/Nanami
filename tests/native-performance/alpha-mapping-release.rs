@@ -35,7 +35,12 @@ mod arch {
 fn process_frame_descriptor(root: usize, slot: usize) -> usize {
     root * 100000 + slot
 }
+struct Memory;
+impl Memory {
+    fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> { Some(1_000_000_000 + page) }
+}
 struct Alpha {
+    memory: Memory,
     processes: ProcessManager,
     invalidations: usize,
     fail_invalidation: bool,
@@ -49,6 +54,7 @@ impl Alpha {
         install(&mut processes, 2, 202);
         processes.ensure_vm_space_for_pid(1).unwrap();
         Self {
+            memory: Memory,
             processes,
             invalidations: 0,
             fail_invalidation: false,
@@ -101,11 +107,38 @@ fn request(base: usize, bytes: usize, sparse: bool) -> OsRequestEvent {
 }
 
 #[test]
+fn releasing_an_old_large_mapping_keeps_newer_backing_and_defers_in_scalar_order() {
+    let mut alpha = Alpha::new();
+    for page in 0..513 { alpha.page(0x1000 + page * PAGE_SIZE, page, 3); }
+    for page in 0..512 { alpha.page(0x10000000 + page * PAGE_SIZE, 1000 + page, 3); }
+    alpha.processes.take_mutable_vm_lookups();
+    alpha.release(0x1000, 513 * PAGE_SIZE, false).unwrap();
+    let lookups = alpha.processes.take_mutable_vm_lookups();
+    println!("RELEASE-VM strict-pages=513 mutable-lookups={lookups}");
+    assert_eq!(lookups, 1);
+    let deferred: Vec<_> = alpha.processes.deferred_physical_allocations_for_pid(1).collect();
+    assert_eq!(deferred.len(), 513);
+    for (i, allocation) in deferred.iter().enumerate() {
+        assert_eq!(allocation.base_va, 0x1000 + i * PAGE_SIZE);
+        assert_eq!(alpha.processes.physical_reference_count(*allocation), 1);
+    }
+    assert_eq!(alpha.processes.releasable_physical_allocations_for_pid(1).len(), 512);
+    let vm = alpha.processes.vm_space_mut(1).unwrap();
+    assert!(vm.find_frame(0x1000).is_none());
+    assert!(vm.find_frame(0x10000000).is_some());
+    CALLS.with(|calls| assert_eq!(calls.borrow().unmaps.len(), 513));
+}
+
+#[test]
 fn sparse_release_walks_backing_not_a_terabyte_of_unpopulated_addresses() {
     let mut alpha = Alpha::new();
     alpha.page(0x1000, 1, 3);
     alpha.page(0x10_0000_0000, 2, 0);
+    alpha.processes.take_mutable_vm_lookups();
     assert_eq!(alpha.release(0x1000, 0x100_0000_0000, true), Ok(()));
+    let lookups = alpha.processes.take_mutable_vm_lookups();
+    println!("RELEASE-VM sparse-pages=2 mutable-lookups={lookups}");
+    assert_eq!(lookups, 2);
     CALLS.with(|calls| assert_eq!(calls.borrow().unmaps.len(), 1));
     assert_eq!(
         alpha
@@ -127,6 +160,13 @@ fn sparse_release_walks_backing_not_a_terabyte_of_unpopulated_addresses() {
         .unwrap()
         .backed_pages(0, usize::MAX)
         .is_empty());
+    alpha.processes.take_mutable_vm_lookups();
+    assert_eq!(alpha.release(0x1000, 0x100_0000_0000, true), Ok(()));
+    let lookups = alpha.processes.take_mutable_vm_lookups();
+    assert_eq!(lookups, 1); // Existing sparse validation only, no update lookup.
+    assert_eq!(alpha.invalidations, 2);
+    CALLS.with(|calls| assert_eq!(calls.borrow().unmaps.len(), 1));
+    println!("RELEASE-VM empty-sparse mutable-lookups={lookups}");
 }
 
 #[test]
@@ -184,6 +224,26 @@ fn canonical_ram_reservations_reject_partial_and_crossing_releases_before_unmap(
         }
         assert_eq!(alpha.release(r.base_va, 3 * PAGE_SIZE, false), Ok(()));
         assert_eq!(alpha.shared_releases, 1);
+    }
+}
+
+#[test]
+fn sparse_validation_rejects_unreferenced_keys_between_and_after_owned_pages() {
+    for missing in [0x1001, 0x2000, 0x3fff, 0x5000] {
+        let mut alpha = Alpha::new();
+        for (va, slot) in [(0x1000, 1), (0x3000, 3), (0x4000, 4)] {
+            alpha.page(va, slot, 0);
+        }
+        let vm = alpha.processes.vm_space_mut(1).unwrap();
+        vm.record_frame(missing, 999).unwrap();
+        vm.set_permissions(missing, 0);
+        vm.mark_mapping_uncertain(missing);
+        assert_eq!(alpha.release(0x1000, 5 * PAGE_SIZE, true), Err(CapabilityError::InvalidArgument));
+        assert_eq!(alpha.invalidations, 0);
+        CALLS.with(|calls| assert!(calls.borrow().unmaps.is_empty()));
+        assert_eq!(alpha.processes.releasable_physical_allocations_for_pid(1).len(), 3);
+        assert_eq!(alpha.processes.deferred_physical_allocations_for_pid(1).count(), 0);
+        assert!(alpha.processes.vm_space_mut(1).unwrap().mapping_is_uncertain(missing));
     }
 }
 
@@ -409,6 +469,18 @@ fn mixed_order_sparse_release_preserves_newest_duplicates_and_deferred_records()
 }
 
 #[test]
+fn pool_alias_release_uses_pool_frame_and_preserves_deferred_cap_state() {
+    let mut alpha = Alpha::new();
+    alpha.processes.register_pool_alias(1, PAGE_SIZE, 7, 99).unwrap();
+    alpha.processes.vm_space_mut(1).unwrap().record_frame(PAGE_SIZE, 1_000_000_099).unwrap();
+    assert_eq!(alpha.release(PAGE_SIZE, PAGE_SIZE, false), Ok(()));
+    CALLS.with(|calls| assert_eq!(calls.borrow().unmaps[0].1, 1_000_000_099));
+    let pages: Vec<_> = alpha.processes.deferred_physical_allocations_for_pid(1).collect();
+    assert_eq!(pages.len(), 1);
+    assert!(!pages[0].owns_frame_cap);
+}
+
+#[test]
 fn every_failed_unmap_prefix_keeps_all_active_ownership_until_retry() {
     for fail in 0..4 {
         let mut alpha = Alpha::new();
@@ -416,10 +488,20 @@ fn every_failed_unmap_prefix_keeps_all_active_ownership_until_retry() {
             alpha.page(page * PAGE_SIZE, page, 3);
         }
         CALLS.with(|calls| calls.borrow_mut().fail_at = Some(fail));
+        alpha.processes.take_mutable_vm_lookups();
         assert_eq!(
             alpha.release(PAGE_SIZE, 4 * PAGE_SIZE, false),
             Err(CapabilityError::Fatal)
         );
+        let failed_lookups = alpha.processes.take_mutable_vm_lookups();
+        {
+            let vm = alpha.processes.vm_space_mut(1).unwrap();
+            for page in 1..=4 {
+                let va = page * PAGE_SIZE;
+                assert_eq!(vm.find_frame(va).is_none(), page <= fail);
+                assert_eq!(vm.mapping_is_uncertain(va), page == fail + 1);
+            }
+        }
         assert_eq!(
             alpha
                 .processes
@@ -432,7 +514,11 @@ fn every_failed_unmap_prefix_keeps_all_active_ownership_until_retry() {
             .releasable_deferred_physical_allocations_for_pid(1)
             .is_empty());
         CALLS.with(|calls| calls.borrow_mut().fail_at = None);
+        alpha.processes.take_mutable_vm_lookups();
         assert_eq!(alpha.release(PAGE_SIZE, 4 * PAGE_SIZE, false), Ok(()));
+        let retry_lookups = alpha.processes.take_mutable_vm_lookups();
+        println!("RELEASE-VM fail-index={fail} failed-lookups={failed_lookups} retry-lookups={retry_lookups}");
+        assert_eq!((failed_lookups, retry_lookups), (1, 1));
         assert!(alpha
             .processes
             .releasable_physical_allocations_for_pid(1)

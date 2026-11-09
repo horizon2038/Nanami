@@ -160,8 +160,10 @@ struct Fake {
     durable: Vec<u8>,
     shm: usize,
     reads: Vec<(usize, usize)>,
+    read_error: Option<usize>,
     writes: Vec<(usize, usize)>,
     inode_writes: usize,
+    inode_recounts: usize,
     write_result: Option<Result<usize, RequestError>>,
     flush_error: Option<RequestError>,
     events: Vec<(char, usize, usize)>,
@@ -184,6 +186,10 @@ pub mod block {
             let mut fake = fake.borrow_mut();
             fake.reads.push((first, count));
             let bytes = count * BLOCK_SIZE;
+            if fake.read_error == Some(first) {
+                unsafe { ptr::write_bytes((fake.shm + offset) as *mut u8, 0xee, bytes.min(3)); }
+                return Err(RequestError::Transport);
+            }
             unsafe {
                 ptr::copy_nonoverlapping(
                     fake.disk.as_ptr().add(first * BLOCK_SIZE),
@@ -245,9 +251,54 @@ use data_io::*;
 fn max_file_blocks(_runtime: &Ext2Runtime) -> usize {
     512
 }
+// Storage transfer tests model the logical mapping; production direct/indirect
+// table scanning is exercised separately by ext2-data-run.rs.
+std::thread_local! {
+    static RUN_CALLS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+fn get_data_run(
+    runtime: &mut Ext2Runtime,
+    inode: &Ext2Inode,
+    logical: usize,
+    maximum: usize,
+) -> Result<(u32, usize), RequestError> {
+    modeled_run(runtime, inode, logical, maximum, false)
+}
+
+fn get_read_data_run(
+    runtime: &mut Ext2Runtime, inode: &Ext2Inode, logical: usize, maximum: usize,
+) -> Result<(u32, usize), RequestError> {
+    modeled_run(runtime, inode, logical, maximum, true)
+}
+
+fn modeled_run(
+    runtime: &mut Ext2Runtime, inode: &Ext2Inode, logical: usize, maximum: usize, holes: bool,
+) -> Result<(u32, usize), RequestError> {
+    RUN_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let first = get_data_block(runtime, inode, logical)?;
+    let mut count = 1;
+    if holes && first == 0 {
+        while count < maximum && runtime.mapping.get(logical + count) == Some(&0) {
+            count += 1;
+        }
+    }
+    if first != 0 {
+        while count < maximum {
+            match get_data_block(runtime, inode, logical + count) {
+                Ok(next) if next != 0 && next as usize == first as usize + count => {
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    Ok((first, count))
+}
+
 fn get_data_block(
     runtime: &mut Ext2Runtime,
-    _inode: Ext2Inode,
+    _inode: &Ext2Inode,
     logical: usize,
 ) -> Result<u32, RequestError> {
     // Simulate indirect-block traversal clobbering the shared scratch buffer.
@@ -277,6 +328,18 @@ fn ensure_data_block_with(
     Ok(runtime.mapping[logical])
 }
 fn write_inode(
+    _runtime: &mut Ext2Runtime,
+    _inode_no: u32,
+    _inode: Ext2Inode,
+) -> Result<(), RequestError> {
+    FAKE.with(|fake| {
+        let mut fake = fake.borrow_mut();
+        fake.inode_writes += 1;
+        fake.inode_recounts += 1;
+    });
+    Ok(())
+}
+fn write_inode_existing_blocks(
     _runtime: &mut Ext2Runtime,
     _inode_no: u32,
     _inode: Ext2Inode,

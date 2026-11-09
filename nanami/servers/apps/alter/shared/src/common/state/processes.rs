@@ -1,148 +1,6 @@
 use super::*;
 
 impl Runtime {
-    pub fn install_managed_process(
-        &mut self,
-        pid: Word,
-        owner_pid: Word,
-        pcb: Word,
-        terminal_id: Word,
-        image_name: &[u8],
-    ) -> bool {
-        self.install_managed_child_process(pid, 0, owner_pid, pcb, terminal_id, image_name)
-    }
-
-    pub fn install_managed_child_process(
-        &mut self,
-        pid: Word,
-        parent_pid: Word,
-        owner_pid: Word,
-        pcb: Word,
-        terminal_id: Word,
-        image_name: &[u8],
-    ) -> bool {
-        if image_name.is_empty() || image_name.len() > ALTER_IMAGE_NAME_MAX {
-            return false;
-        }
-        let rootfs = self
-            .managed_process(parent_pid)
-            .map(|parent| parent.rootfs)
-            .unwrap_or(super::super::context::RootfsContext::DEFAULT);
-        let umask = self
-            .managed_process(parent_pid)
-            .map_or(0o022, |parent| parent.umask);
-        let mut comm = [0; 16];
-        comm[..image_name.len().min(15)].copy_from_slice(&image_name[..image_name.len().min(15)]);
-        if let Some(parent) = self.managed_process(parent_pid) {
-            comm = parent.comm;
-        }
-        let no_new_privs = self
-            .managed_process(parent_pid)
-            .is_some_and(|parent| parent.no_new_privs);
-        let (argument_vector, argument_count) =
-            self.managed_process(parent_pid).map_or((0, 0), |parent| {
-                (parent.argument_vector, parent.argument_count)
-            });
-        // Sample once at creation, not from a stale syscall clock cache.
-        // If the timer is unavailable, proc reports an unknown start time (0).
-        if self.timer_port == 0
-            && nanami_client::registry::connect_timer_service(crate::abi::SLOT_TIMER_SERVICE)
-                .is_ok()
-        {
-            self.timer_port =
-                nanami_runtime::ipc::process_slot_descriptor(crate::abi::SLOT_TIMER_SERVICE);
-        }
-        let started_at = if self.timer_port != 0 {
-            nanami_client::timer::timer_service_monotonic_ticks(self.timer_port)
-                .ok()
-                .filter(|(_, hz)| *hz != 0)
-                .map_or(0, |(ticks, hz)| (ticks as u128 * 100 / hz as u128) as Word)
-        } else {
-            0
-        };
-        let (terminal_canonical, terminal_echo, terminal_termios) = self
-            .managed
-            .iter()
-            .find(|p| terminal_id != 0 && p.pid != 0 && !p.exited && p.terminal_id == terminal_id)
-            .map(|p| (p.terminal_canonical, p.terminal_echo, p.terminal_termios))
-            .unwrap_or((true, true, None));
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            if self.managed[i].pid == 0 {
-                let mut stored_name = [0; ALTER_IMAGE_NAME_MAX];
-                stored_name[..image_name.len()].copy_from_slice(image_name);
-                self.managed[i] = ManagedProcess {
-                    vm_private_shared: false,
-                    pid,
-                    tgid: pid,
-                    vm_group: pid,
-                    fs_group: pid,
-                    umask,
-                    parent_pid,
-                    argument_vector,
-                    argument_count,
-                    started_at,
-                    job: ProcessJobControl::EMPTY,
-                    owner_pid,
-                    rootfs,
-                    pcb,
-                    program_break: 0,
-                    mapped_break: 0,
-                    fs_base: 0,
-                    terminal_id,
-                    trace_enabled: false,
-                    diagnostics_enabled: false,
-                    graphics_enabled: false,
-                    framebuffer_size: FramebufferSize::DEFAULT,
-                    graphics_session: 0,
-                    exited: false,
-                    exit_status: 0,
-                    signal_state: 0,
-                    signal_waiting: false,
-                    signal_wait_target: 0,
-                    signal_context: LinuxSyscallContext::EMPTY,
-                    last_syscall: 0,
-                    last_syscall_return: 0,
-                    personality: OsPersonality::Linux,
-                    image_name: stored_name,
-                    image_name_len: image_name.len(),
-                    comm,
-                    no_new_privs,
-                    cwd: root_cwd(),
-                    cwd_len: 1,
-                    files: FileTable::new(default_files(terminal_id)),
-                    terminal_line: [0; LINUX_TERMINAL_LINE_MAX],
-                    terminal_line_read: 0,
-                    terminal_line_len: 0,
-                    terminal_line_ready: false,
-                    terminal_canonical,
-                    terminal_echo,
-                    terminal_termios,
-                    terminal_read_waiting: false,
-                    terminal_read_buffer: 0,
-                    terminal_read_len: 0,
-                    terminal_read_context: LinuxSyscallContext::EMPTY,
-                    network_waiting: false,
-                    network_wait_context: LinuxSyscallContext::EMPTY,
-                    device_read_waiting: false,
-                    device_read_fd: 0,
-                    device_read_buffer: 0,
-                    device_read_len: 0,
-                    device_read_context: LinuxSyscallContext::EMPTY,
-                    sleep_waiting: false,
-                    sleep_deadline: 0,
-                    sleep_context: LinuxSyscallContext::EMPTY,
-                    readiness_wait: None,
-                    mappings: MappingTable::EMPTY,
-                };
-                self.initialize_job_control(pid, parent_pid);
-                return true;
-            }
-            i += 1;
-        }
-        false
-    }
-
     pub fn has_child(&self, parent_pid: Word, target_pid: Word) -> bool {
         let parent_pid = self.thread_group(parent_pid);
         let group = self
@@ -167,6 +25,10 @@ impl Runtime {
         let mut i = 0usize;
         while i < self.managed.len() {
             if self.managed[i].pid == pid {
+                #[cfg(feature = "syscall-scope")]
+                if self.syscall_scope.retire(pid) {
+                    nanami_runtime::println!("[syscall.scope.abort] owner={} reason=retire", pid);
+                }
                 self.release_signals(i);
                 let process = self.managed[i];
                 if !self
@@ -191,44 +53,6 @@ impl Runtime {
         false
     }
 
-    pub fn child_wait_event(
-        &self,
-        parent: Word,
-        target: Word,
-        report_stops: bool,
-        report_continues: bool,
-    ) -> Option<(Word, u32, bool)> {
-        let parent = self.thread_group(parent);
-        let group = self.managed_process(parent)?.job.group;
-        for child in &self.managed {
-            if child.pid == 0
-                || child.pid != child.tgid
-                || self.managed.iter().any(|other| {
-                    other.pid != child.pid && !other.exited && other.tgid == child.tgid
-                })
-                || child.parent_pid != parent
-                || !wait_target_matches(child.pid, target, child.job.group, group)
-            {
-                continue;
-            }
-            if child.exited {
-                let signal = child.signals().map_or(0, |state| state.exit_signal);
-                let status = if signal == 0 {
-                    ((child.exit_status & 0xff) << 8) as u32
-                } else {
-                    signal as u32 & 0x7f
-                };
-                return Some((child.pid, status, true));
-            }
-            if let Some(status) = child.signals().and_then(|state| state.child_event) {
-                if (status == 0xffff && report_continues) || (status != 0xffff && report_stops) {
-                    return Some((child.pid, status, false));
-                }
-            }
-        }
-        None
-    }
-
     pub fn set_process_image_name(&mut self, pid: Word, image_name: &[u8]) -> bool {
         if image_name.is_empty() || image_name.len() > ALTER_IMAGE_NAME_MAX {
             return false;
@@ -246,10 +70,15 @@ impl Runtime {
     }
 
     pub fn reset_process_runtime_for_exec(&mut self, pid: Word) -> bool {
+        #[cfg(feature = "syscall-scope")]
+        if self.managed_process(pid).is_some() && self.syscall_scope.retire(pid) {
+            nanami_runtime::println!("[syscall.scope.abort] owner={} reason=exec", pid);
+        }
         let Some(process) = self.managed_process_mut(pid) else {
             return false;
         };
         // EXEC_MEMORY has replaced the VM; no old private-fork alias survives.
+        // The exec caller marks any potential new immutable main aliases next.
         process.vm_private_shared = false;
         process.program_break = 0;
         process.argument_vector = 0;
@@ -289,32 +118,6 @@ impl Runtime {
         true
     }
 
-    pub fn deepest_process_in_tree(&self, root_pid: Word) -> Option<ManagedProcess> {
-        if root_pid == 0 {
-            return None;
-        }
-        let mut best = ManagedProcess::EMPTY;
-        let mut best_depth = 0usize;
-        let mut i = 0usize;
-        while i < self.managed.len() {
-            let entry = self.managed[i];
-            if entry.pid != 0 {
-                if let Some(depth) = self.tree_depth(entry.pid, root_pid) {
-                    if best.pid == 0 || depth >= best_depth {
-                        best = entry;
-                        best_depth = depth;
-                    }
-                }
-            }
-            i += 1;
-        }
-        if best.pid == 0 {
-            None
-        } else {
-            Some(best)
-        }
-    }
-
     pub fn root_process_for_terminal(&self, terminal_id: Word) -> Option<ManagedProcess> {
         if terminal_id == 0 {
             return None;
@@ -346,28 +149,6 @@ impl Runtime {
                 return Some(process);
             }
             i += 1;
-        }
-        None
-    }
-
-    fn tree_depth(&self, pid: Word, root_pid: Word) -> Option<usize> {
-        let mut current = pid;
-        let mut depth = 0usize;
-        while depth <= self.managed.len() {
-            if current == root_pid {
-                return Some(depth);
-            }
-            let process = self.managed_process(current)?;
-            if process.pid != process.tgid {
-                current = process.tgid;
-                depth += 1;
-                continue;
-            }
-            if process.parent_pid == 0 {
-                return None;
-            }
-            current = process.parent_pid;
-            depth += 1;
         }
         None
     }
@@ -448,6 +229,10 @@ impl Runtime {
     }
 
     pub fn mark_process_exited(&mut self, pid: Word, status: Word) {
+        #[cfg(feature = "syscall-scope")]
+        if self.syscall_scope.retire(pid) {
+            nanami_runtime::println!("[syscall.scope.abort] owner={} reason=exit", pid);
+        }
         let group = self.thread_group(pid);
         if self
             .managed_process(group)

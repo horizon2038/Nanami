@@ -5,7 +5,9 @@ type Word = usize;
 mod state {
     pub const LINUX_FD_MAX: usize = 64;
     pub mod readiness {
-        pub const READY_PIPE: usize = 1;
+        pub const READY_PIPE: usize = 8;
+        pub const READY_PIPE_READ: usize = 2048;
+        pub const READY_PIPE_WRITE: usize = 4096;
     }
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/constants.rs"]
@@ -42,17 +44,9 @@ struct LinuxFile {
     resource: Word,
     posix_fd: Word,
 }
-struct Pipe {
-    buffer: [u8; LINUX_PIPE_BYTES],
-    write: usize,
-    len: usize,
-    readers: usize,
-}
-impl Pipe {
-    fn write_byte(&mut self, index: usize, value: u8) {
-        self.buffer[index] = value;
-    }
-}
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/pipe.rs"]
+mod pipe_state;
+use pipe_state::LinuxPipe as Pipe;
 struct Runtime {
     posix_port: Word,
     posix_shm: Word,
@@ -64,6 +58,7 @@ struct Runtime {
     input: LinuxFile,
     output: LinuxFile,
     pipe: Pipe,
+    pipe_storage: Box<[u8; LINUX_PIPE_BYTES]>,
     readiness_changes: usize,
 }
 #[derive(Default)]
@@ -215,6 +210,7 @@ fn setup() -> (Box<[u8; 128]>, Runtime) {
             ..Backend::default()
         }
     });
+    let mut pipe_storage = Box::new([0; LINUX_PIPE_BYTES]);
     let runtime = Runtime {
         posix_port: 1,
         posix_shm: address,
@@ -234,15 +230,55 @@ fn setup() -> (Box<[u8; 128]>, Runtime) {
             posix_fd: 11,
         },
         pipe: Pipe {
-            buffer: [0; LINUX_PIPE_BYTES],
+            active: true,
+            buffer: pipe_storage.as_mut_ptr() as Word,
+            read: 0,
             write: 0,
             len: 0,
             readers: 1,
+            writers: 1,
         },
+        pipe_storage,
         readiness_changes: 0,
     };
     (memory, runtime)
 }
+#[test]
+fn sendfile_pipe_burst_preserves_bytes_and_counts_readable_notifications() {
+    let (_memory, mut r) = setup();
+    r.output.kind = LinuxFileKind::PipeWrite;
+    let mut notifications = 0;
+    for _ in 0..20 {
+        r.readiness_changes = 0x8000;
+        assert_eq!(production::sys_sendfile(&mut r, 1, 4, 3, 0, 4), Ok(4));
+        assert_ne!(r.readiness_changes & 0x8000, 0);
+        notifications += usize::from(r.readiness_changes
+            & (state::readiness::READY_PIPE | state::readiness::READY_PIPE_READ) != 0);
+    }
+    let mut output = [0u8; 80];
+    r.pipe.copy_out(&mut output);
+    assert_eq!(output, core::array::from_fn(|index| index as u8));
+    BACKEND.with(|b| assert_eq!(b.borrow().position, 80));
+    println!("sendfile-pipe-burst readable-notifications={notifications}");
+}
+
+#[test]
+fn sendfile_pipe_wrap_copies_current_source_and_commits_only_accepted_bytes() {
+    for start in [0, 1, LINUX_PIPE_BYTES - 1, LINUX_PIPE_BYTES - 17] {
+        let (_memory, mut runtime) = setup();
+        runtime.output.kind = LinuxFileKind::PipeWrite;
+        runtime.pipe.read = start;
+        runtime.pipe.write = start;
+        assert_eq!(production::sys_sendfile(&mut runtime, 1, 4, 3, 0, 37), Ok(37));
+        assert_eq!(runtime.pipe.len, 37);
+        assert_eq!(runtime.pipe.write, (start + 37) % LINUX_PIPE_BYTES);
+        let mut result = [0; 37];
+        runtime.pipe.copy_out(&mut result);
+        assert_eq!(result, core::array::from_fn(|i| i as u8));
+        BACKEND.with(|b| assert_eq!(b.borrow().position, 37));
+    }
+}
+
 #[test]
 fn short_output_advances_input_only_by_bytes_sent() {
     let (_memory, mut runtime) = setup();

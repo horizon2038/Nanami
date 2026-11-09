@@ -69,6 +69,7 @@ struct Backend {
     sync_error: Option<RequestError>,
     size: Word,
     stats: usize,
+    dir_reply: Option<Result<(Word, Word), RequestError>>,
 }
 
 thread_local! {

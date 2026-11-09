@@ -130,10 +130,15 @@ pub fn vfs_fstat(_port: Word, _handle: Word) -> Result<(Word, Word, Word), Reque
 
 pub fn vfs_read_dir(
     _port: Word,
-    _handle: Word,
-    _offset: Word,
-    _len: Word,
-    _buffer: Word,
+    handle: Word,
+    offset: Word,
+    len: Word,
+    buffer: Word,
 ) -> Result<(Word, Word), RequestError> {
-    panic!("unexpected directory I/O")
+    BACKEND.with(|backend| {
+        let mut backend = backend.borrow_mut();
+        let result = backend.dir_reply.expect("unexpected directory I/O");
+        backend.calls.push(Call { code: VFS_REQUEST_READ_DIR, handle, offset, len, delegate: 0, buffer });
+        result
+    })
 }

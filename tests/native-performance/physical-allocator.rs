@@ -3,9 +3,122 @@
 extern crate alloc;
 mod production {
     include!(env!("NANAMI_PHYSICAL_ALLOCATOR_SOURCE"));
+
+    // Independently express the first-fit choice and checked address route.
+    pub fn address_based_any(a: &mut PhysicalAllocator, bytes: usize)
+        -> Result<PhysicalAllocation, PhysicalAllocError> {
+        if bytes == 0 { return Err(PhysicalAllocError::InvalidArgument); }
+        let count = bytes_to_pages(bytes);
+        let wanted = ceil_log2(count).ok_or(PhysicalAllocError::OutOfMemory)?;
+        let base = a.normal.free_lists.iter().skip(wanted)
+            .find_map(|list| list.first().copied()).ok_or(PhysicalAllocError::OutOfMemory)?;
+        a.allocate_at(base << PAGE_BITS, count << PAGE_BITS, false)
+    }
+
+    pub fn free_lists(a: &PhysicalAllocator) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        (a.normal.free_lists.clone(), a.device.free_lists.clone())
+    }
+
+    fn old_add_block(pool: &mut BuddyPool, mut base: usize, mut order: usize)
+        -> Result<(), PhysicalAllocError> {
+        loop {
+            pool.ensure_order(order);
+            let count = block_pages(order)?;
+            if base % count != 0 { return Err(PhysicalAllocError::InvalidArgument); }
+            let buddy = base ^ count;
+            if let Some(index) = pool.free_lists[order].iter().position(|&page| page == buddy) {
+                pool.free_lists[order].swap_remove(index);
+                base = base.min(buddy);
+                order = order.checked_add(1).ok_or(PhysicalAllocError::InvalidArgument)?;
+                continue;
+            }
+            if !pool.free_lists[order].contains(&base) { pool.free_lists[order].push(base); }
+            return Ok(());
+        }
+    }
+
+    fn status(result: Result<(), PhysicalAllocError>) -> u8 {
+        match result { Ok(()) => 0, Err(PhysicalAllocError::InvalidArgument) => 1,
+            Err(PhysicalAllocError::PermissionDenied) => 2, Err(PhysicalAllocError::OutOfMemory) => 3 }
+    }
+
+    #[test]
+    fn fused_buddy_scan_preserves_first_buddy_priority_duplicates_and_failure_state() {
+        for entries in [vec![], vec![8], vec![9], vec![8, 9], vec![9, 8],
+            vec![4, 6, 8, 10], vec![8, 8, 12], vec![8, 4, 9, 9, 8]] {
+            for base in [3, 8, 9, 10, usize::MAX] {
+                for order in [0, 1, 2] {
+                    let lists = vec![entries.clone(), vec![10, 6], vec![12, 4]];
+                    let mut fused = BuddyPool { free_lists: lists.clone() };
+                    let mut old = BuddyPool { free_lists: lists };
+                    assert_eq!(status(fused.add_block(base, order)), status(old_add_block(&mut old, base, order)));
+                    assert_eq!(fused.free_lists, old.free_lists);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fused_buddy_scan_matches_two_pass_coalescing_during_fragmented_range_returns() {
+        let mut fused = BuddyPool::new();
+        let mut old = BuddyPool::new();
+        let mut seed = 73u64;
+        for _ in 0..6000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let base = (seed >> 24) as usize % 8192;
+            let count = 1 + (seed >> 40) as usize % 65;
+            let result = fused.add_range(base, count);
+            let expected = (|| {
+                let mut base = base;
+                let mut remaining = count;
+                while remaining != 0 {
+                    let order = largest_aligned_order(base, remaining)?;
+                    old_add_block(&mut old, base, order)?;
+                    let pages = block_pages(order)?;
+                    base = base.checked_add(pages).ok_or(PhysicalAllocError::InvalidArgument)?;
+                    remaining -= pages;
+                }
+                Ok(())
+            })();
+            assert_eq!(status(result), status(expected));
+            assert_eq!(fused.free_lists, old.free_lists);
+        }
+    }
 }
 use production::{PhysicalAllocError, PhysicalAllocator};
 const PAGE: usize = 4096;
+
+#[test]
+fn initialization_batch_tail_return_and_fragmented_single_page_fallback() {
+    for claimed in [0, 1, 32, 63, 64] {
+        for reverse in [false, true] {
+            let mut allocator = normal(128);
+            let batch = allocator.allocate_any(64 * PAGE).unwrap_or_else(|_| panic!("batch"));
+            if claimed < 64 { release(&mut allocator, batch.base_page + claimed, 64 - claimed); }
+            let info = allocator.memory_info();
+            assert_eq!(info.total_pages - info.free_pages, claimed);
+            for offset in 0..claimed {
+                let page = if reverse { claimed - offset - 1 } else { offset };
+                release(&mut allocator, batch.base_page + page, 1);
+            }
+            assert_eq!(allocator.memory_info().free_pages, 128);
+            allocate(&mut allocator, 1, 128);
+        }
+    }
+    let mut fragmented = normal(128);
+    allocate(&mut fragmented, 1, 128);
+    for page in (1..=128).step_by(2) { release(&mut fragmented, page, 1); }
+    let before = production::free_lists(&fragmented);
+    assert!(matches!(fragmented.allocate_any(64 * PAGE), Err(PhysicalAllocError::OutOfMemory)));
+    assert_eq!(production::free_lists(&fragmented), before);
+    for _ in 0..64 {
+        let page = fragmented.allocate_any(PAGE).unwrap_or_else(|_| panic!("fallback"));
+        assert_eq!(page.base_page % 2, 1);
+    }
+    assert_eq!(fragmented.memory_info().free_pages, 0);
+    assert_eq!(fragmented.memory_info().total_pages, 128);
+}
+
 fn normal(pages: usize) -> PhysicalAllocator {
     let mut allocator = PhysicalAllocator::new();
     allocator
@@ -29,6 +142,93 @@ fn release(allocator: &mut PhysicalAllocator, base: usize, pages: usize) {
 }
 fn invalid(result: Result<(), PhysicalAllocError>) {
     assert!(matches!(result, Err(PhysicalAllocError::InvalidArgument)));
+}
+
+fn allocation_result(result: Result<production::PhysicalAllocation, PhysicalAllocError>)
+    -> Result<(usize, usize, bool), u8> {
+    result.map(|a| (a.base_page, a.page_count, a.is_device)).map_err(|error| match error {
+        PhysicalAllocError::InvalidArgument => 0,
+        PhysicalAllocError::PermissionDenied => 1,
+        PhysicalAllocError::OutOfMemory => 2,
+    })
+}
+
+#[test]
+fn first_fit_matches_address_based_selection_and_list_order_under_churn() {
+    let mut a = normal(4096);
+    let mut reference = normal(4096);
+    for allocator in [&mut a, &mut reference] {
+        allocator.add_region(8192 * PAGE, 64 * PAGE, true, false).unwrap_or_else(|_| panic!("device"));
+    }
+    let mut live = Vec::new();
+    let mut occupied = [false; 4096];
+    let mut random = 0x12345678u64;
+    for step in 0..6000 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if step % 5 == 0 && !live.is_empty() {
+            let index = (random >> 24) as usize % live.len();
+            let (base, count) = live.swap_remove(index);
+            let offset = (random >> 32) as usize % count;
+            let freed = 1 + (random >> 42) as usize % (count - offset);
+            release(&mut a, base + offset, freed);
+            release(&mut reference, base + offset, freed);
+            occupied[base + offset - 1..base + offset + freed - 1].fill(false);
+            if offset != 0 { live.push((base, offset)); }
+            if offset + freed != count { live.push((base + offset + freed, count - offset - freed)); }
+        } else {
+            let count = 1 + (random >> 32) as usize % 65;
+            let bytes = count * PAGE - (random as usize & 4095);
+            let result = if step % 7 == 0 {
+                let base = 1 + (random >> 19) as usize % 4096;
+                let result = allocation_result(a.allocate_at(base * PAGE, bytes, false));
+                assert_eq!(result, allocation_result(reference.allocate_at(base * PAGE, bytes, false)));
+                result
+            } else {
+                let result = allocation_result(a.allocate_any(bytes));
+                assert_eq!(result, allocation_result(production::address_based_any(&mut reference, bytes)));
+                result
+            };
+            if let Ok((base, count, device)) = result {
+                assert!(!device);
+                assert!(occupied[base - 1..base + count - 1].iter().all(|v| !v));
+                occupied[base - 1..base + count - 1].fill(true);
+                live.push((base, count));
+            }
+        }
+        assert_eq!(production::free_lists(&a), production::free_lists(&reference));
+        assert_eq!(a.memory_info().free_pages, occupied.iter().filter(|v| !**v).count());
+    }
+    for (base, count) in live { release(&mut a, base, count); release(&mut reference, base, count); }
+    assert_eq!(production::free_lists(&a), production::free_lists(&reference));
+    assert_eq!(a.memory_info().free_pages, 4096);
+}
+
+#[test]
+fn first_fit_exact_and_non_power_of_two_requests_keep_rounding_failure_and_device_policy() {
+    for bytes in [0, 1, PAGE - 1, PAGE, 3 * PAGE - 1, 63 * PAGE, 64 * PAGE,
+        65 * PAGE, 511 * PAGE, 512 * PAGE, 513 * PAGE, 1024 * PAGE,
+        1024 * PAGE + 1, usize::MAX] {
+        let mut a = normal(1024);
+        let mut reference = normal(1024);
+        assert_eq!(allocation_result(a.allocate_any(bytes)),
+            allocation_result(production::address_based_any(&mut reference, bytes)));
+        assert_eq!(production::free_lists(&a), production::free_lists(&reference));
+    }
+    let mut a = PhysicalAllocator::new();
+    a.add_region(PAGE, 64 * PAGE, true, false).unwrap_or_else(|_| panic!("device"));
+    assert_eq!(allocation_result(a.allocate_any(PAGE)), Err(2));
+    assert!(a.allocate_at(PAGE, PAGE, true).unwrap_or_else(|_| panic!("device allocate")).is_device);
+    // Existing region registration can admit a malformed interval extending
+    // past the byte-address space. Preserve its old address-based fallback.
+    let mut a = PhysicalAllocator::new();
+    let mut reference = PhysicalAllocator::new();
+    for allocator in [&mut a, &mut reference] {
+        allocator.add_region(usize::MAX & !(PAGE - 1), 4 * PAGE, false, false)
+            .unwrap_or_else(|_| panic!("high region"));
+    }
+    assert_eq!(allocation_result(a.allocate_any(2 * PAGE)),
+        allocation_result(production::address_based_any(&mut reference, 2 * PAGE)));
+    assert_eq!(production::free_lists(&a), production::free_lists(&reference));
 }
 
 #[test]

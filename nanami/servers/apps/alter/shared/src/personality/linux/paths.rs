@@ -1,39 +1,9 @@
 use super::{
-    graphics_enabled, personality, virtual_fs, Runtime, VirtualNode, Word, EFAULT, EINVAL,
-    ENAMETOOLONG, EROFS, ESRCH, LINUX_AT_FDCWD, LINUX_CWD_MAX, LINUX_PAGE_SIZE,
+    graphics_enabled, personality, virtual_fs, Runtime, VirtualNode, Word, EINVAL,
+    ENAMETOOLONG, EROFS, ESRCH, LINUX_AT_FDCWD, LINUX_CWD_MAX,
 };
 
-pub(super) fn read_c_string(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Word, i32> {
-    if user_ptr == 0 {
-        return Err(EFAULT);
-    }
-    let max = ::core::cmp::min(runtime.posix_shm_size as usize, 4096);
-    let mut copied = 0usize;
-    while copied < max {
-        let source = user_ptr.checked_add(copied as Word).ok_or(EFAULT)?;
-        let page_remaining = (LINUX_PAGE_SIZE - (source & (LINUX_PAGE_SIZE - 1))) as usize;
-        // Most paths terminate near the start: avoid copying an entire page.
-        let chunk = ::core::cmp::min(max - copied, page_remaining).min(128.max(copied));
-        super::guest_memory::copyin_into(
-            runtime,
-            pid,
-            source,
-            runtime.posix_shm + copied as Word,
-            chunk as Word,
-        )?;
-
-        let end = copied + chunk;
-        while copied < end {
-            let byte =
-                unsafe { ::core::ptr::read((runtime.posix_shm + copied as Word) as *const u8) };
-            if byte == 0 {
-                return Ok(copied as Word);
-            }
-            copied += 1;
-        }
-    }
-    Err(ENAMETOOLONG)
-}
+pub(super) use super::path_string::read_c_string;
 
 pub(super) fn resolve_path(runtime: &mut Runtime, pid: Word, user_ptr: Word) -> Result<Word, i32> {
     let len = read_c_string(runtime, pid, user_ptr)?;
@@ -67,14 +37,19 @@ pub(super) fn translate_guest_path_at(
     }
 
     let base = runtime.posix_shm + offset;
-    let rootfs = runtime.managed_process(pid).ok_or(ESRCH)?.rootfs;
+    let rootfs = &runtime.managed_process(pid).ok_or(ESRCH)?.rootfs;
     if rootfs.root_len != 0 {
         if is_linux_virtual_path(base, len) {
             return Ok(len);
         }
         let guest = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
-        let mut host = [0; crate::abi::ALTER_PATH_MAX];
-        let host_len = rootfs.host_path(guest, &mut host).ok_or(ENAMETOOLONG)?;
+        if !crate::common::context::normalized(guest) {
+            return Err(ENAMETOOLONG);
+        }
+        let suffix_len = if len == 1 { 0 } else { len };
+        let host_len = rootfs.root_len.checked_add(suffix_len)
+            .filter(|length| *length <= crate::abi::ALTER_PATH_MAX)
+            .ok_or(ENAMETOOLONG)?;
         if offset
             .checked_add(host_len + 1)
             .is_none_or(|end| end > runtime.posix_shm_size)
@@ -82,7 +57,8 @@ pub(super) fn translate_guest_path_at(
             return Err(ENAMETOOLONG);
         }
         unsafe {
-            core::ptr::copy_nonoverlapping(host.as_ptr(), base as *mut u8, host_len);
+            core::ptr::copy(base as *const u8, (base + rootfs.root_len) as *mut u8, suffix_len);
+            core::ptr::copy_nonoverlapping(rootfs.root.as_ptr(), base as *mut u8, rootfs.root_len);
             core::ptr::write((base + host_len) as *mut u8, 0);
         }
         return Ok(host_len);
@@ -122,11 +98,6 @@ pub(super) fn translate_guest_path_at(
     if len_usize >= LINUX_CWD_MAX {
         return Err(ENAMETOOLONG);
     }
-    let mut original = [0u8; LINUX_CWD_MAX];
-    unsafe {
-        ::core::ptr::copy_nonoverlapping(base as *const u8, original.as_mut_ptr(), len_usize);
-    }
-
     let suffix_len = if len_usize == 1 { 0 } else { len_usize };
     let new_len = guest_root.len() + suffix_len;
     if offset
@@ -139,14 +110,14 @@ pub(super) fn translate_guest_path_at(
     }
 
     unsafe {
-        ::core::ptr::copy_nonoverlapping(guest_root.as_ptr(), base as *mut u8, guest_root.len());
         if suffix_len != 0 {
-            ::core::ptr::copy_nonoverlapping(
-                original.as_ptr(),
+            ::core::ptr::copy(
+                base as *const u8,
                 (base + guest_root.len() as Word) as *mut u8,
                 suffix_len,
             );
         }
+        ::core::ptr::copy_nonoverlapping(guest_root.as_ptr(), base as *mut u8, guest_root.len());
         ::core::ptr::write((base + new_len as Word) as *mut u8, 0);
     }
     Ok(new_len as Word)
@@ -217,15 +188,12 @@ pub(super) fn resolve_lexical_shm_path(
     if input_len as usize >= LINUX_CWD_MAX {
         return Err(ENAMETOOLONG);
     }
-    let mut input = [0u8; LINUX_CWD_MAX];
     let input_len = input_len as usize;
-    unsafe {
-        ::core::ptr::copy_nonoverlapping(
-            runtime.posix_shm as *const u8,
-            input.as_mut_ptr(),
-            input_len,
-        );
-    }
+    // SHM is only read until the complete result is ready. Borrow its input;
+    // keep staging the output so every failure leaves the input unchanged.
+    let input = unsafe {
+        core::slice::from_raw_parts(runtime.posix_shm as *const u8, input_len)
+    };
 
     let mut out = [0u8; LINUX_CWD_MAX];
     let mut out_len: usize;

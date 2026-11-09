@@ -114,6 +114,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             Err(e) => return Err(log_error("[alter] ipc receive failed: ", e)),
         };
 
+        runtime.current_fault_pid = 0;
         pending = match event {
             ServiceEvent::Request(request) => handle_request(&mut runtime, request),
             ServiceEvent::Notification { identifier, .. } => {
@@ -131,11 +132,14 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 reason,
                 program_counter,
                 fault_address,
+                architecture_fault_code,
                 hardware_context,
                 hardware_context_count,
                 ..
             } => {
                 runtime.trapped_faults = runtime.trapped_faults.saturating_add(1);
+                runtime.current_fault_pid = runtime.process_for_fault_identifier(identifier)
+                    .map_or(identifier, |process| process.pid);
                 match fault::handle_fault(
                     &mut runtime,
                     FaultEvent {
@@ -143,6 +147,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                         reason,
                         program_counter,
                         kernel_call_number: fault_address,
+                        architecture_fault_code,
                         hardware_context,
                         hardware_context_count,
                     },

@@ -5,6 +5,9 @@ extern crate self as a9n_abi;
 extern crate self as nanami_runtime;
 use std::cell::RefCell;
 type Word = usize;
+#[path = "../../nanami/servers/apps/alter/shared/src/common/state/readonly_mapping.rs"]
+mod readonly_mapping;
+mod state { pub use super::readonly_mapping::ReadonlyMapping; }
 const EIO: i32 = 5;
 mod guest_views {
     pub(super) fn invalidate(_: &super::Runtime, _: usize) {}
@@ -42,6 +45,7 @@ impl Process {
     }
 }
 struct Runtime {
+    readonly_mapping: std::cell::Cell<state::ReadonlyMapping>,
     managed: Vec<Process>,
     current_fault_pid: Word,
 }
@@ -132,6 +136,7 @@ fn setup() -> Runtime {
         }
     });
     Runtime {
+        readonly_mapping: std::cell::Cell::new(state::ReadonlyMapping::EMPTY),
         current_fault_pid: 1,
         managed: (1..=8)
             .map(|pid| Process {
@@ -175,6 +180,40 @@ fn guard_stops_only_active_vm_peers_never_replaying_a_handled_wait() {
         Call::Write,
         Call::Resume(102),
     ]);
+}
+
+#[test]
+fn known_snapshot_skips_query_but_still_detaches_under_vm_quiescence() {
+    for marker in [false, true] {
+        let mut runtime = setup(); runtime.managed.truncate(2);
+        runtime.managed[0].vm_private_shared = marker;
+        runtime.readonly_mapping.set(state::ReadonlyMapping::new(3, 1 << 32 | 7, 4096, 4096, 4096, 0));
+        BACKEND.with(|b| b.borrow_mut().shared = false);
+        assert_eq!(production::with_snapshot_write(&runtime, 1, 4096, 4096, write), Ok(91));
+        calls(&[Call::Suspend(102), Call::Detach, Call::Write, Call::Resume(102)]);
+        assert_eq!(runtime.readonly_mapping.get().generation, 0);
+    }
+}
+
+#[test]
+fn known_snapshot_stop_detach_and_operation_failures_keep_barrier_order() {
+    for stage in 0..3 {
+        let mut runtime = setup(); runtime.managed.truncate(2);
+        runtime.readonly_mapping.set(state::ReadonlyMapping::new(3, 1 << 32 | 7, 4096, 4096, 4096, 0));
+        BACKEND.with(|b| {
+            let mut b = b.borrow_mut(); b.fail_stop = if stage == 0 { 102 } else { 0 };
+            b.fail_detach = stage == 1;
+        });
+        assert_eq!(production::with_snapshot_write(&runtime, 1, 4096, 4096, || {
+            write()?; Err::<Word, _>(EIO)
+        }), Err(EIO));
+        assert_eq!(runtime.readonly_mapping.get().generation, 0);
+        match stage {
+            0 => calls(&[Call::Suspend(102)]),
+            1 => calls(&[Call::Suspend(102), Call::Detach, Call::Resume(102)]),
+            _ => calls(&[Call::Suspend(102), Call::Detach, Call::Write, Call::Resume(102)]),
+        }
+    }
 }
 
 #[test]
@@ -274,4 +313,18 @@ fn fork_barrier_quiesces_running_peers_even_without_shared_markers() {
     runtime.managed[0].vm_private_shared = false;
     assert_eq!(production::with_vm_quiescence(&runtime, 1, write), Ok(91));
     calls(&[Call::Suspend(102), Call::Write, Call::Resume(102)]);
+}
+
+#[test]
+fn privileged_writes_clear_immutable_origin_even_without_detach_or_guest_views() {
+    for shared_marker in [false, true] {
+        let mut runtime = setup();
+        runtime.managed[0].vm_private_shared = shared_marker;
+        BACKEND.with(|backend| backend.borrow_mut().shared = false);
+        runtime.readonly_mapping.set(state::ReadonlyMapping::new(1, 1 << 32, 4096, 4096, 4096, 0));
+        assert_eq!(production::with_private_write(&runtime, 1, 4096, 1, || {
+            assert_eq!(runtime.readonly_mapping.get().generation, 0);
+            write()
+        }), Ok(91));
+    }
 }

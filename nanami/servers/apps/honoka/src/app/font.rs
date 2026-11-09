@@ -1,19 +1,24 @@
-use alloc::boxed::Box;
-
+#[cfg(test)]
 use fontdue::{Font, FontSettings};
 
 use crate::framebuffer::{Framebuffer, Rect};
 
 // MIT License
 // Copyright (c) 2018 Source Foundry Authors
+#[cfg(test)]
 const FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/hack.ttf");
+#[cfg(test)]
 const TITLE_FONT_SIZE: f32 = 13.0;
+#[cfg(test)]
 const TITLE_BASELINE: i32 = 10;
 const FALLBACK_GLYPH_WIDTH: i32 = 7;
 const FIRST: usize = 32;
 const COUNT: usize = 96;
 const MAX_GLYPH_W: usize = 24;
 const MAX_GLYPH_H: usize = 24;
+
+#[cfg(test)]
+static GLYPH_SAMPLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 struct CachedGlyph {
@@ -26,6 +31,7 @@ struct CachedGlyph {
     bitmap: [u8; MAX_GLYPH_W * MAX_GLYPH_H],
 }
 
+#[cfg(test)]
 impl CachedGlyph {
     const EMPTY: Self = Self {
         cached: false,
@@ -38,30 +44,36 @@ impl CachedGlyph {
     };
 }
 
+// Expand the compact generated rows at compile time, preserving the renderer's
+// padded bitmap layout without any startup parsing, rasterization or allocation.
+const fn title_bitmap(pixels: &[u8], width: usize, height: usize) -> [u8; MAX_GLYPH_W * MAX_GLYPH_H] {
+    assert!(width <= MAX_GLYPH_W && height <= MAX_GLYPH_H);
+    assert!(pixels.len() == width * height);
+    let mut bitmap = [0; MAX_GLYPH_W * MAX_GLYPH_H];
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            bitmap[y * MAX_GLYPH_W + x] = pixels[y * width + x];
+            x += 1;
+        }
+        y += 1;
+    }
+    bitmap
+}
+
+include!("title_glyphs.rs");
+
 pub struct TextRenderer {
-    glyphs: Box<[CachedGlyph; COUNT]>,
+    glyphs: &'static [CachedGlyph; COUNT],
     use_fontdue: bool,
 }
 
 impl TextRenderer {
     pub fn new() -> Self {
-        log_heap_stats("[honoka] title font init begin");
-        let mut glyphs = allocate_glyph_cache();
-        let use_fontdue = if FONT_BYTES.is_empty() {
-            nanami_runtime::println!("[honoka] title font missing; using bitmap fallback");
-            false
-        } else if let Ok(font) = Font::from_bytes(FONT_BYTES, font_settings()) {
-            nanami_runtime::println!("[honoka] title fontdue ready bytes={:#x}", FONT_BYTES.len());
-            prerasterize_glyph_cache(&mut glyphs, &font);
-            true
-        } else {
-            nanami_runtime::println!("[honoka] title fontdue parse failed; using bitmap fallback");
-            false
-        };
-        log_heap_stats("[honoka] title font init end");
         Self {
-            glyphs,
-            use_fontdue,
+            glyphs: &TITLE_GLYPHS,
+            use_fontdue: true,
         }
     }
 
@@ -129,6 +141,7 @@ impl TextRenderer {
     }
 }
 
+#[cfg(test)]
 fn font_settings() -> FontSettings {
     FontSettings {
         scale: TITLE_FONT_SIZE,
@@ -137,37 +150,7 @@ fn font_settings() -> FontSettings {
     }
 }
 
-fn log_heap_stats(prefix: &str) {
-    let (used, remaining, total) = nanami_runtime::heap::heap_stats();
-    nanami_runtime::println!(
-        "{} heap-used={:#x} heap-rem={:#x} heap-total={:#x}",
-        prefix,
-        used,
-        remaining,
-        total
-    );
-}
-
-fn allocate_glyph_cache() -> Box<[CachedGlyph; COUNT]> {
-    let mut glyphs = Box::<[CachedGlyph; COUNT]>::new_uninit();
-    let first = glyphs.as_mut_ptr().cast::<CachedGlyph>();
-    for index in 0..COUNT {
-        unsafe { first.add(index).write(CachedGlyph::EMPTY) };
-    }
-    // Every element is initialized before exposing the owned cache.
-    unsafe { glyphs.assume_init() }
-}
-
-fn prerasterize_glyph_cache(glyphs: &mut [CachedGlyph; COUNT], font: &Font) {
-    let mut i = 0usize;
-    while i < COUNT {
-        let ch = (FIRST + i) as u8;
-        let glyph = rasterize_glyph(font, ch);
-        glyphs[i] = glyph;
-        i += 1;
-    }
-}
-
+#[cfg(test)]
 fn rasterize_glyph(font: &Font, ch: u8) -> CachedGlyph {
     let (metrics, bitmap) = font.rasterize(ch as char, TITLE_FONT_SIZE);
     let mut glyph = CachedGlyph::EMPTY;
@@ -203,15 +186,33 @@ fn draw_cached_glyph(
 ) {
     let base_x = x.saturating_add(glyph.x_offset);
     let base_y = y.saturating_add(glyph.y_offset);
-    let mut gy = 0usize;
-    while gy < glyph.height {
-        let mut gx = 0usize;
-        while gx < glyph.width {
+    let clip = dirty.x.checked_add(dirty.width).zip(dirty.y.checked_add(dirty.height));
+    let (gx_start, gx_end, gy_start, gy_end) = if let Some((right, bottom)) = clip {
+        let span = |base: i32, length: usize, start: i32, end: i32| {
+            // Wide differences avoid overflow for offscreen glyph origins.
+            // A representable exclusive clip end also excludes coordinates
+            // which the old saturating pixel additions collapse to i32::MAX.
+            ((start as i64 - base as i64).clamp(0, length as i64) as usize,
+                (end as i64 - base as i64).clamp(0, length as i64) as usize)
+        };
+        let (left, right) = span(base_x, glyph.width, dirty.x, right);
+        let (top, bottom) = span(base_y, glyph.height, dirty.y, bottom);
+        (left, right, top, bottom)
+    } else {
+        // Retain the original per-pixel behavior for overflowing clip edges.
+        (0, glyph.width, 0, glyph.height)
+    };
+    let mut gy = gy_start;
+    while gy < gy_end {
+        let mut gx = gx_start;
+        while gx < gx_end {
             let alpha = glyph.bitmap[gy * MAX_GLYPH_W + gx];
+            #[cfg(test)]
+            GLYPH_SAMPLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             if alpha != 0 {
                 let px = base_x.saturating_add(gx as i32);
                 let py = base_y.saturating_add(gy as i32);
-                if contains(dirty, px, py) {
+                if clip.is_some() || contains(dirty, px, py) {
                     framebuffer.blend_pixel(px, py, blend_over(background, color, alpha), opacity);
                 }
             }
@@ -236,6 +237,7 @@ fn blend_over(background: u32, foreground: u32, alpha: u8) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+#[cfg(test)]
 fn ceil_positive(value: f32) -> i32 {
     let truncated = value as i32;
     if value > truncated as f32 {
@@ -345,4 +347,74 @@ fn glyph5x7(ch: u8) -> [u8; 7] {
 
 fn contains(rect: Rect, x: i32, y: i32) -> bool {
     x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_cache_matches_fontdue_for_all_slots_and_metrics() {
+        let renderer = TextRenderer::new();
+        let font = Font::from_bytes(FONT_BYTES, font_settings()).unwrap();
+        for index in 0..COUNT {
+            let expected = rasterize_glyph(&font, (FIRST + index) as u8);
+            let actual = &renderer.glyphs[index];
+            assert_eq!((actual.cached, actual.width, actual.height, actual.advance,
+                actual.x_offset, actual.y_offset),
+                (expected.cached, expected.width, expected.height, expected.advance,
+                expected.x_offset, expected.y_offset), "slot={index}");
+            assert_eq!(actual.bitmap, expected.bitmap, "slot={index}");
+        }
+    }
+    use alloc::vec;
+    use crate::framebuffer::ScreenInfo;
+    use core::sync::atomic::Ordering::Relaxed;
+
+    #[test]
+    fn cached_glyph_clips_samples_and_matches_legacy_pixel_walk() {
+        let mut glyph = CachedGlyph::EMPTY;
+        glyph.width = MAX_GLYPH_W;
+        glyph.height = MAX_GLYPH_H;
+        for (i, alpha) in glyph.bitmap.iter_mut().enumerate() {
+            *alpha = (i as u8).wrapping_mul(37);
+        }
+        let screen = ScreenInfo { width: 36, height: 34, stride_bytes: 39 * 4, bits_per_pixel: 32,
+            red_position: 16, red_size: 8, green_position: 8, green_size: 8,
+            blue_position: 0, blue_size: 8 };
+        for (x, y) in [(5, 4), (-9, -9), (29, 28), (i32::MAX - 3, i32::MAX - 3),
+            (i32::MIN, i32::MIN)] {
+            for dirty in [Rect::new(0, 0, 36, 34), Rect::new(7, 9, 11, 13),
+                Rect::new(0, 0, 1, 1), Rect::EMPTY, Rect::new(3, 3, -2, -1),
+                Rect::new(i32::MAX - 2, i32::MAX - 2, 10, 10)] {
+                for opacity in [0, 1, 127, 254, 255] {
+                    let mut expected = vec![0xa579317fu32; 39 * 34];
+                    let mut actual = expected.clone();
+                    let output = Framebuffer::new(1, actual.as_mut_ptr() as usize,
+                        actual.len() * 4, screen).ok().unwrap();
+                    let reference = Framebuffer::new(1, expected.as_mut_ptr() as usize,
+                        expected.len() * 4, screen).ok().unwrap();
+                    draw_cached_glyph(&output, dirty, x, y, &glyph, 0x12abef, 0xfedc23, opacity);
+                    for gy in 0..glyph.height {
+                        for gx in 0..glyph.width {
+                            let alpha = glyph.bitmap[gy * MAX_GLYPH_W + gx];
+                            let px = x.saturating_add(gx as i32);
+                            let py = y.saturating_add(gy as i32);
+                            if alpha != 0 && contains(dirty, px, py) {
+                                reference.blend_pixel(px, py, blend_over(0xfedc23, 0x12abef, alpha), opacity);
+                            }
+                        }
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        let mut pixels = vec![0u32; 39 * 34];
+        let output = Framebuffer::new(1, pixels.as_mut_ptr() as usize, pixels.len() * 4, screen).ok().unwrap();
+        GLYPH_SAMPLES.store(0, Relaxed);
+        draw_cached_glyph(&output, Rect::new(7, 9, 1, 1), 5, 4, &glyph, 0xffffff, 0, 255);
+        let samples = GLYPH_SAMPLES.swap(0, Relaxed);
+        std::println!("GLYPH-DAMAGE-CLIP bitmap=24x24 dirty=1x1 samples={samples}");
+        assert_eq!(samples, 1);
+    }
 }

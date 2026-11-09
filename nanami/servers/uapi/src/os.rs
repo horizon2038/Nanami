@@ -120,6 +120,9 @@ pub const OS_REQUEST_PROCESS_WRITE_VIEW: Word = 0x1033;
 /// it cannot be refilled while aliases live. DETACH precedes every private write.
 /// On error, release any installed destination prefix; never fallback-copy over it.
 pub const OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT: Word = 0x1034;
+/// Trusted supervisor: source VA, source bytes, final R/W/X permissions.
+/// Ordinary MAP_ANONYMOUS retains its original two-word initializer contract.
+pub const OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED: Word = 0x1035;
 pub const OS_PRIVATE_WRITE_QUERY: Word = 0;
 pub const OS_PRIVATE_WRITE_DETACH: Word = 1;
 /// PROCESS_FORK arg3 opt-in. Only sealed tasks may share private R/RX backing.

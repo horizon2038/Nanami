@@ -18,6 +18,67 @@ pub mod nanami_utils {
 }
 #[path = "../../nanami/src/nanami_core/elf_loader.rs"]
 pub mod elf_loader;
+
+#[test]
+fn bounded_symbol_comparison_matches_complete_cstring_decoding() {
+    let mut seed = 0x194785u64;
+    for len in 0usize..1025 {
+        let mut data: Vec<u8> = (0..len).map(|_| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as u8
+        }).collect();
+        for nul in [None, Some(0), Some(len / 2), len.checked_sub(1)] {
+            let original = data.clone();
+            if let Some(index) = nul.filter(|i| *i < data.len()) { data[index] = 0; }
+            let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
+            for target_len in [0, 1, 18, len / 2, len, len + 1] {
+                let mut target = vec![0x71; target_len];
+                let copied = data.len().min(target_len);
+                target[..copied].copy_from_slice(&data[..copied]);
+                assert_eq!(elf_loader::symbol_name_matches_for_test(&data, &target), data[..end] == target);
+                target.push(0);
+                assert_eq!(elf_loader::symbol_name_matches_for_test(&data, &target), data[..end] == target);
+            }
+            data = original;
+        }
+    }
+}
+
+#[test]
+fn elf_symbol_lookup_skips_long_names_and_preserves_unterminated_tail_and_bias() {
+    let target = b"__ipc_buffer_start";
+    let count = 2049usize;
+    let sym_offset = 64 + 2 * 64;
+    let str_offset = sym_offset + count * 24;
+    let mut image = vec![0; str_offset];
+    image[16..18].copy_from_slice(&3u16.to_le_bytes());
+    image[40..48].copy_from_slice(&64u64.to_le_bytes());
+    image[58..60].copy_from_slice(&64u16.to_le_bytes());
+    image[60..62].copy_from_slice(&2u16.to_le_bytes());
+    image[68..72].copy_from_slice(&11u32.to_le_bytes());
+    image[88..96].copy_from_slice(&(sym_offset as u64).to_le_bytes());
+    image[96..104].copy_from_slice(&((count * 24) as u64).to_le_bytes());
+    image[104..108].copy_from_slice(&1u32.to_le_bytes());
+    image[120..128].copy_from_slice(&24u64.to_le_bytes());
+    image[152..160].copy_from_slice(&(str_offset as u64).to_le_bytes());
+    for index in 0..count {
+        let offset = image.len() - str_offset;
+        image[sym_offset + index * 24..sym_offset + index * 24 + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+        image[sym_offset + index * 24 + 8..sym_offset + index * 24 + 16].copy_from_slice(&(index as u64).to_le_bytes());
+        image.extend_from_slice(target);
+        if index + 1 != count {
+            image.extend(std::iter::repeat_n(b'x', 400));
+            image.push(0);
+        }
+    }
+    let strings = image.len() - str_offset;
+    image[160..168].copy_from_slice(&(strings as u64).to_le_bytes());
+    assert_eq!(elf_loader::symbol_value(&image, target).unwrap(), Some(0x400000 + count - 1));
+    image.push(0);
+    image[160..168].copy_from_slice(&((strings + 1) as u64).to_le_bytes());
+    assert_eq!(elf_loader::symbol_value(&image, target).unwrap(), Some(0x400000 + count - 1));
+    assert_eq!(elf_loader::symbol_value(&image, b"missing").unwrap(), None);
+}
 #[path = "../../nanami/src/nanami_core/kernel_object.rs"]
 pub mod kernel_object;
 pub mod nanami_core {

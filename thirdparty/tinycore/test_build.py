@@ -30,6 +30,19 @@ def archive(records):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_desktop_test_image_cli_reaches_observer_builder(self):
+        # Exercise main, not just assemble: its imports have a separate scope.
+        # Stop at the helper boundary so this test needs no downloads or VM.
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "image"
+            with mock.patch.object(sys, "argv", ["build.py", "--desktop", "--image", "--with-tests"]), \
+                    mock.patch.object(build, "acquire", return_value=Path(temporary) / "archive"), \
+                    mock.patch.object(build, "assemble", return_value=output), \
+                    mock.patch.object(desktop, "build_window_observer", side_effect=RuntimeError("observer reached")) as observer:
+                with self.assertRaisesRegex(RuntimeError, "observer reached"):
+                    build.main()
+                observer.assert_called_once_with(output / "overlay/tinycore/rootfs")
+
     def read(self, records):
         return build.archive_entries(io.BytesIO(archive(records)))
 
@@ -273,13 +286,16 @@ class DesktopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             temporary = Path(temporary)
             with mock.patch.object(desktop, "install", return_value={"packages": {}}), \
-                    mock.patch.object(desktop, "build_readiness", return_value={"helper": "digest"}) as readiness:
+                    mock.patch.object(desktop, "build_readiness", return_value={"helper": "digest"}) as readiness, \
+                    mock.patch.object(desktop, "build_font_cache", return_value={"cache": "digest"}) as caches:
                 graphical = build.assemble(data, graphical=True, output=temporary / "desktop")
                 console = build.assemble(data, output=temporary / "console")
             manifest = json.loads((graphical / "manifest.json").read_text())
             self.assertEqual(manifest["profile_symlinks"], desktop.PROFILE_LINKS)
             self.assertEqual(manifest["profile_helpers"], {"helper": "digest"})
+            self.assertEqual(manifest["font_caches"], {"cache": "digest"})
             readiness.assert_called_once()
+            caches.assert_called_once()
             self.assertTrue((graphical / "overlay/tinycore/rootfs/root/.wmx/Editor").is_symlink())
             self.assertNotIn("profile_symlinks", json.loads((console / "manifest.json").read_text()))
             self.assertFalse((console / "overlay/tinycore/rootfs/root/.wmx").exists())

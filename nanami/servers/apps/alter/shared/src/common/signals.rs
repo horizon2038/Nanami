@@ -1,5 +1,7 @@
 //! Linux signal state. Runtime owns the lazy allocation; PCB metadata copies do not.
 use alloc::rc::Rc;
+use alloc::collections::VecDeque;
+#[cfg(test)]
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
@@ -23,6 +25,14 @@ pub const SS_ONSTACK: usize = 1;
 pub const SS_DISABLE: usize = 2;
 pub const SS_AUTODISARM: usize = 0x8000_0000;
 const PENDING_LIMIT: usize = 128;
+
+#[cfg(test)]
+static SIGNAL_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn take_signal_reads() -> usize {
+    SIGNAL_READS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
 
 pub const fn bit(signal: usize) -> u64 {
     1u64 << (signal - 1)
@@ -82,6 +92,8 @@ impl Info {
     }
 
     pub fn signal(self) -> usize {
+        #[cfg(test)]
+        SIGNAL_READS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         u32::from_le_bytes(self.bytes[..4].try_into().unwrap()) as usize
     }
 
@@ -98,12 +110,79 @@ impl Info {
     }
 }
 
+/// Records and their exact membership mask are mutated together. Keeping the
+/// records private also protects the mask shared by threads in a task group.
+#[derive(Clone, Default)]
+pub struct Pending {
+    records: VecDeque<Info>,
+    mask: u64,
+}
+
+impl Pending {
+    #[cfg(test)]
+    pub fn record_addresses(&self) -> Vec<(Info, usize)> {
+        self.records.iter().map(|info| (*info, info as *const Info as usize)).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn retain(&mut self, keep: impl Fn(&Info) -> bool) {
+        let mut mask = 0;
+        self.records.retain(|info| {
+            if keep(info) {
+                mask |= bit(info.signal());
+                true
+            } else {
+                false
+            }
+        });
+        self.mask = mask;
+    }
+
+    fn enqueue(&mut self, info: Info) -> bool {
+        let signal = info.signal();
+        if signal < 32 && self.mask & bit(signal) != 0 {
+            return true;
+        }
+        // Standard signals retain their finite headroom above the realtime cap.
+        if signal >= 32 && self.len() >= PENDING_LIMIT {
+            return false;
+        }
+        self.records.push_back(info);
+        self.mask |= bit(signal);
+        true
+    }
+
+    fn restore(&mut self, info: Info) {
+        self.mask |= bit(info.signal());
+        self.records.push_front(info);
+    }
+
+    fn take_signal(&mut self, signal: usize) -> Option<Info> {
+        let index = self.records.iter().position(|info| info.signal() == signal)?;
+        let info = self.records.remove(index)?;
+        // The removed record was the first match. Earlier records cannot be
+        // duplicates; any next match is now at index or later in logical order.
+        // Realtime/restored duplicates retain membership until the last one.
+        if !self.records.range(index..).any(|info| info.signal() == signal) {
+            self.mask &= !bit(signal);
+        }
+        Some(info)
+    }
+}
+
 #[derive(Clone)]
 pub struct Signals {
     pub actions: Rc<RefCell<[Action; NSIG]>>,
     pub blocked: u64,
-    pub pending: Vec<Info>,
-    group_pending: Rc<RefCell<Vec<Info>>>,
+    pub pending: Pending,
+    group_pending: Rc<RefCell<Pending>>,
     pub altstack: AltStack,
     pub suspend_mask: Option<u64>,
     pub wait_mask: Option<u64>,
@@ -128,8 +207,8 @@ impl Signals {
         Self {
             actions: Rc::new(RefCell::new([Action::default(); NSIG])),
             blocked: 0,
-            pending: Vec::new(),
-            group_pending: Rc::new(RefCell::new(Vec::new())),
+            pending: Pending::default(),
+            group_pending: Rc::new(RefCell::new(Pending::default())),
             altstack: AltStack::DISABLED,
             suspend_mask: None,
             wait_mask: None,
@@ -169,10 +248,7 @@ impl Signals {
     }
 
     pub fn pending_mask(&self) -> u64 {
-        self.pending
-            .iter()
-            .chain(self.group_pending.borrow().iter())
-            .fold(0, |mask, info| mask | bit(info.signal()))
+        self.pending.mask | self.group_pending.borrow().mask
     }
 
     pub fn has_pending(&self) -> bool {
@@ -215,7 +291,7 @@ impl Signals {
     }
 
     pub fn enqueue_group(&mut self, info: Info) -> bool {
-        Self::enqueue_to(&mut self.group_pending.borrow_mut(), info)
+        self.group_pending.borrow_mut().enqueue(info)
     }
 
     pub fn enqueue(&mut self, info: Info) -> bool {
@@ -225,22 +301,7 @@ impl Signals {
         } else if stop_signal(signal) {
             self.discard(SIGCONT);
         }
-        Self::enqueue_to(&mut self.pending, info)
-    }
-
-    fn enqueue_to(pending: &mut Vec<Info>, info: Info) -> bool {
-        let signal = info.signal();
-        if signal < 32 && pending.iter().any(|queued| queued.signal() == signal) {
-            return true;
-        }
-        // Standard signals have at most one record per number. Reserve their
-        // finite headroom rather than dropping an already queued realtime signal
-        // when SIGSTOP/SIGALRM arrives at a full realtime queue.
-        if signal >= 32 && pending.len() >= PENDING_LIMIT {
-            return false;
-        }
-        pending.push(info);
-        true
+        self.pending.enqueue(info)
     }
 
     pub fn take_matching(&mut self, mask: u64) -> Option<Info> {
@@ -249,34 +310,23 @@ impl Signals {
 
     pub fn restore_pending(&mut self, info: Info, group: bool) {
         if group {
-            self.group_pending.borrow_mut().insert(0, info);
+            self.group_pending.borrow_mut().restore(info);
         } else {
-            self.pending.insert(0, info);
+            self.pending.restore(info);
         }
     }
 
     pub fn take_matching_record(&mut self, mask: u64) -> Option<(Info, bool)> {
-        let local = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, info)| mask & bit(info.signal()) != 0)
-            .min_by_key(|(_, info)| info.signal())
-            .map(|(index, info)| (index, info.signal()));
-        let group = self
-            .group_pending
-            .borrow()
-            .iter()
-            .enumerate()
-            .filter(|(_, info)| mask & bit(info.signal()) != 0)
-            .min_by_key(|(_, info)| info.signal())
-            .map(|(index, info)| (index, info.signal()));
-        if let Some((index, signal)) = local {
-            if group.is_none_or(|(_, group_signal)| signal <= group_signal) {
-                return Some((self.pending.remove(index), false));
-            }
+        let eligible = self.pending_mask() & mask;
+        if eligible == 0 {
+            return None;
         }
-        group.map(|(index, _)| (self.group_pending.borrow_mut().remove(index), true))
+        let signal = eligible.trailing_zeros() as usize + 1;
+        if self.pending.mask & bit(signal) != 0 {
+            self.pending.take_signal(signal).map(|info| (info, false))
+        } else {
+            self.group_pending.borrow_mut().take_signal(signal).map(|info| (info, true))
+        }
     }
 
     pub fn next(&mut self) -> Option<Info> {

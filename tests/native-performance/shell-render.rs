@@ -181,3 +181,86 @@ fn one_character_reconstructs_a_row_band_not_the_whole_window() {
     }
     assert_eq!(damage(&mut terminal, &mut text, &mut pixels, 712, 396), 0);
 }
+
+// Independent full-paint ordering, clipped to the requested band. Start with
+// arbitrary prior pixels so missing clears and out-of-band stores are visible.
+fn reference_band(
+    terminal: &terminal::Terminal, text: &mut font::TextRenderer,
+    pixels: &mut [u32], width: usize, height: usize, top: usize, bottom: usize,
+) {
+    let bottom = bottom.min(height);
+    if top >= bottom {
+        return;
+    }
+    pixels[top * width..bottom * width].fill(0x0010_1418);
+    for row in 0..terminal.rows().min(height / FONT_H) {
+        let y = row * FONT_H;
+        for (column, cell) in terminal.view_row(row).iter().enumerate().take(width / FONT_W) {
+            let mut cell = *cell;
+            if terminal.cursor_visible && terminal.at_bottom() && terminal.cursor() == (column, row) {
+                std::mem::swap(&mut cell.fg, &mut cell.bg);
+            }
+            let x = column * FONT_W;
+            for py in y.max(top)..(y + FONT_H).min(bottom) {
+                pixels[py * width + x..py * width + x + FONT_W].fill(cell.bg);
+            }
+            text.draw_cell_in_band(pixels.as_mut_ptr() as Word, width, height,
+                x, y, cell.byte, cell.fg, (top, bottom));
+            if cell.underline && y + FONT_H > top && y + FONT_H <= bottom {
+                let offset = (y + FONT_H - 1) * width + x;
+                pixels[offset..offset + FONT_W].fill(cell.fg);
+            }
+        }
+    }
+}
+
+#[test]
+fn arbitrary_bands_match_full_order_with_margins_clamped_rows_and_prior_pixels() {
+    let mut text = font::TextRenderer::new();
+    let mut cases = 0;
+    for (width, height, cols, rows) in [
+        (713usize, 397usize, 89, 33), (83, 63, 4, 2), (17, 37, 9, 8),
+        (7, 11, 1, 1), (9, 13, 1, 1), (0, 25, 3, 4),
+        (49, 0, 3, 4), (33, 3100, 3, 300),
+    ] {
+        let mut terminal = terminal::Terminal::new(cols, rows);
+        for round in 0..3 {
+            for byte in b"\x1b[31;44;4m gypj_|~W\x1b[0m\r\n\x1b[32;45mABCDE\r\n" {
+                terminal.process_byte(*byte);
+            }
+            if round == 1 {
+                terminal.scroll(2);
+            }
+            let bands = [(0, height), (0, 1), (1, 12), (11, 13), (12, 25),
+                (13, 26), (height.saturating_sub(1), height + 8),
+                (height, height + 1), (25, 3), (0, 0)];
+            for (top, bottom) in bands {
+                let mut actual: Vec<u32> = (0..width * height + 2)
+                    .map(|i| (i as u32).wrapping_mul(123457) ^ 0xa579317f).collect();
+                let mut expected = actual.clone();
+                render::paint(&terminal, &mut text, actual[1..].as_mut_ptr() as Word,
+                    width, height, top, bottom);
+                reference_band(&terminal, &mut text, &mut expected[1..1 + width * height],
+                    width, height, top, bottom);
+                assert_eq!(actual, expected, "{width}x{height} band={top}..{bottom} round={round}");
+                cases += 1;
+            }
+        }
+    }
+    println!("SHELL-BACKGROUND oracle-cases={cases}");
+}
+
+#[test]
+fn background_fill_work_for_full_and_partial_bands() {
+    let terminal = terminal::Terminal::new(89, 33);
+    let mut text = font::TextRenderer::new();
+    let mut pixels = vec![0; 712 * 396];
+    for (top, bottom) in [(0, 396), (24, 37)] {
+        render::take_fill_stores();
+        render::paint(&terminal, &mut text, pixels.as_mut_ptr() as Word,
+            712, 396, top, bottom);
+        let stores = render::take_fill_stores();
+        println!("SHELL-BACKGROUND band={top}..{bottom} fill-stores={stores}");
+        assert_eq!(stores, 712 * (bottom - top));
+    }
+}

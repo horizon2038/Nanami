@@ -13,20 +13,26 @@ mod memory_clone;
 mod memory_copy;
 mod memory_exec;
 mod memory_init;
+mod memory_image;
+mod memory_lazy;
+mod memory_zero;
 mod memory_pages;
 mod memory_private;
 mod memory_requests;
 mod memory_retirement;
 mod memory_snapshot;
 mod memory_staging;
+mod memory_transfer;
 mod mmio;
 mod process_policy;
 mod process_requests;
+mod stack_population;
 mod service_buffers;
 mod service_events;
 mod service_requests;
 mod shared_memory;
 mod support;
+mod page_fill;
 mod threads;
 mod version_info;
 
@@ -41,6 +47,7 @@ mod arch_impl;
 use self::memory_pages::PageSource;
 use self::process_policy::{ComponentSpec, ProcessPolicies, ProcessPolicy};
 use self::support::*;
+use self::page_fill::fill_lazy_page;
 
 use crate::nanami_core::capability_space::RootCapabilitySpace;
 use crate::nanami_core::communication::{
@@ -63,7 +70,7 @@ use crate::nanami_core::communication::{
     OS_RESPONSE_OK, OS_RESPONSE_PERMISSION_DENIED, OS_RESPONSE_PONG_MAGIC,
 };
 use crate::nanami_core::cpio;
-use crate::nanami_core::elf_loader::parse_elf64;
+use crate::nanami_core::elf_loader::{parse_elf64, page::fill_image_page};
 use crate::nanami_core::memory::MemoryManager;
 use crate::nanami_core::process::{ProcessLazyMappingKind, ProcessManager};
 use crate::nanami_core::vm_space::VmTracker;
@@ -792,7 +799,7 @@ impl Alpha {
             OS_REQUEST_PROCESS_MEMORY_COPY_WITHIN => {
                 response_from_status_result(self.handle_process_memory_copy_within_request(request))
             }
-            OS_REQUEST_PROCESS_MAP_ANONYMOUS => {
+            OS_REQUEST_PROCESS_MAP_ANONYMOUS | nanami_uapi::os::OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED => {
                 response_from_details_result(self.handle_process_map_anonymous_request(request))
             }
             nanami_uapi::os::OS_REQUEST_PROCESS_READ_VIEW => {

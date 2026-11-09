@@ -6,6 +6,31 @@ use core::fmt::{self, Write};
 const NODE_MASK: Word = 0xffff_ffff;
 const ROOT_ENTRIES: Word = 6;
 
+#[cfg(test)]
+static STAT_NUMERIC_FORMATS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) fn take_stat_numeric_formats() -> usize {
+    STAT_NUMERIC_FORMATS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
+fn write_stat_field(text: &mut Text<'_>, field: isize) -> fmt::Result {
+    // Most Linux stat accounting fields are currently zero. Their complete
+    // representation is fixed; keep general signed formatting for other values.
+    if field == 0 {
+        return text.write_str(" 0");
+    }
+    #[cfg(test)]
+    STAT_NUMERIC_FORMATS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    write!(text, " {field}")
+}
+
+#[cfg(test)]
+pub(super) fn stat_field_for_test(field: isize, out: &mut [u8]) -> Result<usize, i32> {
+    let mut text = Text::new(out);
+    write_stat_field(&mut text, field).map_err(|_| EIO)?;
+    Ok(text.used)
+}
+
 pub(super) fn node(resource: Word) -> Option<VirtualNode> {
     VirtualNode::from_id(resource & NODE_MASK)
 }
@@ -16,6 +41,11 @@ fn resource(node: VirtualNode, pid: Word) -> Word {
 
 fn visible(runtime: &Runtime, caller: Word, target: Word) -> Option<&ManagedProcess> {
     let current = runtime.managed_process(caller)?;
+    // The caller's resolved record already establishes this exact identity.
+    // Unknown PIDs still fail above; other PIDs must pass the scope check.
+    if caller == target {
+        return Some(current);
+    }
     let process = runtime.managed_process(target)?;
     (current.rootfs.leader == process.rootfs.leader).then_some(process)
 }
@@ -149,6 +179,9 @@ pub(super) fn directory_entry<'a>(
         cookie
     };
     let current = runtime.managed_process(caller).ok_or(ESRCH)?;
+    // Membership is stable for this enumeration request. Resolve the subject's
+    // group only for a candidate that passes the cheaper PID/scope filters.
+    let mut task_group = None;
     let next = runtime
         .managed
         .iter()
@@ -159,7 +192,7 @@ pub(super) fn directory_entry<'a>(
                 && if directory == VirtualNode::Proc {
                     process.pid == process.tgid
                 } else {
-                    process.tgid == runtime.thread_group(subject)
+                    process.tgid == *task_group.get_or_insert_with(|| runtime.thread_group(subject))
                 }
         })
         .min_by_key(|process| process.pid);
@@ -222,6 +255,27 @@ fn state(runtime: &Runtime, process: &ManagedProcess) -> &'static str {
     }
 }
 
+fn comm_name(process: &ManagedProcess) -> &str {
+    let bytes = &process.comm[..process.comm.iter().position(|byte| *byte == 0).unwrap_or(15)];
+    core::str::from_utf8(bytes).unwrap_or("?")
+}
+
+pub(super) fn try_read_current_shm(
+    runtime: &mut Runtime, caller: Word, value: Word, offset: Word, len: Word,
+) -> Option<Result<usize, i32>> {
+    if !matches!(node(value), Some(VirtualNode::ProcStat | VirtualNode::ProcStatus
+        | VirtualNode::ProcComm | VirtualNode::ProcStatm)) {
+        return None;
+    }
+    // These four readers inspect process records and format/copy into out;
+    // they never use posix_shm as scratch or issue guest-memory/clock IPC.
+    // In particular cmdline must keep staging because it overwrites SHM.
+    let limit = len.min(4096).min(runtime.posix_shm_size);
+    let out = unsafe { core::slice::from_raw_parts_mut(runtime.posix_shm as *mut u8, limit) };
+    // End this exclusive SHM borrow on return, before caller copyout/IPC.
+    Some(read(runtime, caller, value, offset, out))
+}
+
 pub(super) fn read(
     runtime: &mut Runtime,
     caller: Word,
@@ -234,6 +288,20 @@ pub(super) fn read(
     let subject = value >> 32;
     if node == VirtualNode::ProcCmdline {
         return cmdline(runtime, subject, offset, out);
+    }
+    if node == VirtualNode::ProcComm {
+        let process = visible(runtime, caller, subject).ok_or(ENOENT)?;
+        let bytes = comm_name(process).as_bytes();
+        // comm is at most 15 bytes plus newline. Copy just the requested
+        // window, without formatting or collecting unrelated process stats.
+        let offset = offset.min(bytes.len() + 1);
+        let count = (bytes.len() + 1 - offset).min(out.len());
+        let name_bytes = bytes.len().saturating_sub(offset).min(count);
+        if name_bytes != 0 {
+            out[..name_bytes].copy_from_slice(&bytes[offset..offset + name_bytes]);
+        }
+        if name_bytes < count { out[name_bytes] = b'\n'; }
+        return Ok(count);
     }
     let mut buffer = [0u8; 2048];
     let mut text = Text::new(&mut buffer);
@@ -249,12 +317,7 @@ pub(super) fn read(
         .map_err(|_| EIO)?;
     } else {
         let process = visible(runtime, caller, subject).ok_or(ENOENT)?;
-        let name = &process.comm[..process
-            .comm
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(15)];
-        let name = core::str::from_utf8(name).unwrap_or("?");
+        let name = comm_name(process);
         let state = state(runtime, process);
         let parent = visible(runtime, caller, process.parent_pid).map_or(0, |parent| parent.tgid);
         let threads = runtime
@@ -270,7 +333,6 @@ pub(super) fn read(
             .map(|mapping| mapping.size)
             .sum();
         match node {
-            VirtualNode::ProcComm => writeln!(text, "{name}"),
             VirtualNode::ProcStat => {
                 let terminal = process.job.controlling_terminal;
                 const LINUX_VT_MAJOR: Word = 4;
@@ -313,7 +375,7 @@ pub(super) fn read(
                 )
                 .map_err(|_| EIO)?;
                 for field in fields {
-                    write!(text, " {field}").map_err(|_| EIO)?;
+                    write_stat_field(&mut text, field).map_err(|_| EIO)?;
                 }
                 writeln!(text)
             }

@@ -1,6 +1,14 @@
 //! Continuation positions are a cache, never a new externally visible cookie.
 use super::*;
 
+#[cfg(test)]
+static NAME_ZERO_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn take_name_zero_bytes() -> usize {
+    NAME_ZERO_BYTES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy)]
 struct Cursor {
     inode: u32,
@@ -83,35 +91,25 @@ pub(super) fn read_directory(
         if block_file_offset >= inode.size as usize {
             break;
         }
-        let block = get_data_block(runtime, inode, cursor.block)
+        let block = get_data_block(runtime, &inode, cursor.block)
             .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
         if block == 0 {
             break;
         }
-        read_block(runtime, block as usize)
+        validate_run(runtime, block as usize, 1)
             .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
         let block_limit = min(runtime.block_size, inode.size as usize - block_file_offset);
-        while cursor.offset < block_limit && written < limit_entries {
-            let Some(entry) = parse_directory_entry(
-                runtime.block_shm as usize + cursor.offset,
-                block_limit - cursor.offset,
-            ) else {
-                return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
-            };
-            if entry.inode != 0 {
-                if cursor.index >= start_index {
-                    unsafe {
-                        write_vfs_dirent(
-                            (session.shm_local as usize + out_offset + written * record_bytes)
-                                as *mut u8,
-                            entry,
-                        );
-                    }
-                    written += 1;
-                }
-                cursor.index += 1;
-            }
-            cursor.offset += entry.record_len;
+        let output = session.shm_local as usize + out_offset;
+        if let Some(bytes) = runtime.block_cache.load_slice(block as usize, 0, block_limit) {
+            // The cache borrow outlives parsing/name serialization; the helper
+            // cannot perform metadata I/O or evict the entry behind name_ptr.
+            emit_block(bytes, &mut cursor, start_index, limit_entries, &mut written, output)?;
+        } else {
+            read_block(runtime, block as usize)
+                .map_err(|_| nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR)?;
+            // The successful full-block read backs this bounded EOF prefix.
+            let bytes = unsafe { core::slice::from_raw_parts(runtime.block_shm as *const u8, block_limit) };
+            emit_block(bytes, &mut cursor, start_index, limit_entries, &mut written, output)?;
         }
         if cursor.offset == block_limit {
             cursor.block += 1;
@@ -120,6 +118,29 @@ pub(super) fn read_directory(
     }
     runtime.directory_cursors.entries[handle] = cursor;
     Ok((written, cursor.index))
+}
+
+fn emit_block(
+    bytes: &[u8], cursor: &mut Cursor, start_index: usize, limit_entries: usize,
+    written: &mut usize, output: usize,
+) -> Result<(), Word> {
+    let record_bytes = nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES;
+    while cursor.offset < bytes.len() && *written < limit_entries {
+        let Some(entry) = parse_directory_entry(
+            bytes.as_ptr() as usize + cursor.offset, bytes.len() - cursor.offset,
+        ) else {
+            return Err(nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR);
+        };
+        if entry.inode != 0 {
+            if cursor.index >= start_index {
+                unsafe { write_vfs_dirent((output + *written * record_bytes) as *mut u8, entry); }
+                *written += 1;
+            }
+            cursor.index += 1;
+        }
+        cursor.offset += entry.record_len;
+    }
+    Ok(())
 }
 
 pub(super) fn parse_directory_entry(addr: usize, available: usize) -> Option<Ext2DirectoryEntry> {
@@ -162,17 +183,21 @@ pub(super) unsafe fn write_vfs_dirent(dst: *mut u8, entry: Ext2DirectoryEntry) {
         dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_LEN_OFFSET),
         nanami_client::vfs::VFS_DIRECTORY_ENTRY_RECORD_BYTES as Word,
     );
+    let name_bytes = min(entry.name_len, nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES);
+    let tail_bytes = nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES - name_bytes;
+    #[cfg(test)]
+    NAME_ZERO_BYTES.fetch_add(
+        tail_bytes,
+        core::sync::atomic::Ordering::Relaxed,
+    );
     ptr::write_bytes(
-        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
+        dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET + name_bytes),
         0,
-        nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
+        tail_bytes,
     );
     ptr::copy_nonoverlapping(
         entry.name_ptr,
         dst.add(nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_OFFSET),
-        min(
-            entry.name_len,
-            nanami_client::vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES,
-        ),
+        name_bytes,
     );
 }

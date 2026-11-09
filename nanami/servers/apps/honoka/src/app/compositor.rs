@@ -146,6 +146,8 @@ pub struct Compositor {
     theme: Theme,
     dirty_rects: [Rect; MAX_DIRTY_RECTS],
     dirty_count: usize,
+    #[cfg(test)]
+    background_pixels: core::cell::Cell<usize>,
     cursor_damage: MotionDamage,
     outline_damage: MotionDamage,
     focused_window_id: Word,
@@ -201,6 +203,8 @@ impl Compositor {
             theme,
             dirty_rects: [Rect::EMPTY; MAX_DIRTY_RECTS],
             dirty_count: 0,
+            #[cfg(test)]
+            background_pixels: core::cell::Cell::new(0),
             cursor_damage: MotionDamage::default(),
             outline_damage: MotionDamage::default(),
             focused_window_id: 0,
@@ -283,6 +287,16 @@ impl Compositor {
 
     pub fn has_pending_render(&self) -> bool {
         self.dirty_count != 0 || self.cursor_damage.is_pending()
+    }
+
+    #[cfg(feature = "honoka-frame-events")]
+    pub fn note_graphics_notification(&mut self, present: bool, timer: bool) {
+        self.profile.notification(present, timer);
+    }
+
+    #[cfg(feature = "honoka-frame-events")]
+    pub fn report_frame_events(&mut self) {
+        self.profile.report_frame_events();
     }
 
     pub fn set_clock(&mut self, hour: u8, minute: u8, second: u8) {
@@ -908,12 +922,70 @@ impl Compositor {
     }
 
     fn render_rect(&self, dirty: Rect) {
+        // A dirty rect spanning an opaque client's content and its frame used
+        // to redraw the entire background/lower windows. Isolate the covered
+        // content so the existing occlusion rule can skip that work. Present
+        // still receives the original dirty rect once; this only clips RAM
+        // composition into disjoint regions, with no recursive subdivision.
+        for index in (1..MAX_WINDOWS).rev() {
+            let window = self.windows[index];
+            if !window.used || !window.visible
+                || window.opacity != nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE
+            { continue; }
+            let Some(center) = intersect_rect(window.content_rect(), dirty) else { continue; };
+            if contains_rect_fully(window.content_rect(), dirty) { break; }
+            let right = center.x.saturating_add(center.width);
+            let bottom = center.y.saturating_add(center.height);
+            let dirty_right = dirty.x.saturating_add(dirty.width);
+            let dirty_bottom = dirty.y.saturating_add(dirty.height);
+            for part in [
+                center,
+                Rect::new(dirty.x, dirty.y, dirty.width, center.y - dirty.y),
+                Rect::new(dirty.x, bottom, dirty.width, dirty_bottom - bottom),
+                Rect::new(dirty.x, center.y, center.x - dirty.x, center.height),
+                Rect::new(right, center.y, dirty_right - right, center.height),
+            ] {
+                self.render_rect_unpartitioned(part);
+            }
+            return;
+        }
+        self.render_rect_unpartitioned(dirty);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_reference_for_test(&self) {
+        self.render_rect_unpartitioned(self.screen_rect());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_region_for_test(&self, dirty: Rect, reference: bool) -> usize {
+        self.background_pixels.set(0);
+        if reference { self.render_rect_unpartitioned(dirty); }
+        else { self.render_rect(dirty); }
+        self.background_pixels.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_surface_for_test(&self, id: Word, dirty: Rect, reference: bool) -> bool {
+        let window = self.windows.iter().find(|w| w.used && w.id == id).copied().unwrap();
+        if reference {
+            draw_window_surface_unpruned(&self.framebuffer, window, self.theme, true, dirty);
+        } else {
+            draw_window_surface(&self.framebuffer, window, self.theme, true, dirty);
+        }
+        damage_misses_window_surface(window, dirty)
+    }
+
+    fn render_rect_unpartitioned(&self, dirty: Rect) {
         if dirty.is_empty() {
             return;
         }
         let theme = self.theme;
         let first_window = self.first_visible_window_for_dirty(dirty);
         if first_window == 0 {
+            #[cfg(test)]
+            self.background_pixels.set(self.background_pixels.get()
+                + (dirty.width as usize) * (dirty.height as usize));
             if let Some(background) = &self.background {
                 background.paint(&self.framebuffer, dirty);
             } else {
@@ -986,9 +1058,41 @@ impl Compositor {
     }
 
     fn mark_dirty(&mut self, rect: Rect) {
-        let clipped = clip_to_screen(rect, self.framebuffer.screen());
+        let mut clipped = clip_to_screen(rect, self.framebuffer.screen());
         if clipped.is_empty() {
             return;
+        }
+        // Damage is a set: a queued superset already redraws every pixel of
+        // this update. Repeated client/clock notifications must not exhaust
+        // the sparse queue and turn unrelated updates into a large repaint.
+        if self.dirty_rects[..self.dirty_count].iter()
+            .any(|queued| contains_rect_fully(*queued, clipped))
+        {
+            return;
+        }
+        let mut index = 0;
+        while index < self.dirty_count {
+            let queued = self.dirty_rects[index];
+            let contained = contains_rect_fully(clipped, queued);
+            // Same-span touching/overlapping strips have a rectangular union.
+            // Do not join L shapes or fill any gap between sparse updates.
+            let join = (clipped.x == queued.x && clipped.width == queued.width
+                && clipped.y <= queued.y.saturating_add(queued.height) && queued.y <= clipped.y.saturating_add(clipped.height))
+                || (clipped.y == queued.y && clipped.height == queued.height
+                    && clipped.x <= queued.x.saturating_add(queued.width) && queued.x <= clipped.x.saturating_add(clipped.width));
+            if contained || join {
+                if join {
+                    clipped = union_rect(clipped, queued);
+                }
+                self.dirty_rects.copy_within(index + 1..self.dirty_count, index);
+                self.dirty_count -= 1;
+                if join {
+                    // The expanded strip can now connect to an earlier entry.
+                    index = 0;
+                }
+            } else {
+                index += 1;
+            }
         }
         if self.dirty_count >= MAX_DIRTY_RECTS {
             self.dirty_count = 0;
@@ -998,6 +1102,30 @@ impl Compositor {
         }
         self.dirty_rects[self.dirty_count] = clipped;
         self.dirty_count += 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_damage_for_test(&mut self, rect: Rect, reference: bool) {
+        if !reference {
+            self.mark_dirty(rect);
+            return;
+        }
+        let clipped = clip_to_screen(rect, self.framebuffer.screen());
+        if clipped.is_empty() {
+            return;
+        }
+        if self.dirty_count >= MAX_DIRTY_RECTS {
+            self.dirty_rects[0] = self.screen_rect();
+            self.dirty_count = 1;
+            return;
+        }
+        self.dirty_rects[self.dirty_count] = clipped;
+        self.dirty_count += 1;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_damage_for_test(&self) -> &[Rect] {
+        &self.dirty_rects[..self.dirty_count]
     }
 
     fn mark_dirty_outline(&mut self, rect: Rect, thickness: i32) {
@@ -1374,6 +1502,8 @@ impl Compositor {
             }
             // Only changed tiles are composed/presented. Reading the stable
             // capture during rendering also closes the compare/draw race.
+            #[cfg(feature = "honoka-frame-events")]
+            self.profile.fbdev_scan();
             unsafe {
                 fbdev_damage::capture(
                     window.local_fb,
@@ -1382,6 +1512,8 @@ impl Compositor {
                     window.fb_width.min(content.width.max(0) as usize),
                     window.fb_height.min(content.height.max(0) as usize),
                     |rect| {
+                        #[cfg(feature = "honoka-frame-events")]
+                        self.profile.damage_rectangle();
                         self.mark_dirty(Rect::new(
                             content.x + rect.x,
                             content.y + rect.y,
@@ -1915,6 +2047,45 @@ fn draw_close_button(framebuffer: &Framebuffer, dirty: Rect, window: Window, col
 }
 
 fn draw_window_surface(
+    framebuffer: &Framebuffer,
+    window: Window,
+    theme: Theme,
+    active: bool,
+    dirty: Rect,
+) {
+    if damage_misses_window_surface(window, dirty) {
+        return;
+    }
+    draw_window_surface_unpruned(framebuffer, window, theme, active, dirty);
+}
+
+fn damage_misses_window_surface(window: Window, dirty: Rect) -> bool {
+    if window.local_fb == 0 {
+        return false;
+    }
+    let content = window.content_rect();
+    let populated = Rect::new(content.x, content.y,
+        content.width.min(window.fb_width as i32),
+        content.height.min(window.fb_height as i32));
+    if !contains_rect_fully(populated, dirty) {
+        return false;
+    }
+    let outer = window.rect();
+    let inner = Rect::new(outer.x + 2, outer.y + 2, outer.width - 4, outer.height - 4);
+    // Rounded row spans widen towards the middle. The two endpoint rows
+    // therefore bound every intervening row, including short rounded windows.
+    for y in [dirty.y, dirty.y.saturating_add(dirty.height).saturating_sub(1)] {
+        let Some((x0, x1)) = rounded_row_span(inner, WINDOW_CORNER_RADIUS - 2, y) else {
+            return false;
+        };
+        if dirty.x < x0 || dirty.x.saturating_add(dirty.width) > x1 {
+            return false;
+        }
+    }
+    true
+}
+
+fn draw_window_surface_unpruned(
     framebuffer: &Framebuffer,
     window: Window,
     theme: Theme,

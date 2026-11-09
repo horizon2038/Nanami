@@ -29,10 +29,7 @@ fn object(runtime: &Runtime, id: Word) -> Result<&IoUring, i32> {
 }
 
 fn object_mut(runtime: &mut Runtime, id: Word) -> Result<&mut IoUring, i32> {
-    match runtime.poll_objects.get_mut(id) {
-        Some(Object::Ring(ring)) => Ok(ring),
-        _ => Err(EBADF),
-    }
+    runtime.poll_objects.ring_mut(id).ok_or(EBADF)
 }
 
 fn ring_id(runtime: &Runtime, pid: Word, fd: Word) -> Result<Word, i32> {
@@ -369,6 +366,17 @@ fn execute(runtime: &mut Runtime, pid: Word, sqe: Submission) -> Result<Word, i3
     }
 }
 
+#[cfg(test)]
+pub(super) fn io_for_test(
+    runtime: &mut Runtime, pid: Word, opcode: u8, fd: Word,
+    addr: Word, len: Word, off: Word,
+) -> Result<Word, i32> {
+    io(runtime, pid, Submission {
+        opcode, fd, addr, len, off, flags: 0, priority: 0, op_flags: 0,
+        data: 0, personality: 0, buffer: 0, file_index: 0,
+    })
+}
+
 fn io(runtime: &mut Runtime, pid: Word, sqe: Submission) -> Result<Word, i32> {
     if sqe.op_flags != 0 {
         return Err(EOPNOTSUPP);
@@ -380,28 +388,32 @@ fn io(runtime: &mut Runtime, pid: Word, sqe: Submission) -> Result<Word, i32> {
         return Err(EOPNOTSUPP);
     }
     let write = matches!(sqe.opcode, 2 | 23);
-    let mut vectors = Vec::new();
-    if matches!(sqe.opcode, 1 | 2) {
+    let single = [(sqe.addr, sqe.len)];
+    let mut owned_vectors = Vec::new();
+    // Scalar READ/WRITE already carry their complete descriptor in the SQE.
+    // Keep vectored descriptors owned: payload I/O may overwrite SHM and the
+    // caller's iovec memory after all descriptors have been validated.
+    let vectors = if matches!(sqe.opcode, 1 | 2) {
         if sqe.len > 1024 {
             return Err(EINVAL);
         }
-        vectors.try_reserve(sqe.len).map_err(|_| ENOMEM)?;
+        owned_vectors.try_reserve(sqe.len).map_err(|_| ENOMEM)?;
         for index in 0..sqe.len {
             let ptr = sqe.addr.checked_add(index * 16).ok_or(EFAULT)?;
             read_target_memory(runtime, pid, ptr, 16)?;
-            vectors.push((read_shm_u64(runtime, 0), read_shm_u64(runtime, 8)));
+            owned_vectors.push((read_shm_u64(runtime, 0), read_shm_u64(runtime, 8)));
         }
+        owned_vectors.as_slice()
     } else {
-        vectors.try_reserve(1).map_err(|_| ENOMEM)?;
-        vectors.push((sqe.addr, sqe.len));
-    }
+        &single
+    };
     vectors.iter().try_fold(0usize, |sum, (_, bytes)| {
         sum.checked_add(*bytes)
             .filter(|sum| *sum <= i32::MAX as Word)
             .ok_or(EINVAL)
     })?;
     let mut total: Word = 0;
-    for (address, bytes) in vectors {
+    for &(address, bytes) in vectors {
         let result = if sqe.off == Word::MAX {
             if write {
                 sys_write(runtime, pid, sqe.fd, address, bytes)

@@ -20,6 +20,8 @@ pub mod image_cache;
 pub mod launch;
 #[path = "common/loader.rs"]
 pub mod loader;
+#[path = "common/nul_scan.rs"]
+pub mod nul_scan;
 #[path = "common/process.rs"]
 pub mod process;
 #[path = "common/signals.rs"]
@@ -28,5 +30,14 @@ pub mod signals;
 pub mod state;
 #[path = "common/syscall_profile.rs"]
 pub mod syscall_profile;
+#[cfg(feature = "wait-shape")]
+#[path = "common/wait_shape.rs"]
+pub(crate) mod wait_shape;
+#[cfg(feature = "syscall-scope")]
+#[path = "common/syscall_scope.rs"]
+pub(crate) mod syscall_scope;
+#[cfg(feature = "syscall-scope")]
+#[path = "common/scope_controller.rs"]
+pub(crate) mod scope_controller;
 #[path = "common/virtual_fs.rs"]
 pub mod virtual_fs;

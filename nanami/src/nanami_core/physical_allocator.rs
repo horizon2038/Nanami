@@ -6,6 +6,14 @@ const INITIAL_INDEX_BUCKETS: usize = 32;
 const MAX_INDEX_BYTES: usize = 256 * 1024;
 const INDEX_BUCKET_LOAD: usize = 4;
 
+#[cfg(test)]
+static CONTAINING_SEARCHES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn take_containing_searches() -> usize {
+    CONTAINING_SEARCHES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Copy)]
 pub struct PhysicalAllocation {
     pub base_page: usize,
@@ -81,7 +89,15 @@ impl BuddyPool {
             }
 
             let buddy = base_page ^ count;
-            if let Some(index) = self.find_block_index(order, buddy) {
+            // A missing buddy previously required a second scan for this
+            // block. Remember duplicates during the buddy scan instead. A
+            // buddy still takes priority even if a duplicate appeared first.
+            let mut already_free = false;
+            let buddy_index = self.free_lists[order].iter().position(|&page| {
+                already_free |= page == base_page;
+                page == buddy
+            });
+            if let Some(index) = buddy_index {
                 self.free_lists[order].swap_remove(index);
                 if buddy < base_page {
                     base_page = buddy;
@@ -92,7 +108,7 @@ impl BuddyPool {
                 continue;
             }
 
-            if self.find_block_index(order, base_page).is_none() {
+            if !already_free {
                 self.free_lists[order].push(base_page);
             }
             return Ok(());
@@ -111,50 +127,53 @@ impl BuddyPool {
             .checked_add(page_count)
             .ok_or(PhysicalAllocError::InvalidArgument)?;
 
-        if !self.contains_range(base_page, page_count) {
-            return Err(PhysicalAllocError::OutOfMemory);
-        }
-        self.carve_range(base_page, page_count)
+        let first = self.validated_first_block(base_page, page_count)
+            .ok_or(PhysicalAllocError::OutOfMemory)?;
+        // Complete preflight is read-only. This first location is still exact
+        // until carving starts; later locations must be found after mutation.
+        self.carve_range(base_page, page_count, first)
     }
 
     fn contains_range(&self, base_page: usize, page_count: usize) -> bool {
-        let Some(end_page) = base_page.checked_add(page_count) else {
-            return false;
-        };
-        if page_count == 0 {
-            return false;
-        }
+        self.validated_first_block(base_page, page_count).is_some()
+    }
 
-        let mut current = base_page;
-        while current < end_page {
-            let Some((order, _, block_base)) = self.find_containing_block(current) else {
-                return false;
-            };
-            let Ok(block_count) = block_pages(order) else {
-                return false;
-            };
-            let Some(block_end) = block_base.checked_add(block_count) else {
-                return false;
-            };
-            current = core::cmp::min(block_end, end_page);
+    #[inline(always)]
+    fn validated_first_block(
+        &self, base_page: usize, page_count: usize,
+    ) -> Option<(usize, usize, usize)> {
+        let end_page = base_page.checked_add(page_count)?;
+        if page_count == 0 {
+            return None;
         }
-        true
+        let first = self.find_containing_block(base_page)?;
+        let mut block = first;
+        loop {
+            let (order, _, block_base) = block;
+            let block_count = block_pages(order).ok()?;
+            let block_end = block_base.checked_add(block_count)?;
+            let current = core::cmp::min(block_end, end_page);
+            if current == end_page {
+                return Some(first);
+            }
+            block = self.find_containing_block(current)?;
+        }
     }
 
     fn carve_range(
         &mut self,
         base_page: usize,
         page_count: usize,
+        first: (usize, usize, usize),
     ) -> Result<(), PhysicalAllocError> {
         let end_page = base_page
             .checked_add(page_count)
             .ok_or(PhysicalAllocError::InvalidArgument)?;
         let mut current = base_page;
+        let mut block = first;
 
-        while current < end_page {
-            let Some((order, index, block_base)) = self.find_containing_block(current) else {
-                return Err(PhysicalAllocError::OutOfMemory);
-            };
+        loop {
+            let (order, index, block_base) = block;
 
             let block_count = block_pages(order)?;
             let block_end = block_base
@@ -175,9 +194,12 @@ impl BuddyPool {
                 self.add_range(allocated_end, block_end - allocated_end)?;
             }
             current = allocated_end;
+            if current == end_page {
+                return Ok(());
+            }
+            block = self.find_containing_block(current)
+                .ok_or(PhysicalAllocError::OutOfMemory)?;
         }
-
-        Ok(())
     }
 
     fn find_first_fit(&self, page_count: usize) -> Option<usize> {
@@ -195,6 +217,8 @@ impl BuddyPool {
     }
 
     fn find_containing_block(&self, page: usize) -> Option<(usize, usize, usize)> {
+        #[cfg(test)]
+        CONTAINING_SEARCHES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let mut order = 0usize;
         while order < self.free_lists.len() {
             let count = block_pages(order).ok()?;
@@ -208,20 +232,6 @@ impl BuddyPool {
                 index += 1;
             }
             order += 1;
-        }
-        None
-    }
-
-    fn find_block_index(&self, order: usize, base_page: usize) -> Option<usize> {
-        if order >= self.free_lists.len() {
-            return None;
-        }
-        let mut index = 0usize;
-        while index < self.free_lists[order].len() {
-            if self.free_lists[order][index] == base_page {
-                return Some(index);
-            }
-            index += 1;
         }
         None
     }
@@ -249,6 +259,11 @@ pub struct PhysicalAllocator {
     device: BuddyPool,
     allocations: Vec<AllocationRecord>,
     allocation_buckets: Vec<u32>,
+    // Keep the exact ledger sum until the query clamps to usize. A saturated
+    // cached usize could not recover correctly after removing a large record.
+    // The 32/64-bit platforms' Vec length and record widths bound this sum
+    // below u128::MAX, including duplicate reserved-region records.
+    allocated_normal_pages: u128,
 }
 
 impl PhysicalAllocator {
@@ -258,6 +273,7 @@ impl PhysicalAllocator {
             device: BuddyPool::new(),
             allocations: Vec::new(),
             allocation_buckets: Vec::new(),
+            allocated_normal_pages: 0,
         }
     }
 
@@ -426,6 +442,9 @@ impl PhysicalAllocator {
             self.unindex_record(last);
         }
         let allocation = self.allocations.swap_remove(index);
+        if !allocation.is_device {
+            self.allocated_normal_pages -= allocation.page_count as u128;
+        }
         if index != last {
             self.index_record(index);
         }
@@ -451,12 +470,7 @@ impl PhysicalAllocator {
 
     pub fn memory_info(&self) -> PhysicalMemoryInfo {
         let free_pages = self.normal.free_page_count();
-        let mut allocated_pages = 0usize;
-        for allocation in self.allocations.iter() {
-            if !allocation.is_device {
-                allocated_pages = allocated_pages.saturating_add(allocation.page_count);
-            }
-        }
+        let allocated_pages = self.allocated_normal_pages.min(usize::MAX as u128) as usize;
         PhysicalMemoryInfo {
             total_pages: free_pages.saturating_add(allocated_pages),
             free_pages,
@@ -476,6 +490,9 @@ impl PhysicalAllocator {
     fn push_record(&mut self, record: AllocationRecord) {
         let index = self.allocations.len();
         self.allocations.push(record);
+        if !record.is_device {
+            self.allocated_normal_pages += record.page_count as u128;
+        }
         let buckets = self.allocation_buckets.len();
         let desired = if buckets == 0 {
             INITIAL_INDEX_BUCKETS
@@ -624,5 +641,75 @@ fn largest_aligned_order(base_page: usize, page_count: usize) -> Result<usize, P
             return Ok(0);
         }
         order -= 1;
+    }
+}
+
+#[cfg(test)]
+mod info_tests {
+    use super::*;
+
+    fn check(allocator: &PhysicalAllocator) {
+        let free = allocator.normal.free_page_count();
+        let allocated = allocator.allocations.iter().filter(|record| !record.is_device)
+            .fold(0usize, |sum, record| sum.saturating_add(record.page_count));
+        let info = allocator.memory_info();
+        assert_eq!((info.total_pages, info.free_pages), (free.saturating_add(allocated), free));
+    }
+
+    #[test]
+    fn info_matches_record_oracle_through_partial_free_reserved_and_device_churn() {
+        let mut allocator = PhysicalAllocator::new();
+        assert!(allocator.add_region(0x100000, 512 * PAGE_SIZE, false, false).is_ok());
+        assert!(allocator.add_region(0x900000, 7 * PAGE_SIZE, false, true).is_ok());
+        assert!(allocator.add_region(0x10000000, 32 * PAGE_SIZE, true, false).is_ok());
+        assert!(allocator.add_region(0x20000000, 3 * PAGE_SIZE, true, true).is_ok());
+        assert!(allocator.allocate_at(0x10000000, 8 * PAGE_SIZE, true).is_ok());
+        assert!(allocator.free(0x10002000, 2 * PAGE_SIZE).is_ok());
+        let mut live = Vec::new();
+        let mut random = 0x1234_5678u64;
+        for step in 0..10000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            if live.is_empty() || random & 3 != 0 {
+                if let Ok(allocation) = allocator.allocate_any(((random >> 8) as usize % 8 + 1) * PAGE_SIZE) {
+                    live.push((allocation.base_page, allocation.page_count));
+                }
+            } else {
+                let index = (random >> 16) as usize % live.len();
+                let (base, pages) = live.swap_remove(index);
+                let offset = step % pages;
+                assert!(allocator.free((base + offset) * PAGE_SIZE, PAGE_SIZE).is_ok());
+                if offset != 0 { live.push((base, offset)); }
+                if offset + 1 < pages { live.push((base + offset + 1, pages - offset - 1)); }
+            }
+            assert!(allocator.free(0x900000, PAGE_SIZE).is_err());
+            check(&allocator);
+            assert_eq!(allocator.memory_info().total_pages, 519);
+        }
+        for (base, pages) in live {
+            assert!(allocator.free(base * PAGE_SIZE, pages * PAGE_SIZE).is_ok());
+            check(&allocator);
+        }
+        assert_eq!(allocator.memory_info().free_pages, 512);
+    }
+
+    #[test]
+    fn info_saturation_can_recover_after_record_removal() {
+        // Synthetic ledger values isolate saturation from physical map limits.
+        // Removing a prefix must recover the exact sum, not subtract from an
+        // already clamped usize total and silently lose the overflow excess.
+        let mut allocator = PhysicalAllocator::new();
+        for (base, pages) in [(0, usize::MAX - 2), (usize::MAX - 8, 7)] {
+            allocator.push_record(AllocationRecord {
+                base_page: base, page_count: pages, is_device: false, reserved: false, next: 0,
+            });
+        }
+        check(&allocator);
+        assert_eq!(allocator.memory_info().total_pages, usize::MAX);
+        assert!(allocator.free(0, 6 * PAGE_SIZE).is_ok());
+        check(&allocator);
+        assert_eq!(allocator.memory_info().free_pages, 6);
+        allocator.normal = BuddyPool::new();
+        check(&allocator);
+        assert_eq!(allocator.memory_info().total_pages, usize::MAX - 1);
     }
 }

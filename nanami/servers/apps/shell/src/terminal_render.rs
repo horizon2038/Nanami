@@ -2,6 +2,14 @@
 use crate::{font::TextRenderer, terminal::Terminal, FONT_H, FONT_W};
 use nanami_runtime::Word;
 
+#[cfg(test)]
+static FILL_STORES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(super) fn take_fill_stores() -> usize {
+    FILL_STORES.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+
 pub(super) fn damage_band(
     text: &TextRenderer,
     first: usize,
@@ -28,7 +36,17 @@ pub(super) fn paint(
     if top >= bottom {
         return;
     }
-    fill(pixels, width, 0, top, width, bottom, 0x0010_1418);
+    // Cell backgrounds below overwrite every covered pixel before its final
+    // glyph blend. Clear only margins, still before any glyph can spill into
+    // them; retain the existing cell/background/glyph paint order.
+    let covered_width = terminal.cols().min(width / FONT_W) * FONT_W;
+    let covered_height = terminal.rows().min(height / FONT_H) * FONT_H;
+    if covered_width < width {
+        fill(pixels, width, covered_width, top, width, bottom.min(covered_height), 0x0010_1418);
+    }
+    if covered_height < bottom {
+        fill(pixels, width, 0, top.max(covered_height), width, bottom, 0x0010_1418);
+    }
     let (ink_top, ink_bottom) = text.row_ink_bounds();
     // A glyph can extend beyond its cell. Include those neighboring source
     // rows, but clip all writes so an unchanged antialiased pixel is not blended
@@ -93,6 +111,11 @@ fn fill(
     bottom: usize,
     color: u32,
 ) {
+    #[cfg(test)]
+    FILL_STORES.fetch_add(
+        right.saturating_sub(left) * bottom.saturating_sub(top),
+        core::sync::atomic::Ordering::Relaxed,
+    );
     for y in top..bottom {
         for x in left..right {
             unsafe { core::ptr::write_volatile((pixels as *mut u32).add(y * width + x), color) };

@@ -1,5 +1,10 @@
 #[path = "linux/clone3.rs"]
 mod clone3;
+#[path = "linux/stack_fault.rs"]
+mod stack_fault;
+pub(crate) use stack_fault::materialize_stack_fault;
+#[path = "linux/path_checks.rs"]
+mod path_checks;
 #[path = "linux/private_memory.rs"]
 mod private_memory;
 #[path = "linux/prctl.rs"]
@@ -15,6 +20,8 @@ mod vectored;
 
 #[path = "linux/file_io.rs"]
 mod file_io;
+#[path = "linux/file_read.rs"]
+mod file_read;
 use file_io::*;
 
 #[path = "linux/sendfile.rs"]
@@ -98,6 +105,9 @@ mod unix_message;
 #[path = "linux/filesystem.rs"]
 mod filesystem;
 use filesystem::*;
+#[path = "linux/readlink.rs"]
+mod readlink;
+use readlink::{sys_readlink, sys_readlinkat};
 
 #[path = "linux/directory.rs"]
 mod directory;
@@ -121,6 +131,9 @@ mod resolver;
 #[path = "linux/descriptors.rs"]
 mod descriptors;
 use descriptors::*;
+#[path = "linux/opening.rs"]
+mod opening;
+use opening::*;
 
 #[path = "linux/fadvise.rs"]
 mod fadvise;
@@ -167,6 +180,9 @@ use system::*;
 #[path = "linux/vm.rs"]
 mod vm;
 use vm::*;
+#[path = "linux/program_break.rs"]
+mod program_break;
+use program_break::sys_brk;
 
 #[path = "linux/wait_signals.rs"]
 mod wait_signals;
@@ -205,6 +221,9 @@ mod clock_events;
 #[path = "linux/realtime.rs"]
 mod realtime;
 use clock_events::arm_clock_timer;
+#[cfg(feature = "wait-shape")]
+#[path = "linux/wait_shape.rs"]
+mod wait_shape;
 
 #[path = "linux/tracing.rs"]
 mod tracing;
@@ -212,6 +231,12 @@ use tracing::*;
 
 #[path = "linux/file_mapping.rs"]
 mod file_mapping;
+#[path = "linux/anonymous_mapping.rs"]
+mod anonymous_mapping;
+#[path = "linux/file_snapshot.rs"]
+mod file_snapshot;
+#[path = "linux/file_remap.rs"]
+mod file_remap;
 #[path = "linux/memory_copy.rs"]
 mod memory_copy;
 use memory_copy::*;
@@ -226,6 +251,8 @@ use exec_stack::*;
 
 #[path = "linux/paths.rs"]
 mod paths;
+#[path = "linux/path_string.rs"]
+mod path_string;
 use paths::*;
 
 #[path = "linux/errors.rs"]
@@ -286,6 +313,8 @@ pub fn dispatch_syscall(
     native_pid: Word,
     context: LinuxSyscallContext,
 ) -> EmulationAction {
+    #[cfg(feature = "wait-shape")]
+    runtime.wait_shape.syscall(native_pid, context.number);
     if let Some(action) = unix::dispatch(runtime, native_pid, context) {
         record_action_result(runtime, native_pid, context.number, action);
         trace_syscall_action(runtime, native_pid, context, action);

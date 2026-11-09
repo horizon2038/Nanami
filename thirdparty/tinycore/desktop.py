@@ -253,13 +253,72 @@ def build_readiness(root):
     return build_xlib_tool(root, HERE / "tools/wait-for-x.c", "usr/local/bin/nanami-wait-for-x")
 
 
-def build_window_observer(root):
+def build_font_cache(root):
+    """Precompute stock caches for the zero timestamps written by ImageBuilder.
+
+    Use the locked guest loader, libraries and fc-cache, never the host's
+    fontconfig version. Only the private staging copy receives packed mtimes;
+    runtime directory validation remains entirely upstream's responsibility.
+    """
+    root = Path(root).resolve(strict=True)
+    inputs = ("usr/local/etc/fonts", "usr/local/share/fontconfig",
+              "usr/local/lib/X11/fonts")
+    for relative in inputs:
+        directory = root / relative
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"font cache input is not a real directory: {relative}")
+        for path in directory.rglob("*"):
+            if not path.resolve(strict=True).is_relative_to(root):
+                raise ValueError(f"font cache input escapes profile: {path}")
+    destination = root / "var/cache/fontconfig"
+    for directory in (root / "var", root / "var/cache"):
+        if directory.is_symlink():
+            raise ValueError("font cache destination traverses a symlink")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("font cache destination is not empty")
+    with tempfile.TemporaryDirectory(prefix="tinycore-font-cache-") as temporary:
+        staging = Path(temporary)
+        for relative in inputs:
+            shutil.copytree(root / relative, staging / relative, symlinks=True)
+        for path in [staging, *staging.rglob("*")]:
+            if not path.is_symlink():
+                os.utime(path, ns=(0, 0))
+        (staging / "var/cache/fontconfig").mkdir(parents=True)
+        environment = os.environ.copy()
+        for key in list(environment):
+            if key.startswith("FONTCONFIG_") or key == "SOURCE_DATE_EPOCH":
+                del environment[key]
+        environment.update(FONTCONFIG_FILE="/usr/local/etc/fonts/fonts.conf",
+                           FONTCONFIG_PATH="/usr/local/etc/fonts", LC_ALL="C")
+        subprocess.run([str(root / "lib/ld-linux-x86-64.so.2"), "--library-path",
+                        f"{root}/usr/local/lib:{root}/lib",
+                        str(root / "usr/local/bin/fc-cache"), "-s", "-y", str(staging)],
+                       env=environment, check=True)
+        caches = staging / "var/cache/fontconfig"
+        if not list(caches.glob("*-le64.cache-9")):
+            raise ValueError("pinned fontconfig did not produce its cache format")
+        for path in caches.iterdir():
+            if path.is_symlink() or not path.is_file():
+                raise ValueError("unexpected font cache output")
+        shutil.copytree(caches, destination)
+        destination.chmod(0o755)
+        for path in destination.iterdir():
+            path.chmod(0o644)
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(destination.iterdir())}
+
+
+def build_window_observer(root, steady_rtt=False, syscall_scope=False):
     """Install the test-only launch observer; never modify the desktop clients."""
     source = HERE.parents[1] / "tests/alter-linux/desktop-window-observer.c"
-    return build_xlib_tool(root, source, "bin/aw")
+    flags = ["-DAPP_OBSERVER_STEADY_RTT"] if steady_rtt else []
+    if syscall_scope:
+        flags.append("-DAPP_OBSERVER_SYSCALL_SCOPE")
+    return build_xlib_tool(root, source, "bin/aw-scope" if syscall_scope else "bin/aw", flags)
 
 
-def build_xlib_tool(root, source, destination):
+def build_xlib_tool(root, source, destination, extra_flags=(),
+                    runtime_libraries=("usr/local/lib/libX11.so.6", "lib/libc.so.6")):
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("desktop profile root must be a real directory")
@@ -272,7 +331,7 @@ def build_xlib_tool(root, source, destination):
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(f"desktop helper directory is not real: {relative}")
     libraries = []
-    for relative in ["usr/local/lib/libX11.so.6", "lib/libc.so.6"]:
+    for relative in runtime_libraries:
         library = (root / relative).resolve(strict=True)
         if not library.is_relative_to(resolved) or not library.is_file():
             raise ValueError(f"profile library escapes root: {relative}")
@@ -286,7 +345,7 @@ def build_xlib_tool(root, source, destination):
         "-fno-pie", "-no-pie", "-mno-sse", "-mno-sse2", "-mno-red-zone",
         "-O2", "-Wall", "-Wextra", "-Werror", "-Wl,-e,_start,--image-base=0x400000",
         "-Wl,--dynamic-linker=/lib/ld-linux-x86-64.so.2,--allow-shlib-undefined",
-        str(source), str(HERE / "tools/start-x86_64.S"),
+        *extra_flags, str(source), str(HERE / "tools/start-x86_64.S"),
         *libraries, "-o", str(binary),
     ], check=True)
     binary.chmod(0o755)

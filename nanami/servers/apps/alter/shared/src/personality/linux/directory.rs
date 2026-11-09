@@ -5,6 +5,7 @@ use super::{
     ALTER_IO_OFFSET, EBADF, EFAULT, EINVAL, EIO, ENOTDIR, LINUX_DIRENT64_NAME_OFFSET, LINUX_DT_BLK,
     LINUX_DT_CHR, LINUX_DT_DIR, LINUX_DT_REG, LINUX_DT_SOCK, LINUX_DT_UNKNOWN,
 };
+use nanami_runtime::RequestError;
 
 const MAX_RECORD_BYTES: Word =
     (LINUX_DIRENT64_NAME_OFFSET + vfs::VFS_DIRECTORY_ENTRY_NAME_BYTES).next_multiple_of(8);
@@ -57,6 +58,24 @@ pub(super) fn sys_getdents64(
             seek(runtime, file, index, posix::POSIX_SEEK_SET)?;
             return Ok(out);
         }
+        if option_env!("NANAMI_BIASED_READDIR") != Some("0") {
+            if let Some(bytes) = read_backing_inner(
+                runtime, pid, file, user_buffer, count, mounts, Some(mounts.len()),
+            )? {
+                #[cfg(target_os = "none")]
+                if option_env!("NANAMI_BIASED_READDIR_DIAG") == Some("1") && bytes != 0 {
+                    use core::sync::atomic::{AtomicBool, Ordering};
+                    static FILES: AtomicBool = AtomicBool::new(false);
+                    if runtime.managed_process(pid).is_some_and(|process| {
+                        process.image_name[..process.image_name_len].rsplit(|byte| *byte == b'/').next()
+                            == Some(&b"xfe"[..])
+                    }) && !FILES.swap(true, Ordering::Relaxed) {
+                        nanami_runtime::println!("[linux.dir] biased-root-files pid={}", pid);
+                    }
+                }
+                return Ok(bytes);
+            }
+        }
         seek(
             runtime,
             file,
@@ -90,6 +109,18 @@ fn read_backing(
     count: Word,
     mounts: &[virtual_fs::DirectoryEntry],
 ) -> Result<Word, i32> {
+    read_backing_inner(runtime, pid, file, user_buffer, count, mounts, None)?.ok_or(EIO)
+}
+
+fn read_backing_inner(
+    runtime: &mut Runtime,
+    pid: Word,
+    file: LinuxFile,
+    user_buffer: Word,
+    count: Word,
+    mounts: &[virtual_fs::DirectoryEntry],
+    bias: Option<Word>,
+) -> Result<Option<Word>, i32> {
     let source_offset = ALTER_IO_OFFSET as Word;
     let capacity = count.min(runtime.posix_shm_size);
     // Retain the small-buffer batch, but let large requests carry more entries.
@@ -103,18 +134,28 @@ fn read_backing(
     // Packed Linux records are smaller than their VFS input records. Together
     // with the initial source gap, that permits output beyond the old prefix
     // while keeping each current name and all unread records untouched.
+    let mut started = false;
     loop {
-        let (entries, next_index) = posix::posix_read_dir(
-            runtime.posix_port,
-            file.posix_fd,
-            max_records,
-            source_offset,
-        )
-        .map_err(map_request_error)?;
+        let reply = if let Some(bias) = bias {
+            posix::posix_read_dir_biased(
+                runtime.posix_port, file.posix_fd, max_records, source_offset, bias,
+            )
+        } else {
+            posix::posix_read_dir(
+                runtime.posix_port, file.posix_fd, max_records, source_offset,
+            )
+        };
+        let (entries, next_index) = match reply {
+            Err(RequestError::Unsupported) if bias.is_some() && !started => return Ok(None),
+            other => other.map_err(map_request_error)?,
+        };
+        started = true;
         if entries == 0 {
-            return Ok(0);
+            return Ok(Some(0));
         }
-        if entries > max_records || next_index < entries {
+        if entries > max_records || next_index < entries
+            || next_index.checked_add(bias.unwrap_or(0)).is_none()
+        {
             return Err(EIO);
         }
         let start = next_index - entries;
@@ -178,16 +219,16 @@ fn read_backing(
             Ok(())
         })();
         if packed.is_err() {
-            seek(runtime, file, start, posix::POSIX_SEEK_SET)?;
-            return packed.map(|_| 0);
+            seek(runtime, file, start + bias.unwrap_or(0), posix::POSIX_SEEK_SET)?;
+            return packed.map(|_| Some(0));
         }
         // The backend advances by a batch; only commit entries actually copied
         // (or intentionally shadowed), not entries that did not fit the buffer.
         if consumed < entries {
-            seek(runtime, file, start + consumed, posix::POSIX_SEEK_SET)?;
+            seek(runtime, file, start + consumed + bias.unwrap_or(0), posix::POSIX_SEEK_SET)?;
         }
         if out != 0 {
-            return Ok(out);
+            return Ok(Some(out));
         }
         if consumed < entries {
             return Err(EINVAL);
@@ -200,9 +241,12 @@ fn record_len(name_len: usize) -> Word {
     align_up_word((LINUX_DIRENT64_NAME_OFFSET + name_len + 1) as Word, 8)
 }
 
-fn write_entry(base: Word, inode: Word, next: Word, dtype: Word, name: &[u8]) {
+pub(super) fn write_entry(base: Word, inode: Word, next: Word, dtype: Word, name: &[u8]) {
     unsafe {
-        core::ptr::write_bytes(base as *mut u8, 0, record_len(name.len()));
+        // Header and name bytes are all overwritten below. Initialize only
+        // their NUL/padding suffix, preserving the complete dirent64 output.
+        let suffix = LINUX_DIRENT64_NAME_OFFSET + name.len();
+        core::ptr::write_bytes((base + suffix) as *mut u8, 0, record_len(name.len()) - suffix);
         write_u64(base, inode);
         write_u64(base + 8, next);
         write_u16(base + 16, record_len(name.len()) as u16);
@@ -213,4 +257,9 @@ fn write_entry(base: Word, inode: Word, next: Word, dtype: Word, name: &[u8]) {
             name.len(),
         );
     }
+}
+
+#[cfg(test)]
+pub(super) fn write_entry_for_test(base: Word, inode: Word, next: Word, dtype: Word, name: &[u8]) {
+    write_entry(base, inode, next, dtype, name);
 }

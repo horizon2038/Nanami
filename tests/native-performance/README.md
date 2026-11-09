@@ -3,6 +3,246 @@
 The ongoing evidence, acceptance rules and rejected experiments are recorded in
 [Nanami / Alter optimization cycles](optimization-cycles.md).
 
+Directory name-cache misses can search borrowed warm block bytes without a
+scratch copy. Existing positive/negative precedence and negative publication
+rules remain: malformed/inode/type/map/I/O/bounds failures cache no miss. Tests
+compare production block/dentry caches and parser with the prior scratch
+scanner, including dirty invalidation, prefix/case/deleted names, early matches,
+repair/retry and EOF. Borrowed names do not outlive search, and cache publication
+uses only returned inode values. No cache budget or startup/CPU gain claim.
+
+Symlink payload construction appends only the inline bytes in inode.size rather
+than60 bytes followed by truncation; block-backed targets can borrow current
+cached bytes directly. The ext2-link-target suite uses the actual reader/cache
+and modeled inode/transport, checking all inline lengths0..60 with exact output
+and zero reallocations, cold/warm partial blocks, dirty bytes, bounds/holes and
+allocation/type/size/I/O error precedence. No path-resolution, authority or cache
+budget change; allocation counts do not establish whole-RPC or startup savings.
+
+Warm directory enumeration borrows the current cached block's EOF prefix and
+parses/serializes it before releasing that borrow, avoiding scratch staging.
+Cold reads use the same emitter after successful scratch I/O. Production cache
+tests compare1/7/16-entry batches with full rescans, including dirty names and
+deletions, generations, handle reuse, malformed output prefixes/retry and cached
+bounds. Cookies, cursor publication, record bytes and CLOCK behavior remain;
+there is no new cache/heap capacity or claimed startup/CPU improvement.
+
+Warm indirect get_data_run requests can borrow the current cached leaf instead
+of copying its whole block into scratch. Current parent/leaf bounds are checked;
+only a run resolved within that leaf returns directly. Missing records and
+cross-leaf contiguous prefixes keep the old scanner/error-prefix behavior.
+data-run tests use production BlockCache for warm single/double/fragmented runs,
+dirty parent/leaf changes, scratch preservation, misses and invalid cached
+bounds; storage tests compare borrowed-view CLOCK behavior with ordinary loads.
+No new allocation/cache capacity or launch-wide speed claim.
+
+Ext2 cached ranges of2..64 blocks capture slot indices during presence proof and
+copy through those request-local slots, removing a second BTreeMap traversal.
+Missing blocks leave output and CLOCK bits untouched; exclusive borrowing keeps
+slots stable. The512-byte64-bit stack array covers current64-KiB transfers with
+1-KiB blocks; single-block and larger-range paths retain their behavior, with no
+cache/transfer-capacity change. Production storage tests cover63/64/65 and129
+blocks, partial edges, dirty bytes, misses and eviction equivalence to scalar
+loads or untouched controls. No startup/CPU improvement is claimed.
+
+Physical allocate_any retains its checked select-then-allocate_at route. The
+direct-carve revival was withdrawn after discovering the existing cycle18
+rejection. Buddy block return now combines buddy and duplicate detection into
+one scan, preserving first-buddy priority, duplicate refusal, swap-remove and
+upward merge order. Real-pool tests compare duplicate/misalignment/high-page
+cases and6000 fragmented range returns with the original two-pass merge.
+Public allocation/partial-free tests still check exact free-list order and an
+independent page model. No cache/index/budget/policy or claimed launch gain.
+
+Immediate process copies and compare-exchange can reuse an exact current Ready
+initialization alias through map_process_transfer_frame. Copy resolves both
+Frames first; later destination selection only changes CopyWindow on a miss.
+The stable map_process_copy_frame contract is unchanged: COW detach obtains a
+source before changing initialization slots and must retain a CopyWindow alias.
+alpha-copy-window combines both production windows to check reuse, pinned
+mixed aliases, owner invalidation, slot replacement, pending MAP/UNMAP fallback
+and retained-source stability. Neither cache budget nor guest authority changes;
+per-hit avoided MAP does not establish startup-wide or CPU savings.
+
+Private-snapshot destination checks now resolve the memory owner and scan lazy
+mapping records once, rather than repeating the same lookup for every target
+page. The range helper preserves the original page-grid predicate, half-open
+ends, unaligned keys, checked overflow and malformed-entry cutoff. Differential
+ProcessManager tests compare3000 ranges for owners/peers/other/unknown PIDs;
+production snapshot tests reject first/middle/last conflicts over513 pages before
+any canonicalization/copy/PTE change and permit an adjacent lazy range. No lazy
+page is materialized or persistent state added; hardware calls are unchanged.
+
+Physical-reference retirement resolves its partition/slot/count once, then
+commits directly to that entry after successful release. Last-owner deletion
+retains the existing backward-shift algorithm. Failed release keeps its record
+and suffix; each next alias resolves a fresh entry after the preceding commit.
+No entry survives a reference-index mutation. Scalar-oracle tests cover257
+repeated aliases, another live owner, Active/Deferred states, failure prefixes
+and successful retry, alongside existing collision/churn and Alpha cleanup tests.
+This removes redundant hash lookups; it does not establish launch-wide savings.
+
+Sealed exec retirement now visits current Frame metadata directly in VA order
+instead of allocating a backed-page snapshot and looking up each Frame again.
+Confirmed PROT_NONE backing is skipped; uncertain entries still receive UNMAP.
+The read-only visitor returns the failed VA/error and stops further callbacks;
+its structural tree traversal may finish without additional hardware actions.
+The handler marks that VA uncertain and returns before cap/RAM cleanup. All
+leaf UNMAPs must still succeed before chunk revoke and deferred RAM retirement.
+`vm-index` checks order/presence/error prefixes and allocation-free traversal;
+production exec tests check zero allocations before first UNMAP over513 pages
+and before/after-removal failures at0/1/256/512. These test modeled PTEs and
+ownership, not hardware shootdowns or a startup/CPU percentage. User UNMAP
+count/order is unchanged; metadata work and temporary storage are removed.
+
+Alpha protection requests now avoid the page rollback Vec and repeated point
+lookups when a current metadata range query proves every page is backed,
+certain and already has the exact requested rights. COW write markers decline
+this path. Copy-window invalidation still runs and its failure propagates.
+Changes, holes and uncertain ranges retain the original handler/rollback.
+`vm-index` compares exact-range proofs with point queries, including default7,
+PROT_NONE, sparse/high/unaligned metadata and allocation-free visits; existing
+readonly snapshot queries use the same exact-rights helper. Production handler
+tests verify zero allocations over64 pages for rights0..7, unchanged PTEs,
+cleanup failures and COW/uncertain guards. Equal-rights pages already avoided
+user MAP/UNMAP; the improvement is metadata/temporary storage work, not a claim
+of fewer user mapping syscalls or measured startup/CPU savings.
+
+Private-page initialization now also probes ready initialization aliases for
+current permanent-pool source Frames, including shared POSIX read buffers. When
+preflight resolves only pool Frames, it skips the optional child-ownership
+snapshot; every Frame is still resolved again during copying. Private/mixed
+sources retain the old snapshot/child validation. Destination-slot collisions
+use the existing CopyWindow role swap even without a snapshot, and fallback
+source mappings still pin that destination. No capacity, rights, publication,
+tail-zeroing or rollback change. `alpha-private-pages` checks pool-only/mixed
+hits, zero snapshot calls behind4000 newer records, current-Frame replacement,
+collision pinning and failure rollback. Reuse/role-swap optouts retain coverage.
+The alias cache is modeled here; actual cache transitions remain covered by
+initialization-window tests. Work counts do not establish launch/CPU gains.
+
+Alpha's static image/record staging reader now probes an existing ready
+initialization alias by its freshly resolved Frame before using CopyWindow.
+The copy into independent static storage remains; no source view survives it.
+The lossy Frame hint occupies padding in the existing initialization rows:
+2048 aliases, their physical-slot policy and32-KiB metadata bound stay unchanged.
+Empty/Pending/Ready states preserve failed MAP/UNMAP tracking. A collision,
+stale Frame or pending entry declines to the original copy window without scans
+or ownership inference. Initialization-window tests exercise hints/collisions/
+failure cleanup; staging tests model ready aliases and check fresh data, current
+Frame replacement, unaligned spans and committed prefixes. They establish the
+conditional path, not actual launch-wide hit/MAP counts or a CPU percentage.
+
+ext2 inode-cache misses now decode the100 bytes of fields in use directly from
+a borrowed block-cache record, avoiding a full-block scratch copy. The borrow
+cannot outlive a cache mutation; no pointer/view persists. Cold misses decode
+the existing block-read scratch in place. `ext2-inode-read` compiles the actual
+reader/decoder and block cache with modeled transport/decoded-cache access,
+checking block/group boundaries, inode strides, all fields, dirty values,
+failed publication and invalid record ranges. Storage tests cover record-view
+bounds and CLOCK equivalence. Existing decoded-cache hit/replacement policy is
+unchanged. These tests establish contents/work behavior, not CPU or startup gains.
+
+ext2 scalar indirect-pointer lookups now fetch four bytes from the current block
+cache instead of copying a whole cached table into scratch. Cold misses retain
+ordinary block validation/read/retry/cache-fill behavior. Run scans explicitly
+load their leaf table when inspecting multiple pointers; double-table parent
+lookups and single-block runs need only the scalar value. No scratch pointer or
+new metadata cache persists. Single-block `load_range` also uses one exact index
+lookup, retaining range-overflow checks and CLOCK reference marking. Storage
+tests check cold fill, warm scratch preservation, dirty values, invalid ranges
+and eviction equivalence; data-run tests model warm word reads without touching
+scratch and still compare direct/single/double boundaries and error prefixes.
+Copy/query work is reduced; device-I/O and launch/CPU gains are not inferred.
+
+UNIX socket reachability now uses a128-byte bounded worklist instead of repeated
+whole-graph passes. Each marked endpoint is processed once; existing exact-ID
+lookups still resolve its accept/SCM_RIGHTS edges. Peers stay weak. A request-local
+sweep cursor skips the unchanged marked prefix while rechecking swap-removed
+slots, preserving the original removal/release order. No persistent state,
+allocation, capacity or bulk-close lifecycle is added. `linux-unix` checks reverse
+chains, full roots/frontiers, independent graph reachability after ID churn,
+weak/unrooted cycles and scalar sweep order, plus existing rights/resource tests.
+Cycle67's limited startup GC contribution remains evidence; this change does
+not claim GC is the current launch bottleneck or establish a CPU percentage.
+
+Alpha's ELF page filler now initializes a page with its first file copy when
+that copy covers all4096 bytes, avoiding a preceding zero pass. Partial first
+copies still zero the page; BSS/no-copy pages and failures before the first copy
+also clear every byte. Segment overlay order, failure prefixes and TLS patching
+remain unchanged. `alpha-page-fill` runs the production filler over owned RAM
+against a zero-and-overlay oracle, including2000 randomized segment layouts,
+overlap, partial pages, BSS, TLS, source/range errors and neighbor sentinels.
+It tests page contents and errors, not hardware mapping or a startup percentage.
+
+The ext2 name cache now uses128 one-byte slot hints to avoid scanning all128
+entries on an exact hint hit. Parent, length, full name and validity are still
+checked; collisions and stale hints fall back to the existing FIFO cache.
+Capacity, negative entries, update position and invalidation semantics stay the
+same. `ext2-dentry-cache` compares20,000 mixed operations and periodic complete
+lookups against an independent model of the old FIFO, plus wraparound/stale
+slots, parent/name distinctions and boundary-length cases. These checks prove
+cache behavior, not a launch-time or CPU percentage.
+
+Checked-copy permission preflight now queries current VM permission exceptions
+and uncertain mappings by range. Single-page requests retain direct lookup;
+backing, COW and copy-window preparation remain in the existing transfer path.
+Production VM tests compare the range result with page-wise queries, including
+partial endpoints, high addresses, dense rights, sparse exceptions and uncertain
+updates. The Alpha fixture checks a late denial before a16MiB mocked transfer.
+This fixture proves preflight/call behavior, not actual16MiB copying or CPU gains.
+
+Snapshot source validation likewise uses current range metadata: explicit
+rights1 must cover every page and unique aligned Frame keys must cover the
+whole extent. Missing/default/RX/uncertain pages decline. Two VM tests compare
+point checks over513 pages, holes, unaligned metadata and high addresses;
+existing production Alpha tests still check rights outside the requested alias.
+This changes lookup work only, retaining ownership/capability/refcount checks.
+
+Shared RAM creation and opaque service-buffer zeroing now reuse the existing
+permanent-pool initialization window. Every byte is still cleared before any
+participant mapping is published, even on a cached alias hit. `alpha-shared-zero`
+executes the production zeroing body over owned host buffers, including reuse,
+neighbor sentinels, mapping failure prefixes and physical-range overflow. Window
+selection/eviction/failure behavior is tested separately by the existing
+`alpha-initialization-window` fixture; these models do not prove hardware TLBs.
+No additional mapping-cache capacity is introduced.
+
+Private mapping release can now defer ordered page references in one guarded
+list pass after preflight. Every allocation field and reverse-snapshot order
+must match; otherwise it uses the original scalar deferral. References, existing
+deferred-tail order and single-page/whole-extent paths remain unchanged.
+Production ownership tests compare both implementations behind512 newer records,
+with shared references, duplicate VAs, sparse holes and stale/unordered snapshots.
+Canonical shared-page retirement now uses the same order/field preflight, then
+calls fallible physical release before unlinking each reference. Failure keeps
+the failed record/suffix; callbacks are never retried through scalar fallback.
+Tests compare scalar callback order, last-owner decisions, committed prefixes,
+remaining lists/refcounts and recycled-node reuse, including failures at either
+end and after an owner-head update.
+
+`ext2-sector-count` compiles production inode sector accounting with destructive
+block scratch and an independent pointer-graph oracle. Dense/sparse direct,
+single/double tables, partial64-pointer batches, repeated child pointers, inline
+symlinks and read errors preserve accounting. Double-table accounting captures
+64 child pointers before reading leaves, avoiding repeated leaf loads per entry.
+With256 entries and all children present, double-table reads fall from65792 to260
+(plus one read for a separate single table). This counts helper reads, not device
+I/O or measured CPU time. No heap allocation or block-size ceiling is added.
+
+`ext2-inode-write` compiles the actual inode publisher. Size growth within
+existing blocks preserves the inode's current sector count, but still writes
+the inode, invalidates file versions and updates caches only after success.
+Allocation-changing writes and other metadata operations still recount.
+The storage suite checks2065 one-byte writes with2065 inode commits and only
+three recounts, plus payload readback. The guest file-mapping fixture checks128
+small appends across a single-indirect block boundary and fsync/reopen/readback.
+Regular-file inode publication now preserves directory continuation generations;
+generic metadata and all other inode types retain conservative invalidation.
+Production writer tests cover success/failure by inode kind, while the actual
+block cache tests verify unchanged metadata writeback ordering. The guest fixture
+enumerates64 entries in small batches with unrelated appends between batches.
+
 Temporary image retention: after completing cycle N, delete generated boot
 images and their backing rootfs from cycle N-2 and earlier. Retain only the
 newest validated candidate and the latest accepted working fallback (or the
@@ -701,6 +941,26 @@ all twelve inspected frames are in the
 [cycle109 notes](optimization-cycles.md#cycle-109-observe-post-ping-paint-and-real-keyboard-response).
 The100ms fully painted/input-ready launch goal remains unmet.
 
+The current timeline runner also writes `app-launch-paint-reference.json`
+after QEMU has exited and been reaped. `tests/negoto/files_paint.py` strictly
+decodes bounded opaque RGB/RGBA PNGs and compares the complete fixed Files
+client rectangle with audited `/root` and `/usr/local` fixture hashes. Missing,
+malformed, unsupported or different images remain unmatched. Run an existing
+capture directory offline with `python3 tests/negoto/files_paint.py RUN_DIRECTORY`.
+These are captured-state matches, not a generic GUI oracle or a launch/input
+latency PASS. The original ping measurement and unverified readiness fields
+remain unchanged. Reference evidence is in
+`session-handoff/logs/linux-native-scope-20261106/paint-oracle-audit/`.
+The timeline also sends one Ctrl-L chord (`clear_location` in the installed
+Xfe configuration), with captures requested at +50/+500ms and actual command
+and capture bounds in `app-launch-single-input.json`. Its audited empty-Location
+state is a separate exact reference. It runs after the launch samples, so it
+cannot establish launch input readiness. The existing multi-key `/usr/local`
+challenge follows it; its timing differs from older timeline cohorts. See
+`session-handoff/logs/linux-native-scope-20261106/single-input/` for the first
+KVM result. A visually normal caret variant can remain unmatched: do not relax
+the region/hash or report this as a latency PASS.
+
 Cycle110 rejects pre-generated Fontconfig caches after eight ordinary matched
 boots. A version-matched2.16.2/cache-9 generator is reproducible, and the target
 loads all97 cached fonts before GUI startup, but Files is effectively flat
@@ -728,7 +988,7 @@ speed comparison. Restore all probes exactly and remove their image pair;
 see the [cycle112 notes](optimization-cycles.md#cycle-112-refresh-the-current-xfe-workload-and-audit-snapshot-lifetime).
 
 Cycle113 prototypes reclaimable, read-only file-snapshot storage behind the
-default-off `NANAMI_IMMUTABLE_SNAPSHOTS=1` switch. Publication follows complete
+then-default-off `NANAMI_IMMUTABLE_SNAPSHOTS=1` switch. Publication follows complete
 I/O, version validation and read-only protection; eviction retires rather than
 overwrites backing. Failed construction/retirement retains ownership without
 serving a cache hit. Default and enabled native1338/17 ignored, enabled ASan175/2
@@ -739,7 +999,7 @@ See the [cycle113 notes](optimization-cycles.md#cycle-113-prototype-reclaimable-
 
 Cycle114 connects experimental R/RX private file aliases to those RAM snapshots,
 with unique-extent/page accounting, explicit RAM reference units, detach-before-
-write and whole-object release validation. It remains default-off. Final native
+write and whole-object release validation. It was default-off at that checkpoint. Final native
 1357/17 ignored, selected ASan191/2 ignored, cross-backend checks and all34 QEMU
 boots across three variants pass. Final Files timing improves only0.79% with
 10ms host observation; earlier cohorts improve4.31--6.72%, while the unchanged
@@ -1211,7 +1471,13 @@ candidate that looked faster in desktop wall-time profiling was rejected after
 a reproducible full-update regression in this controlled workload.
 
 The same notes cover process-creation measurements and the validated file
-snapshot cache. `alter-image-cache` runs the production loader with mocked
+snapshot cache. Replacement first applies the existing protected-main and
+rounded-byte-budget constraints, then uses empty capacity. Under pressure from
+another version of the same inode, eligible older versions and failed owners
+share an age-ordered victim tier before unrelated images. Without that pressure,
+ordinary LRU applies. Identity affinity is only an eviction hint; cache hits
+still require the complete nonreused VFS version identity and size.
+`alter-image-cache` runs the production loader with mocked
 service requests, including cache hits, mutable files, partial I/O, buffer reuse
 and mmap segment reuse. Its current cache admits up to 48 small-file snapshots
 within the original 16-MiB retained-data budget, rather than allocating 48
@@ -1221,8 +1487,16 @@ explicitly protects the outstanding main ELF's address from replacement.
 Tests also cover a near-ceiling whole-file snapshot, immutable old-version
 bytes, warm segment reuse and over-ceiling no-prefetch/no-allocation fallback.
 [Cycle 40](optimization-cycles.md#cycle-40-admit-medium-dsos-within-the-existing-snapshot-byte-budget)
-records the rejected 4MiB per-file candidate; production retains the 2MiB
-ceiling and original 16MiB total capacity bound.
+records the rejected general 4MiB per-file candidate. ELF and cold writable
+mappings retain the 2MiB ceiling. Whole-file readonly mappings may now admit
+larger immutable snapshots within the same 16MiB total bound; partial cold
+mappings never prefetch. x86_64 defaults to immutable backing, with
+`NANAMI_IMMUTABLE_SNAPSHOTS=0` restoring mutable storage and the old ceiling.
+`linux-file-snapshot` tests separate rounded file aliases from private zero
+suffixes, publication errors and legacy/final zero-page permissions. Alpha
+tests cover 513-page aliases, source retirement, COW and uncertain MAP failure.
+KVM evidence and limits are recorded in the handoff's `large-file-snapshots`
+checkpoint; this change does not establish a repeatable startup speedup.
 Tests cover a 32-file resident set, large-file churn at the byte limit and an
 interpreter that must bypass the cache to preserve its live main image.
 `ext2-file-versions` checks bounded token eviction and
@@ -1252,6 +1526,165 @@ execution context before reusing the same container ID. The 100-ms observer
 interval bounds polling resolution. Session deletion and the observer's sample
 printing are outside the measured interval; guest-critical-path work, including
 synchronous diagnostic output, remains part of elapsed startup time.
+
+The QEMU runner accepts `--accel kvm` (CPU `host`) or `--accel tcg`
+(CPU `max`); `--cpu` overrides that model. `--tcg-threads` requires TCG.
+Each run saves its exact `command.json` and keeps temporary disk overlays
+in that run's log directory. Keep different accelerators/hosts separate.
+
+For post-launch communication diagnostics, build the desktop image with
+`--desktop --image --with-tests --with-launch-rtt`, then run the QEMU fixture
+with `--accel kvm --tinycore-app-launch-perf files --app-launch-ready ping
+--app-launch-rtt`. It requires a complete report containing three raw128 and
+three Xlib128 samples. These measure the whole X11 stack, including scheduling;
+they do not isolate IPC. RTT mode excludes `--app-launch-timeline` so screenshots
+and keyboard challenges do not overlap timed RTT work. A ping response still
+does not prove completed painting or input readiness. Performance comparisons
+need frozen inputs and complete, predeclared matched cohorts.
+
+`--host-process-stats` optionally records Linux QEMU process CPU counters around
+the launch interval, with PID/start identity, actual read bounds and tick rate.
+User ticks already include guest ticks; these totals cannot isolate guest IPC
+or application CPU work. Contradictory counters are rejected. The 2026-11-06
+nested-KVM admission trial failed its 5% perturbation gates; its CPU breakdown
+must not be used as normal-runtime attribution. The separate identical-command
+control also failed stability. `--host-cpus 0,2,4,6,8` can explicitly constrain
+Linux KVM via taskset and verifies existing QEMU threads before timed work, but
+that distinct baseline also failed stability; it is not a demonstrated fix.
+Choose masks from the actual host topology, keep these trials separate, and do
+not relax gates or rerun unchanged conditions until a favorable result appears.
+Per-run `host-manifest.json` records harness source hashes and kernel identity
+before starting QEMU, for future provenance.
+
+`--host-poll-ms` explicitly selects the host serial observation interval
+(1..1000ms, default200ms) and records it in the launch JSON and console. The
+native relay still polls at100ms. Nanosecond timestamps do not remove either
+observation interval, and a ping is not full-paint/input readiness. Different
+host polling intervals need separate disturbance controls; do not interpret
+a shorter observation delay as a guest speedup.
+
+`alter-syscall-scope` tests a bounded ledger/controller and the native packet
+decoder. Alter's non-default `syscall-scope` feature connects it around Linux
+dispatch handlers. Count mode needs no per-handler clocks; timed mode
+rejects missing/reversed/overlapping counters. Nonreused scope epochs reject
+stale records, owner checks protect stop/cancel, overflow invalidates rather
+than partially commits, and out-of-table syscall numbers retain a separate row.
+Feature-only PR_SET_NAME values `nscope.count`, `nscope.time`, `nscope.stop`
+start/stop a caller-owned scope. Owner exit/removal/committed exec cancels it.
+Private diagnostic PRCTL option `0x4e530001` copies a stopped, owner-checked
+8272-byte LE report using ordinary typed owned copyout; it retains the report
+on EFAULT and does not grant native capabilities. Header words are magic
+`0x00315043534e414e`, epoch, mode(0=count/1=time), start, end, ledger-valid,
+row count513, and1=local counter unverified;513 call/tick pairs follow.
+Row512 retains all out-of-table numbers. No native pointers are serialized.
+This is not an A9N Kernel ABI or default Linux behavior. Legacy
+`NANAMI_ALTER_PROFILE=1` cannot be combined with this feature.
+
+`tests/alter-linux/syscall-scope.c` and the native Negoto probe validate known
+counts, non-owner refusal, EFAULT retry, packet fields and cancellation before
+owner reaping/while an exec child stays alive. `--syscall-scope-fixture active`
+or `off` runs this functional check on KVM with the test bundle. The tracked
+`package-scope-fixture.py` creates separate paired images from frozen inputs,
+verifying readback, filesystem health and unchanged boot/ESP/trailer bytes.
+Serial rows are not an oracle: one real run lost a row to interleaved output.
+The current native fixture independently validates both binary packets before
+its cleanup footer; the strict legacy parser and failed evidence are retained.
+
+The opt-in `--scope-disk-readout` additionally retains a private qcow2 overlay,
+waits for the native fixture's post-workload VFS sync and strict cleanup footer,
+stops/reaps QEMU, and extracts both files with read-only debugfs. Schema3 results
+retain full 8272-byte packets, SHA-256 hashes, independent host validation of all
+rows/headers, and extraction commands. Disabled controls require both files
+absent. KVM SMP1/SMP4 passed this storage path; backing images stayed unchanged.
+Its diagnostic bootstrap waits for initial compositor render plus a fixed10s
+settle because a font-log tag interleaved in the first attempt. This provides no
+boot/readiness timing assertion and does not change ordinary performance gates.
+Raw serial packet export was rejected after actual interleaving; it is removed.
+See `session-handoff/logs/linux-native-scope-20261106/DISK-EXPORT-PLAN.md` and its
+result for retained failures and the exact diagnostic conditions.
+
+For real app diagnostics, `desktop.build_window_observer(..., syscall_scope=True)`
+builds a separate `/bin/aw-scope`; `package-scope-fixture.py --observer ELF`
+installs it into both paired images. `qemu-smoke.py --tinycore-app-launch-perf
+files --app-launch-ready ping --app-syscall-scope off|count|time` uses that observer
+as the live owner. It starts before observer READY and stops after the first
+verified ping reply. Serialization/fsync follow the endpoint and any requested
+RTT samples. The host requires APP-SCOPE-SAVED, reaps QEMU, and independently
+decodes the full workload packet from the retained overlay. Disabled mode must
+produce no packet. `app-syscall-scope-result.json` explicitly denies performance
+admission and records coverage/boundaries; these diagnostic runs use the same
+fixed-settle bootstrap as disk fixture diagnostics.
+
+Normal/off SMP1, count SMP1, and time SMP1/SMP4 functional runs passed. They are
+single samples, not an overhead/stability cohort. Scope includes pre-click delay,
+observer work and background Linux dispatch in this Alter; it is not per-app
+CPU time or an exact click interval. Stop/control overhead can affect observed
+ping latency. First ping still does not prove full paint or input readiness.
+See the APP-SCOPE plan/result under the same handoff log directory. No cost
+ranking or optimization is admitted from these packets before clock and matched
+normal/off/count/time disturbance validation.
+
+Normal cached private file mmap initializes fresh backing directly with
+final R/W/X rights through trusted Nanami request0x1035, avoiding a subsequent
+permission-remapping pass. `NANAMI_MAP_FINAL_PERMISSIONS=0` restores the old
+two-step path; `=1` explicitly enables the default. It requires matching Alpha;
+update Alpha and Alter together. The
+legacy two-word initializer contract remains unchanged. Model/failure tests and
+real KVM file-mapping regression pass. SMP4 ABBA observed6.15s vs4.78s mean Files
+first-ping latency, but control and candidate repeatability both failed5%; no
+22% speedup was established by that experiment. See the retained plan and
+`session-handoff/logs/linux-native-scope-20261106/final-permissions/RESULT.md`.
+An extension to private anonymous mappings was implemented and tested, then
+withdrawn:its KVM SMP4 ABBA observed launch+10.51%,raw+5.54%,Xlib+8.11%, with failed
+repeatability. The live source enables only the file-backed path;
+see `session-handoff/logs/linux-native-scope-20261106/anonymous-final/RESULT.md`.
+
+Normal Alpha initialization reuses
+only already-ready initialization aliases after current Frame/private ownership
+checks, with a bounded request-local ownership walk and original CopyWindow
+fallback. `NANAMI_INIT_SOURCE_REUSE=0` restores the original mapping path;
+`=1` explicitly enables the default. No cache growth or guest mapping limit.
+Historical host tests and real KVM file
+mapping pass, but its ABBA stopped at a candidate boot timeout and observed QEMU
+SIGSEGV; no performance result/adoption. The HMP sender's separate EOF-spin bug
+was fixed with EOF/exited-process checks and a total reply deadline. See
+`session-handoff/logs/linux-native-scope-20261106/source-reuse/RESULT.md`.
+The pending reuse shortcut now gets only the owner's scalar root, eliminating
+an actual528B snapshot-copy call confirmed in native assembly. Diagnostic-only
+KVM SMP1 verification reached a reuse hit near Linux context fork and passed the
+file-mapping regression; it does not prove Files mmap hit coverage or speed.
+`NANAMI_INIT_SOURCE_REUSE_DIAG=1` emits a one-time forced record only for functional
+reachability builds; do not use those builds for timing. See
+`session-handoff/logs/linux-native-scope-20261106/source-reuse-reachability/RESULT.md`.
+The matching non-diagnostic scalar revision completed SMP4 ABBA:observed launch
+mean5.71s vs5.08s, but within-control launch shifted28.21% and within-candidate
+11.31%; raw/Xlib repeatability also failed. No11% gain or default adoption is
+claimed. Full records:
+`session-handoff/logs/linux-native-scope-20261106/source-reuse-scalar-perf/RESULT.md`.
+
+Normal Alpha initialization also enables collision-aware role selection with
+source reuse. `NANAMI_INIT_SOURCE_ROLE_SWAP=0` restores the previous placement;
+`=1` explicitly enables the default. Only on an initialization-slot/source collision, it places
+the fresh destination in existing CopyWindow and pins it through any source
+fallback; cache sizes stay unchanged. Partial-page/pinning tests and KVM mapping
+regression pass. SMP4 ABBA observed6.17s vs4.88s mean launch, but controls and
+candidate raw RTT failed repeatability; no20.9% speedup/default adoption claimed.
+Evidence:`session-handoff/logs/linux-native-scope-20261106/source-role/RESULT.md`.
+Those comparisons are historical and do not establish a precise gain. Current
+normal-path integration and combined safety/runtime checks are recorded in
+`session-handoff/logs/linux-native-scope-20261107/mapping-default/`.
+The anonymous final-permissions extension remains withdrawn. Continue removing
+demonstrated work on the current KVM host per user instruction; timing variance
+alone does not block all implementation, and it must still be reported honestly.
+
+KVM SMP1/SMP4 functional success does not establish normal-workload coverage,
+runtime overhead, calibrated clock/CPU identity, a cost ranking or a gain.
+Only handler dispatch is observed; page faults, register access, replies and
+unobserved work are not inferred from the remainder. Restarted dispatches can
+count more than one invocation per logical syscall. Inclusive spans include
+RPC waits/descheduling. Actual application boundaries, durable real-app cost data
+and matched off/count/time disturbance gates remain required before attribution.
+
 Cycle 36 records a rejected user-level deferred-fork implementation: immutable
 snapshots and bounded prefault/address hints passed functional checks, but real
 startup was 22.2% slower. The accepted runtime keeps eager private cloning; no
@@ -1554,6 +1987,33 @@ ahci|virtio|usb` can regression-test each root-disk transport in a snapshot.
 Add `--native-info --network` to capture the three PCI listing modes and the
 renamed `net-info` builtin for visual inspection; this does not claim automated
 text recognition of those screenshots.
+
+The host runner's optional `--host-process-stats` also retains raw per-thread
+stat/schedstat snapshots around the click/ping interval. It checks HMP ownership,
+start ticks, unchanged thread membership, counter monotonicity and the existing
+guest/inclusive-user accounting rule. The [Linux scheduler counters](https://docs.kernel.org/scheduler/sched-stats.html)
+report runtime/runqueue nanoseconds and timeslices; these are not independently
+validated physical CPU or Hyper-V wait measurements. Unproven runqueue enablement
+omits wait deltas; any accounting inconsistency rejects thread attribution.
+Raw values remain available for diagnosis, with CPU-cost admission false.
+
+The optional `honoka-frame-events` feature in Honoka and this test crate counts
+notification batches, fbdev scans, emitted damage rectangles and dirty render
+passes without adding clock RPCs. It disables the separate wall-time profiler
+and reports at most64 groups after existing clock notifications; groups are not
+elapsed seconds or FPS. Native tests cover merged bits, reset and overflow.
+Default builds omit these hooks. Interleaved rows are not reconstructable timing
+evidence, and diagnostic counts alone cannot establish a stage's CPU cost.
+
+`linux-unix` also checks the normal coalesced receive path's bounded owned
+gathering (`NANAMI_UNIX_COALESCED_RECVMSG=0` restores the original path):64/256-byte
+receives allocate nothing,257 bytes retain the Vec fallback, including a partial
+first-packet offset. It preserves ordered whole-payload/metadata
+copyout, queue rollback, PEEK and ancillary barriers. Explicit `=1` enables it;
+native allocation reduction does not prove an end-to-end speedup. The raw Linux
+file-mapping fixture adds16 real protected-header fault/retry cases; a dedicated
+probe built with `NANAMI_REQUIRE_UNIX_RECVMSG_FAULTS=1` requires that marker within
+the same collected terminal buffer as the overall file-mapping completion.
 
 `gpu` exercises the common GPU client/provider protocol, ownership, padding,
 quotas and dead-client reclamation. `gpu-blt` runs production Gen9 command
@@ -1948,6 +2408,124 @@ removed-but-attached segments, IPC_STAT ABI and last-context cleanup. VM IPC is
 mocked in these unit tests; the integer-only Tiny Core guest fixture separately
 tests real shared aliases, fork, guard pages, protection, partial unmap and
 reclamation on QEMU with one and four cores.
+
+Normal builds reject unrelated syscall numbers before AF_UNIX descriptor
+lookup. `NANAMI_UNIX_DISPATCH_FILTER=0` restores the original lookup-before-reject
+path for comparison or rollback; `=1` explicitly enables the normal guard.
+`linux-unix` verifies that unrelated syscalls
+and poll/select completion retries perform no FD lookup, guest copy or signal
+delivery; the optout performs the original lookups. Supported operations still
+resolve the live descriptor, including after reuse. Run this configuration with
+`--test-threads=1`. Lookup counts prove eliminated work, not a wall-time gain.
+
+The default readlink path uses a request-local negative
+result: the existing rooted no-follow lookup already returns a file
+type. After preserving output argument validation, confirmed regular/directory/
+socket types return EINVAL without a second READLINK request. Symlink, unknown
+type and virtual paths retain the original fallback. No pathname classification
+survives this request. A concurrent mutation can linearize a negative readlink
+at the observed non-link; later calls always perform a fresh lookup.
+`NANAMI_READLINK_KIND_FASTPATH=0` restores the original second-request path for
+comparison or rollback; `=1` explicitly enables the default optimization.
+`linux-path-lookup` runs the production wrapper/rooted transport with a
+backend model to check query counts, no-follow/dirfd/truncation/type replacement,
+unknown/virtual delegation and lookup/output error order. Real virtual output
+and protected pages require the strict KVM fixture described in alter-linux.
+The real Files initialization window showed READLINK requests fall from 67 to
+21 with the same 697 syscall entries. This establishes eliminated work, not an
+exact wall-time improvement percentage. Fine timing variance alone is not a
+reason to keep the functionally verified reduction disabled.
+
+Normal builds use bounded position hints for UNIX socket
+lookup. Exact IDs are checked before using a hint; collisions fall back to the
+original scan. `linux-unix` covers capacity/churn, stale IDs, both swap-removal
+paths, mutable access and accept/SCM_RIGHTS ownership roots. Storage is 128
+words per socket collection, with
+no additional socket limit or allocation. Functional success does not establish
+an application speedup. `NANAMI_UNIX_SOCKET_LOOKUP=0` restores the original
+scan with no hint storage; `=1` explicitly enables the default hints. The normal
+hint and coalesced paths are also tested together with the default dispatch
+guard and readlink reduction.
+
+Normal compatible read-only opens use `VFS_PATH_OPEN_READONLY` to resolve and
+acquire a handle in one rooted request. POSIX translates that handle into its
+owned FD, then Linux creates the local FD. This removes the second successful
+pathname walk and POSIX open request. `NANAMI_ROOTED_READONLY_OPEN=0` restores
+the two-request route; FD cleanup on local allocation failure remains fixed.
+Create/truncate/write/other flags retain the old route, as do declined/missing
+cases. Virtual mount priority is preserved even after a disk symlink resolves
+into a virtual path. At POSIX capacity the proxy resolves only, acquiring no
+handle; it uses the same3-based slot rule as ordinary allocation, while dup
+retains its0-based rule. No persistent path/authority cache is introduced.
+
+The separate `POSIX_REQUEST_OPEN_ROOTED` entry lets older POSIX servers reject
+before forwarding an operation whose owned handle they cannot translate. Only
+legacy rejection/explicit unsupported may fall back; other errors are retained.
+Update ext2 and POSIX together for the optimized route. An old stack remains
+functional but can pay an unsupported probe; explicit optout avoids it.
+`NANAMI_ROOTED_OPEN_DIAG=1` emits one general and one xfe-specific reachability
+line for functional testing; normal builds omit these logs. Native tests run
+the production Linux opening/namespace code, real POSIX state/FD allocator/
+proxy, ext2's transactional completion helper and the actual client wire code.
+The real C fixture/probe adds `ROOTED-OPEN-PASS`/`NANAMI_REQUIRE_ROOTED_OPEN=1`.
+Evidence: `session-handoff/logs/linux-native-scope-20261107/rooted-open/`.
+This proves eliminated requests and functional reachability, not a precise
+launch speedup. Historical wait-shape step counters select RESOLVE/READLINK;
+they do not include the new OPEN operation and are not total request counts.
+
+Optional Alter `wait-shape` is a structural diagnostic for the first executable
+named xfe. It buffers at most64 wait events and reports overflow, using existing
+timeout/deadline/readiness values with no additional clock reads. Phase0 is an
+immediate poll scan (before copyout),1 a parked poll wait,2 a wake still pending,
+3 a handler return value,4 a handler error. Wake rows also include blocking I/O;
+these may have no recorded poll start. Cached ticks are not elapsed durations.
+Rows are reported once after existing timer notifications advance two backend
+seconds, so serial printing does not interrupt every recorded wait. This does
+not establish measurement overhead, CPU cost, wall-time attribution or readiness.
+The pure `wait-shape` test covers bounded storage/PID isolation/report scheduling;
+native clocks/readiness harnesses stub the serial adapter. Cross-build and KVM
+are required to test actual image selection and reporting. Default builds omit
+the diagnostic entirely.
+
+The wait diagnostic also records exact socket/peer IDs per row and one owned
+peer-address/live-FD-holder snapshot. It matches current open-description IDs,
+counts every matching live descriptor, saves up to4 executable basenames, and
+flags name/address truncation. Creator credentials do not establish ownership.
+If an accepted endpoint is still pending without a holder, identity capture is
+retried only on later buffered events of the first connection. A reused FD or
+another PID/connection cannot replace that identity. This identifies an endpoint;
+it does not establish its processing time or CPU share.
+
+The diagnostic can also bracket recorded event points using successful existing
+`refresh_clock` samples. Each row keeps the preceding sample and the first later
+sample; later work never widens that upper bound. Rate changes, regressions and
+cache/sample mismatches mark the window inconsistent; missing bounds stay
+missing. `clock-consistent=1` means observed sample consistency, not independent
+counter accuracy or instrumentation admission. With same-epoch fresh samples,
+adjacent event separation lies in `[max(0,next.lower-prev.upper),
+next.upper-prev.lower]` provider ticks. Phase1 follows scan/alarm setup, phase3
+precedes register write/resume: neither is an exact total blocked-time boundary.
+No additional clock read/RPC/alarm is introduced. The model tests first-sample
+closure, missing/equal samples and permanent rejection after inconsistencies.
+
+A fixed diagnostic census starts only if buffered row14 is a handler-result
+record, and stops at the selected PID's next poll-scan record. It counts Linux
+dispatch entries0..511 plus an outside bucket, including the closing poll.
+The window is fixed prospectively from earlier evidence, not moved to whichever
+interval looks largest. Other PIDs and out-of-window calls are excluded. Output
+includes total entries, nonzero kinds and overflow; require all rows/totals to
+match before treating the census as complete. Missing/incomplete windows stay
+incomplete. Counts do not classify page faults, native resume, successful
+results, user CPU or handler time.
+
+Inside that fixed gap, successful `read_c_string` inputs can be snapshotted
+before SHM translation/reuse. Up to128 distinct raw strings retain192 bytes
+each; truncated prefixes never merge, and hit/drop/allocation/overflow totals
+are explicit. Hits aggregate operations; `first-call` is only the first observed
+dispatch. Only the last string in a dispatch receives a matched immediate handler
+result, once. Park/unknown remains unknown. Text uses escaped printable ASCII,
+otherwise raw bytes. Paths are not canonicalized; relative names and successful
+open results alone do not prove file existence, open mode or cache validation.
 
 The production `MemoryManager` tests also cover large GUI frame-node metadata:
 lazy overflow beyond the primary process arena, repeated root-slot reuse without

@@ -2,6 +2,9 @@
 #![allow(dead_code)]
 extern crate self as nanami_runtime;
 use std::cell::RefCell;
+thread_local! {
+    static PROCESS_QUERIES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
 type Word = usize;
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
@@ -119,6 +122,7 @@ struct Runtime {
     monotonic_ticks: usize,
     monotonic_tick_hz: usize,
     posix_shm: usize,
+    posix_shm_size: usize,
     _shm: Box<[u8; 4096]>,
 }
 impl Runtime {
@@ -137,10 +141,12 @@ impl Runtime {
             monotonic_ticks: 1245,
             monotonic_tick_hz: 100,
             posix_shm: shm.as_mut_ptr() as usize,
+            posix_shm_size: 4096,
             _shm: shm,
         }
     }
     fn managed_process(&self, pid: usize) -> Option<&Process> {
+        PROCESS_QUERIES.with(|count| count.set(count.get() + 1));
         self.managed.iter().find(|process| process.pid == pid)
     }
     fn thread_group(&self, pid: usize) -> usize {
@@ -217,6 +223,91 @@ fn pid_lookup_is_context_local_and_task_membership_is_checked() {
 }
 
 #[test]
+fn self_visibility_avoids_reloading_the_same_pid_but_checks_unknown_identity() {
+    let r = Runtime::new();
+    let mut counts = Vec::new();
+    for (caller, target, visible) in [(9, 9, true), (9, 3, true), (9, 7, false), (99, 99, false), (9, 0, true)] {
+        PROCESS_QUERIES.with(|count| count.set(0));
+        let result = procfs::validate(&r, caller, (target << 32) | VirtualNode::ProcStat.id());
+        counts.push(PROCESS_QUERIES.with(|count| count.get()));
+        assert_eq!(result, if visible { Ok(()) } else { Err(ENOENT) });
+    }
+    println!("proc visibility process queries self/same-scope/other-scope/unknown-self/global: {counts:?}");
+    assert_eq!(counts, [1, 2, 2, 1, 0]);
+}
+
+#[test]
+fn pure_proc_shm_output_matches_staged_read_for_limits_offsets_and_scope() {
+    let mut cases = 0;
+    for node in [VirtualNode::ProcStat, VirtualNode::ProcStatus, VirtualNode::ProcComm, VirtualNode::ProcStatm] {
+        for caller in [9, 3, 7, 99] {
+            for subject in [9, 3, 7, 99] {
+                for offset in [0, 1, 8, 128, 2048, usize::MAX] {
+                    for len in [0, 1, 16, 127, 4096, 4097, usize::MAX] {
+                        let mut r = Runtime::new();
+                        r.posix_shm_size = if subject == 3 { 128 } else { 4096 };
+                        // External SHM ownership stays outside Runtime's borrowed fields.
+                        let mut shm = [0xa5u8; 4096];
+                        r.posix_shm = shm.as_mut_ptr() as Word;
+                        let value = (subject << 32) | node.id();
+                        let limit = len.min(4096).min(r.posix_shm_size);
+                        let mut staged = [0u8; 4096];
+                        let expected = procfs::read(&mut r, caller, value, offset, &mut staged[..limit]);
+                        let mut expected_shm = shm;
+                        if let Ok(amount) = expected { expected_shm[..amount].copy_from_slice(&staged[..amount]); }
+                        assert_eq!(procfs::try_read_current_shm(&mut r, caller, value, offset, len), Some(expected));
+                        assert_eq!(shm, expected_shm);
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    println!("pure proc direct SHM staged-reference cases: {cases}");
+}
+
+#[test]
+fn proc_shm_route_rejects_scratch_using_or_other_nodes_without_side_effects() {
+    for node in [VirtualNode::ProcCmdline, VirtualNode::ProcUptime, VirtualNode::ProcSelfExe,
+        VirtualNode::ProcMemInfo, VirtualNode::ProcNetArp, VirtualNode::DevZero] {
+        let mut r = Runtime::new();
+        let mut shm = [0xa5u8; 4096]; r.posix_shm = shm.as_mut_ptr() as Word;
+        PROCESS_QUERIES.with(|count| count.set(0));
+        assert_eq!(procfs::try_read_current_shm(&mut r, 9, (9 << 32) | node.id(), 0, 4096), None);
+        assert_eq!(PROCESS_QUERIES.with(|count| count.get()), 0);
+        assert_eq!(shm, [0xa5; 4096]);
+    }
+}
+
+#[test]
+fn self_visibility_matches_two_lookup_reference_after_exit_scope_and_pid_reuse() {
+    let mut cases = 0;
+    for scenario in 0..4 {
+        let mut r = Runtime::new();
+        match scenario {
+            1 => r.managed[0].exited = true,
+            2 => r.managed[0].rootfs.leader = 7,
+            3 => {
+                r.managed[0].pid = 0;
+                r.managed.push(Process::new(9, 9, 7));
+                r.managed.reverse();
+            }
+            _ => {},
+        }
+        for caller in [0, 3, 7, 8, 9, 99] {
+            for target in [0, 3, 7, 8, 9, 99] {
+                let old = target == 0 || r.managed_process(caller).zip(r.managed_process(target))
+                    .is_some_and(|(a,b)| a.rootfs.leader == b.rootfs.leader);
+                assert_eq!(procfs::validate(&r, caller, (target << 32) | VirtualNode::ProcStat.id()),
+                    if old { Ok(()) } else { Err(ENOENT) });
+                cases += 1;
+            }
+        }
+    }
+    println!("proc self visibility old-reference cases: {cases}");
+}
+
+#[test]
 fn enumeration_uses_stable_pid_cookies_not_reusable_process_table_indices() {
     let mut runtime = Runtime::new();
     let mut name = [0; 20];
@@ -283,6 +374,38 @@ fn stat_has_52_linux_fields_correct_units_and_signed_foreground() {
 }
 
 #[test]
+fn stat_zero_fields_skip_generic_numeric_formatting() {
+    let mut r = Runtime::new();
+    let value = entry(&r, 9, b"/proc/9/stat");
+    procfs::take_stat_numeric_formats();
+    let text = read(&mut r, value);
+    let formats = procfs::take_stat_numeric_formats();
+    let fields: Vec<_> = text[text.rfind(')').unwrap()+2..].split_whitespace().collect();
+    assert_eq!(fields.len(), 50); // state plus numeric fields4..52
+    let numeric: Vec<isize> = fields[1..].iter().map(|v| v.parse().unwrap()).collect();
+    assert_eq!(numeric.iter().filter(|v| **v != 0).count(), 4);
+    println!("proc stat generic numeric format calls for49 fields: {formats}");
+    assert_eq!(formats, 4);
+}
+
+#[test]
+fn stat_numeric_field_bytes_match_decimal_reference_and_keep_guards() {
+    let mut cases = 0;
+    for value in (-1024isize..=1024).chain([isize::MIN, isize::MAX, -1000000000, 1000000000]) {
+        let expected = format!(" {value}");
+        for alignment in 0..8 {
+            let mut out = [0xa5u8; 64];
+            let count = procfs::stat_field_for_test(value, &mut out[alignment..48]).unwrap();
+            assert_eq!(count, expected.len());
+            assert_eq!(&out[alignment..alignment+count], expected.as_bytes());
+            assert!(out[..alignment].iter().chain(out[alignment+count..].iter()).all(|b| *b == 0xa5));
+            cases += 1;
+        }
+    }
+    println!("proc stat numeric field decimal reference cases: {cases}");
+}
+
+#[test]
 fn task_directories_list_all_and_only_the_groups_threads() {
     let mut runtime = Runtime::new();
     let tasks = entry(&runtime, 9, b"/proc/3/task");
@@ -329,6 +452,112 @@ fn files_support_short_reads_eof_and_removed_subjects() {
         procfs::read(&mut runtime, 3, value, 0, &mut byte),
         Err(ENOENT)
     );
+}
+
+#[test]
+fn comm_reads_do_not_query_parent_or_compute_other_proc_fields() {
+    let mut r = Runtime::new();
+    let value = entry(&r, 9, b"/proc/9/comm");
+    r.managed[0].parent_pid = 3;
+    r.managed[0].mappings = (0..1024).map(|i| Mapping { base: 0x10000 + i * 4096, size: 4096 }).collect();
+    PROCESS_QUERIES.with(|count| count.set(0));
+    let mut out = [0u8; 32];
+    assert_eq!(procfs::read(&mut r, 9, value, 0, &mut out), Ok(9));
+    let count = PROCESS_QUERIES.with(|count| count.get());
+    assert_eq!(&out[..9], b"foo) bar\n");
+    println!("proc comm managed-process queries: {count}");
+    assert_eq!(count, 2); // One identity lookup for each self visibility check.
+}
+
+#[test]
+fn task_directory_reuses_one_group_query_per_cookie() {
+    let mut r = Runtime::new();
+    r.managed = (9..265).rev().map(|pid| Process::new(pid, 9, 9)).collect();
+    let value = entry(&r, 9, b"/proc/9/task");
+    PROCESS_QUERIES.with(|count| count.set(0));
+    let mut cookie = 0;
+    let mut pid = 9;
+    loop {
+        let mut name = [0u8; 20];
+        let Some(found) = procfs::directory_entry(&r, 9, value, cookie, &mut name).unwrap() else { break; };
+        assert_eq!(found.name, pid.to_string().as_bytes());
+        assert_eq!(found.resource >> 32, pid);
+        assert_eq!(found.next, pid + 1);
+        cookie = found.next; pid += 1;
+    }
+    assert_eq!(pid, 265);
+    let count = PROCESS_QUERIES.with(|count| count.get());
+    println!("proc task256 full enumeration managed-process queries: {count}");
+    assert_eq!(count, 770);
+}
+
+#[test]
+fn task_directory_matches_old_group_predicate_across_scope_cookie_and_buffer_cases() {
+    let mut r = Runtime::new();
+    for pid in 20..32 {
+        let mut p = Process::new(pid, if pid % 3 == 0 { 9 } else { 3 }, if pid % 4 == 0 { 7 } else { 9 });
+        p.exited = pid % 2 == 0;
+        r.managed.push(p);
+    }
+    r.managed.reverse();
+    let mut cases = 0;
+    for caller in [9, 3, 7, 99] {
+        for subject in [9, 3, 7, 99, 0] {
+            for cookie in [0, 9, 10, 23, usize::MAX] {
+                for capacity in [0, 1, 20] {
+                    let current = r.managed_process(caller);
+                    let target = r.managed_process(subject);
+                    let expected = if subject != 0 && current.zip(target).is_none_or(|(a,b)| a.rootfs.leader != b.rootfs.leader) {
+                        Err(ENOENT)
+                    } else if let Some(current) = current {
+                        let found = r.managed.iter().filter(|p| p.pid != 0 && p.pid >= cookie
+                            && p.rootfs.leader == current.rootfs.leader && p.tgid == r.thread_group(subject)).min_by_key(|p| p.pid);
+                        if let Some(p) = found {
+                            let name = p.pid.to_string().into_bytes();
+                            if name.len() > capacity { Err(EIO) }
+                            else { Ok(Some((name, (p.pid << 32) | VirtualNode::ProcProcess.id(), p.pid + 1))) }
+                        } else { Ok(None) }
+                    } else { Err(ESRCH) };
+                    let mut name = [0xa5; 20];
+                    let actual = procfs::directory_entry(&r, caller, (subject << 32) | VirtualNode::ProcTask.id(), cookie, &mut name[..capacity])
+                        .map(|entry| entry.map(|e| (e.name.to_vec(), e.resource, e.next)));
+                    assert_eq!(actual, expected, "caller={caller} subject={subject} cookie={cookie} capacity={capacity}");
+                    cases += 1;
+                }
+            }
+        }
+    }
+    println!("proc task old-predicate reference cases: {cases}");
+}
+
+#[test]
+fn comm_direct_bytes_match_format_reference_for_all_small_windows() {
+    let names: [[u8; 16]; 6] = [
+        [0; 16], *b"123456789abcdefg", *b"abc\0xxxxxxxxxxxx",
+        *b"bad\xffxxxxxxxxxxxx", *b"a\n()b\0xxxxxxxxxx", *b"\xc3\xa9\0xxxxxxxxxxxxx",
+    ];
+    let mut cases = 0;
+    for comm in names {
+        for exited in [false, true] {
+            let mut r = Runtime::new();
+            let value = entry(&r, 9, b"/proc/9/comm");
+            r.managed[0].comm = comm; r.managed[0].exited = exited;
+            let name = &comm[..comm.iter().position(|b| *b == 0).unwrap_or(15)];
+            let expected = format!("{}\n", core::str::from_utf8(name).unwrap_or("?"));
+            for offset in (0..=18).chain([usize::MAX]) {
+                for length in 0..=18 {
+                    let mut out = [0xa5; 24];
+                    let bytes = &expected.as_bytes()[offset.min(expected.len())..];
+                    let count = length.min(bytes.len());
+                    assert_eq!(procfs::read(&mut r, 9, value, offset, &mut out[..length]), Ok(count));
+                    assert_eq!(&out[..count], &bytes[..count]);
+                    assert!(out[count..].iter().all(|b| *b == 0xa5));
+                    cases += 1;
+                }
+            }
+        }
+    }
+    println!("proc comm reference windows: {cases}");
 }
 
 #[test]

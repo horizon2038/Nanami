@@ -76,6 +76,7 @@ const SLOT_NET_DEVICE_PORT: Word = 23;
 const SLOT_TIMER_SERVICE_PORT: Word = 22;
 const SLOT_CLIENT_RX_NOTIFICATION_BASE: Word = 32;
 const BACKOFF_MS: Word = 100;
+const BACKEND_CONNECT_TIMEOUT_MS: Word = 5_000;
 const TIMER_CONNECT_RETRIES: usize = 128;
 const RX_MAINTENANCE_INTERVAL_MS: Word = 10;
 
@@ -1093,12 +1094,23 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let timer_port = connect_timer_service();
 
     nanami_runtime::print!("[net-server] connect backend: net-device\n");
-    let backend_pid = backend_connect::connect(
+    let backend_pid = match backend_connect::connect(
+        BACKEND_CONNECT_TIMEOUT_MS.div_ceil(BACKOFF_MS),
         || nanami_client::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT),
         |error, consecutive| nanami_runtime::println!(
             "[net-server] backend connect failed: {} consecutive={}", error, consecutive),
         || sleep_ms(timer_port, BACKOFF_MS),
-    );
+    ) {
+        Ok(pid) => pid,
+        Err(error) => {
+            nanami_runtime::println!(
+                "[net-server] backend connection timed out after {} ms; network unavailable: {}",
+                BACKEND_CONNECT_TIMEOUT_MS,
+                error,
+            );
+            return Err(error.into());
+        }
+    };
     nanami_runtime::println!("[net-server] backend connected pid={:#x}", backend_pid);
 
     let net_device_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_NET_DEVICE_PORT);

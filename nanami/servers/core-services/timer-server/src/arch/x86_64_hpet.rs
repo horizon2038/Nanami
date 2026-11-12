@@ -185,12 +185,11 @@ impl PreparedTimer {
     }
 
     pub fn on_interrupt(&mut self) {
-        unsafe {
-            write64(self.resource, REG_INTERRUPT_STATUS, 1);
-        }
-        // Keep the enabled state so arm(None) still disables the comparator.
-        // The fired comparator must not qualify for the unchanged-alarm path.
-        self.comparator = 0;
+        // This driver selects edge mode: there is no HPET status to acknowledge.
+        // A pending/stale IRQ must not invalidate a still-future comparator and
+        // cause another disable/write/enable cycle. complete_event() samples
+        // the clock before arm(), so an actually expired comparator already
+        // fails the unchanged-alarm check. arm(None) still disables the timer.
     }
 
     pub fn arm(&mut self, deadline: Option<u64>) -> Result<(), RequestError> {
@@ -256,5 +255,47 @@ impl PreparedTimer {
             lead = lead.saturating_mul(2).min(max_lead);
         }
         Err(RequestError::Transport)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn early_irq_keeps_future_comparator_and_does_not_write_mmio() {
+        let mut registers = [0u64; HPET_MMIO_BYTES / core::mem::size_of::<u64>()];
+        registers[REG_TIMER0_CONFIGURATION / 8] = TIMER_COUNTER_64 | TIMER_INTERRUPT_ENABLE;
+        registers[REG_TIMER0_COMPARATOR / 8] = 100_000;
+        registers[REG_MAIN_COUNTER / 8] = 50_000;
+        let mut timer = PreparedTimer {
+            resource: registers.as_mut_ptr() as Word,
+            irq_number: 0,
+            physical_base: 0x1000,
+            clock: Clock::new(10_000_000, true),
+            legacy: true,
+            comparator_wide: true,
+            configuration: TIMER_COUNTER_64,
+            armed: true,
+            deadline: Some(1_000_000),
+            comparator: 100_000,
+        };
+        let before = registers;
+        // Each event takes a fresh clock sample, including an early/stale IRQ.
+        // Repeated notifications must not turn into repeated reprogramming.
+        for _ in 0..100 {
+            timer.on_interrupt();
+            assert_eq!(timer.now(), 500_000);
+            timer.arm(Some(1_000_000)).unwrap();
+            assert_eq!(timer.comparator, 100_000);
+            assert!(timer.armed);
+            assert_eq!(registers, before);
+        }
+        // A real expiry must still rearm the following deadline.
+        registers[REG_MAIN_COUNTER / 8] = 100_001;
+        timer.on_interrupt();
+        assert_eq!(timer.now(), 1_000_010);
+        timer.arm(Some(2_000_000)).unwrap();
+        assert_eq!(registers[REG_TIMER0_COMPARATOR / 8], 200_000);
     }
 }

@@ -8,6 +8,12 @@ hardware resolution; actual resolution is the HPET capability's period.
 - Only the earliest pending deadline is programmed. An unchanged deadline does
   not rewrite the comparator. With a 64-bit main counter and an empty queue, the
   comparator is disabled while the clock keeps running.
+- An IRQ notification alone does not invalidate a future comparator. Every
+  event samples the counter before deciding whether to rearm; actual expiry
+  fails the future-comparator check without special invalidation. The driver
+  selects edge mode, so it does not write the HPET interrupt-status register on
+  each IRQ. Level-mode status acknowledgement is not applicable here (see
+  [HPET specification, sections 2.3.6 and 2.4.6](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf)).
 - Comparator programming rounds up to hardware cycles, includes a 10 us guard,
   and checks the counter after writing. A missed equality comparison is retried
   with more lead time rather than waiting for a counter wrap. Persistent failure

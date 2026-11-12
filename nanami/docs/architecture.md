@@ -579,6 +579,10 @@ connection instead of repeatedly connecting into the same occupied slot.
 and receive mechanism are initialized. Without a NIC, lookup fails promptly
 instead of handing Alter a port whose server is still waiting for a backend;
 otherwise one synchronous attachment call could stall unrelated Linux guests.
+Backend connection retries have a five-second wait budget (50 delays of
+100 ms). If no backend appears, `net-server` logs the timeout and exits without
+publishing `network-service`. Retries remain bounded when the timer is absent
+and the spin-delay fallback is used.
 
 Registration is append-only: another owner or endpoint cannot replace a name;
 an exact owner/endpoint retry is idempotent. A registration request is not

@@ -81,10 +81,11 @@ fn one_shot_disarms_when_queue_becomes_empty() {
     assert_ne!(mmio[0x100 / 8] & (1 << 2), 0);
     assert_eq!(mmio[0x100 / 8] & (1 << 3), 0);
     mmio[0xf0 / 8] = 100_001;
+    mmio[0x20 / 8] = 0; // Edge-mode status is always zero on hardware.
     timer.on_interrupt();
     timer.arm(None).unwrap();
     assert_eq!(mmio[0x100 / 8] & (1 << 2), 0);
-    assert_eq!(mmio[0x20 / 8], 1); // Only timer 0's W1C status bit.
+    assert_eq!(mmio[0x20 / 8], 0); // No runtime W1C for an edge-mode IRQ.
 }
 
 #[test]

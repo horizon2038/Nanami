@@ -31,6 +31,10 @@ const ENOMEM: i32 = 12;
 const LINUX_PAGE_SIZE: usize = 4096;
 const LINUX_PROT_WRITE: usize = 2;
 const SYS_CLONE: usize = 56;
+const LINUX_CLONE_VM: usize = 0x100;
+const LINUX_SIGCHLD: usize = 17;
+#[derive(Debug)]
+enum EmulationAction { Return(isize), Park }
 #[derive(Clone, Copy, Debug)]
 struct LinuxSyscallContext {
     number: Word,
@@ -48,6 +52,9 @@ struct Runtime {
     posix_shm: usize,
     scratch: Box<[u8; 4096]>,
     captured: Option<LinuxSyscallContext>,
+    parked: Option<(usize, usize, LinuxSyscallContext)>,
+    threads: bool,
+    used_shared: bool,
 }
 impl Runtime {
     fn new() -> Self {
@@ -62,6 +69,9 @@ impl Runtime {
             posix_shm: scratch.as_mut_ptr() as usize,
             scratch,
             captured: None,
+            parked: None,
+            threads: false,
+            used_shared: false,
         }
     }
     fn managed_process(&self, pid: usize) -> Option<&Process> {
@@ -73,6 +83,12 @@ impl Runtime {
     fn memory_access_allowed(&self, _: usize, _: usize, _: usize, _: usize) -> bool {
         true
     }
+    fn park_signal_waiter(&mut self, pid: usize, child: usize, context: LinuxSyscallContext) -> bool {
+        self.parked = Some((pid, child, context));
+        true
+    }
+    fn has_live_threads(&self, _: usize) -> bool { self.threads }
+    fn thread_group(&self, pid: usize) -> usize { pid }
 }
 fn read_target_memory(
     runtime: &Runtime,
@@ -116,6 +132,16 @@ fn copyout_owned(runtime: &Runtime, pid: usize, destination: usize, source: &[u8
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/clone3.rs"]
 mod clone3;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/vfork.rs"]
+mod vfork;
+mod threads {
+    use super::*;
+    pub(super) fn clone_vm(runtime: &mut Runtime, _: usize, context: LinuxSyscallContext) -> Result<usize, i32> {
+        runtime.used_shared = true;
+        runtime.captured = Some(context);
+        Ok(77)
+    }
+}
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/prctl.rs"]
 mod prctl;
 
@@ -145,7 +171,7 @@ fn scope_controls_follow_successful_checked_name_copy_and_owner_lookup() {
 }
 
 fn clone(runtime: &mut Runtime, words: &[u64; 12], bytes: usize) -> Result<usize, i32> {
-    clone3::clone3(
+    match clone3::clone3(
         runtime,
         1,
         LinuxSyscallContext {
@@ -153,7 +179,11 @@ fn clone(runtime: &mut Runtime, words: &[u64; 12], bytes: usize) -> Result<usize
             args: [words.as_ptr() as usize, bytes, 0, 0, 0, 0],
             program_counter: 0x123456,
         },
-    )
+    ) {
+        EmulationAction::Return(value) if value < 0 => Err(-value as i32),
+        EmulationAction::Return(value) => Ok(value as usize),
+        EmulationAction::Park => Ok(runtime.parked.unwrap().1),
+    }
 }
 
 #[test]
@@ -266,7 +296,7 @@ fn clone3_rejects_small_large_and_unknown_nonzero_tails_before_fork() {
     assert!(runtime.captured.is_none());
 }
 #[test]
-fn clone3_rejects_signal_bits_bad_stacks_and_unavailable_vm_vfork() {
+fn clone3_rejects_signal_bits_and_bad_stacks() {
     let mut runtime = Runtime::new();
     let mut words = [0; 12];
     words[0] = 17;
@@ -276,7 +306,46 @@ fn clone3_rejects_signal_bits_bad_stacks_and_unavailable_vm_vfork() {
     assert_eq!(clone(&mut runtime, &words, 88), Err(EINVAL));
     words[6] = u64::MAX;
     assert_eq!(clone(&mut runtime, &words, 88), Err(EINVAL));
-    words[0] = 0x4100;
-    assert_eq!(clone(&mut runtime, &words, 88), Err(ENOSYS));
     assert!(runtime.captured.is_none());
+}
+
+#[test]
+fn shared_vfork_parks_with_the_original_clone3_pc_and_arguments() {
+    let mut runtime = Runtime::new();
+    let mut words = [0; 12];
+    words[0] = 0x4100 | (1 << 32);
+    words[4] = 17; words[5] = 0x10000; words[6] = 0x10000;
+    assert_eq!(clone(&mut runtime, &words, 88), Ok(77));
+    let (_, child, original) = runtime.parked.unwrap();
+    assert_eq!(child, 77);
+    assert_eq!(original.number, 435);
+    assert_eq!(original.program_counter, 0x123456);
+    assert_eq!(original.args[0], words.as_ptr() as usize);
+    assert_eq!(runtime.captured.unwrap().args[0], words[0] as usize | 17);
+}
+
+#[test]
+fn vfork_ignores_all_argument_registers_and_shares_the_inherited_stack() {
+    let mut runtime = Runtime::new();
+    let original = LinuxSyscallContext { number: 58, args: [usize::MAX; 6], program_counter: 0x123456 };
+    assert!(matches!(vfork::sys_vfork(&mut runtime, 1, original), EmulationAction::Park));
+    assert!(runtime.used_shared);
+    let child = runtime.captured.unwrap();
+    assert_eq!(child.number, 58);
+    assert_eq!(child.program_counter, original.program_counter);
+    assert_eq!(child.args, [0x4111, 0, 0, 0, 0, 0]);
+    let (parent, pid, resumed) = runtime.parked.unwrap();
+    assert_eq!((parent, pid), (1, 77));
+    assert_eq!(resumed.args, original.args);
+    assert_eq!(resumed.program_counter, original.program_counter);
+}
+
+#[test]
+fn multithreaded_vfork_preserves_the_existing_private_snapshot_fallback() {
+    let mut runtime = Runtime::new(); runtime.threads = true;
+    let original = LinuxSyscallContext { number: 58, args: [usize::MAX; 6], program_counter: 0x123456 };
+    assert!(matches!(vfork::sys_vfork(&mut runtime, 1, original), EmulationAction::Park));
+    assert!(!runtime.used_shared);
+    assert_eq!(runtime.captured.unwrap().args, original.args);
+    assert_eq!(runtime.parked.unwrap().1, 77);
 }

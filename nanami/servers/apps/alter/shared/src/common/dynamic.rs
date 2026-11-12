@@ -257,7 +257,11 @@ pub fn track(
     pid: Word,
     main: &ElfMetadata,
     interpreter: Option<&Interpreter>,
+    initial_permissions: bool,
 ) -> bool {
+    // Alpha alone certifies the raw, disjoint, nonzero LOAD layout. Callers
+    // consume that acknowledgement before the stopped main image is changed.
+    // Keep the ordinary protocol with older Alpha and all exceptional images.
     let bias = if main.elf_type == 3 { 0x400000 } else { 0 };
     for segment in main.segments.iter().take(main.load_segment_count) {
         if segment.memory_size == 0 {
@@ -277,7 +281,7 @@ pub fn track(
         if !runtime.add_mapping(pid, base, (end & !(PAGE - 1)) - base, prot) {
             return false;
         }
-        if nanami_runtime::request_process_mapping_protect(
+        if !initial_permissions && nanami_runtime::request_process_mapping_protect(
             pid,
             base,
             (end & !(PAGE - 1)) - base,
@@ -286,6 +290,16 @@ pub fn track(
         .is_err()
         {
             return false;
+        }
+    }
+    #[cfg(target_os = "none")]
+    if initial_permissions && option_env!("NANAMI_INITIAL_RIGHTS_DIAG") == Some("1") {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static REPORTS: AtomicUsize = AtomicUsize::new(0);
+        if REPORTS.fetch_add(1, Ordering::Relaxed) < 64 {
+            nanami_runtime::println!("[elf.initial-rights] pid={} entry={:#x} loads={} protect-rpcs=0",
+                pid, main.entry_point, main.segments.iter().take(main.load_segment_count)
+                    .filter(|segment| segment.memory_size != 0).count());
         }
     }
     interpreter

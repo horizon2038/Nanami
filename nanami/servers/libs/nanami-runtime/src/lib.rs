@@ -332,6 +332,38 @@ pub fn request_memory_create(bytes: Word) -> Result<Word, RequestError> {
     Ok(local)
 }
 
+/// Construct reclaimable owned RAM with a copied prefix, zero suffix and
+/// readonly leaves. Requires a nonempty source and the matching Alpha API.
+pub fn request_memory_create_readonly(
+    bytes: Word, source: Word, source_bytes: Word,
+) -> Result<Word, RequestError> {
+    create_readonly_memory(bytes, source, source_bytes, OS_REQUEST_SHARED_MEMORY_CREATE)
+}
+
+/// Immutable backing for Alpha copies/snapshots, with no native CPU mapping.
+/// Map R with self MAPPING_PROTECT before dereferencing the returned address.
+pub fn request_memory_create_source(
+    bytes: Word, source: Word, source_bytes: Word,
+) -> Result<Word, RequestError> {
+    create_readonly_memory(bytes, source, source_bytes, OS_REQUEST_MEMORY_SOURCE_CREATE)
+}
+
+fn create_readonly_memory(bytes: Word, source: Word, source_bytes: Word, code: Word)
+    -> Result<Word, RequestError> {
+    let capacity = bytes.checked_add(4095).ok_or(RequestError::InvalidArgument)? & !4095;
+    if bytes == 0 || source == 0 || source_bytes == 0 || source_bytes > capacity
+        || source.checked_add(source_bytes).is_none()
+    { return Err(RequestError::InvalidArgument); }
+    let (status, local, peer) = call_os_port(
+        code, 0, bytes, source, source_bytes, 5,
+    )?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    if local == 0 || local & 4095 != 0 || local.checked_add(capacity).is_none() || peer != 0 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(local)
+}
+
 /// Share owned RAM at a fixed address in a process supervised by the caller.
 pub fn request_mapping_share_at(
     peer_pid: Word,
@@ -564,10 +596,20 @@ pub fn request_process_spawn_memory_fault_handler_suspended(
     priority: Word,
     pcb_destination_slot: Word,
 ) -> Result<Word, RequestError> {
+    request_process_spawn_memory_fault_handler_suspended_with_permissions(
+        image_vaddr, size_bytes, priority, pcb_destination_slot,
+    ).map(|(pid, _)| pid)
+}
+
+/// The optional acknowledgement describes only the stopped initial image.
+/// A zero/unknown reply keeps the supervisor's ordinary protection pass.
+pub fn request_process_spawn_memory_fault_handler_suspended_with_permissions(
+    image_vaddr: Word, size_bytes: Word, priority: Word, pcb_destination_slot: Word,
+) -> Result<(Word, bool), RequestError> {
     if image_vaddr == 0 || size_bytes == 0 || pcb_destination_slot == 0 {
         return Err(RequestError::InvalidArgument);
     }
-    let (status, child_pid, _) = call_os_port(
+    let (status, child_pid, permissions) = call_os_port(
         OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED,
         image_vaddr,
         size_bytes,
@@ -578,7 +620,7 @@ pub fn request_process_spawn_memory_fault_handler_suspended(
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
-    Ok(child_pid)
+    Ok((child_pid, permissions == OS_PROCESS_IMAGE_FINAL_PERMISSIONS))
 }
 
 /// Drop a supervised guest's direct native capability access. The first call
@@ -621,8 +663,9 @@ pub fn request_process_fork(
     request_process_fork_options(source_pid, pcb_destination_slot, priority, 0)
 }
 
-/// Opt-in private R/RX aliasing. The supervisor must quiesce all source VM
-/// users before forking, and query/detach before privileged writes/upgrades.
+/// Opt-in private COW (legacy function name). The supervisor must quiesce all
+/// source VM users and revoke writable views before forking, repair COW write
+/// faults, and query/detach before privileged writes or hardware upgrades.
 pub fn request_process_fork_shared_readonly(
     source_pid: Word,
     pcb_destination_slot: Word,
@@ -658,6 +701,11 @@ fn request_process_fork_options(
 
 /// Query is side-effect free. DETACH requires all tasks sharing the target VM
 /// to be inactive through the current fault or a completed synchronous stop.
+/// QUERY returns whether shared private pages exist; DETACH returns whether
+/// any were successfully repaired. DEFERRED additionally permits absent
+/// replacement PTEs until PROTECT or POPULATE_SNAPSHOT; it requires a sealed
+/// target and a supervisor supporting those missing faults. A failing detach
+/// never reports success.
 pub fn request_process_private_write(
     pid: Word,
     address: Word,
@@ -667,7 +715,7 @@ pub fn request_process_private_write(
     if pid == 0
         || bytes == 0
         || address.checked_add(bytes).is_none()
-        || (mode != OS_PRIVATE_WRITE_QUERY && mode != OS_PRIVATE_WRITE_DETACH)
+        || !matches!(mode, OS_PRIVATE_WRITE_QUERY | OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED)
     {
         return Err(RequestError::InvalidArgument);
     }
@@ -698,6 +746,17 @@ pub fn request_process_map_private_snapshot(
     source: Word,
     permissions: Word,
 ) -> Result<(), RequestError> {
+    map_private_snapshot(pid, base, bytes, source, permissions, None)
+}
+
+pub fn request_process_map_private_snapshot_prefix(
+    pid: Word, base: Word, bytes: Word, source: Word, eager_bytes: Word,
+) -> Result<(), RequestError> {
+    map_private_snapshot(pid, base, bytes, source, 1, Some(eager_bytes))
+}
+
+fn map_private_snapshot(pid: Word, base: Word, bytes: Word, source: Word,
+    permissions: Word, eager: Option<Word>) -> Result<(), RequestError> {
     if pid == 0
         || base == 0
         || source == 0
@@ -709,7 +768,9 @@ pub fn request_process_map_private_snapshot(
     {
         return Err(RequestError::InvalidArgument);
     }
-    let descriptor = [source, permissions];
+    if eager.is_some_and(|prefix| permissions != 1 || prefix == 0
+        || prefix > bytes || prefix & 4095 != 0) { return Err(RequestError::InvalidArgument); }
+    let descriptor = [source, permissions | if eager.is_some() { OS_PRIVATE_SNAPSHOT_DEFER } else { 0 }, eager.unwrap_or(0)];
     let (status, _, _) = call_os_port(
         OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT,
         pid,
@@ -722,6 +783,19 @@ pub fn request_process_map_private_snapshot(
         return Err(RequestError::Status(status));
     }
     Ok(())
+}
+
+/// Complete a missing immutable-snapshot PTE, preserving current logical rights.
+pub fn request_process_populate_snapshot(pid: Word, page: Word, required: Word)
+    -> Result<bool, RequestError> {
+    if pid == 0 || page == 0 || page & 4095 != 0 || !matches!(required, 1 | 2 | 4) {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, populated, _) = call_os_port(OS_REQUEST_PROCESS_POPULATE_SNAPSHOT,
+        pid, page, required, 0, 4)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    if populated > 1 { return Err(RequestError::Protocol); }
+    Ok(populated != 0)
 }
 
 /// Allocate initialized private pages at a fixed address. The source prefix is
@@ -737,6 +811,35 @@ pub fn request_process_map_initialized_at(
 }
 
 /// Trusted supervisor only: publish freshly initialized pages with final rights.
+/// Select the address using Alpha's ordinary automatic heap reservation.
+pub fn request_process_map_anonymous_protected(
+    target_pid: Word,
+    size_bytes: Word,
+    permissions: Word,
+) -> Result<(Word, Word), RequestError> {
+    if target_pid == 0 || size_bytes == 0 || permissions == 0 || permissions & !7 != 0 {
+        return Err(RequestError::InvalidArgument);
+    }
+    let mapped = size_bytes.checked_add(4095).ok_or(RequestError::InvalidArgument)? & !4095;
+    let initializer = [0, 0, permissions];
+    let (status, base, bytes) = call_os_port(
+        OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED,
+        target_pid,
+        mapped,
+        0,
+        initializer.as_ptr() as Word,
+        5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if base == 0 || base & 4095 != 0 || bytes != mapped || base.checked_add(bytes).is_none() {
+        return Err(RequestError::Protocol);
+    }
+    Ok((base, bytes))
+}
+
+/// Trusted supervisor only: publish freshly initialized pages with final rights.
 pub fn request_process_map_initialized_protected_at(
     target_pid: Word,
     base: Word,
@@ -749,6 +852,26 @@ pub fn request_process_map_initialized_protected_at(
         return Err(RequestError::InvalidArgument);
     }
     request_map_initialized(target_pid, base, mapped_bytes, source, source_bytes, Some(permissions))
+}
+
+/// Initialize private readonly backing directly, retaining lazy small leaves.
+/// Errors can leave an owned prefix; ordinary whole-range cleanup still owns it.
+pub fn request_process_map_initialized_deferred_at(
+    target_pid: Word, base: Word, mapped_bytes: Word, source: Word,
+    source_bytes: Word, eager_bytes: Word,
+) -> Result<(), RequestError> {
+    if target_pid == 0 || base == 0 || mapped_bytes == 0
+        || (base | mapped_bytes | eager_bytes) & 4095 != 0
+        || eager_bytes == 0 || eager_bytes > mapped_bytes
+        || base.checked_add(mapped_bytes).is_none() || source_bytes > mapped_bytes
+        || (source_bytes != 0 && source == 0) || source.checked_add(source_bytes).is_none()
+    { return Err(RequestError::InvalidArgument); }
+    let initializer = [source, source_bytes, 1 | OS_MAP_INITIALIZER_DEFER, eager_bytes];
+    let (status, address, bytes) = call_os_port(OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED,
+        target_pid, mapped_bytes, base, initializer.as_ptr() as Word, 5)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    if address != base || bytes != mapped_bytes { return Err(RequestError::InvalidArgument); }
+    Ok(())
 }
 
 fn request_map_initialized(
@@ -814,10 +937,19 @@ pub fn request_process_exec_memory(
     size_bytes: Word,
     priority: Word,
 ) -> Result<Word, RequestError> {
+    request_process_exec_memory_with_permissions(target_pid, image_vaddr, size_bytes, priority)
+        .map(|(entry, _)| entry)
+}
+
+/// Only a successful initial-image acknowledgement may omit redundant LOAD
+/// protections. It conveys no authority for later mmap/mprotect operations.
+pub fn request_process_exec_memory_with_permissions(
+    target_pid: Word, image_vaddr: Word, size_bytes: Word, priority: Word,
+) -> Result<(Word, bool), RequestError> {
     if target_pid == 0 || image_vaddr == 0 || size_bytes == 0 {
         return Err(RequestError::InvalidArgument);
     }
-    let (status, entry_point, _) = call_os_port(
+    let (status, entry_point, permissions) = call_os_port(
         OS_REQUEST_PROCESS_EXEC_MEMORY,
         target_pid,
         image_vaddr,
@@ -828,7 +960,7 @@ pub fn request_process_exec_memory(
     if status != OS_RESPONSE_OK {
         return Err(RequestError::Status(status));
     }
-    Ok(entry_point)
+    Ok((entry_point, permissions == OS_PROCESS_IMAGE_FINAL_PERMISSIONS))
 }
 
 pub fn request_process_spawn_fault_handler(

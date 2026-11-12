@@ -91,6 +91,7 @@ fn process_frame_descriptor(root: usize, slot: usize) -> usize {
 }
 struct Memory;
 impl Memory {
+    fn ensure_page_tables(&mut self,_:usize,_:usize,_:&mut vm_space::VmSpace)->Result<(),CapabilityError> {Ok(())}
     fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> { Some(1_000_000_000 + page) }
 }
 struct Alpha {
@@ -101,6 +102,11 @@ struct Alpha {
     fail_zero_construction: bool,
 }
 impl Alpha {
+    fn split_private_large_mappings(&mut self, _: usize, _: usize, _: usize, _: bool) -> Result<(), CapabilityError> { Ok(()) }
+    fn prepare_large_protection(&mut self, _: usize, _: usize, _: usize, _: usize)
+        -> Result<Vec<protection::LargeProtection>, CapabilityError> { Ok(Vec::new()) }
+    fn apply_large_protection(&mut self, _: usize, _: usize, _: &[protection::LargeProtection],
+        _: core::ops::Range<usize>, _: usize) -> Result<(), CapabilityError> { unreachable!() }
     fn new(permissions: usize) -> Self {
         KERNEL.with(|kernel| *kernel.borrow_mut() = Kernel::default());
         let mut processes = manager();
@@ -212,6 +218,19 @@ impl Alpha {
 mod protection;
 #[path = "../../nanami/src/nanami_core/alpha/mapping_release.rs"]
 mod release;
+
+#[test]
+fn single_page_equal_rights_cannot_bypass_unacknowledged_pte_repair() {
+        let mut a=Alpha::new(1);
+        a.processes.vm_space_mut(1).unwrap().mark_mapping_uncertain(VA);
+        KERNEL.with_borrow_mut(|k|k.unmap_failure=Some(Failure::Before));
+        let request=OsRequestEvent {identifier:1,arg0:1,arg1:VA,arg2:PAGE_SIZE,arg3:1};
+        assert!(a.handle_mapping_protect_request(request).is_err());
+        assert!(a.owns_page());
+        KERNEL.with_borrow_mut(|k|k.unmap_failure=None);
+        a.handle_mapping_protect_request(request).unwrap();
+        assert!(!a.processes.vm_space(1).unwrap().mapping_is_uncertain(VA));
+}
 
 #[test]
 fn bulk_zero_protection_keeps_cold_pages_absent_until_single_page_demand() {
@@ -330,6 +349,48 @@ fn unchanged_none_range_with_unbacked_pages_preserves_cleanup_and_ownership() {
 }
 
 #[test]
+fn small_protection_snapshots_need_no_heap_before_cleanup_or_pte_changes() {
+    for count in 1..=5 {
+        let mut a = Alpha::new(3);
+        for page in 1..count { a.page(1, VA + page * PAGE_SIZE, 3); }
+        a.fail_invalidation = true;
+        let request = OsRequestEvent { identifier: 1, arg0: 1, arg1: VA, arg2: count * PAGE_SIZE, arg3: 1 };
+        PROTECT_ALLOCATIONS.with(|n| n.set(Some(0)));
+        let result = a.handle_mapping_protect_request(request);
+        let allocations = PROTECT_ALLOCATIONS.with(|n| n.replace(None).unwrap());
+        assert_eq!(result, Err(CapabilityError::Fatal));
+        assert_eq!(allocations, if count <= 4 { 0 } else { 2 });
+        KERNEL.with_borrow(|k| { assert_eq!((k.maps, k.unmaps), (0, 0)); assert!(k.ptes.values().all(|(_, rights)| *rights == 3)); });
+        println!("INLINE-PROTECT pages={count} preflight_allocations={allocations}");
+    }
+}
+
+#[test]
+fn inline_protection_snapshot_restores_mixed_rights_at_every_failed_page() {
+    for count in 1..=4 {
+        for failed in 0..count {
+            for failure in [Failure::Before, Failure::After] {
+                let rights = [1usize, 3, 0, 5];
+                let mut a = Alpha::new(rights[0]);
+                for page in 1..count { a.page(1, VA + page * PAGE_SIZE, rights[page]); }
+                KERNEL.with_borrow_mut(|k| { k.map_failure = Some(failure); k.map_failure_at = Some(failed); });
+                let request = OsRequestEvent { identifier: 1, arg0: 1, arg1: VA, arg2: count * PAGE_SIZE, arg3: 4 };
+                assert_eq!(a.handle_mapping_protect_request(request), Err(CapabilityError::Fatal));
+                let space = a.processes.memory_entry(1).unwrap().address_space;
+                for page in 0..count {
+                    let va = VA + page * PAGE_SIZE;
+                    let vm = a.processes.vm_space_mut(1).unwrap();
+                    assert_eq!(vm.permissions(va), rights[page]); assert!(!vm.mapping_is_uncertain(va));
+                    let frame = vm.find_frame(va).unwrap();
+                    KERNEL.with_borrow(|k| assert_eq!(k.ptes.get(&(space, va)).copied(), (rights[page] != 0).then_some((frame, rights[page]))));
+                    assert!(a.processes.find_active_physical_allocation_reference(1, va, 1).is_some());
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn backed_protection_ranges_keep_preflight_failure_and_large_prefix_rollback() {
     let request = OsRequestEvent { identifier: 1, arg0: 1, arg1: VA, arg2: 64 * PAGE_SIZE, arg3: 1 };
     let mut a = Alpha::new(3);
@@ -412,6 +473,45 @@ fn equal_rights_do_not_bypass_cow_write_or_uncertain_unmap_guards() {
     assert!(a.protect(0).is_err());assert!(a.owns_page());
     assert!(a.processes.vm_space_mut(1).unwrap().mapping_is_uncertain(VA));
     KERNEL.with_borrow(|k|assert!(k.unmaps>0));
+}
+
+#[test]
+fn writable_cow_protection_preserves_logical_rights_and_masks_every_hardware_transition() {
+    let mut a = Alpha::new(1);
+    let vm = a.processes.vm_space_mut(1).unwrap();
+    vm.mark_private_page_cow_write(VA, true);
+    vm.set_permissions(VA, 3);
+    let space = a.processes.memory_entry(1).unwrap().address_space;
+    for rights in [3, 7, 5, 0, 3, 1, 7] {
+        assert_eq!(a.protect(rights), Ok(()));
+        let vm = a.processes.vm_space_mut(1).unwrap();
+        assert_eq!(vm.permissions(VA), rights);
+        assert_eq!(vm.hardware_permissions(VA), rights & !2);
+        KERNEL.with(|k| assert_eq!(k.borrow().ptes.get(&(space, VA)).map(|p| p.1),
+            if rights == 0 { None } else { Some(rights & !2) }));
+    }
+    for rights in [2, 6] { assert!(a.protect(rights).is_err()); }
+    assert_eq!(a.release(), Ok(()));
+    let vm = a.processes.vm_space_mut(1).unwrap();
+    assert!(!vm.private_page_shared(VA));
+    assert!(!vm.private_page_cow_write(VA));
+}
+
+#[test]
+fn writable_cow_protection_failure_restores_logical_and_readonly_leaf_rights() {
+    for failure in [Failure::Before, Failure::After] {
+        let mut a = Alpha::new(1);
+        let vm = a.processes.vm_space_mut(1).unwrap();
+        vm.mark_private_page_cow_write(VA, true); vm.set_permissions(VA, 3);
+        KERNEL.with(|k| k.borrow_mut().map_failure = Some(failure));
+        assert!(a.protect(7).is_err());
+        let space = a.processes.memory_entry(1).unwrap().address_space;
+        let vm = a.processes.vm_space_mut(1).unwrap();
+        assert_eq!(vm.permissions(VA), 3);
+        assert!(vm.private_page_cow_write(VA));
+        assert!(!vm.mapping_is_uncertain(VA));
+        KERNEL.with(|k| assert_eq!(k.borrow().ptes[&(space, VA)].1, 1));
+    }
 }
 
 #[test]

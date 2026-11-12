@@ -1,6 +1,9 @@
 //! Production sendfile; service I/O and guest memory are deterministic mocks.
 #![allow(dead_code)]
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
+pub use std::{print, println};
+type RequestError = i32;
 type Word = usize;
 mod state {
     pub const LINUX_FD_MAX: usize = 64;
@@ -43,11 +46,33 @@ struct LinuxFile {
     kind: LinuxFileKind,
     resource: Word,
     posix_fd: Word,
+    grant: Word,
+    cursor: bool,
+}
+impl LinuxFile {
+    fn posix_read_grant(&self) -> Word { self.grant }
+    fn posix_read_cursor(&self) -> bool { self.cursor && self.grant != 0 }
+    fn with_posix_read_grant(mut self, grant: Word) -> Self { self.grant=grant; self.cursor=false; self }
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/common/file_reader.rs"]
+mod file_reader;
+struct Channel;
+impl Channel {
+    fn port(&mut self, _: Word) -> Option<Word> { Some(22) }
+}
+mod reader_scope {
+    use super::*;
+    mod production {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../nanami/servers/apps/alter/shared/src/common/state/file_reader.rs"));
+    }
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/pipe.rs"]
 mod pipe_state;
 use pipe_state::LinuxPipe as Pipe;
 struct Runtime {
+    file_reader: file_reader::Reader,
+    rooted_channel: Channel,
+    posix_direct_shm: Word,
     posix_port: Word,
     posix_shm: Word,
     terminal_port: Word,
@@ -63,6 +88,11 @@ struct Runtime {
 }
 #[derive(Default)]
 struct Backend {
+    granted_reads: Vec<(Word, Word, Word)>,
+    granted_stats: usize,
+    proxy_stats: usize,
+    grant_error: Option<i32>,
+    oversized_read: Option<Word>,
     position: usize,
     data: Vec<u8>,
     sent: Vec<u8>,
@@ -85,6 +115,9 @@ fn send(bytes: usize) -> Result<Word, i32> {
     })
 }
 impl Runtime {
+    fn seek_posix(&self, fd: Word, offset: Word, whence: Word) -> Result<Word, i32> {
+        self.file_reader.seek(fd, offset, whence).unwrap_or_else(|| posix::posix_seek(self.posix_port, fd, offset, whence))
+    }
     fn linux_file(&self, _: Word, fd: Word) -> Option<LinuxFile> {
         match fd {
             3 => Some(self.input),
@@ -98,7 +131,10 @@ impl Runtime {
     fn posix_read_buffer_size(&self) -> Word {
         64
     }
-    fn pread_posix(&self, _: Word, _: Word, len: Word, offset: Word) -> Result<(Word, Word), i32> {
+    fn pread_posix(&self, fd: Word, output: Word, len: Word, offset: Word) -> Result<(Word, Word), i32> {
+        if let Some(Ok(bytes)) = self.file_reader.pread(fd, output, len, offset) {
+            return Ok((bytes, self.posix_shm));
+        }
         BACKEND.with(|backend| {
             let b = backend.borrow();
             let len = len.min(b.data.len().saturating_sub(offset));
@@ -128,7 +164,11 @@ mod posix {
     pub const POSIX_SEEK_SET: Word = 0;
     pub const POSIX_SEEK_CUR: Word = 1;
     pub fn posix_fstat(_: Word, _: Word) -> Result<(Word, Word, Word, Word, Word), i32> {
+        BACKEND.with(|b| b.borrow_mut().proxy_stats += 1);
         Ok((1, 100, POSIX_FILE_TYPE_REGULAR, 0, 0))
+    }
+    pub fn posix_fstat_flags(port: Word, fd: Word, _: Word) -> Result<(Word, Word, Word, Word, Word), i32> {
+        posix_fstat(port, fd)
     }
     pub fn posix_fcntl_status_flags(_: Word, _: Word, _: Option<Word>) -> Result<Word, i32> {
         BACKEND.with(|b| Ok(b.borrow().flags))
@@ -144,6 +184,38 @@ mod posix {
             Ok(b.position)
         })
     }
+}
+mod vfs {
+    use super::*;
+    pub const VFS_FILE_TYPE_REGULAR: Word = 1;
+    pub fn vfs_read_cursor_granted(port: Word, grant: Word, bytes: Word, output: Word) -> Result<Word, i32> {
+        let position=BACKEND.with(|b|b.borrow().position);
+        let read=vfs_pread_granted(port,grant,position,bytes,output)?;
+        BACKEND.with(|b|b.borrow_mut().position=position+read);Ok(read)
+    }
+    pub fn vfs_seek_cursor_granted(port: Word, _: Word, offset: Word, whence: Word) -> Result<Word, i32> {
+        posix::posix_seek(port,0,offset,whence)
+    }
+    pub fn vfs_fstat_granted(_: Word, _: Word, _: Word) -> Result<(Word, Word, Word), i32> {
+        BACKEND.with(|b| {
+            let mut b = b.borrow_mut(); b.granted_stats += 1;
+            if let Some(error) = b.grant_error { return Err(error); }
+            Ok((1, b.data.len(), VFS_FILE_TYPE_REGULAR))
+        })
+    }
+    pub fn vfs_pread_granted(_: Word, grant: Word, offset: Word, bytes: Word, output: Word) -> Result<Word, i32> {
+        BACKEND.with(|b| {
+            let mut b = b.borrow_mut(); b.granted_reads.push((grant, offset, bytes));
+            if let Some(error) = b.grant_error { return Err(error); }
+            if let Some(bytes) = b.oversized_read { return Ok(bytes); }
+            let bytes = bytes.min(b.data.len().saturating_sub(offset));
+            if bytes != 0 {
+                unsafe { std::ptr::copy_nonoverlapping(b.data.as_ptr().add(offset), (b.source + output) as *mut u8, bytes); }
+            }
+            Ok(bytes)
+        })
+    }
+    pub fn vfs_read_versioned_granted(_: Word, _: Word, _: Word, _: Word) -> Result<(Word, Word), i32> { unreachable!() }
 }
 mod net {
     use super::*;
@@ -212,6 +284,9 @@ fn setup() -> (Box<[u8; 128]>, Runtime) {
     });
     let mut pipe_storage = Box::new([0; LINUX_PIPE_BYTES]);
     let runtime = Runtime {
+        file_reader: file_reader::Reader::EMPTY,
+        rooted_channel: Channel,
+        posix_direct_shm: address,
         posix_port: 1,
         posix_shm: address,
         terminal_port: 2,
@@ -223,11 +298,15 @@ fn setup() -> (Box<[u8; 128]>, Runtime) {
             kind: LinuxFileKind::Posix,
             resource: 0,
             posix_fd: 10,
+            grant: 0,
+            cursor: false,
         },
         output: LinuxFile {
             kind: LinuxFileKind::Posix,
             resource: 1,
             posix_fd: 11,
+            grant: 0,
+            cursor: false,
         },
         pipe: Pipe {
             active: true,
@@ -243,6 +322,53 @@ fn setup() -> (Box<[u8; 128]>, Runtime) {
     };
     (memory, runtime)
 }
+
+#[test]
+fn sendfile_scopes_fresh_stat_and_pread_without_changing_short_write_cursor_rules() {
+    let (_memory, mut r) = setup();
+    r.input.grant = 71;
+    r.file_reader = file_reader::Reader::new(90, 99, 22);
+    BACKEND.with(|b| { let mut b = b.borrow_mut(); b.position = 7; b.max_write = 3; });
+    assert_eq!(production::sys_sendfile(&mut r, 1, 4, 3, 0, 19), Ok(3));
+    BACKEND.with(|b| {
+        let b = b.borrow();
+        assert_eq!((b.granted_stats, b.proxy_stats), (1, 0));
+        assert_eq!(b.granted_reads, [(71, 7, 19)]);
+        assert_eq!(b.sent, [7, 8, 9]);
+        assert_eq!(b.position, 10);
+    });
+    assert!(r.file_reader.pread(10, 0, 1, 0).is_none());
+    assert_eq!(r.file_reader.pread(90, 0, 1, 0), Some(Ok(1)));
+    BACKEND.with(|b| assert_eq!(b.borrow().granted_reads.last().unwrap().0, 99));
+}
+
+#[test]
+fn expired_sendfile_grant_uses_fresh_proxy_stat_and_same_positioned_offset() {
+    let (_memory, mut r) = setup();
+    r.input.grant = 71;
+    let mut offset = 17u64;
+    BACKEND.with(|b| b.borrow_mut().grant_error = Some(EIO));
+    assert_eq!(production::sys_sendfile(&mut r, 1, 4, 3, &mut offset as *mut _ as Word, 5), Ok(5));
+    assert_eq!(offset, 22);
+    BACKEND.with(|b| {
+        let b = b.borrow();
+        assert_eq!((b.granted_stats, b.proxy_stats, b.position), (1, 1, 0));
+        assert_eq!(b.granted_reads, [(71, 17, 5)]);
+        assert_eq!(b.sent, [17, 18, 19, 20, 21]);
+    });
+}
+
+#[test]
+fn oversized_sendfile_reply_cannot_publish_bytes_or_advance_any_cursor() {
+    let (_memory, mut r) = setup();
+    r.input.grant = 71;
+    BACKEND.with(|b| b.borrow_mut().oversized_read = Some(65));
+    let mut offset = 17u64;
+    assert_eq!(production::sys_sendfile(&mut r, 1, 4, 3, &mut offset as *mut _ as Word, 64), Err(EIO));
+    assert_eq!(offset, 17);
+    BACKEND.with(|b| { let b = b.borrow(); assert!(b.sent.is_empty()); assert_eq!(b.position, 0); });
+}
+
 #[test]
 fn sendfile_pipe_burst_preserves_bytes_and_counts_readable_notifications() {
     let (_memory, mut r) = setup();

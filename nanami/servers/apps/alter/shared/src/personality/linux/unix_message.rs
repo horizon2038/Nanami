@@ -79,6 +79,16 @@ fn copy_in_append(
     let original = data.len();
     let (bases, lengths) = message.vectors.parts();
     data.try_reserve_exact(len).map_err(|_| ENOMEM)?;
+    if bases.len() > 1 {
+        if let Some(result) = guest_memory::copyin_owned_gather(
+            runtime, pid, bases, lengths, &mut data.spare_capacity_mut()[..len],
+        ) {
+            result?;
+            // Even a partially completed failed vector remains outside Vec::len.
+            unsafe { data.set_len(original + len); }
+            return Ok(());
+        }
+    }
     let result = (|| {
         let mut copied = 0;
         for index in 0..bases.len() {
@@ -170,6 +180,32 @@ fn append_stream(
 fn copy_out(runtime: &Runtime, pid: Word, message: &Message, data: &[u8]) -> Result<(), i32> {
     let mut copied = 0;
     let (bases, lengths) = message.vectors.parts();
+    if bases.len() > 1 && !data.is_empty() {
+        let mut fields: [(Word, &[u8]); 4] = [(0, &[]); 4];
+        let mut count = 0;
+        for (&base, &length) in bases.iter().zip(lengths) {
+            let bytes = length.min(data.len() - copied);
+            if bytes == 0 { continue; }
+            // Preserve each original checked-copy chunk. In particular a
+            // larger iovec must keep its successful prefix before a fault.
+            if bytes > runtime.posix_shm_size || count == fields.len() { break; }
+            fields[count] = (base, &data[copied..copied + bytes]);
+            count += 1;
+            copied += bytes;
+            if copied == data.len() { break; }
+        }
+        if copied == data.len() {
+            // Preparation and checked-vector fallback preserve field order,
+            // overlapping outputs, and the successful prefix on EFAULT.
+            return match count {
+                1 => guest_memory::copyout_owned(runtime, pid, fields[0].0, fields[0].1),
+                2 => guest_memory::copyout_owned_many(runtime, pid, &[fields[0], fields[1]]),
+                3 => guest_memory::copyout_owned_many(runtime, pid, &[fields[0], fields[1], fields[2]]),
+                _ => guest_memory::copyout_owned_many(runtime, pid, &fields),
+            }.map_err(|_| EFAULT);
+        }
+        copied = 0;
+    }
     for index in 0..bases.len() {
         let count = lengths[index].min(data.len() - copied);
         let mut done = 0;
@@ -466,6 +502,7 @@ fn send(
     // More data in an already-readable queue cannot wake another reader.
     // Receive still notifies writers when constrained capacity frees.
     if became_readable {
+        runtime.unix_wake_targets.note_read(destination);
         runtime.readiness_changes |= READY_UNIX_READ;
     }
     Ok(count)
@@ -777,6 +814,15 @@ fn receive(
             super::unix::collect(runtime);
         }
         if notify_writers {
+            // A connected stream has exactly one possible sender. Datagram
+            // and record capacity changes retain the broadcast fallback.
+            let target = runtime.unix_sockets.get(file.resource).and_then(|this| {
+                if this.kind != Kind::Stream { return None; }
+                this.peer.filter(|id| runtime.unix_sockets.get(*id)
+                    .is_some_and(|peer| peer.kind == Kind::Stream
+                        && peer.peer == Some(file.resource)))
+            });
+            runtime.unix_wake_targets.note_write(target);
             runtime.readiness_changes |= READY_UNIX_WRITE;
         }
     }

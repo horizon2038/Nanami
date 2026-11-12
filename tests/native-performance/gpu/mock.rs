@@ -30,6 +30,8 @@ pub struct Fake {
     pub fills: usize,
     pub copies: usize,
     pub presents: usize,
+    pub batch_supported: bool,
+    pub batches: Vec<Vec<Rect>>,
     pub fail_work: bool,
     pub fail_release: bool,
     pub dead_owners: std::collections::BTreeSet<Word>,
@@ -134,6 +136,18 @@ impl Backend for Fake {
         Ok(())
     }
     fn present(&mut self, source: Buffer, _: Rect) -> Result<(), RequestError> {
+        self.record_present(source)
+    }
+    fn present_batch(&mut self, source: Buffer, rects: &[Rect]) -> Result<(), RequestError> {
+        if !self.batch_supported {
+            return Err(RequestError::Unsupported);
+        }
+        self.batches.push(rects.to_vec());
+        self.record_present(source)
+    }
+}
+impl Fake {
+    fn record_present(&mut self, source: Buffer) -> Result<(), RequestError> {
         self.presents += 1;
         if self.fail_work {
             return Err(RequestError::Transport);
@@ -150,7 +164,7 @@ pub fn call(code: Word, args: [Word; 4], words: u8) -> Result<(Word, Word, Word)
         GET_INFO => 1,
         CREATE | PRESENT => 4,
         DESTROY => 2,
-        FILL | COPY => 5,
+        FILL | COPY | PRESENT_BATCH => 5,
         _ => panic!("Unknown GPU operation"),
     };
     assert_eq!(words, expected);

@@ -2,9 +2,12 @@
 use crate::elf::ElfMetadata;
 use nanami_runtime::Word;
 
-pub const ENTRIES: usize = 48;
-pub const MAX_RETAINED_BYTES: Word = 16 * 1024 * 1024;
-// More small-file slots within the original byte budget; large images bypass it.
+// Leave room for small dependencies while admitting larger readonly images.
+// Both metadata and snapshot storage stay bounded; victim sets use one u64.
+pub const ENTRIES: usize = 64;
+pub const MAX_RETAINED_BYTES: Word = 24 * 1024 * 1024;
+const _: () = assert!(ENTRIES <= u64::BITS as usize);
+// Writable and ordinary executable fills retain their existing per-image cap.
 pub const MAX_IMAGE_BYTES: Word = 2 * 1024 * 1024;
 const PAGE_BYTES: Word = 4096;
 const KEY_BUCKETS: usize = 64;
@@ -27,6 +30,40 @@ pub const IMMUTABLE_STORAGE: bool = match option_env!("NANAMI_IMMUTABLE_SNAPSHOT
     Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
     None => cfg!(target_arch = "x86_64"),
 };
+pub const UNMAPPED_SOURCES: bool = match option_env!("NANAMI_UNMAPPED_IMAGE_SOURCES") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => cfg!(target_arch = "x86_64"),
+};
+
+/// A loader may map all LOAD bytes while leaving nonloaded file metadata out.
+/// Keep the leading readonly LOAD resident: the dynamic loader reads its hash,
+/// symbol/version and relocation tables before remapping executable LOADs.
+pub fn deferred_elf_prefix(metadata: &ElfMetadata, bytes: Word) -> Option<Word> {
+    const PREFIX: Word = 64 * 1024;
+    if bytes < 256 * 1024 || metadata.elf_type != 3 { return None; }
+    let headers = metadata.program_header_count.checked_mul(metadata.program_header_entry_size)?
+        .checked_add(metadata.program_header_offset)?;
+    let backed = bytes.checked_add(PAGE_BYTES - 1)? & !(PAGE_BYTES - 1);
+    let segments = metadata.segments.get(..metadata.load_segment_count)?;
+    if headers > PREFIX
+        || !segments.iter().any(|segment| segment.flags & 1 != 0 && segment.file_size != 0)
+        || !segments.iter().all(|segment| segment.offset.checked_add(segment.file_size)
+            .is_some_and(|end| end <= backed)) { return None; }
+    let mut prefix = PREFIX;
+    for segment in segments {
+        if segment.offset == 0 && segment.flags == 4 {
+            let end = segment.file_size.checked_add(PAGE_BYTES - 1)? & !(PAGE_BYTES - 1);
+            prefix = prefix.max(end);
+        }
+    }
+    Some(prefix)
+}
+
+#[derive(Clone, Copy)]
+pub struct MappingReplacement {
+    pub slot: usize,
+    pub victims: u64,
+}
 
 #[derive(Clone, Copy)]
 pub struct CachedImage {
@@ -35,6 +72,9 @@ pub struct CachedImage {
     pub size: Word,
     pub capacity: Word,
     pub metadata: Option<ElfMetadata>,
+    // Alpha can use backing without native PTEs. CPU consumers must first
+    // finish a read-only mapping and clear this bit after its acknowledgement.
+    pub source_only: bool,
     used: u64,
 }
 
@@ -179,7 +219,7 @@ mod index_tests {
         fn insert(&mut self, slot: usize, identity: Word, size: Word) {
             let used = self.tick();
             self.entries[slot] = Some(CachedImage { identity, size, address: 0x100000 + slot * 0x10000,
-                capacity: size.next_multiple_of(PAGE_BYTES), metadata: None, used });
+                capacity: size.next_multiple_of(PAGE_BYTES), metadata: None, source_only: false, used });
         }
         fn get(&mut self, identity: Word, size: Word) -> Option<&CachedImage> {
             if identity >> 32 == 0 { return None; }
@@ -388,6 +428,24 @@ impl ImageCache {
         false
     }
 
+    /// The dynamic loader first reserves a whole DSO as R, then remaps its
+    /// LOAD segments. Keep its header resident and defer that temporary suffix.
+    pub fn elf_snapshot_prefix(&self, address: Word, bytes: Word) -> Option<Word> {
+        if !IMMUTABLE_STORAGE || bytes < 256 * 1024 { return None; }
+        self.entries.iter().flatten().find_map(|image| {
+            if image.identity >> 32 == 0 || image.address != address || bytes > image.size { return None; }
+            deferred_elf_prefix(&image.metadata?, bytes)
+        })
+    }
+
+    #[cfg(target_os = "none")]
+    pub fn unmapped_source_range(&self, address: Word, bytes: Word) -> bool {
+        let Some(end) = address.checked_add(bytes) else { return false; };
+        bytes != 0 && self.entries.iter().flatten().any(|image| image.identity != 0
+            && image.source_only && image.address <= address
+            && image.address.checked_add(image.capacity).is_some_and(|limit| end <= limit))
+    }
+
     pub fn allocation_capacity(&self, index: usize, size: Word) -> Word {
         if IMMUTABLE_STORAGE {
             // A published snapshot is retired, never refilled in place. Its
@@ -413,6 +471,42 @@ impl ImageCache {
     pub fn replacement_mapping(&self, size: Word, readonly_alias: bool, identity: Word) -> Option<usize> {
         let limit = if IMMUTABLE_STORAGE && readonly_alias { MAX_RETAINED_BYTES } else { MAX_IMAGE_BYTES };
         self.replacement_with_limit(size, None, limit, identity)
+    }
+
+    /// Select enough cold owners to admit a readonly mapping within the same
+    /// byte budget. A single large victim need not exist. Selection is pure;
+    /// callers must acknowledge every retirement before allocating the fill.
+    pub fn mapping_replacement(&self, size: Word, readonly_alias: bool, identity: Word) -> Option<MappingReplacement> {
+        if !IMMUTABLE_STORAGE || !readonly_alias {
+            return self.replacement_mapping(size, readonly_alias, identity)
+                .map(|slot| MappingReplacement { slot, victims: 0 });
+        }
+        #[cfg(test)]
+        QUERY_COUNTS.with(|counts| { let (lookups, selections) = counts.get(); counts.set((lookups, selections + 1)); });
+        if size == 0 || size > MAX_RETAINED_BYTES { return None; }
+        let capacity = size.checked_add(PAGE_BYTES - 1)? & !(PAGE_BYTES - 1);
+        let mut retained = self.retained_bytes();
+        if retained > MAX_RETAINED_BYTES { return None; }
+        let superseded = |image: &CachedImage| identity >> 32 != 0 && image.identity >> 32 != 0
+            && image.identity != identity && image.identity as u32 == identity as u32;
+        let generation = self.entries.iter().flatten().any(superseded);
+        let mut slot = self.entries.iter().position(Option::is_none);
+        let mut victims = 0u64;
+        loop {
+            if retained.checked_add(capacity)? <= MAX_RETAINED_BYTES {
+                if let Some(slot) = slot { return Some(MappingReplacement { slot, victims }); }
+            }
+            let (index, image) = self.entries.iter().enumerate()
+                .filter(|(index, _)| victims & (1u64 << index) == 0)
+                .filter_map(|(index, entry)| entry.as_ref().map(|image| (index, image)))
+                .min_by_key(|(index, image)| (
+                    if generation && (superseded(image) || image.identity == 0) { 0 } else { 1 },
+                    image.used, *index,
+                ))?;
+            retained = retained.checked_sub(image.capacity)?;
+            victims |= 1u64 << index;
+            slot.get_or_insert(index);
+        }
     }
 
     fn replacement_with_limit(
@@ -460,6 +554,16 @@ impl ImageCache {
         self.entries[index].as_ref()
     }
 
+    pub fn mark_source_only(&mut self, index: usize) {
+        self.entries[index].as_mut().expect("owned snapshot").source_only = true;
+    }
+
+    pub fn mark_source_mapped(&mut self, address: Word) {
+        if let Some(image) = self.entries.iter_mut().flatten().find(|image| image.address == address) {
+            image.source_only = false;
+        }
+    }
+
     /// Retain ownership after a failed/partial release, but never serve a hit
     /// from a mapping whose publication or retirement has not completed.
     pub fn invalidate(&mut self, index: usize) {
@@ -499,6 +603,7 @@ impl ImageCache {
             size,
             capacity,
             metadata,
+            source_only: false,
             used,
         });
         if identity >> 32 != 0 {

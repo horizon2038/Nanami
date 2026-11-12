@@ -96,6 +96,40 @@ fn handles_are_owner_scoped_and_destroyed_identifiers_never_alias_new_buffers() 
 }
 
 #[test]
+fn sparse_present_validates_all_rectangles_and_owner_before_dispatch() {
+    mock::reset();
+    let surface = surface();
+    let rects = [rect(0, 0, 1, 1), rect(79, 39, 1, 1), rect(3, 7, 5, 8)];
+    assert_eq!(present_batch(&surface, &rects), Err(RequestError::Status(4)));
+    mock::FAKE.with(|fake| fake.borrow_mut().batch_supported = true);
+    mock::caller(43);
+    assert_eq!(present_batch(&surface, &rects), Err(RequestError::Status(2)));
+    mock::caller(42);
+    let packed = rects[0].packed(surface.layout).unwrap();
+    let invalid = rect(80, 0, 1, 1).packed(Layout::new(96, 40, 384).unwrap()).unwrap();
+    for args in [
+        [surface.id, 0, 0, 0],
+        [surface.id, packed, 0, packed],
+        [surface.id, packed, packed, invalid],
+        [surface.id, packed, 1, 0],
+    ] {
+        assert_eq!(mock::call(PRESENT_BATCH, args, 5).unwrap().0, 1);
+    }
+    assert!(present_batch(&surface, &[]).is_err());
+    assert!(present_batch(&surface, &[rects[0]; 4]).is_err());
+    mock::FAKE.with(|fake| assert!(fake.borrow().batches.is_empty()));
+    for count in 1..=rects.len() {
+        present_batch(&surface, &rects[..count]).unwrap();
+    }
+    mock::FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.presents, 3);
+        assert_eq!(fake.batches, [&rects[..1], &rects[..2], &rects[..3]]);
+    });
+    destroy(&surface).unwrap();
+}
+
+#[test]
 fn allocation_pressure_retires_dead_clients_without_reusing_stale_handles() {
     mock::reset();
     let old: Vec<_> = (0..16).map(|_| surface()).collect();

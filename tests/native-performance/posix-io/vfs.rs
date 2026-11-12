@@ -8,6 +8,8 @@ pub use truncate::*;
 #[path = "../../../nanami/servers/libs/nanami-client/src/vfs/service.rs"]
 mod service;
 pub use service::vfs_close;
+pub use service::{vfs_fstat_granted, vfs_pread_granted, vfs_read_versioned_granted};
+pub use service::{vfs_read_cursor, vfs_read_cursor_granted, vfs_seek_cursor, vfs_seek_cursor_granted};
 
 #[test]
 fn socket_creation_transmits_the_node_type_as_the_fourth_word() {
@@ -101,6 +103,13 @@ pub fn vfs_read_delegated(
         delegate,
         buffer,
     })
+}
+
+pub fn vfs_read_versioned(
+    _port: Word, handle: Word, identity: Word, len: Word, delegate: Word,
+) -> Result<(Word, Word), RequestError> {
+    record(Call { code: VFS_REQUEST_READ_VERSIONED, handle, offset: identity, len, delegate, buffer: 0 })
+        .map(|bytes| (bytes, identity))
 }
 
 pub fn vfs_read(

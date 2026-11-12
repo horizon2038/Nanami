@@ -1,9 +1,11 @@
 """Post-VM extraction of diagnostic packets from an isolated writable overlay."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
+import tempfile
 
 
 def root_partition(image):
@@ -76,6 +78,8 @@ def validate_workload_packet(packet, mode):
 def extract(overlay, directory, enabled, application_mode=None):
     """Caller must stop/reap QEMU first. No original image is opened writable."""
     directory = Path(directory)
+    if (directory / "scope-disk-extraction.json").exists():
+        raise ValueError("refuse to overwrite earlier extraction")
     commands = []
 
     def command(argv):
@@ -85,11 +89,13 @@ def extract(overlay, directory, enabled, application_mode=None):
         result.check_returncode()
         return result.stdout + result.stderr
 
+    # These large copies are disposable. Retain only the overlay, packets and
+    # command receipt; /tmp is tmpfs on the optimization host.
+    scratch = tempfile.TemporaryDirectory(prefix="nanami-scope-export-",
+                                         dir=os.environ.get("QEMU_TMPDIR", "/tmp"))
     try:
-        raw = directory / "scope-export-disk.img"
-        root = directory / "scope-export-rootfs.img"
-        if raw.exists() or root.exists():
-            raise ValueError("refuse to overwrite earlier extraction")
+        raw = Path(scratch.name) / "disk.img"
+        root = Path(scratch.name) / "rootfs.img"
         command(["qemu-img", "convert", "-f", "qcow2", "-O", "raw", str(overlay), str(raw)])
         offset, length = root_partition(raw)
         with raw.open("rb") as source, root.open("xb") as target:
@@ -125,4 +131,5 @@ def extract(overlay, directory, enabled, application_mode=None):
                                              decoded=decoded)
         return packets
     finally:
+        scratch.cleanup()
         (directory / "scope-disk-extraction.json").write_text(json.dumps(commands, indent=2) + "\n")

@@ -1,4 +1,5 @@
 extern crate self as a9n_abi;
+extern crate self as nanami_runtime;
 pub use nanami_uapi as uapi;
 pub type Word = usize;
 pub type CapabilityDescriptor = Word;
@@ -22,6 +23,26 @@ fn call_port(_: Word, code: Word, arg0: Word, arg1: Word, arg2: Word, arg3: Word
 mod namespace;
 #[path = "../../nanami/servers/libs/nanami-client/src/posix/directory.rs"]
 mod directory;
+#[allow(dead_code)]
+#[path = "../../nanami/servers/libs/nanami-client/src/posix/service.rs"]
+mod posix_service;
+pub fn request_exit_with_status(_: Word, _: Word) -> Result<(), RequestError> { panic!() }
+pub fn request_heap(_: Word) -> Result<(Word, Word), RequestError> { panic!() }
+pub fn request_mapping_release(_: Word, _: Word) -> Result<(), RequestError> { panic!() }
+
+#[test]
+fn vfs_provider_negotiation_preserves_transport_legacy_and_zero_pid_errors() {
+    REPLY.with(|reply| reply.set(Ok((OS_RESPONSE_OK,42,0))));
+    assert_eq!(posix_service::posix_vfs_provider(1), Ok(42));
+    CALL.with(|call| assert_eq!(call.get(), (POSIX_REQUEST_CONTROL, POSIX_CONTROL_VFS_PROVIDER, 2)));
+    ARGS.with(|args| assert_eq!(args.get(), [POSIX_CONTROL_VFS_PROVIDER,0,0,0]));
+    REPLY.with(|reply| reply.set(Ok((OS_RESPONSE_OK,0,0))));
+    assert_eq!(posix_service::posix_vfs_provider(1), Err(RequestError::Protocol));
+    REPLY.with(|reply| reply.set(Ok((uapi::os::OS_RESPONSE_INVALID_ARGUMENT,0,0))));
+    assert_eq!(posix_service::posix_vfs_provider(1), Err(RequestError::Status(uapi::os::OS_RESPONSE_INVALID_ARGUMENT)));
+    REPLY.with(|reply| reply.set(Err(RequestError::Transport)));
+    assert_eq!(posix_service::posix_vfs_provider(1), Err(RequestError::Transport));
+}
 
 #[test]
 fn biased_directory_wire_carries_bias_and_returns_raw_vfs_cookie() {
@@ -48,6 +69,27 @@ fn rooted_open_uses_a_distinct_request_and_retains_the_reply() {
     REPLY.with(|reply| reply.set(Ok((OS_RESPONSE_OK,16,VFS_FILE_TYPE_REGULAR))));
     assert!(matches!(namespace::posix_rooted_open_request(1,64),Ok((16,VFS_FILE_TYPE_REGULAR))));
     CALL.with(|call| assert_eq!(call.get(),(uapi::posix::POSIX_REQUEST_OPEN_ROOTED,64,2)));
+}
+
+#[test]
+fn granted_open_entries_keep_token_bits_and_only_legacy_dispatch_rejection_is_unsupported() {
+    for code in [POSIX_REQUEST_OPEN_ROOTED_GRANTED,VFS_REQUEST_OPEN_ROOTED_GRANTED,
+        POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED,VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED] {
+        let call=| | match code {
+            POSIX_REQUEST_OPEN_ROOTED_GRANTED => namespace::posix_rooted_open_granted_request(1,64),
+            VFS_REQUEST_OPEN_ROOTED_GRANTED => namespace::vfs_rooted_open_granted_request(1,64),
+            POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED => namespace::posix_rooted_open_cursor_granted_request(1,64),
+            _ => namespace::vfs_rooted_open_cursor_granted_request(1,64),
+        };
+        let cursor=matches!(code,POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED|VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED);
+        let kind=VFS_FILE_TYPE_REGULAR | (71 << VFS_OPEN_GRANT_TYPE_BITS) | if cursor {VFS_OPEN_CURSOR_TYPE_FLAG} else {0};
+        REPLY.with(|r|r.set(Ok((0,19,kind))));assert!(matches!(call(),Ok((19,value)) if value==kind));
+        CALL.with(|c|assert_eq!(c.get(),(code,64,2)));
+        REPLY.with(|r|r.set(Ok((uapi::os::OS_RESPONSE_INVALID_ARGUMENT,0,0))));
+        assert!(matches!(call(),Err(namespace::PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED))));
+        REPLY.with(|r|r.set(Ok((VFS_PATH_RESPONSE_ERROR,VFS_PATH_ERROR_IO,0))));
+        assert!(matches!(call(),Err(namespace::PathError::Filesystem(VFS_PATH_ERROR_IO))));
+    }
 }
 
 #[test]

@@ -10,6 +10,20 @@ use core::sync::atomic::{fence, Ordering};
 use nanami_runtime::ipc::{ServiceEvent, ServiceRequest};
 use nanami_runtime::{RequestError, Word};
 
+#[path = "app/dma.rs"]
+mod dma;
+use dma::*;
+
+#[path = "app/completion.rs"]
+mod completion;
+
+#[path = "app/command_state.rs"]
+mod command_state;
+
+#[path = "app/session.rs"]
+mod session;
+use session::{ClientSession, handle_request};
+
 const SLOT_PCI_CONFIG: Word = 16;
 const SLOT_SERVICE_PORT: Word = 20;
 
@@ -54,13 +68,6 @@ const ATA_IDENTIFY_DEVICE: u8 = 0xec;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
 
-const DMA_COMMAND_LIST_OFFSET: usize = 0x0000;
-const DMA_RECEIVED_FIS_OFFSET: usize = 0x0400;
-const DMA_COMMAND_TABLE_OFFSET: usize = 0x0500;
-const DMA_DATA_OFFSET: usize = 0x1000;
-const DMA_DATA_BYTES: usize = nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES as usize;
-const DMA_TOTAL_BYTES: usize = DMA_DATA_OFFSET + DMA_DATA_BYTES;
-const COMMAND_TABLE_PRDT_OFFSET: usize = 0x80;
 const AHCI_MMIO_BYTES: Word = 0x2000;
 const SECTOR_BYTES: usize = 512;
 const BLOCK_BYTES: usize = nanami_client::block::BLOCK_DEVICE_BLOCK_SIZE as usize;
@@ -84,34 +91,20 @@ impl PciAddress {
     };
 }
 
-#[derive(Clone, Copy)]
-struct ClientSession {
-    active: bool,
-    pid: Word,
-    shared_memory: Word,
-    shared_size: Word,
-}
-
-impl ClientSession {
-    const EMPTY: Self = Self {
-        active: false,
-        pid: 0,
-        shared_memory: 0,
-        shared_size: 0,
-    };
-}
-
-#[derive(Clone, Copy)]
 struct AhciRuntime {
     abar: Word,
     port: usize,
     dma_physical: Word,
     dma_virtual: Word,
+    dma_data_bytes: usize,
     disk_capacity_sectors: u64,
     partition_start_sector: u64,
     partition_sectors: u64,
     flush_command: u8,
+    commands: command_state::State,
 }
+
+const _: () = assert!(core::mem::size_of::<AhciRuntime>() == 9 * core::mem::size_of::<Word>());
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -217,6 +210,7 @@ fn is_active_sata_port(base: Word, port: usize, implemented: u32) -> bool {
 }
 
 fn stop_port(runtime: &AhciRuntime) -> Result<(), RequestError> {
+    runtime.commands.invalidate();
     let base = runtime.abar;
     let command_offset = port_offset(runtime.port, PORT_CMD);
     let mut command = unsafe { mmio_read32(base, command_offset) };
@@ -261,100 +255,38 @@ fn configure_port(runtime: &AhciRuntime) -> Result<(), RequestError> {
     Ok(())
 }
 
-fn prepare_command(
-    runtime: &AhciRuntime,
-    command: u8,
-    lba: u64,
-    sectors: u16,
-    bytes: usize,
-    write: bool,
-) -> Result<(), RequestError> {
-    if bytes > DMA_DATA_BYTES
-        || bytes > 0x0040_0000
-        || (bytes != 0 && sectors == 0 && command != ATA_IDENTIFY_DEVICE)
-    {
-        return Err(RequestError::InvalidArgument);
-    }
-    unsafe {
-        ptr::write_bytes(runtime.dma_virtual as *mut u8, 0, DMA_DATA_OFFSET);
-        let command_list = (runtime.dma_virtual as usize + DMA_COMMAND_LIST_OFFSET) as *mut u32;
-        let command_table = runtime.dma_virtual as usize + DMA_COMMAND_TABLE_OFFSET;
-        let mut flags = 5u32;
-        if write {
-            flags |= 1 << 6;
-        }
-        if bytes != 0 {
-            flags |= 1 << 16;
-        }
-        ptr::write_volatile(command_list, flags);
-        ptr::write_volatile(command_list.add(1), 0);
-        let command_table_physical = runtime.dma_physical as u64 + DMA_COMMAND_TABLE_OFFSET as u64;
-        ptr::write_volatile(command_list.add(2), command_table_physical as u32);
-        ptr::write_volatile(command_list.add(3), (command_table_physical >> 32) as u32);
-
-        let fis = command_table as *mut u8;
-        ptr::write(fis.add(0), 0x27);
-        ptr::write(fis.add(1), 1 << 7);
-        ptr::write(fis.add(2), command);
-        ptr::write(fis.add(4), lba as u8);
-        ptr::write(fis.add(5), (lba >> 8) as u8);
-        ptr::write(fis.add(6), (lba >> 16) as u8);
-        ptr::write(fis.add(7), 1 << 6);
-        ptr::write(fis.add(8), (lba >> 24) as u8);
-        ptr::write(fis.add(9), (lba >> 32) as u8);
-        ptr::write(fis.add(10), (lba >> 40) as u8);
-        ptr::write(fis.add(12), sectors as u8);
-        ptr::write(fis.add(13), (sectors >> 8) as u8);
-
-        if bytes != 0 {
-            let prdt = (command_table + COMMAND_TABLE_PRDT_OFFSET) as *mut u32;
-            let data_physical = runtime.dma_physical as u64 + DMA_DATA_OFFSET as u64;
-            ptr::write_volatile(prdt, data_physical as u32);
-            ptr::write_volatile(prdt.add(1), (data_physical >> 32) as u32);
-            ptr::write_volatile(prdt.add(2), 0);
-            ptr::write_volatile(prdt.add(3), (bytes as u32 - 1) | (1 << 31));
-        }
-    }
-    fence(Ordering::Release);
-    Ok(())
-}
-
-fn submit(runtime: &AhciRuntime) -> Result<(), RequestError> {
+fn submit(runtime: &AhciRuntime, bytes: usize) -> Result<(), RequestError> {
     let base = runtime.abar;
     let port = runtime.port;
-    wait_clear(
+    runtime.commands.submit(|| wait_clear(
         base,
         port_offset(port, PORT_TFD),
         PORT_TFD_BSY | PORT_TFD_DRQ,
-    )?;
-    unsafe {
+    ), || unsafe {
         mmio_write32(base, port_offset(port, PORT_IS), u32::MAX);
         mmio_write32(base, port_offset(port, PORT_CI), 1);
-    }
-    let mut spin = 0usize;
-    loop {
-        let issued = unsafe { mmio_read32(base, port_offset(port, PORT_CI)) };
-        let status = unsafe { mmio_read32(base, port_offset(port, PORT_IS)) };
-        if status & PORT_IS_TFES != 0 {
-            return Err(RequestError::Transport);
-        }
-        if issued & 1 == 0 {
-            fence(Ordering::Acquire);
-            return Ok(());
-        }
-        spin += 1;
-        if spin >= POLL_LIMIT {
-            return Err(RequestError::Transport);
-        }
-        if spin & 0x3fff == 0 {
-            nanami_runtime::yield_now();
-        }
-    }
+    }, || completion::wait(
+        |register| unsafe { mmio_read32(base, port_offset(port, match register {
+            completion::Register::Issued => PORT_CI,
+            completion::Register::Status => PORT_IS,
+        })) },
+        || {
+            // PRDBC is coherent, private DMA RAM, reset before every command.
+            // Reaching the byte count never proves completion: wait() still
+            // requires fresh CI-clear and TFES checks. Flush has no data hint.
+            bytes == 0 || unsafe {
+                ptr::read_volatile((runtime.dma_virtual + DMA_COMMAND_LIST_OFFSET + 4) as *const u32)
+                    as usize == bytes
+            }
+        },
+        nanami_runtime::yield_now,
+        POLL_LIMIT,
+    ))
 }
 
 fn identify(runtime: &mut AhciRuntime) -> Result<u64, RequestError> {
     prepare_command(runtime, ATA_IDENTIFY_DEVICE, 0, 0, SECTOR_BYTES, false)?;
-    submit(runtime)?;
+    submit(runtime, SECTOR_BYTES)?;
     let words = (runtime.dma_virtual as usize + DMA_DATA_OFFSET) as *const u16;
     let commands = unsafe { ptr::read_unaligned(words.add(83)) };
     runtime.flush_command = if commands & 0xc000 != 0x4000 {
@@ -390,7 +322,17 @@ fn transfer_absolute(
     bytes: usize,
     write: bool,
 ) -> Result<(), RequestError> {
-    if bytes == 0 || bytes > DMA_DATA_BYTES || bytes % SECTOR_BYTES != 0 {
+    transfer_absolute_to(runtime, lba, bytes, write, runtime.dma_physical + DMA_DATA_OFFSET)
+}
+
+fn transfer_absolute_to(
+    runtime: &AhciRuntime,
+    lba: u64,
+    bytes: usize,
+    write: bool,
+    data_physical: Word,
+) -> Result<(), RequestError> {
+    if bytes == 0 || bytes > runtime.dma_data_bytes || bytes % SECTOR_BYTES != 0 {
         return Err(RequestError::InvalidArgument);
     }
     let sectors = bytes / SECTOR_BYTES;
@@ -401,7 +343,7 @@ fn transfer_absolute(
     {
         return Err(RequestError::InvalidArgument);
     }
-    prepare_command(
+    prepare_command_to(
         runtime,
         if write {
             ATA_WRITE_DMA_EXT
@@ -412,8 +354,9 @@ fn transfer_absolute(
         sectors as u16,
         bytes,
         write,
+        data_physical,
     )?;
-    submit(runtime)
+    submit(runtime, bytes)
 }
 
 fn find_root_partition(runtime: &AhciRuntime) -> Result<nanami_gpt::Partition, RequestError> {
@@ -421,7 +364,7 @@ fn find_root_partition(runtime: &AhciRuntime) -> Result<nanami_gpt::Partition, R
     let data = unsafe {
         core::slice::from_raw_parts(
             (runtime.dma_virtual as usize + DMA_DATA_OFFSET) as *const u8,
-            DMA_DATA_BYTES,
+            runtime.dma_data_bytes,
         )
     };
     let header =
@@ -449,8 +392,9 @@ fn transfer(
     block_index: usize,
     bytes: usize,
     write: bool,
+    data_physical: Word,
 ) -> Result<(), RequestError> {
-    if bytes == 0 || bytes > DMA_DATA_BYTES || bytes % SECTOR_BYTES != 0 {
+    if bytes == 0 || bytes > runtime.dma_data_bytes || bytes % SECTOR_BYTES != 0 {
         return Err(RequestError::InvalidArgument);
     }
     let sectors = bytes / SECTOR_BYTES;
@@ -468,125 +412,7 @@ fn transfer(
         .partition_start_sector
         .checked_add(partition_lba)
         .ok_or(RequestError::InvalidArgument)?;
-    transfer_absolute(runtime, lba, bytes, write)
-}
-
-fn handle_control(
-    request: ServiceRequest,
-    session: &mut ClientSession,
-    runtime: &AhciRuntime,
-) -> (Word, Word, Word) {
-    match request.arg0 {
-        nanami_client::block::BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY => {
-            let size = if request.arg1 == 0 {
-                nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES
-            } else {
-                request.arg1
-            };
-            match nanami_runtime::request_shared_memory(request.identifier, size) {
-                Ok((local, peer)) => {
-                    *session = ClientSession {
-                        active: true,
-                        pid: request.identifier,
-                        shared_memory: local,
-                        shared_size: size,
-                    };
-                    (nanami_runtime::OS_RESPONSE_OK, peer, size)
-                }
-                Err(error) => (status(error), 0, 0),
-            }
-        }
-        nanami_client::block::BLOCK_DEVICE_CONTROL_GET_INFO => (
-            nanami_runtime::OS_RESPONSE_OK,
-            BLOCK_BYTES as Word,
-            (runtime.partition_sectors / (BLOCK_BYTES / SECTOR_BYTES) as u64) as Word,
-        ),
-        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    }
-}
-
-fn handle_transfer(
-    request: ServiceRequest,
-    session: &ClientSession,
-    runtime: &AhciRuntime,
-    write: bool,
-) -> (Word, Word, Word) {
-    if !session.active || session.pid != request.identifier {
-        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
-    }
-    let bytes = match (request.arg1 as usize).checked_mul(BLOCK_BYTES) {
-        Some(bytes) => bytes,
-        None => return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    };
-    let offset = request.arg2 as usize;
-    if request.arg1 == 0
-        || offset
-            .checked_add(bytes)
-            .map_or(true, |end| end > session.shared_size)
-        || bytes > DMA_DATA_BYTES
-    {
-        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
-    }
-
-    let dma_data = runtime.dma_virtual as usize + DMA_DATA_OFFSET;
-    if write {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                (session.shared_memory as usize + offset) as *const u8,
-                dma_data as *mut u8,
-                bytes,
-            )
-        };
-    }
-    match transfer(runtime, request.arg0 as usize, bytes, write) {
-        Ok(()) => {
-            if !write {
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        dma_data as *const u8,
-                        (session.shared_memory as usize + offset) as *mut u8,
-                        bytes,
-                    )
-                };
-            }
-            (nanami_runtime::OS_RESPONSE_OK, bytes, 0)
-        }
-        Err(error) => (status(error), 0, 0),
-    }
-}
-
-fn handle_request(
-    request: ServiceRequest,
-    session: &mut ClientSession,
-    runtime: &AhciRuntime,
-) -> (Word, Word, Word) {
-    match request.code {
-        nanami_client::block::BLOCK_DEVICE_REQUEST_CONTROL => {
-            handle_control(request, session, runtime)
-        }
-        nanami_client::block::BLOCK_DEVICE_REQUEST_READ => {
-            handle_transfer(request, session, runtime, false)
-        }
-        nanami_client::block::BLOCK_DEVICE_REQUEST_WRITE => {
-            handle_transfer(request, session, runtime, true)
-        }
-        nanami_client::block::BLOCK_DEVICE_REQUEST_FLUSH => {
-            if !session.active || session.pid != request.identifier {
-                return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
-            }
-            let result = if runtime.flush_command == 0 {
-                Err(RequestError::Unsupported)
-            } else {
-                prepare_command(runtime, runtime.flush_command, 0, 0, 0, false)
-                    .and_then(|()| submit(runtime))
-            };
-            match result {
-                Ok(()) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
-                Err(error) => (status(error), 0, 0),
-            }
-        }
-        _ => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
-    }
+    transfer_absolute_to(runtime, lba, bytes, write, data_physical)
 }
 
 fn status(error: RequestError) -> Word {
@@ -602,8 +428,8 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
     nanami_client::pci::connect(SLOT_PCI_CONFIG)?;
     let pci = nanami_runtime::ipc::process_slot_descriptor(SLOT_PCI_CONFIG);
     let (controllers, controller_count) = find_controllers(pci)?;
-    let (dma_physical, dma_virtual) = nanami_runtime::request_dma(DMA_TOTAL_BYTES)?;
-    unsafe { ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_TOTAL_BYTES) };
+    let (dma_physical, dma_virtual, dma_data_bytes) = allocate_command_memory(nanami_runtime::request_dma)?;
+    unsafe { ptr::write_bytes(dma_virtual as *mut u8, 0, DMA_DATA_OFFSET + dma_data_bytes) };
     let mut selected: Option<(AhciRuntime, PciAddress)> = None;
 
     for address in controllers[..controller_count].iter().copied() {
@@ -631,10 +457,12 @@ fn initialize() -> Result<AhciRuntime, RequestError> {
                 port,
                 dma_physical,
                 dma_virtual,
+                dma_data_bytes,
                 disk_capacity_sectors: 0,
                 partition_start_sector: 0,
                 partition_sectors: 0,
                 flush_command: 0,
+                commands: command_state::State::new(),
             };
             configure_port(&runtime)?;
             let partition = (|| {
@@ -720,7 +548,7 @@ fn serve() -> nanami_runtime::NanamiResult {
         };
         match event {
             ServiceEvent::Request(request) => {
-                reply = handle_request(request, &mut session, &runtime);
+                reply = handle_request(request, &mut session, &runtime)?;
                 has_reply = true;
             }
             ServiceEvent::Notification { .. } | ServiceEvent::Fault { .. } => {}

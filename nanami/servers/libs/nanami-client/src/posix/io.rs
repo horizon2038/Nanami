@@ -55,6 +55,17 @@ pub fn posix_pread_direct(
     positioned_io(port, POSIX_REQUEST_PREAD_DIRECT, fd, out, len, offset)
 }
 
+pub fn posix_pread_versioned(
+    port: CapabilityDescriptor, fd: Word, size: Word, identity: Word,
+) -> Result<(Word, Word), RequestError> {
+    let (status, bytes, verified) =
+        call_port(port, POSIX_REQUEST_PREAD_VERSIONED, fd, 0, size, identity, 5)?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((bytes, verified))
+}
+
 pub fn posix_pwrite(
     port: CapabilityDescriptor,
     fd: Word,

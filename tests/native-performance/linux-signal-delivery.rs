@@ -63,6 +63,8 @@ mod syscalls;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/arch/aarch64.rs"]
 mod syscalls;
 use syscalls::*;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/vfork_wait.rs"]
+mod vfork_wait;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/signals_runtime.rs"]
 mod delivery;
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/signal_frame.rs"]

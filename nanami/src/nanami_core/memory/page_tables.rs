@@ -12,6 +12,7 @@ pub(super) struct PageTables {
 }
 
 impl PageTables {
+    pub(super) fn node_descriptor(&self) -> CapabilityDescriptor { self.node }
     pub(super) fn new(node: CapabilityDescriptor, generics: CapabilityDescriptor) -> Self {
         Self {
             node,

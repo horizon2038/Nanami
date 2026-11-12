@@ -1,12 +1,21 @@
 #[path = "linux/clone3.rs"]
 mod clone3;
+#[path = "linux/vfork_wait.rs"]
+mod vfork_wait;
+#[path = "linux/vfork.rs"]
+mod vfork;
+use vfork::sys_vfork;
 #[path = "linux/stack_fault.rs"]
 mod stack_fault;
 pub(crate) use stack_fault::materialize_stack_fault;
+#[path = "linux/snapshot_fault.rs"]
+mod snapshot_fault;
+pub(crate) use snapshot_fault::materialize_snapshot_fault;
 #[path = "linux/path_checks.rs"]
 mod path_checks;
 #[path = "linux/private_memory.rs"]
 mod private_memory;
+pub(crate) use private_memory::materialize_private_write_fault;
 #[path = "linux/prctl.rs"]
 mod prctl;
 #[path = "linux/statfs.rs"]
@@ -20,6 +29,8 @@ mod vectored;
 
 #[path = "linux/file_io.rs"]
 mod file_io;
+#[path = "linux/positioned_io.rs"]
+mod positioned_io;
 #[path = "linux/file_read.rs"]
 mod file_read;
 use file_io::*;
@@ -180,6 +191,8 @@ use system::*;
 #[path = "linux/vm.rs"]
 mod vm;
 use vm::*;
+#[path = "linux/memory_protection.rs"]
+mod memory_protection;
 #[path = "linux/program_break.rs"]
 mod program_break;
 use program_break::sys_brk;
@@ -233,6 +246,8 @@ use tracing::*;
 mod file_mapping;
 #[path = "linux/anonymous_mapping.rs"]
 mod anonymous_mapping;
+#[path = "linux/address_gap.rs"]
+mod address_gap;
 #[path = "linux/file_snapshot.rs"]
 mod file_snapshot;
 #[path = "linux/file_remap.rs"]
@@ -804,8 +819,21 @@ pub fn dispatch_syscall(
             return action;
         }
         SYS_GETPID => Ok(runtime.thread_group(native_pid)),
+        SYS_CLONE if context.args[0] & clone3::CLONE_VFORK != 0 => {
+            let action = clone3::finish(runtime, native_pid, context, context);
+            record_action_result(runtime, native_pid, context.number, action);
+            trace_critical_action(runtime, native_pid, context, action);
+            trace_syscall_action(runtime, native_pid, context, action);
+            return action;
+        }
         SYS_CLONE | SYS_FORK => sys_fork(runtime, native_pid, context),
-        SYS_CLONE3 => clone3::clone3(runtime, native_pid, context),
+        SYS_CLONE3 => {
+            let action = clone3::clone3(runtime, native_pid, context);
+            record_action_result(runtime, native_pid, context.number, action);
+            trace_critical_action(runtime, native_pid, context, action);
+            trace_syscall_action(runtime, native_pid, context, action);
+            return action;
+        }
         SYS_PRCTL => prctl::prctl(runtime, native_pid, context.args),
         SYS_SETRESUID | SYS_SETRESGID => prctl::setresid(context.args),
         SYS_SHMGET => sysv_shm::get(

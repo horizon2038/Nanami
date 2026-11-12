@@ -503,6 +503,24 @@ fn clock_sleep(
 }
 
 #[test]
+fn nanosecond_sleep_deadlines_keep_saturation_and_absolute_relative_bases() {
+    for hz in [1usize, 1000, 999_999_999, 1_000_000_000, 1_000_000_001, Word::MAX] {
+        for seconds in [0usize, 1, Word::MAX / 1_000_000_000 - 1, Word::MAX / 1_000_000_000, Word::MAX / 1_000_000_000 + 1, isize::MAX as Word] {
+            for nanos in [0usize, 1, 999_999_999] {
+                for absolute in [false, true] {
+                    let mut r = runtime(hz); FAKE.with_borrow_mut(|f| f.ticks = 17);
+                    let mut request = [seconds, nanos]; r.posix_shm = request.as_mut_ptr() as Word;
+                    let ticks = (seconds as u128 * hz as u128 + (nanos as u128 * hz as u128).div_ceil(1_000_000_000)).min(Word::MAX as u128) as Word;
+                    let deadline = (if absolute { 0usize } else { 17usize }).saturating_add(ticks);
+                    let expected = if (seconds == 0 && nanos == 0 && !absolute) || deadline <= 17 { None } else { Some(deadline) };
+                    assert_eq!(sleep_deadline(&mut r, 1, 1, 1, absolute), Ok(expected));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn clock_sleep_relative_uses_existing_alarm_and_preserves_syscall_context() {
     for clock in [0, 1, 7] {
         let mut runtime = runtime(1000);

@@ -76,12 +76,22 @@ pub const POSIX_REQUEST_FSTATFS: Word = 0xa141;
 /// READ_DIR with arg3 subtracted from the shared open-file cursor for VFS I/O.
 /// Reply detail1 is the raw VFS cursor; the stored cursor includes arg3 again.
 pub const POSIX_REQUEST_READ_DIR_BIASED: Word = 0xa143;
+/// Read a whole regular file into the direct window at offset zero.
+/// Args: fd, zero, expected size, expected versioned inode.
+/// Reply payload: bytes and verified identity, or zeros if the version changed.
+pub const POSIX_REQUEST_PREAD_VERSIONED: Word = 0xa144;
 /// detail0 carries the ordinary status. Distinguishes real errors from an old
 /// service rejecting the new request with OS_RESPONSE_INVALID_ARGUMENT.
 pub const POSIX_READ_DIR_BIASED_ERROR: Word = 0xa143_0001;
 /// Rooted read-only open. Separate from PATH so older proxies cannot forward
 /// an operation whose returned VFS handle they do not know how to own/translate.
 pub const POSIX_REQUEST_OPEN_ROOTED: Word = 0xa142;
+/// Same path/FD payload as OPEN_ROOTED; detail1 also carries a VFS read grant.
+pub const POSIX_REQUEST_OPEN_ROOTED_GRANTED: Word = 0xa145;
+/// Negotiated readonly FD whose shared offset is owned by VFS. A cursor flag
+/// in the low type byte identifies success; old services may reject this entry
+/// before opening anything. Content writes/truncation through this FD fail.
+pub const POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED: Word = 0xa146;
 pub const POSIX_FLOCK_SHARED: Word = 1;
 pub const POSIX_FLOCK_EXCLUSIVE: Word = 2;
 pub const POSIX_FLOCK_UNLOCK: Word = 8;
@@ -95,6 +105,8 @@ pub const POSIX_STAT_INCLUDE_VERSION: Word = 2;
 
 pub const POSIX_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const POSIX_CONTROL_ATTACH_DIRECT_IO: Word = 2;
+/// Native VFS provider backing this POSIX connection; no metadata is cached.
+pub const POSIX_CONTROL_VFS_PROVIDER: Word = 3;
 pub const POSIX_WAIT_NOHANG: Word = 1;
 
 pub const POSIX_DEFAULT_SHM_BYTES: Word = 0x10000;

@@ -173,22 +173,10 @@ impl PreparedTimer {
     }
 
     fn counter(&mut self) -> u64 {
-        let counter = (self.resource as usize + REG_MAIN_COUNTER) as *const u32;
-        let raw = unsafe {
-            if self.clock.wide {
-                // A chipset can split even an aligned 64-bit MMIO read.
-                loop {
-                    let high = read_volatile(counter.add(1));
-                    let low = read_volatile(counter);
-                    if high == read_volatile(counter.add(1)) {
-                        break (u64::from(high) << 32) | u64::from(low);
-                    }
-                }
-            } else {
-                u64::from(read_volatile(counter))
-            }
-        };
-        self.clock.observe(raw)
+        let counter = self.resource as usize + REG_MAIN_COUNTER;
+        self.clock.sample(|offset| unsafe {
+            read_volatile((counter + offset) as *const u32)
+        })
     }
 
     pub fn now(&mut self) -> u64 {
@@ -221,13 +209,12 @@ impl PreparedTimer {
         if self.armed && self.deadline == deadline && self.clock.last_cycles() < self.comparator {
             return Ok(());
         }
-        let now = self.counter();
         // A 32-bit counter needs wrap maintenance even when clients are idle;
         // a 32-bit comparator also needs bounded steps for distant deadlines.
         let limit = if self.comparator_wide {
             u64::MAX
         } else {
-            now.saturating_add(1 << 30)
+            self.counter().saturating_add(1 << 30)
         };
         let target = deadline.map_or(limit, |ns| self.clock.cycles_ceil(ns).min(limit));
         let mut lead = self.clock.cycles_ceil(10_000).max(2); // 10 us programming guard

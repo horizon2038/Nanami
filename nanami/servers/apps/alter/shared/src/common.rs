@@ -14,6 +14,8 @@ pub mod elf;
 pub mod fault;
 #[path = "common/framebuffer_size.rs"]
 pub mod framebuffer_size;
+#[path = "common/file_reader.rs"]
+pub mod file_reader;
 #[path = "common/image_cache.rs"]
 pub mod image_cache;
 #[path = "common/launch.rs"]
@@ -24,6 +26,8 @@ pub mod loader;
 pub mod nul_scan;
 #[path = "common/process.rs"]
 pub mod process;
+#[path = "common/rooted_channel.rs"]
+pub mod rooted_channel;
 #[path = "common/signals.rs"]
 pub mod signals;
 #[path = "common/state.rs"]

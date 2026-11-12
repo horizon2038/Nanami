@@ -4,6 +4,9 @@ use super::{
 };
 use core::mem::MaybeUninit;
 
+#[path = "owned_gather.rs"]
+mod owned_gather;
+
 pub(super) fn read_linux_msghdr(
     runtime: &mut Runtime,
     pid: Word,
@@ -126,6 +129,44 @@ pub(super) fn copyin_owned(
     .map_err(|_| EFAULT)
 }
 
+/// Gather bulk input in one existing checked-vector request. The caller owns
+/// the unpublished destination and may expose it only after complete success.
+/// Ineligible shapes retain scalar reads, including their warm read leases.
+pub(super) fn copyin_owned_gather(
+    runtime: &Runtime,
+    pid: Word,
+    bases: &[Word],
+    lengths: &[Word],
+    destination: &mut [MaybeUninit<u8>],
+) -> Option<Result<(), i32>> {
+    let bytes = destination.len();
+    let plan = owned_gather::plan(
+        bases, lengths, destination, runtime.posix_shm_size,
+        super::guest_views::MAX_CONTIGUOUS_READ_BYTES,
+    )?;
+    // Nothing in this private destination has been published. A later denied
+    // source can reject the whole gather without promising an earlier prefix.
+    if plan.entries().iter().any(|entry| {
+        !runtime.memory_access_allowed(pid, entry.target, entry.bytes, 1)
+    }) {
+        return Some(Err(EFAULT));
+    }
+    let result = nanami_runtime::request_process_memory_readv_checked(pid, plan.entries())
+        .map_err(|_| EFAULT);
+    #[cfg(target_os = "none")]
+    if result.is_ok() && option_env!("NANAMI_UNIX_GATHER_DIAG") == Some("1") {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static REPORTED: AtomicUsize = AtomicUsize::new(0);
+        if REPORTED.fetch_add(1, Ordering::Relaxed) < 16 {
+            nanami_runtime::println!("[linux.unix] bulk-gather pid={} bytes={} fields={}",
+                pid, bytes, plan.entries().len());
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    let _ = bytes;
+    Some(result)
+}
+
 pub(super) fn write_target_memory(
     runtime: &Runtime,
     pid: Word,
@@ -148,11 +189,19 @@ pub(super) fn copyout_from(
     if len == 0 {
         return Ok(());
     }
-    if super::guest_views::copy_from_scratch(runtime, pid, user_ptr, source, len) {
-        return Ok(());
+    if super::private_memory::needs_checked_write_preparation(runtime, pid) {
+        super::private_memory::invalidate_checked_write_origin(runtime, pid, user_ptr, len);
+        if super::guest_views::copy_from_scratch_cached(runtime, pid, user_ptr, source, len) {
+            return Ok(());
+        }
     }
-    nanami_runtime::request_process_memory_write_checked(pid, user_ptr, source, len)
-        .map_err(|_| EFAULT)
+    super::private_memory::with_checked_private_write(runtime, pid, user_ptr, len, || {
+        if super::guest_views::copy_from_scratch(runtime, pid, user_ptr, source, len) {
+            return Ok(());
+        }
+        nanami_runtime::request_process_memory_write_checked(pid, user_ptr, source, len)
+            .map_err(|_| EFAULT)
+    })
 }
 
 /// A typed owned source permits small copyout without exposing an arbitrary
@@ -170,16 +219,20 @@ pub(super) fn copyout_owned(
     if source.is_empty() {
         return Ok(());
     }
-    if super::guest_views::copy_from_owned(runtime, pid, user_ptr, source) {
-        return Ok(());
+    if super::private_memory::needs_checked_write_preparation(runtime, pid) {
+        super::private_memory::invalidate_checked_write_origin(runtime, pid, user_ptr, source.len());
+        if super::guest_views::copy_from_owned_cached(runtime, pid, user_ptr, source) {
+            return Ok(());
+        }
     }
-    nanami_runtime::request_process_memory_write_checked(
-        pid,
-        user_ptr,
-        source.as_ptr() as Word,
-        source.len(),
-    )
-    .map_err(|_| EFAULT)
+    super::private_memory::with_checked_private_write(runtime, pid, user_ptr, source.len(), || {
+        if super::guest_views::copy_from_owned(runtime, pid, user_ptr, source) {
+            return Ok(());
+        }
+        nanami_runtime::request_process_memory_write_checked(
+            pid, user_ptr, source.as_ptr() as Word, source.len(),
+        ).map_err(|_| EFAULT)
+    })
 }
 
 pub(super) fn write_target_memory_from(
@@ -206,9 +259,62 @@ pub(super) fn copyout_owned_many<const N: usize>(
     pid: Word,
     buffers: &[(Word, &[u8]); N],
 ) -> Result<(), i32> {
+    if super::private_memory::needs_checked_write_preparation(runtime, pid) {
+        let cached_permissions_valid = N != 0 && N <= super::guest_views::MAX_WRITE_BUFFERS
+            && buffers.iter().all(|(target, source)| !source.is_empty()
+                && runtime.memory_access_allowed(pid, *target, source.len(), 2));
+        if cached_permissions_valid {
+            for &(target, source) in buffers {
+                super::private_memory::invalidate_checked_write_origin(runtime, pid, target, source.len());
+            }
+            if super::guest_views::copy_from_owned_many_cached(runtime, pid, buffers) {
+                return Ok(());
+            }
+        }
+        if let Some((base, bytes)) = single_page_copyout_span(buffers) {
+            let permissions_valid = cached_permissions_valid || buffers.iter().all(|(target, source)|
+                runtime.memory_access_allowed(pid, *target, source.len(), 2));
+            if permissions_valid {
+                // Every field uses the same backing page: any COW detach
+                // failure would already fail the first field. Prepare once,
+                // then retain the original ordered view/vector stores.
+                return super::private_memory::with_checked_private_write(runtime, pid, base, bytes, ||
+                    copyout_owned_many_prepared(runtime, pid, buffers, true));
+            }
+        }
+        // Keep ordered field faults: preparing every field before storing the
+        // first would suppress its committed prefix when a later detach fails.
+        for &(target, source) in buffers { copyout_owned(runtime, pid, target, source)?; }
+        return Ok(());
+    }
     let permissions_valid = buffers.iter().all(|(target, source)| {
         !source.is_empty() && runtime.memory_access_allowed(pid, *target, source.len(), 2)
     });
+    copyout_owned_many_prepared(runtime, pid, buffers, permissions_valid)
+}
+
+fn single_page_copyout_span<const N: usize>(buffers: &[(Word, &[u8]); N]) -> Option<(Word, Word)> {
+    if N == 0 || N > nanami_runtime::OS_MEMORY_COPY_VECTOR_MAX { return None; }
+    let mut start = Word::MAX;
+    let mut end = 0;
+    for &(target, source) in buffers {
+        if source.is_empty() { return None; }
+        let limit = target.checked_add(source.len())?;
+        start = start.min(target);
+        end = end.max(limit);
+    }
+    if start / LINUX_PAGE_SIZE != (end - 1) / LINUX_PAGE_SIZE { return None; }
+    Some((start, end - start))
+}
+
+fn copyout_owned_many_prepared<const N: usize>(
+    runtime: &Runtime, pid: Word, buffers: &[(Word, &[u8]); N], permissions_valid: bool,
+) -> Result<(), i32> {
+    if permissions_valid && !buffers.is_empty() {
+        for &(target, source) in buffers {
+            super::private_memory::invalidate_checked_write_origin(runtime, pid, target, source.len());
+        }
+    }
     if permissions_valid && super::guest_views::copy_from_owned_many(runtime, pid, buffers)
     {
         return Ok(());
@@ -236,13 +342,16 @@ pub(super) fn copyout_many(
     pid: Word,
     transfers: &[nanami_runtime::ProcessMemoryTransfer],
 ) -> Result<(), i32> {
-    if !transfers.is_empty()
+    if !super::private_memory::needs_checked_write_preparation(runtime, pid) && !transfers.is_empty()
         && transfers.len() <= nanami_runtime::OS_MEMORY_COPY_VECTOR_MAX
         && transfers.iter().all(|transfer| {
             transfer.bytes != 0
                 && runtime.memory_access_allowed(pid, transfer.target, transfer.bytes, 2)
         })
     {
+        for transfer in transfers {
+            super::private_memory::invalidate_checked_write_origin(runtime, pid, transfer.target, transfer.bytes);
+        }
         return nanami_runtime::request_process_memory_writev_checked(pid, transfers)
             .map_err(|_| EFAULT);
     }

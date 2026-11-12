@@ -283,18 +283,96 @@ fn provider_replacement_drops_the_old_alias_and_revalidates() {
 fn incoherent_hardware_reads_are_bounded_and_rollover_samples_are_coherent() {
     let mut calls = 0;
     assert_eq!(
-        counter::coherent_counter(|_| {
+        counter::coherent_counter(None, |_| {
             calls += 1;
             calls
         }),
         None
     );
-    assert_eq!(calls, 24);
-    let mut values = [1, u32::MAX, 2, 2, 3, 2].into_iter();
+    assert_eq!(calls, 17);
+    let mut values = [1, u32::MAX, 2, 3, 2].into_iter();
     assert_eq!(
-        counter::coherent_counter(|_| values.next().unwrap()),
+        counter::coherent_counter(None, |_| values.next().unwrap()),
         Some((2 << 32) | 3)
     );
+}
+
+#[test]
+fn confirmed_high_hint_removes_one_device_read_but_always_reads_fresh_low_and_high() {
+    let mut hint = None;
+    for raw in [0, 1, 99, u32::MAX as u64 - 1, u32::MAX as u64, 1 << 32, (1 << 32) + 7, 9 << 32] {
+        let mut offsets = Vec::new();
+        let result = counter::coherent_counter(hint, |offset| {
+            offsets.push(offset);
+            if offset == 4 { (raw >> 32) as u32 } else { raw as u32 }
+        });
+        assert_eq!(result, Some(raw));
+        let high = (raw >> 32) as u32;
+        assert_eq!(offsets, match hint {
+            None => vec![4, 0, 4],
+            Some(previous) if previous == high => vec![0, 4],
+            _ => vec![0, 4, 0, 4],
+        });
+        hint = Some(high);
+    }
+}
+
+#[test]
+fn hinted_counter_retries_rollover_at_each_read_and_bounds_incoherent_hardware() {
+    for advance_at in 0..=3 {
+        let mut raw = (7u64 << 32) | (u32::MAX as u64);
+        let mut calls = 0;
+        let result = counter::coherent_counter(Some(7), |offset| {
+            if calls == advance_at { raw += 1; }
+            calls += 1;
+            if offset == 4 { (raw >> 32) as u32 } else { raw as u32 }
+        });
+        assert!(matches!(result, Some(value) if value == (7u64 << 32) | u32::MAX as u64 || value == 8u64 << 32));
+    }
+    let mut calls = 0;
+    assert_eq!(counter::coherent_counter(Some(0), |_| { calls += 1; calls }), None);
+    assert_eq!(calls, 16);
+}
+
+#[test]
+fn hinted_samples_match_a_monotonic_device_across_sparse_calls_and_in_read_wraps() {
+    let mut hint = None;
+    let mut raw = 0u64;
+    let mut rng = 0x45a1_91c3_92b8_d6f0u64;
+    for _ in 0..10_000 {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        raw += rng & 0x3_ffff_ffff; // calls can skip several upper-word changes
+        let mut low_samples = Vec::new();
+        let result = counter::coherent_counter(hint, |offset| {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+            raw += rng & 0xffff;
+            if offset == 4 {
+                (raw >> 32) as u32
+            } else {
+                low_samples.push(raw);
+                raw as u32
+            }
+        }).expect("bounded device progress admits a coherent sample");
+        assert!(low_samples.contains(&result), "must return an actual fresh low-read instant");
+        hint = Some((result >> 32) as u32);
+    }
+}
+
+#[test]
+fn reader_crosses_low_rollover_and_drops_a_reset_high_hint_before_fresh_rpc() {
+    let mut page = fixture();
+    let mut reader = MonotonicReader::new();
+    reader.sample(7).unwrap();
+    for raw in [u32::MAX as u64, 1 << 32, (1 << 32) + 5] {
+        page.0[0xf0 / 8] = raw;
+        assert_eq!(reader.sample(7), Ok((raw as usize * 10, 1_000_000_000)));
+    }
+    FAKE.with_borrow(|f| assert_eq!(f.reads, 2));
+    page.0[0xf0 / 8] = 1;
+    assert_eq!(reader.sample(7), Ok((13000, 1_000_000_000)));
+    assert!(!reader.uses_local_counter());
+    assert_eq!(reader.sample(7), Ok((14000, 1_000_000_000)));
+    FAKE.with_borrow(|f| assert_eq!(f.releases.len(), 1));
 }
 
 #[test]

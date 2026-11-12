@@ -279,7 +279,9 @@ impl Alpha {
         let size_bytes = request.arg1;
         let requested_base = request.arg2;
         let protected = request.code == nanami_uapi::os::OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED;
-        if protected && (requested_base == 0 || request.arg3 == 0) {
+        // A zero base uses the same automatic heap reservation as anonymous
+        // mmap. The descriptor is still mandatory for final-rights requests.
+        if protected && request.arg3 == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
         if caller_pid == 0 || target_pid == 0 || size_bytes == 0 {
@@ -292,6 +294,9 @@ impl Alpha {
         if target.reaper_pid != caller_pid && target_pid != caller_pid {
             return Err(CapabilityError::PermissionDenied);
         }
+
+        let supervised = target.capabilities_sealed && target.reaper_pid == caller_pid
+            && target_pid != caller_pid && !target.exited && !target.resource_quarantined;
 
         let mapped_size = size_bytes
             .checked_add(PAGE_SIZE - 1)
@@ -310,17 +315,26 @@ impl Alpha {
             } else {
                 7
             };
-            self.map_process_initialized_pages_protected(
+            let source = Some(PageSource { pid: caller_pid, address: source[0], bytes: source[1] });
+            if protected && permissions & nanami_uapi::os::OS_MAP_INITIALIZER_DEFER != 0 {
+                if !supervised || requested_base == 0
+                    || permissions != (1 | nanami_uapi::os::OS_MAP_INITIALIZER_DEFER)
+                    || self.processes.find_entry_by_pid(caller_pid).is_none_or(|entry|
+                        entry.capabilities_sealed || entry.exited || entry.resource_quarantined)
+                { return Err(CapabilityError::PermissionDenied); }
+                let descriptor = self.read_process_memory_into_static_buffer(caller_pid,
+                    request.arg3, 4 * core::mem::size_of::<Word>())?;
+                let eager = unsafe { ptr::read_unaligned(descriptor.as_ptr()
+                    .add(3 * core::mem::size_of::<Word>()) as *const Word) };
+                self.map_process_initialized_pages_deferred(target_pid, requested_base,
+                    page_count, source, eager)?
+            } else { self.map_process_initialized_pages_protected(
                 target_pid,
                 (requested_base != 0).then_some(requested_base),
                 page_count,
-                Some(PageSource {
-                    pid: caller_pid,
-                    address: source[0],
-                    bytes: source[1],
-                }),
+                source,
                 permissions,
-            )?
+            )? }
         } else if requested_base == 0 {
             self.map_process_heap_pages(target_pid, page_count)
                 .map_err(|e| {
@@ -391,6 +405,9 @@ impl Alpha {
         if page_va & (PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
+        if writing && self.processes.immutable_source_overlapping_range(pid, page_va, PAGE_SIZE) {
+            return Err(CapabilityError::PermissionDenied);
+        }
         let frame = match self
             .processes
             .vm_space_mut(pid)
@@ -427,14 +444,22 @@ impl Alpha {
         let alpha_as = self.processes.alpha_entry().address_space;
         if let Some(old_frame) = self.processes.alpha_vm_space_mut().find_frame(temp_va) {
             match arch::address_space::unmap(alpha_as, old_frame, temp_va) {
-                Ok(()) | Err(CapabilityError::IllegalOperation) => {
+                Ok(()) => {
+                    #[cfg(not(test))]
+                    super::memory_init::record_mapping(false, false);
+                    self.processes.alpha_vm_space_mut().forget_frame(temp_va);
+                }
+                Err(CapabilityError::IllegalOperation) => {
                     self.processes.alpha_vm_space_mut().forget_frame(temp_va);
                 }
                 Err(error) => return Err(error),
             }
         }
         let vm = self.processes.alpha_vm_space_mut();
-        self.memory.map_frame_strict(alpha_as, frame, temp_va, vm)
+        self.memory.map_frame_strict(alpha_as, frame, temp_va, vm)?;
+        #[cfg(not(test))]
+        super::memory_init::record_mapping(false, true);
+        Ok(())
     }
 
     pub(super) fn unmap_alpha_temporary_frame(
@@ -458,6 +483,8 @@ impl Alpha {
     ) -> Result<(), CapabilityError> {
         let alpha_as = self.processes.alpha_entry().address_space;
         arch::address_space::unmap(alpha_as, frame, virtual_address)?;
+        #[cfg(not(test))]
+        super::memory_init::record_mapping(false, false);
         self.processes
             .alpha_vm_space_mut()
             .forget_frame(virtual_address);

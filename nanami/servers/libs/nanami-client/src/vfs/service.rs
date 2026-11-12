@@ -3,12 +3,16 @@ use a9n_abi::CapabilityDescriptor;
 use crate::{call_port, RequestError, Word, OS_RESPONSE_OK};
 
 use super::constants::{
+    VFS_REQUEST_READ_CURSOR, VFS_REQUEST_READ_CURSOR_GRANTED,
+    VFS_REQUEST_SEEK_CURSOR, VFS_REQUEST_SEEK_CURSOR_GRANTED,
+    VFS_REQUEST_FSTAT_GRANTED, VFS_REQUEST_READ_GRANTED, VFS_REQUEST_READ_VERSIONED_GRANTED,
     VFS_CONTROL_ATTACH_DELEGATED_SHARED_MEMORY, VFS_CONTROL_ATTACH_SHARED_MEMORY,
     VFS_DELEGATE_ID_SHIFT, VFS_DELEGATE_VALUE_MASK, VFS_OPEN_HANDLE_MASK, VFS_OPEN_INODE_SHIFT,
     VFS_REQUEST_CLOSE, VFS_REQUEST_CONTROL, VFS_REQUEST_CREATE, VFS_REQUEST_FSTAT,
     VFS_REQUEST_LINK, VFS_REQUEST_MKDIR, VFS_REQUEST_OPEN, VFS_REQUEST_OPEN_COMPOUND,
     VFS_REQUEST_READ, VFS_REQUEST_READ_DELEGATED, VFS_REQUEST_READ_DIR, VFS_REQUEST_REMOVE,
     VFS_REQUEST_RENAME, VFS_REQUEST_STAT, VFS_REQUEST_WRITE, VFS_REQUEST_WRITE_DELEGATED,
+    VFS_REQUEST_READ_VERSIONED,
     VFS_STAT_SIZE_MASK, VFS_STAT_TYPE_SHIFT,
 };
 
@@ -179,6 +183,22 @@ pub fn vfs_write(
         return Err(RequestError::Status(status));
     }
     Ok(bytes)
+}
+
+pub fn vfs_read_versioned(
+    service_port: CapabilityDescriptor, handle: Word, identity: Word, size: Word, delegate_id: Word,
+) -> Result<(Word, Word), RequestError> {
+    if delegate_id == 0 || delegate_id > VFS_DELEGATE_VALUE_MASK {
+        return Err(RequestError::InvalidArgument);
+    }
+    let (status, bytes, verified) = call_port(
+        service_port, VFS_REQUEST_READ_VERSIONED, handle, identity, size,
+        delegate_id << VFS_DELEGATE_ID_SHIFT, 5,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    Ok((bytes, verified))
 }
 
 /// The owner keeps the file handle; the delegated peer supplies the data buffer.
@@ -393,6 +413,57 @@ pub fn vfs_fstat_flags(
         return Err(RequestError::Status(status));
     }
     Ok(decode_stat(inode, metadata))
+}
+
+pub fn vfs_fstat_granted(port: CapabilityDescriptor, grant: Word, flags: Word) -> Result<(Word, Word, Word), RequestError> {
+    let (status, inode, metadata) = call_port(port, VFS_REQUEST_FSTAT_GRANTED, grant, flags, 0, 0, 3)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(decode_stat(inode, metadata))
+}
+
+pub fn vfs_pread_granted(port: CapabilityDescriptor, grant: Word, offset: Word, bytes: Word, output: Word) -> Result<Word, RequestError> {
+    let (status, read, _) = call_port(port, VFS_REQUEST_READ_GRANTED, grant, offset, bytes, output, 5)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(read)
+}
+
+pub fn vfs_read_versioned_granted(port: CapabilityDescriptor, grant: Word, identity: Word, bytes: Word) -> Result<(Word, Word), RequestError> {
+    let (status, read, verified) = call_port(port, VFS_REQUEST_READ_VERSIONED_GRANTED, grant, identity, bytes, 0, 5)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok((read, verified))
+}
+
+pub fn vfs_read_cursor(port: CapabilityDescriptor, handle: Word, bytes: Word, delegate: Word, output: Word) -> Result<Word, RequestError> {
+    if delegate > VFS_DELEGATE_VALUE_MASK || output > VFS_DELEGATE_VALUE_MASK {
+        return Err(RequestError::InvalidArgument);
+    }
+    let destination = (delegate << VFS_DELEGATE_ID_SHIFT) | output;
+    cursor_read(port, VFS_REQUEST_READ_CURSOR, handle, bytes, destination)
+}
+
+pub fn vfs_read_cursor_granted(port: CapabilityDescriptor, grant: Word, bytes: Word, output: Word) -> Result<Word, RequestError> {
+    cursor_read(port, VFS_REQUEST_READ_CURSOR_GRANTED, grant, bytes, output)
+}
+
+fn cursor_read(port: CapabilityDescriptor, code: Word, handle: Word, bytes: Word, output: Word) -> Result<Word, RequestError> {
+    let (status, read, _) = call_port(port, code, handle, 0, bytes, output, 5)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    if read > bytes { return Err(RequestError::Protocol); }
+    Ok(read)
+}
+
+pub fn vfs_seek_cursor(port: CapabilityDescriptor, handle: Word, offset: Word, whence: Word) -> Result<Word, RequestError> {
+    cursor_seek(port, VFS_REQUEST_SEEK_CURSOR, handle, offset, whence)
+}
+
+pub fn vfs_seek_cursor_granted(port: CapabilityDescriptor, grant: Word, offset: Word, whence: Word) -> Result<Word, RequestError> {
+    cursor_seek(port, VFS_REQUEST_SEEK_CURSOR_GRANTED, grant, offset, whence)
+}
+
+fn cursor_seek(port: CapabilityDescriptor, code: Word, handle: Word, offset: Word, whence: Word) -> Result<Word, RequestError> {
+    let (status, position, _) = call_port(port, code, handle, offset, whence, 0, 4)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    Ok(position)
 }
 
 pub fn vfs_read_dir(

@@ -39,13 +39,7 @@ pub(super) fn sys_terminal_read_now(
     };
     if let Some(bytes) = bytes {
         if bytes != 0 {
-            nanami_runtime::request_process_memory_write_checked(
-                pid,
-                user_buffer,
-                runtime.terminal_shm,
-                bytes,
-            )
-            .map_err(|_| super::EFAULT)?;
+            super::copyout_from(runtime, pid, user_buffer, runtime.terminal_shm, bytes)?;
         }
         return Ok(Some(bytes));
     }

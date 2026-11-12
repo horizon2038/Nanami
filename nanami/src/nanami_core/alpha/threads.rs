@@ -181,7 +181,7 @@ impl Alpha {
             // Walk only backed pages, including retained PROT_NONE backing.
             // No ELF parsing, pathname lookup, initial stack or zero-fill pass.
             if share_readonly {
-                self.clone_process_vm_shared_readonly(source.pid, pid)?;
+                self.clone_process_vm_private_cow(source.pid, pid)?;
             } else {
                 self.clone_process_vm(source.pid, pid)?;
             }

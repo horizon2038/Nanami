@@ -5,6 +5,10 @@ extern crate self as nanami_client;
 extern crate self as nanami_runtime;
 thread_local! {
     static PROTECT_TRACE: std::cell::RefCell<(Option<Vec<(Word, Word, Word, Word)>>, bool)> = const { std::cell::RefCell::new((None, false)) };
+    static PROTECT_FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static MEMFD_INIT_TRACE: std::cell::RefCell<Option<(Vec<(Word, Word, Word, Word, Word, Word)>, Option<usize>, bool)>> = const { std::cell::RefCell::new(None) };
+    static MEMFD_ANONYMOUS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEMFD_RAW_WRITES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static COPYOUT_FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static COPYOUT_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RAW_COPYOUT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -14,6 +18,7 @@ thread_local! {
     static MEMFD_CLEANUP_TRACE: std::cell::RefCell<Option<MemfdCleanupTrace>> = const { std::cell::RefCell::new(None) };
     static VM_GROUP_QUERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MEMFD_SYNCS: std::cell::RefCell<(Vec<Word>, Option<usize>)> = const { std::cell::RefCell::new((Vec::new(), None)) };
+    static SPARSE_RELEASE_TRACE: std::cell::RefCell<Option<(Vec<(Word, Word, Word)>, Option<usize>)>> = const { std::cell::RefCell::new(None) };
 }
 struct MemfdCleanupTrace {
     releases: Vec<Word>,
@@ -384,6 +389,7 @@ struct Runtime {
     monotonic_ticks: Word,
     monotonic_tick_hz: Word,
     readiness_changes: Word,
+    unix_wake_targets: UnixWakeTargets,
     clock_error: bool,
     alarm_error: bool,
     realtime_anchor: Option<(Word, Word)>,
@@ -513,6 +519,21 @@ fn copyout_owned(r: &mut Runtime, _: Word, ptr: Word, source: &[u8]) -> Result<(
     }
     Ok(())
 }
+mod guest_memory {
+    use super::*;
+    pub(super) fn copyout_owned_many<const N: usize>(r: &mut Runtime, pid: Word, fields: &[(Word, &[u8]); N]) -> Result<(), i32> {
+        SELECT_BATCH_CALLS.with(|n| n.set(n.get() + 1));
+        for &(ptr, bytes) in fields { copyout_owned(r, pid, ptr, bytes)?; }
+        Ok(())
+    }
+}
+mod private_memory {
+    pub(super) fn with_private_write<T>(_: &super::Runtime, _: usize, _: usize, _: usize,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> { operation() }
+}
+thread_local! {
+    static SELECT_BATCH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 unsafe fn write_u64(p: Word, v: Word) {
     (p as *mut u64).write_unaligned(v as u64);
 }
@@ -594,14 +615,16 @@ fn write_guest_u64(runtime: &mut Runtime, pid: Word, ptr: Word, value: Word) -> 
 }
 fn write_target_memory_from(
     _: &Runtime,
-    _: Word,
+    pid: Word,
     destination: Word,
     source: Word,
     bytes: Word,
 ) -> Result<(), i32> {
+    MEMFD_RAW_WRITES.with(|c| c.set(c.get() + 1));
     if destination == 0 {
         return Err(EFAULT);
     }
+    let destination = alias_pointer(pid, destination, bytes).unwrap_or(destination);
     unsafe {
         std::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, bytes);
     }
@@ -751,6 +774,14 @@ pub fn request_process_mapping_release_sparse(
     base: Word,
     bytes: Word,
 ) -> Result<(), RequestError> {
+    let fail = SPARSE_RELEASE_TRACE.with(|trace| {
+        let mut trace = trace.borrow_mut();
+        if let Some((calls, failure)) = trace.as_mut() {
+            calls.push((pid, base, bytes));
+            *failure == Some(calls.len())
+        } else { false }
+    });
+    if fail { return Err(RequestError); }
     ALIASES.with(|aliases| {
         aliases
             .borrow_mut()
@@ -767,7 +798,7 @@ pub fn request_process_mapping_protect(
     let fail = PROTECT_TRACE.with(|trace| {
         let mut trace = trace.borrow_mut();
         if let Some(calls) = &mut trace.0 { calls.push((pid, base, bytes, prot)); }
-        trace.1
+        trace.1 || PROTECT_FAIL_AT.with(|at| at.get().is_some_and(|at| trace.0.as_ref().is_some_and(|calls| calls.len() == at)))
     });
     if fail { return Err(RequestError); }
     ALIASES.with(|aliases| {
@@ -786,12 +817,39 @@ pub fn request_process_map_anonymous_at(
     base: Word,
     bytes: Word,
 ) -> Result<(Word, Word), RequestError> {
+    MEMFD_ANONYMOUS_CALLS.with(|c| c.set(c.get() + 1));
+    map_anonymous_pages(pid, base, bytes)
+}
+fn map_anonymous_pages(pid: Word, base: Word, bytes: Word) -> Result<(Word, Word), RequestError> {
     for va in (base..base + bytes).step_by(LINUX_PAGE_SIZE) {
         let source = request_memory_create(LINUX_PAGE_SIZE)?;
         request_mapping_share_at(pid, source, LINUX_PAGE_SIZE, va)?;
         request_mapping_release(source, LINUX_PAGE_SIZE)?;
     }
     Ok((base, bytes))
+}
+pub fn request_process_map_initialized_protected_at(
+    pid: Word, base: Word, bytes: Word, source: Word, source_bytes: Word, prot: Word,
+) -> Result<(), RequestError> {
+    assert!(prot != 0 && prot & !7 == 0 && source_bytes <= bytes);
+    let (fail, after) = MEMFD_INIT_TRACE.with(|t| {
+        let mut t = t.borrow_mut();
+        if let Some((calls, fail, after)) = t.as_mut() {
+            calls.push((pid, base, bytes, source, source_bytes, prot));
+            (*fail == Some(calls.len()), *after)
+        } else { (false, false) }
+    });
+    if fail && !after { return Err(RequestError); }
+    map_anonymous_pages(pid, base, bytes)?;
+    for offset in (0..bytes).step_by(LINUX_PAGE_SIZE) {
+        let count = source_bytes.saturating_sub(offset).min(LINUX_PAGE_SIZE);
+        if count != 0 {
+            let target = alias_pointer(pid, base + offset, count).ok_or(RequestError)?;
+            unsafe { std::ptr::copy_nonoverlapping((source + offset) as *const u8, target as *mut u8, count); }
+        }
+        ALIASES.with_borrow_mut(|a| a.get_mut(&(pid, base + offset)).unwrap().1 = prot);
+    }
+    if fail { Err(RequestError) } else { Ok(()) }
 }
 pub fn request_process_memory_clone(
     parent: Word,
@@ -966,6 +1024,7 @@ fn runtime() -> Runtime {
         monotonic_ticks: 100,
         monotonic_tick_hz: 1000,
         readiness_changes: 0,
+        unix_wake_targets: UnixWakeTargets::default(),
         clock_error: false,
         alarm_error: false,
         realtime_anchor: Some((0, 0)),
@@ -1277,6 +1336,102 @@ fn pipe_direction_notifications_filter_interests_and_general_close_still_wakes()
         wake_readiness_waiters(&mut r, READY_PIPE);
         assert!(r.managed[0].readiness_wait.is_none());
         assert_eq!(fds[0].revents, expected);
+    }
+}
+
+#[test]
+fn unix_endpoint_notifications_reduce_32_waiter_scans_to_one_in_both_directions() {
+    for (events, source) in [(LINUX_POLLIN, READY_UNIX_READ), (LINUX_POLLOUT, READY_UNIX_WRITE)] {
+        let mut r = runtime();
+        r.managed.clear();
+        let mut outputs = vec![[fd(0, events)]; 32];
+        for index in 0..32 {
+            let pid = index + 1;
+            r.managed.push(Process { pid, pcb: 100 + pid, ..Process::default() });
+            let descriptor = r.allocate_linux_file(pid, LinuxFile {
+                kind: LinuxFileKind::SocketUnix, resource: pid, ..LinuxFile::EMPTY
+            }, 0).unwrap();
+            outputs[index][0].fd = descriptor as i32;
+            let context = LinuxSyscallContext { number: SYS_POLL,
+                args: [outputs[index].as_mut_ptr() as Word, 1, Word::MAX, 0, 0, 0] };
+            assert_eq!(sys_poll_action(&mut r, pid, context), EmulationAction::Park);
+        }
+        r.unix_queries.set(0);
+        wake_readiness_waiters(&mut r, source);
+        assert_eq!(r.unix_queries.get(), 32);
+        r.unix_queries.set(0);
+        if source == READY_UNIX_READ { r.unix_wake_targets.note_read(17); }
+        else { r.unix_wake_targets.note_write(Some(17)); }
+        r.readiness_changes = source;
+        handle_readiness_changes(&mut r);
+        assert_eq!(r.unix_queries.get(), 1);
+        assert!(r.managed.iter().all(|p| p.readiness_wait.is_some()));
+        assert_eq!(r.readiness_changes, 0);
+        assert!(!r.unix_wake_targets.qualified(source));
+        // A later independent event must not inherit the preceding filter.
+        r.unix_queries.set(0);
+        r.readiness_changes = source;
+        handle_readiness_changes(&mut r);
+        assert_eq!(r.unix_queries.get(), 32);
+        println!("UNIX-ENDPOINT-WAKE source={source} provider-scans=32->1");
+    }
+}
+
+#[test]
+fn unix_endpoint_hints_merge_collide_and_keep_unknown_writer_broadcasts() {
+    let mut targets = UnixWakeTargets::default();
+    targets.note_read(3);
+    targets.note_read(19);
+    targets.note_write(Some(7));
+    assert!(targets.matches(READY_UNIX_READ, 3, true, false));
+    assert!(targets.matches(READY_UNIX_READ, 19, true, false));
+    assert!(targets.matches(READY_UNIX_READ, 3 + Word::BITS as Word, true, false));
+    assert!(!targets.matches(READY_UNIX_READ, 7, true, false));
+    assert!(!targets.matches(READY_UNIX_WRITE, 3, false, true));
+    assert!(targets.matches(READY_UNIX_WRITE, 7, false, true));
+    targets.note_write(None);
+    targets.note_write(Some(11));
+    for id in 0..256 { assert!(targets.matches(READY_UNIX_WRITE, id, false, true)); }
+}
+
+#[test]
+fn unix_endpoint_filter_obeys_current_fds_and_preserves_general_and_timer_wakes() {
+    for case in 0..5 {
+        let mut r = runtime();
+        let descriptor = r.allocate_linux_file(1, LinuxFile {
+            kind: LinuxFileKind::SocketUnix, resource: 111, ..LinuxFile::EMPTY
+        }, 0).unwrap();
+        let mut fds = [fd(descriptor as i32, LINUX_POLLIN)];
+        assert_eq!(poll(&mut r, &mut fds, -1), EmulationAction::Park);
+        r.unix_queries.set(0);
+        r.unix_wake_targets.note_read(5);
+        r.readiness_changes = READY_UNIX_READ;
+        match case {
+            0 => { // Shared FD replacement: use its current socket identity.
+                r.files[descriptor].resource = 5;
+                r.unix_ready = LINUX_POLLIN;
+            }
+            1 => { // Close must still report NVAL even with a stale source mask.
+                r.files[descriptor] = LinuxFile::EMPTY;
+            }
+            2 => { // Another provider replaces the number while it is parked.
+                r.files[descriptor].kind = LinuxFileKind::PipeRead;
+                r.pipe.len = 1;
+            }
+            3 => { // A general close/shutdown source overrides endpoint hints.
+                r.readiness_changes |= READY_UNIX;
+                r.unix_ready = LINUX_POLLHUP;
+            }
+            _ => {
+                r.readiness_changes |= READY_TIMER;
+                r.managed[0].readiness_wait.as_mut().unwrap().deadline = Some(99);
+            }
+        }
+        handle_readiness_changes(&mut r);
+        assert!(r.managed[0].readiness_wait.is_none(), "case={case}");
+        assert_eq!(fds[0].revents, match case {
+            1 => LINUX_POLLNVAL, 3 => LINUX_POLLHUP, 4 => 0, _ => LINUX_POLLIN,
+        });
     }
 }
 
@@ -1671,6 +1826,97 @@ fn sparse_select_entries_match_scalar_fd_scan_at_every_nfds_boundary() {
     assert_eq!(read_poll_set(&mut r, 1, empty).unwrap().count, 0);
 }
 #[test]
+fn select_results_batch_present_sets_in_order_and_preserve_aliases() {
+    for number in [SYS_SELECT, SYS_PSELECT6] {
+        for mask in 0usize..8 {
+            for alias in [false, true] {
+                let mut r = runtime(); let mut sets = [7usize; 3];
+                let base = sets.as_mut_ptr() as Word;
+                let pointers = core::array::from_fn::<_, 3, _>(|i| {
+                    if mask & (1 << i) == 0 { 0 } else { base + if alias { 0 } else { i * 8 } }
+                });
+                let ctx = LinuxSyscallContext { number, args: [3, pointers[0], pointers[1], pointers[2], 0, 0] };
+                let mut wait = read_poll_set(&mut r, 1, ctx).unwrap();
+                for entry in &mut wait.entries[..wait.count] {
+                    entry.revents = [LINUX_POLLIN, LINUX_POLLOUT, LINUX_POLLPRI][entry.fd as usize];
+                }
+                SELECT_BATCH_CALLS.with(|n| n.set(0));
+                assert_eq!(write_poll_set(&mut r, 1, &wait), Ok(mask.count_ones() as usize));
+                let mut expected = [7usize; 3];
+                for i in 0..3 {
+                    if pointers[i] != 0 { expected[if alias { 0 } else { i }] = 1 << i; }
+                }
+                assert_eq!(sets, expected);
+                SELECT_BATCH_CALLS.with(|n| assert_eq!(n.get(), usize::from(mask.count_ones() >= 2)));
+            }
+        }
+    }
+}
+
+#[test]
+fn select_result_batch_keeps_fault_prefix_and_skips_zero_nfds_outputs() {
+    for fail in 0..3 {
+        let mut r = runtime(); let mut sets = [7usize; 3]; let base = sets.as_mut_ptr() as Word;
+        let ctx = LinuxSyscallContext { number: SYS_SELECT, args: [3, base, base + 8, base + 16, 0, 0] };
+        let mut wait = read_poll_set(&mut r, 1, ctx).unwrap();
+        for entry in &mut wait.entries[..wait.count] { entry.revents = 0; }
+        COPYOUT_ATTEMPTS.with(|n| n.set(0)); COPYOUT_FAIL_AT.with(|n| n.set(Some(fail)));
+        assert_eq!(write_poll_set(&mut r, 1, &wait), Err(EFAULT));
+        assert_eq!(sets, core::array::from_fn(|i| if i < fail { 0 } else { 7 }));
+        COPYOUT_FAIL_AT.with(|n| n.set(None));
+        wait.context.args[0] = 0; r.copy_error = true;
+        assert_eq!(write_poll_set(&mut r, 1, &wait), Ok(0));
+    }
+}
+
+#[test]
+fn nanosecond_poll_deadlines_and_remaining_times_match_generic_arithmetic() {
+    let mut seed = 0x5931ae87u64;
+    for hz in [1usize, 1000, 999_999_999, 1_000_000_000, 1_000_000_001, Word::MAX] {
+        for _ in 0..2000 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let seconds = seed >> 1;
+            let nanos = seconds as u128 * 1_000_000_000 + (seed % 1_000_000_000) as u128;
+            let ticks = (nanos / 1_000_000_000 * hz as u128)
+                .saturating_add(((nanos % 1_000_000_000) * hz as u128).div_ceil(1_000_000_000));
+            assert_eq!(poll_deadline(seed as Word, hz, nanos), (seed as Word).saturating_add(ticks.min(Word::MAX as u128) as Word));
+        }
+        for number in [SYS_SELECT, SYS_PSELECT6, SYS_PPOLL] {
+            for ticks in [0usize, 1, 999_999_999, 1_000_000_000, Word::MAX - 1, Word::MAX] {
+                let mut r = runtime(); r.monotonic_ticks = 0; r.monotonic_tick_hz = hz;
+                let mut output = [Word::MAX; 2]; let pointer = output.as_mut_ptr() as Word;
+                let context = LinuxSyscallContext { number, args: if number == SYS_PPOLL { [0, 0, pointer, 0, 0, 0] } else { [0, 0, 0, 0, pointer, 0] } };
+                let mut wait = read_poll_set(&mut r, 1, context).unwrap(); wait.deadline = Some(ticks);
+                write_poll_timeout(&mut r, 1, &wait).unwrap();
+                let ns = ((ticks % hz) as u128 * 1_000_000_000 / hz as u128) as Word;
+                assert_eq!(output, [ticks / hz, if number == SYS_SELECT { ns / 1000 } else { ns }]);
+            }
+        }
+    }
+    for nanos in [0u128, Word::MAX as u128, Word::MAX as u128 + 1, u128::MAX] {
+        assert_eq!(poll_deadline(0, 1_000_000_000, nanos), nanos.min(Word::MAX as u128) as Word);
+    }
+}
+
+#[test]
+fn timerfd_nanosecond_conversion_keeps_overflow_errors_and_state() {
+    for hz in [1usize, 1000, 999_999_999, 1_000_000_000, 1_000_000_001, Word::MAX] {
+        for seconds in [0usize, 1, Word::MAX / 1_000_000_000 - 1, Word::MAX / 1_000_000_000, Word::MAX / 1_000_000_000 + 1, isize::MAX as Word] {
+            for nanos in [0usize, 1, 999_999_999] {
+                let mut r = runtime(); r.monotonic_tick_hz = hz;
+                let fd = fd_events::timer_create(&mut r, 1, 1, 0).unwrap();
+                let input = [seconds, nanos, 0, 0];
+                let ticks = seconds as u128 * hz as u128 + (nanos as u128 * hz as u128).div_ceil(1_000_000_000);
+                assert_eq!(fd_events::timer_set(&mut r, 1, fd, 0, input.as_ptr() as Word, 0), if ticks > Word::MAX as u128 { Err(EINVAL) } else { Ok(0) });
+                let file = r.linux_file(1, fd).unwrap();
+                let Some(poll_objects::Object::Timer(timer)) = r.poll_objects.get(file.resource) else { panic!() };
+                assert_eq!(timer.interval, if ticks > Word::MAX as u128 { 0 } else { ticks as Word });
+            }
+        }
+    }
+}
+
+#[test]
 fn zero_fds_still_sleeps_and_subtick_timeout_rounds_up() {
     let mut r = runtime();
     let mut ts = [0i64, 1];
@@ -1726,6 +1972,33 @@ fn epoll_context(epfd: Word, output: &mut [u8], timeout: i32) -> LinuxSyscallCon
             0,
         ],
     }
+}
+
+#[test]
+fn unix_endpoint_hints_keep_epoll_open_description_scans() {
+    let mut r = runtime();
+    let socket = r.allocate_linux_file(1, LinuxFile {
+        kind: LinuxFileKind::SocketUnix, resource: 111, ..LinuxFile::EMPTY
+    }, 0).unwrap();
+    let ep = epoll::create(&mut r, 1, 0).unwrap();
+    watch(&mut r, ep, socket, 1, LINUX_POLLIN as u32, 123).unwrap();
+    let mut output = [0u8; TEST_EVENT_BYTES];
+    let ctx = epoll_context(ep, &mut output, -1);
+    assert_eq!(sys_poll_action(&mut r, 1, ctx), EmulationAction::Park);
+    r.readiness_changes = READY_UNIX_READ;
+    r.unix_wake_targets.note_read(5);
+    r.unix_queries.set(0);
+    // Epoll conservatively retains its full registered-description scan,
+    // including a shared registration that changes while the owner sleeps.
+    handle_readiness_changes(&mut r);
+    assert_eq!(r.unix_queries.get(), 1);
+    assert!(r.managed[0].readiness_wait.is_some());
+    r.unix_ready = LINUX_POLLIN;
+    r.readiness_changes = READY_UNIX_READ;
+    r.unix_wake_targets.note_read(111);
+    handle_readiness_changes(&mut r);
+    assert!(r.managed[0].readiness_wait.is_none());
+    assert_eq!(&output[TEST_EVENT_BYTES - 8..], &123u64.to_le_bytes());
 }
 
 #[test]
@@ -2350,6 +2623,81 @@ fn poll_timer_membership_tracks_creation_and_swap_churn_without_rebuilds() {
 }
 
 #[test]
+fn epoll_membership_skips_non_epoll_objects_without_rescanning_on_warm_queries() {
+    use std::cell::Cell;
+    use poll_objects::{EventCounter, Object, Objects, Epoll, Watch, OBJECT_LIMIT};
+    let file = LinuxFile { kind: LinuxFileKind::SocketUnix, resource: 77, ..LinuxFile::EMPTY };
+    for epolls in [0usize, 2] {
+        let mut objects = Objects::new();
+        for _ in 0..OBJECT_LIMIT - epolls { objects.insert(Object::Counter(EventCounter { value: 0, semaphore: false, nonblocking: false })).unwrap(); }
+        for _ in 0..epolls { objects.insert(Object::Epoll(Epoll { watches: vec![Watch { fd: 4, file, terminal: 0, events: 1, data: 3, armed: false }], cursor: 0, source_mask: Cell::new(None) })).unwrap(); }
+        let absent = LinuxFile { resource: 78, ..file };
+        poll_objects::take_epoll_inspections();
+        for _ in 0..100 { assert!(!objects.has_file_watch(absent, 0)); }
+        let visits = poll_objects::take_epoll_inspections();
+        assert_eq!(visits, 100 * epolls);
+        println!("EPOLL-MEMBERSHIP epolls={epolls} old_variant_checks={} indexed_checks={visits}", OBJECT_LIMIT * 100);
+        if epolls != 0 {
+            // Move an epoll from the last bitmap word into slot zero, then
+            // remove the other epoll so only the moved bit can prove presence.
+            objects.remove(1);
+            objects.remove((OBJECT_LIMIT - 1) as Word);
+            assert!(objects.has_file_watch(file, 0));
+            objects.remove(OBJECT_LIMIT as Word);
+            assert!(!objects.has_file_watch(file, 0));
+        }
+    }
+}
+
+#[test]
+fn epoll_membership_matches_linear_lookup_after_variant_changes_swaps_and_insertions() {
+    use std::cell::Cell;
+    use poll_objects::{EventCounter, Object, Objects, Epoll, Watch};
+    let file = LinuxFile { kind: LinuxFileKind::Terminal, posix_fd: 11, resource: 77, ..LinuxFile::EMPTY };
+    let mut objects = Objects::new(); let mut ids = Vec::new(); let mut seed = 0x59a7e21u64;
+    for step in 0..1000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let make = || if seed & 1 == 0 { Object::Counter(EventCounter { value: 0, semaphore: false, nonblocking: false }) }
+            else { Object::Epoll(Epoll { watches: vec![Watch { fd: 4, file, terminal: seed as usize % 3, events: 1, data: seed, armed: seed & 2 != 0 }], cursor: 0, source_mask: Cell::new(None) }) };
+        if step % 3 == 0 && !ids.is_empty() { let i = seed as usize % ids.len(); objects.remove(ids.swap_remove(i)); }
+        else if step % 3 == 1 && !ids.is_empty() { *objects.get_mut(ids[seed as usize % ids.len()]).unwrap() = make(); }
+        else if ids.len() < 40 { ids.push(objects.insert(make()).unwrap()); }
+        for terminal in 0..4 {
+            let expected = objects.iter().any(|(_, object)| match object {
+                Object::Epoll(epoll) => epoll.watches.iter().any(|watch| watch.file.kind == file.kind && watch.file.posix_fd == file.posix_fd && watch.file.resource == file.resource && watch.terminal == terminal),
+                _ => false,
+            });
+            assert_eq!(objects.has_file_watch(file, terminal), expected);
+        }
+    }
+}
+
+#[test]
+fn indexed_watch_removal_keeps_terminal_identity_disabled_watches_and_source_masks() {
+    use std::cell::Cell;
+    use poll_objects::{EventCounter, Object, Objects, Epoll, Watch};
+    let file = LinuxFile { kind: LinuxFileKind::Terminal, posix_fd: 11, resource: 77, ..LinuxFile::EMPTY };
+    let other = LinuxFile { kind: LinuxFileKind::SocketUnix, ..file };
+    let mut objects = Objects::new();
+    for _ in 0..100 { objects.insert(Object::Counter(EventCounter { value: 0, semaphore: false, nonblocking: false })).unwrap(); }
+    let mut ids = Vec::new();
+    for i in 0..4 {
+        let watches = vec![Watch { fd: 4, file, terminal: if i % 2 == 0 { 7 } else { 8 }, events: 1, data: 10, armed: false },
+            Watch { fd: 5, file: other, terminal: 7, events: 1, data: 20, armed: true }];
+        ids.push(objects.insert(Object::Epoll(Epoll { watches, cursor: 7, source_mask: Cell::new(Some(99)) })).unwrap());
+    }
+    poll_objects::take_epoll_inspections(); objects.forget_file(file, 7);
+    assert_eq!(poll_objects::take_epoll_inspections(), 4);
+    for (i, id) in ids.into_iter().enumerate() {
+        let Some(Object::Epoll(epoll)) = objects.get(id) else { panic!() };
+        assert_eq!(epoll.cursor, 7);
+        assert_eq!(epoll.watches.iter().map(|watch| (watch.data, watch.armed)).collect::<Vec<_>>(), if i % 2 == 0 { vec![(20, true)] } else { vec![(10, false), (20, true)] });
+        assert_eq!(epoll.source_mask.get(), if i % 2 == 0 { None } else { Some(99) });
+    }
+    assert!(!objects.has_file_watch(file, 7)); assert!(objects.has_file_watch(file, 8)); assert!(objects.has_file_watch(other, 100));
+}
+
+#[test]
 fn poll_timer_membership_stays_invalid_across_structural_changes_after_generic_mutation() {
     use poll_objects::{EventCounter, Object, Objects, Timer};
     fn counter() -> Object { Object::Counter(EventCounter { value: 0, semaphore: false, nonblocking: false }) }
@@ -2863,6 +3211,321 @@ fn memfd_shared_aliases_survive_close_protection_and_truncate_then_regrow() {
 }
 
 #[test]
+fn final_memfd_constructor_preserves_sparse_data_permissions_and_private_isolation() {
+    let mut results = Vec::new();
+    for offset in [0, LINUX_PAGE_SIZE] {
+        for valid in [0, 3] {
+            for mode in 0..3 {
+                for prot in [0, 1, 2, 3, 5, 7] {
+                    let (mut r, file, expected) = final_memfd_fixture(offset, valid, mode);
+                    MEMFD_ANONYMOUS_CALLS.with(|c| c.set(0)); MEMFD_RAW_WRITES.with(|c| c.set(0));
+                    MEMFD_INIT_TRACE.with(|t| *t.borrow_mut() = Some((Vec::with_capacity(4), None, false)));
+                    PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(4)), false));
+                    let base = memfd::map(&mut r, 1, 0, 4 * LINUX_PAGE_SIZE, prot, 2, file, offset).unwrap();
+                    let anonymous = MEMFD_ANONYMOUS_CALLS.with(|c| c.get());
+                    let writes = MEMFD_RAW_WRITES.with(|c| c.get());
+                    let protected = PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap().len());
+                    let initialized = MEMFD_INIT_TRACE.with(|t| t.borrow_mut().take().unwrap().0.len());
+                    results.push((anonymous, writes, protected, initialized));
+                    let copies = if mode == 0 { 0 } else if mode == 1 { valid.div_ceil(2) } else { valid };
+                    assert_eq!((anonymous, writes, protected, initialized), if prot == 0 { (valid, copies, valid, 0) } else { (0, 0, 0, valid) });
+                    ALIASES.with_borrow(|a| {
+                        for i in 0..4 {
+                            if i < valid { let page = &a[&(1, base + i * LINUX_PAGE_SIZE)]; assert_eq!(page.1, prot); assert_eq!(&page.0[..], expected[i].as_slice()); }
+                            else { assert!(!a.contains_key(&(1, base + i * LINUX_PAGE_SIZE))); }
+                        }
+                    });
+                    let sources: Vec<_> = r.poll_objects.memory_mut(file.resource).unwrap().pages.iter().map(|(&i, &p)| (i, p)).collect();
+                    for (index, source) in sources {
+                        let i = index - offset / LINUX_PAGE_SIZE;
+                        // The live backing may change after MAP_PRIVATE. The
+                        // guest's copy must retain the sampled contents.
+                        unsafe { (source as *mut u8).write(0xa5); }
+                        ALIASES.with_borrow(|a| assert_eq!(a[&(1, base + i * LINUX_PAGE_SIZE)].0[0], expected[i][0]));
+                    }
+                    if offset == 0 && valid == 3 && prot == 3 {
+                        println!("MEMFD-FINAL mode={mode} map/write/protect/init={:?}", results.last().unwrap());
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(results.len(), 72);
+}
+
+fn final_memfd_fixture(offset: Word, valid: usize, mode: usize) -> (Runtime, LinuxFile, Vec<Vec<u8>>) {
+    ALIASES.with_borrow_mut(|a| a.clear());
+    MEMFD_INIT_TRACE.with(|t| *t.borrow_mut() = None);
+    PROTECT_FAIL_AT.with(|at| at.set(None));
+    let mut r = runtime();
+    let fd = memfd::create(&mut r, 1, c"final".as_ptr() as Word, 2).unwrap();
+    let file = r.linux_file(1, fd).unwrap();
+    let mut expected = Vec::new();
+    for i in 0..valid {
+        let mut page = vec![0; LINUX_PAGE_SIZE];
+        if mode == 2 || mode == 1 && i % 2 == 0 {
+            let bytes = if i + 1 == valid { 17 } else { LINUX_PAGE_SIZE };
+            page[..bytes].fill((i + 1) as u8);
+            let source = request_memory_create(LINUX_PAGE_SIZE).unwrap();
+            unsafe { std::ptr::copy_nonoverlapping(page.as_ptr(), source as *mut u8, LINUX_PAGE_SIZE); }
+            r.poll_objects.memory_mut(file.resource).unwrap().pages.insert(offset / LINUX_PAGE_SIZE + i, source);
+        }
+        expected.push(page);
+    }
+    r.poll_objects.memory_mut(file.resource).unwrap().size = if valid == 0 { 0 } else { offset + (valid - 1) * LINUX_PAGE_SIZE + 17 };
+    (r, file, expected)
+}
+
+#[test]
+fn final_memfd_constructor_failure_cleans_whole_range_without_fallback_or_source_changes() {
+    for after in [false, true] {
+        for fail in 1..=3 {
+            let (mut r, file, expected) = final_memfd_fixture(0, 3, 2);
+            MEMFD_INIT_TRACE.with(|t| *t.borrow_mut() = Some((Vec::with_capacity(3), Some(fail), after)));
+            MEMFD_ANONYMOUS_CALLS.with(|c| c.set(0)); MEMFD_RAW_WRITES.with(|c| c.set(0));
+            PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(4)), false));
+            assert_eq!(memfd::map(&mut r, 1, 0, 4 * LINUX_PAGE_SIZE, 3, 2, file, 0), Err(EIO));
+            assert_eq!(MEMFD_INIT_TRACE.with(|t| t.borrow_mut().take().unwrap().0.len()), fail);
+            assert_eq!(MEMFD_ANONYMOUS_CALLS.with(|c| c.get()), 0);
+            assert_eq!(MEMFD_RAW_WRITES.with(|c| c.get()), 0);
+            assert!(PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap().is_empty()));
+            assert!(ALIASES.with_borrow(|a| a.keys().all(|(pid, _)| *pid != 1)));
+            assert!(r.managed[0].mappings.is_empty());
+            let memory = r.poll_objects.memory_mut(file.resource).unwrap();
+            assert!(memory.maps.is_empty());
+            for (&index, &source) in &memory.pages {
+                let bytes = unsafe { std::slice::from_raw_parts(source as *const u8, LINUX_PAGE_SIZE) };
+                assert_eq!(bytes, expected[index]);
+            }
+        }
+    }
+}
+
+#[test]
+fn memfd_protection_snapshot_allocations_and_rollback_plan_boundaries() {
+    let mut counts = Vec::new();
+    for pages in [1, 4, 5, 16] {
+        let (r, _, base, rights) = inherit_memfd_fixture(pages, pages, true, 2);
+        PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(pages)), false));
+        FUTEX_ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = memfd::protect(&r, 1, base, pages * LINUX_PAGE_SIZE, 1);
+        counts.push(FUTEX_ALLOCATIONS.with(|c| c.replace(None).unwrap()));
+        assert_eq!(result, Ok(()));
+        let calls = PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap());
+        assert_eq!(calls, (0..pages).map(|i| (1, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE, 1)).collect::<Vec<_>>());
+        ALIASES.with_borrow(|a| {
+            for i in 0..pages {
+                assert_eq!(a[&(1, base + i * LINUX_PAGE_SIZE)].1, 1);
+                assert_eq!(a[&(2, base + i * LINUX_PAGE_SIZE)].1, 7);
+                assert_eq!(r.mapping_at(1, base + i * LINUX_PAGE_SIZE).unwrap().prot, rights[i]);
+            }
+        });
+        for fail in 1..=pages {
+            let (r, _, base, rights) = inherit_memfd_fixture(pages, pages, true, 2);
+            PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(2 * pages)), false));
+            PROTECT_FAIL_AT.with(|at| at.set(Some(fail)));
+            let result = memfd::protect(&r, 1, base, pages * LINUX_PAGE_SIZE, 1);
+            PROTECT_FAIL_AT.with(|at| at.set(None));
+            assert_eq!(result, Err(EIO));
+            let calls = PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap());
+            let mut expected: Vec<_> = (0..fail).map(|i| (1, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE, 1)).collect();
+            expected.extend((0..fail - 1).rev().map(|i| (1, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE, rights[i])));
+            assert_eq!(calls, expected);
+            ALIASES.with_borrow(|a| {
+                for i in 0..pages { assert_eq!(a[&(1, base + i * LINUX_PAGE_SIZE)].1, rights[i]); }
+            });
+        }
+    }
+    println!("MEMFD-SNAPSHOT protect plan1/4/5/16 allocations={counts:?}");
+    assert_eq!(counts, [0, 0, 1, 2]);
+}
+
+#[test]
+fn memfd_inherit_snapshot_keeps_all_ids_and_order_across_inline_boundary() {
+    use poll_objects::{MemoryFile, Object};
+    let mut counts = Vec::new();
+    for objects in [0, 1, 4, 5, 16] {
+        ALIASES.with_borrow_mut(|a| a.clear());
+        let mut r = runtime(); r.managed[1].pid = 2;
+        let base = 0x8000_0000;
+        request_process_map_anonymous_at(1, base, objects * LINUX_PAGE_SIZE).unwrap();
+        request_process_map_anonymous_at(2, base, objects * LINUX_PAGE_SIZE).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..objects {
+            let va = base + i * LINUX_PAGE_SIZE;
+            assert!(r.add_mapping(1, va, LINUX_PAGE_SIZE, 3));
+            let mut maps = Vec::with_capacity(2);
+            maps.push(poll_objects::MemoryMapping { offset: 0, shared: false, ..lookup_mapping(1, va) });
+            ids.push(r.poll_objects.insert(Object::Memory(MemoryFile {
+                sysv: None, anonymous: false, backing: None, pages: Default::default(),
+                size: LINUX_PAGE_SIZE, offset: 0, status_flags: 0, seals: 0, maps,
+            })).unwrap());
+        }
+        PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(objects)), false));
+        FUTEX_ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = memfd::inherit(&mut r, 1, 2);
+        counts.push(FUTEX_ALLOCATIONS.with(|c| c.replace(None).unwrap()));
+        assert_eq!(result, Ok(()));
+        assert_eq!(PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap()),
+            (0..objects).map(|i| (2, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE, 3)).collect::<Vec<_>>());
+        for (i, id) in ids.into_iter().enumerate() {
+            let maps = &r.poll_objects.memory_mut(id).unwrap().maps;
+            assert_eq!(maps.len(), 2);
+            assert_eq!((maps[0].pid, maps[1].pid, maps[0].base, maps[1].base), (1, 2, base + i * LINUX_PAGE_SIZE, base + i * LINUX_PAGE_SIZE));
+        }
+    }
+    println!("MEMFD-SNAPSHOT inherit0/1/4/5/16 allocations={counts:?}");
+    assert_eq!(counts, [0, 0, 0, 1, 2]);
+}
+
+#[test]
+fn memfd_private_inherit_coalesces_equal_rights_and_preserves_shared_and_eof_pages() {
+    for shared in [false, true] {
+        for pages in [1usize, 4, 16, 64] {
+            for valid in [0, pages / 2, pages] {
+                for mode in 0..3 {
+                    let (mut r, id, base, rights) = inherit_memfd_fixture(pages, valid, shared, mode);
+                    PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(pages)), false));
+                    SPARSE_RELEASE_TRACE.with(|t| *t.borrow_mut() = Some((Vec::with_capacity(pages), None)));
+                    assert_eq!(memfd::inherit(&mut r, 1, 2), Ok(()));
+                    let calls = PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap());
+                    let releases = SPARSE_RELEASE_TRACE.with(|t| t.borrow_mut().take().unwrap().0);
+                    let flattened: Vec<_> = calls.iter().flat_map(|&(pid, start, bytes, prot)|
+                        (0..bytes).step_by(LINUX_PAGE_SIZE).map(move |off| (pid, start + off, prot))).collect();
+                    assert_eq!(flattened, (0..valid).map(|i| (2, base + i * LINUX_PAGE_SIZE, rights[i])).collect::<Vec<_>>());
+                    assert_eq!(releases, (if shared { 0 } else { valid }..pages).map(|i| (2, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE)).collect::<Vec<_>>());
+                    if shared { assert_eq!(calls.len(), valid); }
+                    else if mode == 0 { assert_eq!(calls.len(), usize::from(valid != 0)); }
+                    ALIASES.with_borrow(|aliases| {
+                        for i in 0..pages {
+                            let parent = &aliases[&(1, base + i * LINUX_PAGE_SIZE)];
+                            assert_eq!(parent.1, rights[i]); assert!(parent.0.iter().all(|b| *b == 0));
+                            if i < valid {
+                                let child = &aliases[&(2, base + i * LINUX_PAGE_SIZE)];
+                                assert_eq!(child.1, rights[i]); assert_eq!(&*child.0, &*parent.0);
+                                assert_eq!(std::rc::Rc::ptr_eq(&child.0, &parent.0), shared);
+                            } else { assert!(!aliases.contains_key(&(2, base + i * LINUX_PAGE_SIZE))); }
+                        }
+                    });
+                    let maps = &r.poll_objects.memory_mut(id).unwrap().maps;
+                    assert_eq!(maps.len(), 2);
+                    assert_eq!((maps[0].pid, maps[1].pid, maps[1].base, maps[1].bytes), (1, 2, base, pages * LINUX_PAGE_SIZE));
+                    if !shared && pages == 64 && valid == pages && mode == 0 {
+                        println!("MEMFD-INHERIT-PROTECT requests_before={pages} after={}", calls.len());
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn inherit_memfd_fixture(pages: usize, valid: usize, shared: bool, mode: usize) -> (Runtime, Word, Word, Vec<Word>) {
+    ALIASES.with_borrow_mut(|aliases| aliases.clear());
+    PROTECT_FAIL_AT.with(|at| at.set(None));
+    let (mut r, id, _) = collectible_memfd(0);
+    r.managed[1].pid = 2;
+    let base = 0x8000_0000;
+    let rights: Vec<_> = (0..pages).map(|i| match mode { 0 => 3, 1 => [1, 3, 5][i / 4 % 3], _ => [0, 1, 3, 5][i % 4] }).collect();
+    request_process_map_anonymous_at(2, base, pages * LINUX_PAGE_SIZE).unwrap();
+    if !shared { request_process_map_anonymous_at(1, base, pages * LINUX_PAGE_SIZE).unwrap(); }
+    for (i, &prot) in rights.iter().enumerate() {
+        let va = base + i * LINUX_PAGE_SIZE;
+        if shared {
+            let source = request_memory_create(LINUX_PAGE_SIZE).unwrap();
+            r.poll_objects.memory_mut(id).unwrap().pages.insert(i, source);
+            request_mapping_share_at(1, source, LINUX_PAGE_SIZE, va).unwrap();
+        }
+        ALIASES.with_borrow_mut(|a| a.get_mut(&(1, va)).unwrap().1 = prot);
+        assert!(r.add_mapping(1, va, LINUX_PAGE_SIZE, prot));
+        assert!(r.add_mapping(2, va, LINUX_PAGE_SIZE, prot));
+    }
+    let memory = r.poll_objects.memory_mut(id).unwrap();
+    // A partial final file page still contributes one whole valid page.
+    memory.size = if valid == 0 { 0 } else { (valid - 1) * LINUX_PAGE_SIZE + 17 };
+    memory.maps.push(poll_objects::MemoryMapping { bytes: pages * LINUX_PAGE_SIZE, offset: 0, shared, ..lookup_mapping(1, base) });
+    (r, id, base, rights)
+}
+
+#[test]
+fn memfd_private_inherit_stops_on_failure_without_releasing_eof_or_changing_parent() {
+    for fail in 1..=3 {
+        let (mut r, id, base, _) = inherit_memfd_fixture(8, 6, false, 0);
+        for i in 0..6 { assert!(r.remove_mapping(1, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE)); assert!(r.add_mapping(1, base + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE, [1, 3, 5][i / 2])); }
+        PROTECT_TRACE.with(|t| *t.borrow_mut() = (Some(Vec::with_capacity(3)), false));
+        SPARSE_RELEASE_TRACE.with(|t| *t.borrow_mut() = Some((Vec::with_capacity(8), None)));
+        PROTECT_FAIL_AT.with(|at| at.set(Some(fail)));
+        assert_eq!(memfd::inherit(&mut r, 1, 2), Err(EIO));
+        PROTECT_FAIL_AT.with(|at| at.set(None));
+        let calls = PROTECT_TRACE.with(|t| t.borrow_mut().0.take().unwrap());
+        assert_eq!(calls, (0..fail).map(|i| (2, base + i * 2 * LINUX_PAGE_SIZE, 2 * LINUX_PAGE_SIZE, [1, 3, 5][i])).collect::<Vec<_>>());
+        assert!(SPARSE_RELEASE_TRACE.with(|t| t.borrow_mut().take().unwrap().0.is_empty()));
+        ALIASES.with_borrow(|a| { for i in 0..8 { assert_eq!(a[&(1, base + i * LINUX_PAGE_SIZE)].1, 3); } });
+        assert_eq!(r.poll_objects.memory_mut(id).unwrap().maps.len(), 2);
+    }
+}
+
+#[test]
+fn memfd_unmap_range_snapshot_allocations_and_untouched_records() {
+    let mut counts = Vec::new();
+    for count in [0, 1, 8, 128, 1024] {
+        for shared_owner in [false, true] {
+            let (mut r, id, _) = collectible_memfd(0);
+            r.managed[0].vm_group = 7;
+            r.managed[1].pid = 2; r.managed[1].vm_group = 7;
+            let memory = r.poll_objects.memory_mut(id).unwrap();
+            memory.maps = (0..count).map(|i| lookup_mapping(if shared_owner { 2 } else { 1 }, 0x10000 + i * 8192)).collect();
+            let signature = |r: &Runtime| r.poll_objects.get(id).map(|object| match object {
+                poll_objects::Object::Memory(m) => m.maps.iter().map(|m| (m.pid, m.base, m.bytes, m.offset, m.prot, m.shared, m.attachment, m.readonly_attachment)).collect::<Vec<_>>(),
+                _ => panic!(),
+            });
+            let before = signature(&r);
+            for (base, bytes, expected) in [(0, 4096, Ok(())), (0x10800, 0, Ok(())), (Word::MAX, 1, Err(EINVAL))] {
+                FUTEX_ALLOCATIONS.with(|c| c.set(Some(0)));
+                let result = memfd::unmap(&mut r, 1, base, bytes);
+                let allocations = FUTEX_ALLOCATIONS.with(|c| c.replace(None).unwrap());
+                assert_eq!(result, expected);
+                assert_eq!(signature(&r), before);
+                counts.push(allocations);
+            }
+        }
+    }
+    println!("UNMAP-RANGE-SNAPSHOT allocations count0/1/8/128/1024 own/shared x disjoint/zero/overflow: {counts:?}");
+    assert_eq!(counts, [0; 30]);
+}
+
+#[test]
+fn memfd_unmap_range_snapshot_keeps_split_order_shared_owner_and_failure_prefix() {
+    for shared_owner in [false, true] {
+        for fail in [None, Some(1), Some(2), Some(3)] {
+            ALIASES.with_borrow_mut(|aliases| aliases.clear());
+            let (mut r, id, _) = collectible_memfd(0);
+            r.managed[0].vm_group = 7;
+            r.managed[1].pid = 2; r.managed[1].vm_group = 7;
+            let owner = if shared_owner { 2 } else { 1 };
+            let first = lookup_mapping(owner, 0x10000);
+            let middle = poll_objects::MemoryMapping { bytes: 5 * LINUX_PAGE_SIZE, offset: 3 * LINUX_PAGE_SIZE, attachment: Some(0x20000), readonly_attachment: true, ..lookup_mapping(owner, 0x20000) };
+            let last = lookup_mapping(owner, 0x40000);
+            r.poll_objects.memory_mut(id).unwrap().maps = vec![first, middle, last];
+            request_process_map_anonymous_at(1, middle.base, middle.bytes).unwrap();
+            let start = middle.base + LINUX_PAGE_SIZE;
+            SPARSE_RELEASE_TRACE.with(|t| *t.borrow_mut() = Some((Vec::with_capacity(3), fail)));
+            let result = memfd::unmap(&mut r, 1, start, 3 * LINUX_PAGE_SIZE);
+            let calls = SPARSE_RELEASE_TRACE.with(|t| t.borrow_mut().take().unwrap().0);
+            assert_eq!(result, if fail.is_some() { Err(EIO) } else { Ok(()) });
+            assert_eq!(calls, (0..fail.unwrap_or(3)).map(|i| (1, start + i * LINUX_PAGE_SIZE, LINUX_PAGE_SIZE)).collect::<Vec<_>>());
+            let sig = |m: &poll_objects::MemoryMapping| (m.pid, m.base, m.bytes, m.offset, m.prot, m.shared, m.attachment, m.readonly_attachment);
+            let actual: Vec<_> = r.poll_objects.memory_mut(id).unwrap().maps.iter().map(sig).collect();
+            let expected = if fail.is_some() { vec![first, middle, last] } else {
+                vec![first, last,
+                    poll_objects::MemoryMapping { pid: 1, bytes: LINUX_PAGE_SIZE, ..middle },
+                    poll_objects::MemoryMapping { pid: 1, base: start + 3 * LINUX_PAGE_SIZE, bytes: LINUX_PAGE_SIZE, offset: middle.offset + 4 * LINUX_PAGE_SIZE, ..middle }]
+            };
+            assert_eq!(actual, expected.iter().map(sig).collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
 fn memfd_truncate_keeps_mapping_records_without_snapshot_allocation() {
     let mut counts = Vec::new();
     for count in [0, 1, 8, 128, 1024] {
@@ -3125,6 +3788,72 @@ fn memfd_forget_process_keeps_first_live_replacement_and_mapping_order() {
         memfd::forget_process(&mut r, 1);
         assert_eq!(r.poll_objects.memory_mut(id).unwrap().maps.iter().map(signature).collect::<Vec<_>>(), expected);
     }
+}
+
+#[test]
+fn ring_membership_skips_unrelated_objects_and_tracks_moved_and_mutated_pins() {
+    use poll_objects::{EventCounter, Object, Objects, IoUring, OBJECT_LIMIT};
+    fn counter() -> Object { Object::Counter(EventCounter { value: 0, semaphore: false, nonblocking: false }) }
+    fn ring(memory: Word, sqes: Word) -> Object { Object::Ring(IoUring {
+        memory, sqes, entries: 1, cq_entries: 1, cq_offset: 0, ring_bytes: 4096,
+        sqe_bytes: 4096, array: false, head: 0, tail: 0, cancel_next: false,
+        overflow: Default::default(),
+    }) }
+    for rings in [0usize, 2] {
+        let mut objects = Objects::new();
+        for _ in 0..OBJECT_LIMIT - rings { objects.insert(counter()).unwrap(); }
+        for _ in 0..rings { objects.insert(ring(7, 8)).unwrap(); }
+        poll_objects::take_ring_inspections();
+        for _ in 0..100 { assert!(!objects.ring_references_memory(9)); }
+        let visits = poll_objects::take_ring_inspections();
+        assert_eq!(visits, rings * 100);
+        println!("RING-MEMBERSHIP rings={rings} old_checks={} indexed_checks={visits}", OBJECT_LIMIT * 100);
+        if rings == 0 { continue; }
+        objects.remove(1); // Move the last word's ring into slot zero.
+        objects.remove((OBJECT_LIMIT - 1) as Word);
+        let id = OBJECT_LIMIT as Word;
+        assert!(objects.ring_references_memory(7));
+        assert!(objects.ring_references_memory(8));
+        objects.ring_mut(id).unwrap().memory = 9;
+        assert!(!objects.ring_references_memory(7));
+        assert!(objects.ring_references_memory(9));
+        objects.remove(id);
+        assert!(!objects.ring_references_memory(8));
+    }
+    // Generic replacement invalidates membership. Structural changes while
+    // invalid must preserve that state until the authoritative rebuild.
+    let mut objects = Objects::new(); let mut ids = Vec::new(); let mut seed = 17u64;
+    for step in 0..2000 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let make = || if seed & 4 == 0 { counter() } else { ring(seed as Word % 11, seed as Word % 13) };
+        if step % 4 == 0 && !ids.is_empty() { objects.remove(ids.swap_remove(seed as usize % ids.len())); }
+        else if step % 4 == 1 && !ids.is_empty() { *objects.get_mut(ids[seed as usize % ids.len()]).unwrap() = make(); }
+        else if ids.len() < 200 { ids.push(objects.insert(make()).unwrap()); }
+        if step % 3 == 0 { continue; }
+        for target in 0..15 {
+            let expected = objects.iter().any(|(_, object)| matches!(object, Object::Ring(r) if r.memory == target || r.sqes == target));
+            assert_eq!(objects.ring_references_memory(target), expected, "step={step} target={target}");
+        }
+    }
+}
+
+#[test]
+fn memfd_collection_without_rings_does_not_scan_other_objects() {
+    let (mut r, id, _) = collectible_memfd(0);
+    for _ in 1..poll_objects::OBJECT_LIMIT {
+        r.poll_objects.insert(poll_objects::Object::Counter(poll_objects::EventCounter {
+            value: 0, semaphore: false, nonblocking: false,
+        })).unwrap();
+    }
+    // The fixture initializes memory via generic get_mut, so the first
+    // membership query must rebuild; later typed accesses preserve it.
+    memfd::take_collect_ring_inspections();
+    assert!(!r.poll_objects.ring_references_memory(id));
+    assert_eq!(memfd::take_collect_ring_inspections(), poll_objects::OBJECT_LIMIT);
+    memfd::collect(&mut r, id);
+    assert_eq!(memfd::take_collect_ring_inspections(), 0);
+    assert!(r.poll_objects.get(id).is_none());
+    MEMFD_CLEANUP_TRACE.with(|trace| assert_eq!(trace.borrow().as_ref().unwrap().closes, [77]));
 }
 
 #[test]

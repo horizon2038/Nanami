@@ -10,6 +10,18 @@ const TIMER_WORDS: usize = OBJECT_LIMIT.div_ceil(64);
 #[cfg(test)]
 static TIMER_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
+static EPOLL_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static RING_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub fn take_ring_inspections() -> usize {
+    RING_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(test)]
+pub fn take_epoll_inspections() -> usize {
+    EPOLL_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(test)]
 pub fn take_timer_inspections() -> usize {
     TIMER_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
@@ -146,6 +158,8 @@ pub struct Objects {
     // Derived membership only. Generic mutable access may replace any variant,
     // so invalidate before handing out &mut Object; rebuild on the next query.
     timer_slots: core::cell::Cell<Option<[u64; TIMER_WORDS]>>,
+    epoll_slots: core::cell::Cell<Option<[u64; TIMER_WORDS]>>,
+    ring_slots: core::cell::Cell<Option<[u64; TIMER_WORDS]>>,
     // None: unknown. Some(None): no armed timers. Some(Some(t)): no timer
     // can expire before t. Removal may leave this conservative bound early.
     expiry_bound: Option<Option<Word>>,
@@ -158,6 +172,8 @@ impl Objects {
             next_id: 1,
             slots: [u16::MAX; OBJECT_LIMIT],
             timer_slots: core::cell::Cell::new(Some([0; TIMER_WORDS])),
+            epoll_slots: core::cell::Cell::new(Some([0; TIMER_WORDS])),
+            ring_slots: core::cell::Cell::new(Some([0; TIMER_WORDS])),
             expiry_bound: Some(None),
         }
     }
@@ -182,7 +198,40 @@ impl Objects {
         slots
     }
 
-    fn timer_indices(slots: [u64; TIMER_WORDS]) -> impl Iterator<Item = usize> {
+    fn epoll_slots(&self) -> [u64; TIMER_WORDS] {
+        if let Some(slots) = self.epoll_slots.get() { return slots; }
+        let mut slots = [0u64; TIMER_WORDS];
+        for (index, (_, object)) in self.entries.iter().enumerate() {
+            #[cfg(test)]
+            EPOLL_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if matches!(object, Object::Epoll(_)) { slots[index / 64] |= 1u64 << (index % 64); }
+        }
+        self.epoll_slots.set(Some(slots));
+        slots
+    }
+
+    fn ring_slots(&self) -> [u64; TIMER_WORDS] {
+        if let Some(slots) = self.ring_slots.get() { return slots; }
+        let mut slots = [0u64; TIMER_WORDS];
+        for (index, (_, object)) in self.entries.iter().enumerate() {
+            #[cfg(test)]
+            RING_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if matches!(object, Object::Ring(_)) { slots[index / 64] |= 1u64 << (index % 64); }
+        }
+        self.ring_slots.set(Some(slots));
+        slots
+    }
+
+    pub fn ring_references_memory(&self, id: Word) -> bool {
+        Self::slot_indices(self.ring_slots()).any(|index| {
+            #[cfg(test)]
+            RING_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            matches!(self.entries.get(index), Some((_, Object::Ring(ring)))
+                if ring.memory == id || ring.sqes == id)
+        })
+    }
+
+    fn slot_indices(slots: [u64; TIMER_WORDS]) -> impl Iterator<Item = usize> {
         slots.into_iter().enumerate().flat_map(|(word, mut bits)| {
             core::iter::from_fn(move || {
                 if bits == 0 {
@@ -190,10 +239,24 @@ impl Objects {
                 }
                 let index = word * 64 + bits.trailing_zeros() as usize;
                 bits &= bits - 1;
-                #[cfg(test)]
-                TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 Some(index)
             })
+        })
+    }
+
+    fn timer_indices(slots: [u64; TIMER_WORDS]) -> impl Iterator<Item = usize> {
+        Self::slot_indices(slots).map(|index| {
+            #[cfg(test)]
+            TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            index
+        })
+    }
+
+    fn epoll_indices(&self) -> impl Iterator<Item = usize> {
+        Self::slot_indices(self.epoll_slots()).map(|index| {
+            #[cfg(test)]
+            EPOLL_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            index
         })
     }
 
@@ -234,6 +297,18 @@ impl Objects {
         #[cfg(test)]
         TIMER_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let is_timer = matches!(&self.entries[index].1, Object::Timer(_));
+        if let Some(mut slots) = self.ring_slots.get() {
+            let bit = 1u64 << (index % 64);
+            slots[index / 64] &= !bit;
+            if matches!(&self.entries[index].1, Object::Ring(_)) { slots[index / 64] |= bit; }
+            self.ring_slots.set(Some(slots));
+        }
+        if let Some(mut slots) = self.epoll_slots.get() {
+            let bit = 1u64 << (index % 64);
+            slots[index / 64] &= !bit;
+            if matches!(&self.entries[index].1, Object::Epoll(_)) { slots[index / 64] |= bit; }
+            self.epoll_slots.set(Some(slots));
+        }
         if is_timer {
             self.expiry_bound = None;
         }
@@ -267,6 +342,8 @@ impl Objects {
     pub fn get_mut(&mut self, id: Word) -> Option<&mut Object> {
         let slot = self.index(id)?;
         self.timer_slots.set(None);
+        self.epoll_slots.set(None);
+        self.ring_slots.set(None);
         self.expiry_bound = None;
         Some(&mut self.entries[slot].1)
     }
@@ -275,6 +352,22 @@ impl Objects {
         if let Some(index) = self.index(id) {
             let last = self.entries.len() - 1;
             self.entries.swap_remove(index);
+            if let Some(mut slots) = self.ring_slots.get() {
+                slots[index / 64] &= !(1u64 << (index % 64));
+                slots[last / 64] &= !(1u64 << (last % 64));
+                if self.entries.get(index).is_some_and(|(_, object)| matches!(object, Object::Ring(_))) {
+                    slots[index / 64] |= 1u64 << (index % 64);
+                }
+                self.ring_slots.set(Some(slots));
+            }
+            if let Some(mut slots) = self.epoll_slots.get() {
+                slots[index / 64] &= !(1u64 << (index % 64));
+                slots[last / 64] &= !(1u64 << (last % 64));
+                if self.entries.get(index).is_some_and(|(_, object)| matches!(object, Object::Epoll(_))) {
+                    slots[index / 64] |= 1u64 << (index % 64);
+                }
+                self.epoll_slots.set(Some(slots));
+            }
             if let Some(mut slots) = self.timer_slots.get() {
                 slots[index / 64] &= !(1u64 << (index % 64));
                 slots[last / 64] &= !(1u64 << (last % 64));
@@ -342,14 +435,18 @@ impl Objects {
     }
 
     pub fn has_file_watch(&self, file: LinuxFile, terminal: Word) -> bool {
-        self.entries.iter().any(|(_, object)| match object {
-            Object::Epoll(epoll) => epoll.watches.iter().any(|watch| watch_matches_file(watch, file, terminal)),
-            _ => false,
+        self.epoll_indices().any(|index| {
+            matches!(self.entries.get(index), Some((_, Object::Epoll(epoll)))
+                if epoll.watches.iter().any(|watch| watch_matches_file(watch, file, terminal)))
         })
     }
 
     pub fn forget_file(&mut self, file: LinuxFile, terminal: Word) {
-        for (_, object) in &mut self.entries {
+        let slots = self.epoll_slots();
+        for index in Self::slot_indices(slots) {
+            #[cfg(test)]
+            EPOLL_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let Some((_, object)) = self.entries.get_mut(index) else { continue; };
             if let Object::Epoll(epoll) = object {
                 let previous = epoll.watches.len();
                 epoll.watches.retain(|watch| !watch_matches_file(watch, file, terminal));

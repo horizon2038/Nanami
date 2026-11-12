@@ -193,11 +193,12 @@ pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, nanami_run
         & (nanami_client::gfx::DISPLAY_CAP_NATIVE_SCANOUT
             | nanami_client::gfx::DISPLAY_CAP_VBLANK_FLIP)
         != 0;
+    let batch_present = capabilities & nanami_client::gfx::DISPLAY_CAP_GPU_PRESENT_BATCH != 0;
     if capabilities & nanami_client::gfx::DISPLAY_CAP_GPU_INTERFACE != 0 {
         match Framebuffer::try_gpu(display_port, screen) {
             Ok(Some(framebuffer)) => {
                 nanami_runtime::println!("[honoka] GPU surface ready (shared CPU/GPU canvas)");
-                return Ok(framebuffer.with_merged_present(merged_present));
+                return Ok(framebuffer.with_present_modes(merged_present, batch_present));
             }
             Ok(None) => {}
             Err(error) => nanami_runtime::println!(
@@ -211,7 +212,7 @@ pub fn prepare_framebuffer(display_port: Word) -> Result<Framebuffer, nanami_run
             .map_err(|e| log_error("[honoka] prepare shared framebuffer failed: ", e))?;
 
     Framebuffer::new(display_port, framebuffer_vaddr, framebuffer_size, screen)
-        .map(|framebuffer| framebuffer.with_merged_present(merged_present))
+        .map(|framebuffer| framebuffer.with_present_modes(merged_present, false))
 }
 
 pub fn subscribe_input(input_port: Word) -> Result<(Word, Word), nanami_runtime::NanamiError> {

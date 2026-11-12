@@ -1,7 +1,8 @@
 //! Translate the extensible clone3 ABI into the existing fork/shared-VM paths.
 use super::*;
 
-const CLONE_VFORK: Word = 0x4000;
+pub(super) const CLONE_VFORK: Word = 0x4000;
+pub(super) const CLONE_CLEAR_SIGHAND: Word = 1 << 32;
 const CLONE_DETACHED: Word = 0x400000;
 const EXIT_SIGNAL_MASK: Word = 0xff;
 const E2BIG: i32 = 7;
@@ -10,9 +11,26 @@ pub(super) fn clone3(
     runtime: &mut Runtime,
     pid: Word,
     context: LinuxSyscallContext,
-) -> Result<Word, i32> {
-    let context = arguments(runtime, pid, context)?;
-    sys_fork(runtime, pid, context)
+) -> EmulationAction {
+    match arguments(runtime, pid, context) {
+        Ok(translated) => finish(runtime, pid, context, translated),
+        Err(errno) => EmulationAction::Return(-(errno as isize)),
+    }
+}
+
+pub(super) fn finish(
+    runtime: &mut Runtime, pid: Word, original: LinuxSyscallContext,
+    translated: LinuxSyscallContext,
+) -> EmulationAction {
+    match sys_fork(runtime, pid, translated) {
+        Ok(child) if translated.args[0] & CLONE_VFORK != 0 => {
+            if runtime.park_signal_waiter(pid, child, original) {
+                EmulationAction::Park
+            } else { EmulationAction::Return(-(ESRCH as isize)) }
+        }
+        Ok(child) => EmulationAction::Return(child as isize),
+        Err(errno) => EmulationAction::Return(-(errno as isize)),
+    }
 }
 
 fn arguments(
@@ -47,10 +65,7 @@ fn arguments(
     if flags & (EXIT_SIGNAL_MASK | CLONE_DETACHED) != 0 || signal > 64 {
         return Err(EINVAL);
     }
-    // Shared-VM vfork+exec needs address-space detachment, which Alpha does
-    // not expose. Preserve libc's ENOSYS fallback, never fake shared memory.
-    if flags & CLONE_VFORK != 0
-        || flags >> 32 != 0
+    if flags & !(u32::MAX as Word | CLONE_CLEAR_SIGHAND) != 0
         || word(64) != 0
         || word(72) != 0
         || word(80) != 0

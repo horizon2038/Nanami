@@ -3,6 +3,7 @@
 extern crate self as nanami_client;
 extern crate self as nanami_runtime;
 use std::cell::RefCell;
+pub use std::print;
 thread_local! {
     static CWD_ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
@@ -63,6 +64,13 @@ const LINUX_CWD_MAX: usize = 128;
 const LINUX_AT_FDCWD: Word = (-100i32) as Word;
 mod posix {
     pub use nanami_uapi::posix::*;
+    pub fn posix_vfs_provider(_: usize) -> Result<usize, super::RequestError> {
+        super::PROVIDER.with(|p| {
+            let mut p = p.borrow_mut();
+            p.provider_queries += 1;
+            if p.direct_pid == 0 { Err(super::RequestError::Status(1)) } else { Ok(p.direct_pid) }
+        })
+    }
     pub fn posix_stat(_: usize, _: usize, _: usize) -> Result<(usize, usize, usize, usize, usize), super::RequestError> {
         super::PROVIDER.with(|provider| {
             let mut p = provider.borrow_mut();
@@ -96,6 +104,21 @@ mod arch {
 #[path = "../../nanami/servers/apps/alter/shared/src/common/virtual_fs.rs"]
 mod virtual_fs;
 use virtual_fs::VirtualNode;
+mod abi { pub const SLOT_VFS_SERVICE: usize = 33; }
+mod ipc { pub fn process_slot_descriptor(slot: usize) -> usize { slot } }
+mod registry {
+    pub const VFS_SERVICE: &str = "vfs-service";
+    pub fn connect_service_with_pid(name: &str, slot: usize) -> Result<usize, super::RequestError> {
+        assert_eq!((name, slot), (VFS_SERVICE, super::abi::SLOT_VFS_SERVICE));
+        super::PROVIDER.with(|p| {
+            let mut p = p.borrow_mut();
+            p.connections += 1;
+            if p.registry_pid == 0 { Err(super::RequestError::Status(1)) } else { Ok(p.registry_pid) }
+        })
+    }
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/common/rooted_channel.rs"]
+mod rooted_channel;
 mod vfs {
     use super::*;
     pub use nanami_uapi::vfs::*;
@@ -103,30 +126,65 @@ mod vfs {
         Transport(i32),
         Filesystem(Word),
     }
+    pub fn vfs_attach_shared_memory(port: Word, size: Word) -> Result<(Word, Word), RequestError> {
+        assert_eq!((port, size), (abi::SLOT_VFS_SERVICE, 65536));
+        PROVIDER.with(|p| {
+            let mut p = p.borrow_mut(); p.attachments += 1;
+            if p.attach_fails { Err(RequestError::Status(1)) } else { Ok((p.direct_shm, p.direct_size)) }
+        })
+    }
+    pub fn vfs_path_request(_: Word, descriptor: Word) -> Result<(Word, Word), PathError> {
+        path_request(true, descriptor)
+    }
     pub fn posix_rooted_open_request(port: Word, descriptor: Word) -> Result<(Word, Word), PathError> {
         posix_path_request(port, descriptor)
     }
+    pub fn posix_rooted_open_granted_request(port: Word, descriptor: Word) -> Result<(Word, Word), PathError> {
+        let unsupported = PROVIDER.with(|p| { let mut p=p.borrow_mut(); p.granted_open_calls+=1; p.unsupported_grant });
+        if unsupported { return Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)); }
+        let (bytes, kind) = posix_rooted_open_request(port, descriptor)?;
+        let grant = PROVIDER.with(|p| p.borrow().grant);
+        Ok((bytes, kind | (grant << VFS_OPEN_GRANT_TYPE_BITS)))
+    }
+    pub fn posix_rooted_open_cursor_granted_request(port: Word, descriptor: Word) -> Result<(Word, Word), PathError> {
+        let (unsupported, transport) = PROVIDER.with(|p| {
+            let mut p=p.borrow_mut(); p.cursor_open_calls+=1; (p.unsupported_cursor,p.cursor_transport)
+        });
+        if unsupported { return Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)); }
+        if transport { return Err(PathError::Transport(EIO)); }
+        let (bytes, kind) = posix_rooted_open_request(port, descriptor)?;
+        let grant = PROVIDER.with(|p| p.borrow().grant);
+        Ok((bytes, kind | (grant << VFS_OPEN_GRANT_TYPE_BITS) | if grant != 0 { VFS_OPEN_CURSOR_TYPE_FLAG } else { 0 }))
+    }
     pub fn posix_path_request(_: Word, descriptor: Word) -> Result<(Word, Word), PathError> {
+        path_request(false, descriptor)
+    }
+    fn path_request(direct: bool, descriptor: Word) -> Result<(Word, Word), PathError> {
         PROVIDER.with(|p| {
             let mut p = p.borrow_mut();
-            let request = unsafe { ((p.shm + descriptor) as *const PathRequest).read_unaligned() };
+            let base = if direct {
+                p.direct_calls += 1;
+                if p.direct_transport_error { return Err(PathError::Transport(EIO)); }
+                p.direct_shm
+            } else { p.proxy_calls += 1; p.shm };
+            let request = unsafe { ((base + descriptor) as *const PathRequest).read_unaligned() };
             let root = unsafe {
                 std::slice::from_raw_parts(
-                    (p.shm + request.root_offset) as *const u8,
+                    (base + request.root_offset) as *const u8,
                     request.root_bytes,
                 )
             };
             assert_eq!(root, b"/test/rootfs");
             let input = unsafe {
                 std::slice::from_raw_parts(
-                    (p.shm + request.path_offset) as *const u8,
+                    (base + request.path_offset) as *const u8,
                     request.path_bytes,
                 )
             }
             .to_vec();
             p.inputs.push(input);
             p.requests.push(request);
-            let target = unsafe { std::slice::from_raw_parts((p.shm + request.target_offset) as *const u8, request.target_bytes) };
+            let target = unsafe { std::slice::from_raw_parts((base + request.target_offset) as *const u8, request.target_bytes) };
             p.captured_target[..target.len()].copy_from_slice(target);
             p.captured_target_len = target.len();
             if let Some(error) = p.error {
@@ -141,6 +199,9 @@ mod vfs {
             // path payload. Do not let this mock fabricate a data reply.
             if request.operation == VFS_PATH_OPEN_READONLY && p.unsupported_open {
                 return Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED));
+            }
+            if direct && request.operation == VFS_PATH_STAT {
+                return Ok((p.metadata.inode, p.metadata.size | (p.metadata.file_type << VFS_STAT_TYPE_SHIFT)));
             }
             if !matches!(request.operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK | VFS_PATH_OPEN_READONLY) {
                 return Ok((0, 0));
@@ -157,28 +218,106 @@ mod vfs {
             } else { &p.path[..] };
             unsafe {
                 if request.operation == VFS_PATH_OPEN_READONLY {
-                    ((p.shm + request.output_offset) as *mut PathOpenResult)
+                    ((base + request.output_offset) as *mut PathOpenResult)
                         .write_unaligned(PathOpenResult { descriptor: p.opened });
                 } else if metadata_bytes != 0 {
-                    ((p.shm + request.output_offset) as *mut PathMetadata)
+                    ((base + request.output_offset) as *mut PathMetadata)
                         .write_unaligned(p.metadata);
                 }
                 std::ptr::copy_nonoverlapping(
                     payload.as_ptr(),
-                    (p.shm + request.output_offset + metadata_bytes) as *mut u8,
+                    (base + request.output_offset + metadata_bytes) as *mut u8,
                     payload.len(),
                 );
             }
             Ok((
-                p.reply_bytes.unwrap_or(metadata_bytes + payload.len()),
+                (if direct { p.direct_reply_bytes } else { None }).or(p.reply_bytes).unwrap_or(metadata_bytes + payload.len()),
                 p.reply_type.unwrap_or(p.metadata.file_type),
             ))
         })
     }
 }
 use vfs::*;
+#[path = "linux-path-lookup/direct.rs"]
+mod direct_tests;
+
+#[test]
+fn granted_rooted_open_retains_the_token_with_the_owned_linux_file() {
+    let mut r=Runtime::new();r.rooted_grants=1;
+    PROVIDER.with(|p|p.borrow_mut().grant=71);
+    assert_eq!(opening::sys_openat(&mut r,1,LINUX_AT_FDCWD,c"value".as_ptr() as Word,LINUX_O_CLOEXEC,0),Ok(3));
+    assert_eq!(r.allocated[0].grant,71);
+    assert_eq!(r.allocated[0].posix_fd,7);
+    assert_eq!(r.allocated[0].flags,LINUX_FD_CLOEXEC);
+}
+
+#[test]
+fn legacy_posix_disables_granted_entry_after_one_unsupported_probe() {
+    let mut r=Runtime::new();r.rooted_grants=1;
+    PROVIDER.with(|p|p.borrow_mut().unsupported_grant=true);
+    for _ in 0..2 {
+        let resolved=namespace::resolve_for_open(&mut r,1,LINUX_AT_FDCWD,0,true,0);
+        // Empty input remains invalid before any protocol probe.
+        assert!(resolved.is_err());
+        let count=r.path(b"value");
+        let resolved=namespace::resolve_for_open(&mut r,1,LINUX_AT_FDCWD,count,true,0).unwrap();
+        assert_eq!(resolved.read_grant,0);assert_eq!(resolved.opened,Some(7));
+    }
+    assert_eq!(r.rooted_grants,0);
+    PROVIDER.with(|p|assert_eq!(p.borrow().granted_open_calls,1));
+}
+
+#[test]
+fn cursor_open_records_only_a_negotiated_regular_file_and_preserves_the_opaque_token() {
+    let mut r=Runtime::new();r.rooted_grants=2;
+    PROVIDER.with(|p|p.borrow_mut().grant=71);
+    assert_eq!(opening::sys_openat(&mut r,1,LINUX_AT_FDCWD,c"value".as_ptr() as Word,LINUX_O_CLOEXEC,0),Ok(3));
+    assert_eq!((r.allocated[0].grant,r.allocated[0].cursor,r.allocated[0].flags),(71,true,LINUX_FD_CLOEXEC));
+    PROVIDER.with(|p| {let p=p.borrow();assert_eq!((p.cursor_open_calls,p.granted_open_calls),(1,0));});
+}
+
+#[test]
+fn cursor_negotiation_remembers_old_posix_without_losing_positioned_grants() {
+    for grants in [true,false] {
+        let mut r=Runtime::new();r.rooted_grants=2;
+        PROVIDER.with(|p| {let mut p=p.borrow_mut();p.unsupported_cursor=true;p.unsupported_grant=!grants;p.grant=if grants {71}else{0};});
+        for _ in 0..2 {
+            let n=r.path(b"value");let resolved=namespace::resolve_for_open(&mut r,1,LINUX_AT_FDCWD,n,true,0).unwrap();
+            assert!(!resolved.read_cursor);assert_eq!(resolved.read_grant,if grants {71}else{0});
+        }
+        assert_eq!(r.rooted_grants,if grants {1}else{0});
+        PROVIDER.with(|p| {let p=p.borrow();assert_eq!(p.cursor_open_calls,1);assert_eq!(p.granted_open_calls,if grants {2}else{1});});
+    }
+}
+
+#[test]
+fn cursor_open_transport_failure_is_not_a_signal_to_acquire_another_descriptor() {
+    let mut r=Runtime::new();r.rooted_grants=2;
+    PROVIDER.with(|p|p.borrow_mut().cursor_transport=true);
+    let n=r.path(b"value");
+    assert!(matches!(namespace::resolve_for_open(&mut r,1,LINUX_AT_FDCWD,n,true,0),Err(EIO)));
+    assert_eq!(r.rooted_grants,2);
+    PROVIDER.with(|p| {let p=p.borrow();assert_eq!((p.cursor_open_calls,p.granted_open_calls,p.proxy_calls),(1,0,0));assert!(p.closed.is_empty());});
+}
+
+#[test]
+fn malformed_cursor_replies_are_closed_before_allocating_a_guest_descriptor() {
+    for (grant,kind) in [(0,VFS_FILE_TYPE_REGULAR|VFS_OPEN_CURSOR_TYPE_FLAG),(71,VFS_FILE_TYPE_DIRECTORY)] {
+        let mut r=Runtime::new();r.rooted_grants=2;
+        PROVIDER.with(|p| {let mut p=p.borrow_mut();p.grant=grant;p.reply_type=Some(kind);});
+        assert_eq!(opening::sys_openat(&mut r,1,LINUX_AT_FDCWD,c"value".as_ptr() as Word,0,0),Err(EIO));
+        assert!(r.allocated.is_empty());
+        PROVIDER.with(|p|assert_eq!(p.borrow().closed,[7]));
+    }
+}
 struct Provider {
+    cursor_open_calls: usize, unsupported_cursor: bool, cursor_transport: bool,
+    grant: Word, granted_open_calls: usize, unsupported_grant: bool,
     shm: Word,
+    direct_shm: Word, direct_size: Word, direct_pid: Word, registry_pid: Word,
+    provider_queries: usize, connections: usize, attachments: usize,
+    direct_calls: usize, proxy_calls: usize, direct_transport_error: bool,
+    attach_fails: bool, direct_reply_bytes: Option<Word>,
     requests: Vec<PathRequest>,
     inputs: Vec<Vec<u8>>,
     metadata: PathMetadata,
@@ -207,7 +346,13 @@ struct Provider {
 impl Provider {
     fn new(shm: Word) -> Self {
         Self {
+            cursor_open_calls: 0, unsupported_cursor: false, cursor_transport: false,
+            grant: 0, granted_open_calls: 0, unsupported_grant: false,
             shm,
+            direct_shm: 0, direct_size: 65536, direct_pid: 0, registry_pid: 42,
+            provider_queries: 0, connections: 0, attachments: 0,
+            direct_calls: 0, proxy_calls: 0, direct_transport_error: false,
+            attach_fails: false, direct_reply_bytes: None,
             requests: Vec::new(),
             inputs: Vec::new(),
             metadata: PathMetadata {
@@ -249,6 +394,8 @@ enum LinuxFileKind {
 }
 #[derive(Clone, Copy)]
 struct LinuxFile {
+    grant: Word,
+    cursor: bool,
     kind: LinuxFileKind,
     posix_fd: Word,
     resource: Word,
@@ -256,8 +403,10 @@ struct LinuxFile {
     status: Word,
 }
 impl LinuxFile {
+    fn with_posix_read_grant(mut self, grant: Word) -> Self { self.grant=grant; self }
+    fn with_posix_read_cursor(mut self, cursor: bool) -> Self { self.cursor=cursor; self }
     fn posix(fd: Word, flags: Word, status: Word) -> Self {
-        Self { kind: LinuxFileKind::Posix, posix_fd: fd, resource: 0, flags, status }
+        Self { kind: LinuxFileKind::Posix, posix_fd: fd, resource: 0, flags, status, grant: 0, cursor: false }
     }
     fn has_posix_backend(&self) -> bool {
         self.kind == LinuxFileKind::Posix
@@ -272,7 +421,9 @@ struct Process {
     rootfs: Rootfs,
 }
 struct Runtime {
+    rooted_grants: u8,
     posix_port: Word,
+    rooted_channel: rooted_channel::Channel,
     posix_shm: Word,
     posix_shm_size: Word,
     process: Process,
@@ -295,11 +446,15 @@ impl Runtime {
         };
         process.cwd[..4].copy_from_slice(b"/lib");
         Self {
+            rooted_grants: 0,
             posix_port: 1,
+            rooted_channel: rooted_channel::Channel::new(),
             posix_shm: shm,
             posix_shm_size: buffer.len(),
             process,
             file: LinuxFile {
+                grant: 0,
+                cursor: false,
                 kind: LinuxFileKind::Posix,
                 posix_fd: 9,
                 resource: 0,

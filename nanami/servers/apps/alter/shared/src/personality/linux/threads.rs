@@ -8,6 +8,7 @@ const CLONE_THREAD: Word = 0x10000;
 const CLONE_SYSVSEM: Word = 0x40000;
 const CLONE_CHILD_CLEARTID: Word = 0x200000;
 const CLONE_DETACHED: Word = 0x400000;
+use super::clone3::{CLONE_CLEAR_SIGHAND, CLONE_VFORK};
 
 pub(super) fn clone_vm(
     runtime: &mut Runtime,
@@ -24,6 +25,8 @@ pub(super) fn clone_vm(
         | CLONE_SYSVSEM
         | CLONE_CHILD_CLEARTID
         | CLONE_DETACHED
+        | CLONE_VFORK
+        | CLONE_CLEAR_SIGHAND
         | LINUX_CLONE_SETTLS
         | LINUX_CLONE_PARENT_SETTID
         | LINUX_CLONE_CHILD_SETTID;
@@ -31,7 +34,20 @@ pub(super) fn clone_vm(
         return Err(ENOSYS);
     }
     let thread = flags & CLONE_THREAD != 0;
-    if (thread && (flags & CLONE_SIGHAND == 0 || flags & 0xff != 0)) || context.args[1] == 0 {
+    let vfork = flags & CLONE_VFORK != 0;
+    if flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND != 0 {
+        return Err(EINVAL);
+    }
+    // Start with posix_spawn's independent file/signal tables and a single
+    // parent task. Shared tables or a thread-group exec need separate unsharing.
+    if vfork && (flags & (CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD) != 0
+        || runtime.has_live_threads(parent_pid) || runtime.thread_group(parent_pid) != parent_pid)
+    {
+        return Err(ENOSYS);
+    }
+    if (thread && (flags & CLONE_SIGHAND == 0 || flags & 0xff != 0))
+        || (context.args[1] == 0 && !vfork)
+    {
         return Err(EINVAL);
     }
     if !thread && flags & 0xff != LINUX_SIGCHLD {
@@ -39,11 +55,19 @@ pub(super) fn clone_vm(
     }
     let options = clone_options(context);
     // Allocate shared dispositions even if the parent has not used a signal syscall.
-    let parent_signals = runtime
+    let mut parent_signals = runtime
         .managed_process_mut(parent_pid)
         .ok_or(ESRCH)?
         .signals_mut()
         .clone_task(flags & CLONE_SIGHAND != 0, thread);
+    if vfork {
+        if let Some(state) = runtime.managed_process(parent_pid).and_then(|p| p.signals()) {
+            parent_signals.altstack = state.altstack;
+        }
+    }
+    if flags & CLONE_CLEAR_SIGHAND != 0 {
+        parent_signals.clear_caught_handlers();
+    }
     // Snapshot only fields used below, before creating or installing the task.
     // Keep owned cwd/image bytes across operations that can mutate process slots.
     let (parent_pcb, parent_fs_base, owner_pid, terminal_id, image_name, image_name_len,

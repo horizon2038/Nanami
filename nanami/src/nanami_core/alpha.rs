@@ -7,6 +7,7 @@ mod control_requests;
 mod domain_manifest;
 mod domains;
 mod exec_profile;
+mod exec_space;
 mod mapping_protection;
 mod mapping_release;
 mod memory_clone;
@@ -15,6 +16,7 @@ mod memory_exec;
 mod memory_init;
 mod memory_image;
 mod memory_lazy;
+mod memory_large;
 mod memory_zero;
 mod memory_pages;
 mod memory_private;
@@ -276,7 +278,7 @@ impl Alpha {
         info!("managers ready");
 
         info!("alpha heap bootstrap");
-        let heap_physical_base = {
+        let (heap_physical_base, permanent_bytes) = {
             let vm_space = processes.alpha_vm_space_mut();
             Self::prepare_alpha_heap(
                 environment,
@@ -298,7 +300,7 @@ impl Alpha {
 
         info!("physical allocator bootstrap");
         memory.initialize_physical_allocator()?;
-        memory.allocate_physical_at(heap_physical_base, ALPHA_HEAP_PAGES * PAGE_SIZE, false)?;
+        memory.allocate_physical_at(heap_physical_base, permanent_bytes, false)?;
         info!("physical allocator ready");
 
         info!("capture initial framebuffer information");
@@ -698,6 +700,12 @@ impl Alpha {
             OS_REQUEST_SHARED_MEMORY_CREATE => {
                 response_from_details_result(self.handle_shared_memory_request(request))
             }
+            nanami_uapi::os::OS_REQUEST_MEMORY_SOURCE_CREATE => {
+                response_from_details_result(self.handle_memory_source_request(request))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_POPULATE_SNAPSHOT => {
+                response_from_detail_result(self.handle_populate_snapshot(request))
+            }
             nanami_uapi::os::OS_REQUEST_MAPPING_SHARE => {
                 response_from_details_result(self.handle_mapping_share_request(request))
             }
@@ -753,14 +761,14 @@ impl Alpha {
             OS_REQUEST_PROCESS_SPAWN_MEMORY => {
                 response_from_detail_result(self.handle_process_spawn_memory_request(request))
             }
-            OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED => response_from_detail_result(
+            OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED => response_from_details_result(
                 self.handle_process_spawn_memory_fault_handler_suspended_request(request),
             ),
             OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED => response_from_detail_result(
                 self.handle_process_spawn_memory_suspended_request(request),
             ),
             OS_REQUEST_PROCESS_EXEC_MEMORY => {
-                response_from_detail_result(self.handle_process_exec_memory_request(request))
+                response_from_details_result(self.handle_process_exec_memory_request(request))
             }
             OS_REQUEST_PROCESS_SPAWN_FAULT_HANDLER => response_from_detail_result(
                 self.handle_process_spawn_fault_handler_request(request),

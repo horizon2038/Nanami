@@ -19,6 +19,9 @@ pub(crate) fn handle_ftruncate(
     if file.kind != FdKind::Regular {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
+    if file.vfs_cursor {
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
     // Truncation does not change the open-file-description offset (including dup).
     let result =
         nanami_client::vfs::vfs_ftruncate(runtime.vfs_port, file.vfs_handle, request.arg1)

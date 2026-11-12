@@ -13,6 +13,7 @@ enum CapabilityError {
 const POOL_FRAME: usize = 0x4000_0000;
 struct Memory;
 impl Memory {
+    fn map_private_large_alias(&mut self, _: usize, _: Option<usize>) -> Result<Option<(usize, usize)>, CapabilityError> { Ok(None) }
     fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> {
         (page < 0x10000).then_some(POOL_FRAME + page)
     }
@@ -87,6 +88,51 @@ mod memory_copy;
 mod memory_init;
 
 #[test]
+fn pool_copy_probe_requires_exact_ready_permanent_frame_without_mutating_windows() {
+    let mut a = Alpha::new();
+    assert_eq!(a.cached_pool_copy_frame(POOL_FRAME + 19), None);
+    let alias = a.map_process_copy_frame(1, POOL_FRAME + 19, None).unwrap();
+    a.map_process_copy_frame(2, 1234, None).unwrap();
+    let before = (a.maps, a.unmaps, a.unmap_attempts.len());
+    for _ in 0..10_000 {
+        assert_eq!(a.cached_pool_copy_frame(POOL_FRAME + 19), Some(alias));
+        assert_eq!(a.cached_pool_copy_frame(POOL_FRAME + 20), None);
+        assert_eq!(a.cached_pool_copy_frame(1234), None);
+    }
+    assert_eq!((a.maps, a.unmaps, a.unmap_attempts.len()), before);
+    a.fail_unmap = true;
+    assert!(a.invalidate_process_copy_mappings(0).is_err());
+    assert_eq!(a.cached_pool_copy_frame(POOL_FRAME + 19), None);
+    assert_eq!(a.mappings[&alias], POOL_FRAME + 19);
+    let mut a = Alpha::new();
+    a.fail_map = true;
+    assert!(a.map_process_copy_frame(1, POOL_FRAME + 20, None).is_err());
+    assert_eq!(a.cached_pool_copy_frame(POOL_FRAME + 20), None);
+    assert_eq!(a.mappings.len(), 1);
+}
+
+#[test]
+fn destination_borrow_eligibility_preserves_ready_initializer_and_pending_cleanup() {
+    let mut a = Alpha::new();
+    assert!(a.initialization_page_needs_mapping(19));
+    a.map_initialization_page(19).unwrap();
+    assert!(!a.initialization_page_needs_mapping(19));
+    assert!(a.initialization_page_needs_mapping(19 + memory_init::PAGES));
+    a.fail_unmap = true;
+    assert!(a.map_initialization_page(19 + memory_init::PAGES).is_err());
+    assert!(!a.initialization_page_needs_mapping(19));
+    assert!(!a.initialization_page_needs_mapping(19 + memory_init::PAGES));
+    a.fail_unmap = false;
+    a.map_initialization_page(19 + memory_init::PAGES).unwrap();
+    assert!(!a.initialization_page_needs_mapping(19 + memory_init::PAGES));
+    assert!(a.initialization_page_needs_mapping(19));
+    a.fail_map = true;
+    assert!(a.map_initialization_page(20).is_err());
+    assert!(!a.initialization_page_needs_mapping(20));
+    assert!(!a.initialization_page_needs_mapping(0x10000));
+}
+
+#[test]
 fn copy_uses_exact_ready_initialization_alias_without_another_mapping_or_eviction() {
     let mut a = Alpha::new();
     let source = a.map_initialization_page(19).unwrap();
@@ -110,11 +156,11 @@ fn copy_uses_exact_ready_initialization_alias_without_another_mapping_or_evictio
 fn initialization_slot_replacement_and_pending_errors_fall_back_to_tracked_copy_aliases() {
     let mut a = Alpha::new();
     let old = a.map_initialization_page(19).unwrap();
-    let replacement = a.map_initialization_page(19 + 2048).unwrap();
+    let replacement = a.map_initialization_page(19 + memory_init::PAGES).unwrap();
     assert_eq!(old, replacement);
     let fallback = a.map_process_transfer_frame(1, POOL_FRAME + 19, Some(replacement)).unwrap();
     assert_ne!(fallback, replacement);
-    assert_eq!(a.mappings[&replacement], POOL_FRAME + 19 + 2048);
+    assert_eq!(a.mappings[&replacement], POOL_FRAME + 19 + memory_init::PAGES);
     assert_eq!(a.mappings[&fallback], POOL_FRAME + 19);
     a.fail_map = true;
     assert!(a.map_initialization_page(20).is_err());
@@ -126,7 +172,7 @@ fn initialization_slot_replacement_and_pending_errors_fall_back_to_tracked_copy_
     assert_eq!(a.mappings[&pending], POOL_FRAME + 20);
     assert_eq!(a.mappings[&fallback], POOL_FRAME + 20);
     a.fail_unmap = true;
-    assert!(a.map_initialization_page(20 + 2048).is_err());
+    assert!(a.map_initialization_page(20 + memory_init::PAGES).is_err());
     assert!(a.cached_initialization_frame(POOL_FRAME + 20).is_none());
     assert_eq!(a.map_process_transfer_frame(2, POOL_FRAME + 20, None).unwrap(), fallback);
 }
@@ -139,9 +185,9 @@ fn retained_copy_alias_survives_initialization_window_replacement() {
     // it must retain the stable CopyWindow contract rather than transfer reuse.
     let retained = a.map_process_copy_frame(1, POOL_FRAME + 19, None).unwrap();
     assert_ne!(retained, initial);
-    a.map_initialization_page(19 + 2048).unwrap();
+    a.map_initialization_page(19 + memory_init::PAGES).unwrap();
     assert_eq!(a.mappings[&retained], POOL_FRAME + 19);
-    assert_eq!(a.mappings[&initial], POOL_FRAME + 19 + 2048);
+    assert_eq!(a.mappings[&initial], POOL_FRAME + 19 + memory_init::PAGES);
 }
 
 #[test]

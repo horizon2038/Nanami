@@ -48,6 +48,11 @@ fn timespec_ticks(runtime: &Runtime, offset: Word) -> Result<Word, i32> {
     if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
         return Err(EINVAL);
     }
+    if runtime.monotonic_tick_hz == 1_000_000_000 {
+        // timerfd rejects overflow; sleep/poll deadlines instead saturate.
+        return (seconds as Word).checked_mul(1_000_000_000)
+            .and_then(|ticks| ticks.checked_add(nanos as Word)).ok_or(EINVAL);
+    }
     let ticks = seconds as u128 * runtime.monotonic_tick_hz as u128
         + (nanos as u128 * runtime.monotonic_tick_hz as u128).div_ceil(1_000_000_000);
     Word::try_from(ticks).map_err(|_| EINVAL)

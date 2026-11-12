@@ -14,6 +14,10 @@ mod events;
 mod identity_cache;
 #[path = "state/io.rs"]
 mod io;
+#[path = "state/file_reader.rs"]
+mod file_reader;
+#[path = "state/read_grant.rs"]
+mod read_grant;
 pub use identity_cache::{IdentityCache, IdentityField};
 #[path = "state/job_control.rs"]
 pub mod job_control;
@@ -281,6 +285,9 @@ pub struct ManagedProcess {
     pub tgid: Word,
     pub vm_group: Word,
     pub vm_private_shared: bool,
+    // Readonly snapshots alone cannot alias a logically writable destination.
+    // A private COW fork sets this conservatively for every VM peer.
+    pub vm_writable_private_shared: bool,
     pub fs_group: Word,
     pub umask: Word,
     pub parent_pid: Word,
@@ -358,6 +365,7 @@ impl ManagedProcess {
         tgid: 0,
         vm_group: 0,
         vm_private_shared: false,
+        vm_writable_private_shared: false,
         fs_group: 0,
         umask: 0o022,
         parent_pid: 0,
@@ -491,6 +499,10 @@ pub struct Runtime {
     pub internal_shm: Word,
     pub internal_shm_size: Word,
     pub posix_port: Word,
+    pub file_reader: super::file_reader::Reader,
+    /// 2: cursor grants, 1: positioned grants, 0: legacy rooted open.
+    pub rooted_grants: u8,
+    pub rooted_channel: super::rooted_channel::Channel,
     pub identity_cache: IdentityCache,
     pub posix_shm: Word,
     pub posix_shm_size: Word,
@@ -504,6 +516,7 @@ pub struct Runtime {
     pub clock_reader: nanami_client::timer::MonotonicReader,
     pub clock_deadline: Option<Word>,
     pub readiness_changes: Word,
+    pub unix_wake_targets: readiness::UnixWakeTargets,
     pub framebuffer_deadline: Option<Word>,
     pub monotonic_ticks: Word,
     pub monotonic_tick_hz: Word,
@@ -576,6 +589,12 @@ impl Runtime {
             internal_shm: 0,
             internal_shm_size: 0,
             posix_port,
+            file_reader: super::file_reader::Reader::EMPTY,
+            rooted_grants: match option_env!("NANAMI_READ_CURSOR") {
+                Some(value) if matches!(value.as_bytes(), [b'0']) => 1,
+                _ => 2,
+            },
+            rooted_channel: super::rooted_channel::Channel::new(),
             identity_cache: IdentityCache::new(),
             posix_shm,
             posix_shm_size,
@@ -589,6 +608,7 @@ impl Runtime {
             clock_reader: nanami_client::timer::MonotonicReader::new(),
             clock_deadline: None,
             readiness_changes: 0,
+            unix_wake_targets: readiness::UnixWakeTargets::EMPTY,
             framebuffer_deadline: None,
             monotonic_ticks: 0,
             monotonic_tick_hz: 0,

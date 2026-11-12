@@ -41,7 +41,59 @@ pub(crate) fn handle_read_delegated(
     handle_read_into(request, runtime, session, out_offset)
 }
 
-fn delegated_buffer(
+pub(super) fn versioned_file_identity(runtime: &mut Ext2Runtime, file: FileHandle) -> Word {
+    let version = if file.mode & EXT2_S_IFMT == EXT2_S_IFREG && !runtime.mapped_pages.pins(file.inode) {
+        runtime.file_versions.get(file.inode)
+    } else {
+        0
+    };
+    file.inode as Word | ((version as Word) << 32)
+}
+
+pub(crate) fn handle_read_versioned(
+    request: ServiceRequest, runtime: &mut Ext2Runtime,
+) -> (Word, Word, Word) {
+    let Some((session, output)) = delegated_buffer(request, runtime) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    };
+    let Some(file) = runtime.handles.get(request.arg0).copied()
+        .filter(|file| file.active && file.owner_pid == request.identifier)
+    else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    read_versioned_into(request, runtime, session, output, file)
+}
+
+fn read_versioned_into(
+    request: ServiceRequest, runtime: &mut Ext2Runtime,
+    session: ClientSession, output: Word, file: FileHandle,
+) -> (Word, Word, Word) {
+    let identity = request.arg1;
+    let size = request.arg2;
+    if identity >> 32 == 0 || size == 0
+        || output.checked_add(size).is_none_or(|end| end > session.shm_size)
+    {
+        return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+    }
+    if file.size as Word != size || versioned_file_identity(runtime, file) != identity {
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
+    }
+    let Ok(inode) = read_inode(runtime, file.inode) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    if inode.size as Word != size {
+        return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
+    }
+    // The server dispatches no filesystem mutation during this positioned
+    // read. Live file mappings were excluded by the version check above.
+    match read_file(runtime, session, inode, 0, size, output) {
+        Ok(bytes) if bytes == size => (nanami_runtime::OS_RESPONSE_OK, bytes, identity),
+        Ok(_) => (nanami_runtime::OS_RESPONSE_OK, 0, 0),
+        Err(status) => (status, 0, 0),
+    }
+}
+
+pub(super) fn delegated_buffer(
     request: ServiceRequest,
     runtime: &Ext2Runtime,
 ) -> Option<(ClientSession, usize)> {
@@ -75,6 +127,13 @@ pub(crate) fn handle_read_into(
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let file = runtime.handles[handle];
+    read_file_handle(request, runtime, session, out_offset, file)
+}
+
+pub(super) fn read_file_handle(
+    request: ServiceRequest, runtime: &mut Ext2Runtime,
+    session: ClientSession, out_offset: Word, file: FileHandle,
+) -> (Word, Word, Word) {
     if (file.mode & EXT2_S_IFMT) != EXT2_S_IFREG {
         return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
     }
@@ -95,6 +154,30 @@ pub(crate) fn handle_read_into(
         Ok(bytes) => (nanami_runtime::OS_RESPONSE_OK, bytes as Word, 0),
         Err(status) => (status, 0, 0),
     }
+}
+
+pub(crate) fn handle_fstat_granted(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    let Some((handle, _)) = super::read_grants::resolve(runtime, request.identifier, request.arg0) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    let file = runtime.handles[handle];
+    super::file_stat(runtime, file, request.arg1)
+}
+
+pub(crate) fn handle_read_granted(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    let Some((handle, session)) = super::read_grants::resolve(runtime, request.identifier, request.arg0) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    let file = runtime.handles[handle];
+    read_file_handle(request, runtime, session, request.arg3, file)
+}
+
+pub(crate) fn handle_read_versioned_granted(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Word, Word) {
+    let Some((handle, session)) = super::read_grants::resolve(runtime, request.identifier, request.arg0) else {
+        return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
+    };
+    let file = runtime.handles[handle];
+    read_versioned_into(request, runtime, session, request.arg3, file)
 }
 
 pub(crate) fn handle_close(

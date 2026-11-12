@@ -105,6 +105,14 @@ impl Alpha {
             alpha_launch::TEMP,
             self.processes.alpha_vm_space_mut(),
         )?;
+        if cfg!(target_arch = "x86_64") {
+            self.memory.ensure_page_tables_for_leaf(
+                self.launch_capabilities.address_space,
+                alpha_launch::LARGE_TEMP,
+                21,
+                self.processes.alpha_vm_space_mut(),
+            )?;
+        }
         let mut slots = [0; 4];
         for index in 0..4 {
             match self.processes.alloc_process_slot() {

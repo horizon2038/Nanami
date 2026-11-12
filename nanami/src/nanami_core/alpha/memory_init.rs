@@ -5,11 +5,52 @@ use super::*;
 // a dangling mapping. This caches mappings, NOT page contents: every allocation
 // is still zeroed or filled before it is exposed to its new owner.
 const BASE: usize = 0x6700_0000;
-// Keep the mapping cache within an 8-MiB alias region (32 KiB of tags on
-// 64-bit targets), leaving space before the separate image-staging window.
-pub(super) const PAGES: usize = 2048;
+// Retain both sides of an 8-MiB input/copy working set. This consumes 64 KiB
+// of tags on 64-bit targets, without reserving another byte of payload RAM.
+// The compact layout remains available for memory-constrained configurations.
+const SMALL: bool = match option_env!("NANAMI_SMALL_INIT_WINDOW") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => false,
+};
+pub(super) const PAGES: usize = if SMALL { 2048 } else { 4096 };
 const _: () = assert!(PAGES.is_power_of_two() && PAGES <= u16::MAX as usize);
 const _: () = assert!(BASE + PAGES * PAGE_SIZE <= PROCESS_COPY_TEMP_BASE);
+
+#[cfg(not(test))]
+#[repr(C)]
+pub(super) struct Diagnostics {
+    magic: usize,
+    init_maps: core::sync::atomic::AtomicUsize,
+    init_unmaps: core::sync::atomic::AtomicUsize,
+    temporary_maps: core::sync::atomic::AtomicUsize,
+    temporary_unmaps: core::sync::atomic::AtomicUsize,
+}
+
+#[cfg(not(test))]
+#[no_mangle]
+pub(super) static NANAMI_INIT_DIAGNOSTICS: Diagnostics = Diagnostics {
+    magic: 0x494e4954,
+    init_maps: core::sync::atomic::AtomicUsize::new(0),
+    init_unmaps: core::sync::atomic::AtomicUsize::new(0),
+    temporary_maps: core::sync::atomic::AtomicUsize::new(0),
+    temporary_unmaps: core::sync::atomic::AtomicUsize::new(0),
+};
+
+#[cfg(not(test))]
+#[inline]
+pub(super) fn record_mapping(initializer: bool, mapped: bool) {
+    if option_env!("NANAMI_INIT_WINDOW_DIAG") == Some("1") {
+        use core::sync::atomic::Ordering;
+        let stats = &NANAMI_INIT_DIAGNOSTICS;
+        let counter = match (initializer, mapped) {
+            (true, true) => &stats.init_maps,
+            (true, false) => &stats.init_unmaps,
+            (false, true) => &stats.temporary_maps,
+            (false, false) => &stats.temporary_unmaps,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Mapping {
@@ -114,7 +155,8 @@ impl Alpha {
         &mut self, first: usize, maximum: usize,
     ) -> Result<(usize, usize), CapabilityError> {
         if maximum == 0 { return Err(CapabilityError::InvalidArgument); }
-        let address = self.map_initialization_page(first)?;
+        let (address, large_pages) = self.map_initialization_page_span(first)?;
+        if large_pages > 1 { return Ok((address, large_pages.min(maximum))); }
         let limit = maximum.min(PAGES - first % PAGES);
         let mut count = 1;
         while count < limit {
@@ -132,6 +174,15 @@ impl Alpha {
 
     pub(super) fn initialization_alias_address(&self, physical_page: usize) -> usize {
         BASE + (physical_page % PAGES) * PAGE_SIZE
+    }
+
+    /// Borrowing another Ready alias is useful only on an initializer miss.
+    /// Pending cleanup must still follow the ordinary error/retry path.
+    pub(super) fn initialization_page_needs_mapping(&self, physical_page: usize) -> bool {
+        let Some(frame) = self.memory.physical_frame_descriptor_from_index(physical_page) else { return false; };
+        let mapping = self.initialization_window.mappings[physical_page % PAGES];
+        mapping.state == MappingState::Empty
+            || (mapping.state == MappingState::Ready && mapping.frame != frame)
     }
     /// Read-only probe: never create/evict an alias while another alias is pinned.
     /// Caller must separately validate current source ownership and Frame identity.
@@ -166,22 +217,30 @@ impl Alpha {
         &mut self,
         physical_page: usize,
     ) -> Result<usize, CapabilityError> {
+        self.map_initialization_page_span(physical_page).map(|span| span.0)
+    }
+
+    fn map_initialization_page_span(&mut self, physical_page: usize)
+        -> Result<(usize, usize), CapabilityError> {
         let frame = self
             .memory
             .physical_frame_descriptor_from_index(physical_page)
             .ok_or(CapabilityError::InvalidArgument)?;
+        if let Some(span) = self.memory.map_private_large_alias(frame, None)? { return Ok(span); }
         let index = physical_page % PAGES;
         let va = self.initialization_alias_address(physical_page);
         let mapping = self.initialization_window.mappings[index];
         if mapping.state != MappingState::Empty {
             if mapping.state == MappingState::Ready && mapping.frame == frame {
                 self.initialization_window.remember(frame, index);
-                return Ok(va);
+                return Ok((va, 1));
             }
             if mapping.state == MappingState::Ready { self.initialization_window.forget(index); }
             self.initialization_window.mappings[index].state = MappingState::Pending;
             // Preserve failed cleanup in the cache; never overwrite a live PTE.
             self.unmap_alpha_frame(mapping.frame, va)?;
+            #[cfg(not(test))]
+            record_mapping(true, false);
             self.initialization_window.mappings[index].state = MappingState::Empty;
         }
         // A failed MAP may have installed a PTE. Retain it for cleanup, but
@@ -189,8 +248,10 @@ impl Alpha {
         self.initialization_window.mappings[index].frame = frame;
         self.initialization_window.mappings[index].state = MappingState::Pending;
         self.map_alpha_temporary_frame(frame, va)?;
+        #[cfg(not(test))]
+        record_mapping(true, true);
         self.initialization_window.mappings[index].state = MappingState::Ready;
         self.initialization_window.remember(frame, index);
-        Ok(va)
+        Ok((va, 1))
     }
 }

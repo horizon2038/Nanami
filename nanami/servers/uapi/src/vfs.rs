@@ -33,6 +33,38 @@ pub const VFS_REQUEST_MAP_READ_PAGE: Word = 0x9118;
 pub const VFS_REQUEST_UNMAP_READ_PAGE: Word = 0x9119;
 /// arg0: owned handle. Writes FilesystemStats at offset zero of client SHM.
 pub const VFS_REQUEST_FSTATFS: Word = 0x911a;
+/// Read a whole regular file into an authorized delegated buffer.
+/// Args: handle, expected versioned inode, expected size, packed destination.
+/// Reply payload: bytes and verified identity, or zeros if the version changed.
+pub const VFS_REQUEST_READ_VERSIONED: Word = 0x911b;
+/// PATH OPEN_READONLY with an authorized read-buffer delegate in flags' upper
+/// word. Reply detail1 packs file type in low8 bits and a read grant above it.
+pub const VFS_REQUEST_OPEN_ROOTED_GRANTED: Word = 0x911c;
+/// Peer-bound open-description tokens; no file-offset mutation is permitted.
+pub const VFS_REQUEST_FSTAT_GRANTED: Word = 0x911d;
+pub const VFS_REQUEST_READ_GRANTED: Word = 0x911e;
+pub const VFS_REQUEST_READ_VERSIONED_GRANTED: Word = 0x911f;
+/// Negotiated readonly open with one provider-owned cursor shared by every
+/// duplicate. Only this entry may return VFS_OPEN_CURSOR_TYPE_FLAG. The old
+/// OPEN_ROOTED_GRANTED entry and its tokens never acquire cursor authority.
+pub const VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED: Word = 0x9120;
+/// Owned handle / peer-bound cursor token, zero, bytes, destination. Owner
+/// destination uses the existing delegate/offset packing (delegate zero = own
+/// control window); a peer destination is an offset in its bound read window.
+/// Success advances the cursor by bytes; any error leaves it unchanged.
+/// A lost/invalid success reply is uncertain and must not be replayed blindly.
+pub const VFS_REQUEST_READ_CURSOR: Word = 0x9121;
+pub const VFS_REQUEST_READ_CURSOR_GRANTED: Word = 0x9122;
+/// Owned handle / peer-bound cursor token, unsigned offset, whence, zero.
+/// Saturating SET/CUR/END semantics match the existing POSIX service.
+pub const VFS_REQUEST_SEEK_CURSOR: Word = 0x9123;
+pub const VFS_REQUEST_SEEK_CURSOR_GRANTED: Word = 0x9124;
+pub const VFS_CURSOR_SEEK_SET: Word = 0;
+pub const VFS_CURSOR_SEEK_CUR: Word = 1;
+pub const VFS_CURSOR_SEEK_END: Word = 2;
+pub const VFS_OPEN_GRANT_TYPE_BITS: u32 = 8;
+pub const VFS_OPEN_GRANT_TYPE_MASK: Word = 0xff;
+pub const VFS_OPEN_CURSOR_TYPE_FLAG: Word = 0x80;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]

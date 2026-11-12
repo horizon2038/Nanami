@@ -84,6 +84,131 @@ fn parsed_load_flags_preinstall_linux_rights_with_dynamic_bias() {
 }
 
 #[test]
+fn initial_permission_ack_requires_disjoint_nonzero_loads_without_native_or_stack_fixups() {
+    let mut elf = ElfImage::empty();
+    elf.segment_count = 4;
+    for (index, rights) in [1, 5, 1, 3].into_iter().enumerate() {
+        elf.segments[index] = seg(0x400000 + index * 0x2000, index * 0x2000, 0x1000, 0x1800);
+        elf.segment_permissions[index] = rights;
+    }
+    let stack = 0x4000000..0x4040000;
+    assert!(elf.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    for (index, segment) in elf.segments[..4].iter().enumerate() {
+        for page in (segment.virtual_address..segment.virtual_address + 0x2000).step_by(PAGE_SIZE) {
+            assert_eq!(elf.exec_page_permissions(true, page, PAGE_SIZE), elf.segment_permissions[index] as usize);
+        }
+    }
+    for rights in [0, 8, 17, u8::MAX] {
+        let mut invalid = elf; invalid.segment_permissions[2] = rights;
+        assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    }
+    let mut invalid = elf; invalid.ipc_buffer_start = Some(0x400000);
+    assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    let mut invalid = elf; invalid.segments[1].virtual_address = 0x401fff;
+    assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    let mut invalid = elf; invalid.segments[1].virtual_address = stack.start - 1;
+    assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    let mut invalid = elf; invalid.segments[1].virtual_address = usize::MAX - 20;
+    assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    let mut invalid = elf; invalid.segment_count = 17;
+    assert!(!invalid.initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    for size in [0, 3, 4095] { assert!(!elf.initial_permissions_complete(size, stack.clone())); }
+    assert!(!ElfImage::empty().initial_permissions_complete(PAGE_SIZE, stack.clone()));
+    elf.segments[1].memory_size = 0;
+    elf.segment_permissions[1] = 0;
+    assert!(elf.initial_permissions_complete(PAGE_SIZE, stack));
+}
+
+#[test]
+fn sparse_load_pages_keep_file_bss_boundaries_and_original_frame_slots() {
+    let bytes: &'static [u8] = Box::leak((0..65536)
+        .map(|i| ((i * 17 + 3) % 251) as u8).collect::<Vec<_>>().into_boxed_slice());
+    let mut elf = ElfImage::empty();
+    elf.segment_count = 2;
+    // The actual dock launcher uses this shape: thirteen RX pages, a 2MiB
+    // unmapped gap, then one writable data/BSS page.
+    elf.segments[0] = seg(0x400000, 0, 50552, 50552);
+    elf.segments[1] = seg(0x60d000, 13 * PAGE_SIZE, 2528, 3288);
+    elf.segment_permissions[..2].copy_from_slice(&[5, 3]);
+    assert!(elf.initial_permissions_complete(PAGE_SIZE, 0x4000000..0x4040000));
+    let mut slots = Vec::new();
+    for (slot, page) in (0x400000..0x60e000).step_by(PAGE_SIZE).enumerate() {
+        if !elf.is_load_page(page, PAGE_SIZE) {
+            let mut old = [0xa5; PAGE_SIZE];
+            oracle(bytes, elf, page, &mut old).unwrap();
+            assert_eq!(old, [0; PAGE_SIZE]);
+            continue;
+        }
+        slots.push(slot);
+        let mut actual = [0xa5; PAGE_SIZE];
+        let mut expected = [0x77; PAGE_SIZE];
+        production::fill_lazy_page(&ProcessLazyMappingKind::Image { image: bytes, elf },
+            page, actual.as_mut_ptr() as usize).unwrap();
+        oracle(bytes, elf, page, &mut expected).unwrap();
+        assert_eq!(actual, expected);
+    }
+    assert_eq!(slots, (0..13).chain([525]).collect::<Vec<_>>());
+    assert_eq!((0x60e000 - 0x400000) / PAGE_SIZE - slots.len(), 512);
+    // The stack still starts at slot526; omitted Frame slots are not packed.
+    assert_eq!((0x60e000 - 0x400000) / PAGE_SIZE, 526);
+}
+
+#[test]
+fn load_page_coverage_handles_unaligned_edges_bss_empty_loads_and_header_order() {
+    let bytes = image();
+    for gap in [0, 1, 63, 64, 65, 512] {
+        for tail in [1, 4095, 4096, 4097] {
+            for reverse in [false, true] {
+                let mut elf = ElfImage::empty();
+                elf.segment_count = 3;
+                let mut segments = [seg(0x400011, 17, 19, 8191),
+                    seg(0x403000 + gap * PAGE_SIZE + 1, 16384, 0, tail)];
+                if reverse { segments.reverse(); }
+                elf.segments[..2].copy_from_slice(&segments);
+                elf.segments[2] = seg(usize::MAX, 0, 0, 0);
+                elf.segment_permissions[..2].copy_from_slice(&[3, 5]);
+                assert!(elf.initial_permissions_complete(PAGE_SIZE, 0x4000000..0x4040000));
+                let end = (0x403000 + gap * PAGE_SIZE + tail + 4096) & !(PAGE_SIZE - 1);
+                for page in (0x400000..end).step_by(PAGE_SIZE) {
+                    let expected = segments.iter().any(|s| {
+                        let first = s.virtual_address / PAGE_SIZE;
+                        let last = (s.virtual_address + s.memory_size - 1) / PAGE_SIZE;
+                        (first..=last).contains(&(page / PAGE_SIZE))
+                    });
+                    assert_eq!(elf.is_load_page(page, PAGE_SIZE), expected);
+                    if expected {
+                        let mut actual = [0xa5; PAGE_SIZE];
+                        let mut expected = [0x77; PAGE_SIZE];
+                        production::fill_lazy_page(&ProcessLazyMappingKind::Image { image: bytes, elf },
+                            page, actual.as_mut_ptr() as usize).unwrap();
+                        oracle(bytes, elf, page, &mut expected).unwrap();
+                        assert_eq!(actual, expected);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn load_page_query_rejects_bad_sizes_keys_counts_and_overflow() {
+    let mut elf = ElfImage::empty();
+    elf.segment_count = 1;
+    elf.segments[0] = seg(0x400000, 0, 0, 4096);
+    assert!(elf.is_load_page(0x400000, PAGE_SIZE));
+    for size in [0, 3, 4095] { assert!(!elf.is_load_page(0x400000, size)); }
+    assert!(!elf.is_load_page(0x400001, PAGE_SIZE));
+    assert!(!elf.is_load_page(usize::MAX & !(PAGE_SIZE - 1), PAGE_SIZE));
+    elf.segment_count = 17;
+    assert!(!elf.is_load_page(0x400000, PAGE_SIZE));
+    assert!(!elf.initial_permissions_complete(PAGE_SIZE, 0..0));
+    elf.segment_count = 1;
+    elf.segments[0].virtual_address = usize::MAX - 1;
+    elf.segments[0].memory_size = 3;
+    assert!(!elf.is_load_page(usize::MAX & !(PAGE_SIZE - 1), PAGE_SIZE));
+}
+
+#[test]
 fn snapshot_page_accepts_only_exact_readonly_file_pages_and_matches_real_fill() {
     let data=image();let p=0x400000;
     for rights in 0..8_u8 {

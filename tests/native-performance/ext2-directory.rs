@@ -17,6 +17,7 @@ pub mod block {
 mod block_cache;
 const MAX_HANDLES: usize = 2;
 const EXT2_NAME_LEN_MAX: usize = 255;
+const EXT2_ROOT_INODE: u32 = 2;
 const BLOCK_SIZE: usize = 128;
 const EXT2_S_IFMT:u16=0xf000;
 const EXT2_S_IFDIR:u16=0x4000;
@@ -32,6 +33,13 @@ mod name_compare;
 use name_compare::bytes_eq;
 #[path = "../../nanami/servers/core-services/ext2-server/src/path_walk.rs"]
 mod path_walk;
+#[path = "../../nanami/servers/core-services/ext2-server/src/path_input.rs"]
+mod path_input;
+#[path = "../../nanami/servers/core-services/ext2-server/src/canonical_path.rs"]
+mod canonical_path;
+#[path = "../../nanami/servers/core-services/ext2-server/src/resolved_path.rs"]
+mod resolved_path;
+use directory_lookup::lookup_in_directory;
 #[path = "../../nanami/servers/core-services/ext2-server/src/directory_parent.rs"]
 mod directory_parent;
 use directory_parent::read_parent_name;
@@ -78,6 +86,8 @@ struct Ext2Runtime {
     mapped: Vec<usize>,
     handles: [Handle; MAX_HANDLES],
     directory_cursors: directory::Cursors,
+    root_path: canonical_path::RootCache,
+    resolved_paths: resolved_path::Cache,
     block_size: usize,
     block_count: usize,
     block_shm_size: usize,
@@ -250,6 +260,8 @@ fn fixture(entries: usize) -> (Ext2Runtime, Ext2Inode) {
             dentry_stores:0,fail_inode:false,fail_map:None,mapped:Vec::new(),
             handles: [Handle { inode: 7 }, Handle { inode: 7 }],
             directory_cursors: directory::Cursors::new(),
+            root_path: canonical_path::RootCache::new(),
+            resolved_paths: resolved_path::Cache::new(),
             block_size: BLOCK_SIZE,
             block_count: disk.len(), block_shm_size: BLOCK_SIZE,
             block_cache:block_cache::BlockCache::new(BLOCK_SIZE,32*BLOCK_SIZE,BLOCK_SIZE),
@@ -279,6 +291,405 @@ fn namespace_chain(warm: bool) -> (Ext2Runtime, Vec<u8>, u32) {
 }
 
 #[test]
+fn canonical_prefix_avoids_ancestor_reads_for_96_distinct_missing_descendants() {
+    let mut counts = [0; 2];
+    for (optimized, count) in [false, true].into_iter().zip(&mut counts) {
+        let (mut r, prefix, parent) = namespace_chain(true);
+        for index in 0..96 { r.dentry_cache.store(parent, format!("absent{index:03}").as_bytes(), None); }
+        namespace_disk::resolve(&mut r, 2, 2, &prefix, true, false, false, true).unwrap();
+        r.inode_reads = 0;
+        for index in 0..96 {
+            let path = [prefix.as_slice(), format!("/absent{index:03}/lib.so").as_bytes()].concat();
+            // Neither an exact positive path nor a direct child of the proven
+            // directory: the previous final-component shortcut could not help.
+            assert!(r.resolved_paths.load(2, 2, &path, true).is_none());
+            assert!(matches!(namespace_disk::resolve(&mut r, 2, 2, &path,
+                true, false, false, optimized), Err(Error::Missing)));
+            assert!(matches!(namespace_disk::resolve(&mut r, 2, 2, &path,
+                true, true, false, optimized), Err(Error::Missing)));
+        }
+        *count = r.inode_reads;
+    }
+    println!("CANONICAL-PREFIX missing-descendants=96 modes=2 ancestor-inode-reads={counts:?}");
+    assert_eq!(counts, [1152, 0]);
+}
+
+fn prefix_subtree() -> Ext2Runtime {
+    let mut r = namespace_tree(true);
+    for (parent, name, inode, mode) in [
+        (11,b"sub".as_slice(),50,EXT2_S_IFDIR), (50,b"deep",51,EXT2_S_IFDIR),
+        (51,b"value",52,0x8000), (50,b"link",53,EXT2_S_IFLNK),
+        (50,b"cycle",54,EXT2_S_IFLNK), (50,b"empty",55,EXT2_S_IFLNK),
+    ] {
+        r.dentry_cache.store(parent,name,Some(inode));
+        r.metadata.insert(inode,Ext2Inode { mode,size:73 });
+    }
+    r.links.insert(53,b"/a/b".to_vec());
+    r.links.insert(54,b"cycle".to_vec());
+    r.links.insert(55,Vec::new());
+    r
+}
+
+#[test]
+fn failed_walks_keep_the_proven_parent_without_caching_any_missing_name() {
+    let mut counts = [0; 2];
+    for (optimized, count) in [false, true].into_iter().zip(&mut counts) {
+        let (mut r, prefix, parent) = namespace_chain(true);
+        for index in 0..96 {
+            r.dentry_cache.store(parent, format!("absent{index:03}").as_bytes(), None);
+        }
+        r.inode_reads = 0;
+        for index in 0..96 {
+            let path = [prefix.as_slice(), format!("/absent{index:03}/lib.so").as_bytes()].concat();
+            for allow_missing in [false, true] {
+                assert!(matches!(namespace_disk::resolve(&mut r, 2, 2, &path,
+                    true, allow_missing, false, optimized), Err(Error::Missing)));
+                assert!(r.resolved_paths.load(2, 2, &path, true).is_none());
+            }
+        }
+        if optimized {
+            assert_eq!(r.resolved_paths.parent_with_origin(2, 2,
+                &[prefix.as_slice(), b"/next"].concat(), true), Some((parent, b"next".as_slice(), true)));
+        }
+        *count = r.inode_reads;
+    }
+    assert_eq!(counts, [1152, 6]);
+    println!("FAILED-PATH-PREFIX ancestor-inode-reads={counts:?}");
+}
+
+#[test]
+fn failed_prefixes_keep_fresh_leaf_metadata_and_are_invalidated_before_creation_and_replacement() {
+    let mut r = prefix_subtree();
+    assert!(matches!(namespace_disk::resolve(&mut r, 2, 2,
+        b"/a/b/sub/deep/missing", true, false, false, true), Err(Error::Missing)));
+    r.inode_reads = 0;
+    r.metadata.get_mut(&52).unwrap().size = 8197;
+    let (_, inode) = namespace_disk::resolve(&mut r, 2, 2,
+        b"/a/b/sub/deep/value", true, false, false, true).unwrap();
+    assert_eq!(inode.unwrap().size, 8197);
+    assert_eq!(r.inode_reads, 1);
+    r.dentry_cache.store(51, b"error", Some(56));
+    r.fail_inode_number = Some(56);
+    assert!(matches!(namespace_disk::resolve(&mut r, 2, 2,
+        b"/a/b/sub/deep/error", true, false, false, true), Err(Error::Io)));
+    r.fail_inode_number = None;
+    directory::invalidate(&mut r);
+    assert!(r.resolved_paths.parent(2, 2, b"/a/b/sub/deep/missing", true).is_none());
+    r.dentry_cache.store(51, b"missing", Some(56));
+    r.metadata.insert(56, Ext2Inode { mode: 0x8000, size: 73 });
+    assert_eq!(namespace_disk::resolve(&mut r, 2, 2,
+        b"/a/b/sub/deep/missing", true, false, false, true).unwrap().0.node.unwrap().inode, 56);
+    directory::invalidate(&mut r);
+    r.dentry_cache.store(50, b"deep", Some(57));
+    r.metadata.insert(57, Ext2Inode { mode: 0x8000, size: 73 });
+    assert!(matches!(namespace_disk::resolve(&mut r, 2, 2,
+        b"/a/b/sub/deep/missing", true, false, false, true), Err(Error::NotDirectory)));
+}
+
+#[test]
+fn failed_prefix_reuse_matches_full_walks_across_links_dotdot_roots_and_missing_modes() {
+    let paths: &[&[u8]] = &[b"/a/b/sub/deep/missing", b"/a/b/sub/deep/value",
+        b"/a/b/sub/link/missing", b"/a/b/sub/link/../value", b"/a/b/sub/cycle/missing",
+        b"/a/b/sub/empty/missing", b"/a/b/sub//deep/missing", b"/a/b/sub/deep/../missing",
+        b"/a/b/sub/deep/value/child", b"/a/b/sub/deep/value/", b"/a/b/sub/deep/missing\0"];
+    let pack = |result: Result<(path_walk::Resolved, Option<Ext2Inode>), Error>|
+        result.map(|(r, _)| (r.node, r.parent, r.name, r.path));
+    for follow in [false, true] {
+        for missing in [false, true] {
+            let mut actual = prefix_subtree();
+            let mut expected = prefix_subtree();
+            for _ in 0..3 {
+                for path in paths {
+                    assert_eq!(pack(namespace_disk::resolve(&mut actual, 2, 2, path, follow, missing, false, true)),
+                        pack(namespace_disk::resolve(&mut expected, 2, 2, path, follow, missing, false, false)), "{path:?}");
+                }
+            }
+            assert!(actual.resolved_paths.parent(3, 3, b"/a/b/sub/deep/other", follow).is_none());
+        }
+    }
+    for (retain, cacheable) in [(true, true), (false, false)] {
+        let mut r = prefix_subtree();
+        assert!(namespace_disk::resolve(&mut r, 2, 2, b"/a/b/sub/deep/missing",
+            true, false, retain, cacheable).is_err());
+        assert!(r.resolved_paths.parent(2, 2, b"/a/b/sub/deep/other", true).is_none());
+    }
+}
+
+#[test]
+fn canonical_prefix_descendants_match_full_walk_and_keep_link_and_error_precedence() {
+    let paths: &[&[u8]] = &[b"/a/b/sub/deep/value",b"/a/b/sub/deep/missing",b"/a/b/sub/missing/value",
+        b"/a/b/sub/deep/value/child",b"/a/b/sub/deep/value/",b"/a/b/sub/link/value",
+        b"/a/b/sub/link/../value",b"/a/b/sub/link",b"/a/b/sub/cycle/value",b"/a/b/sub/empty/value",
+        b"/a/b/sub/./deep/value",b"/a/b/sub//deep/value",b"/a/b/sub/deep/../deep/value",
+        b"/a/b/sub/deep/value\0",b"/a/b/sub/deep/.."];
+    for follow in [false,true] {
+        for missing in [false,true] {
+            for retain in [false,true] {
+                for path in paths {
+                    let mut actual=prefix_subtree();let mut expected=prefix_subtree();
+                    namespace_disk::resolve(&mut actual,2,2,b"/a/b",follow,false,false,true).unwrap();
+                    let pack=|result: Result<(path_walk::Resolved,Option<Ext2Inode>),Error>|
+                        result.map(|(r,_)|(r.node,r.parent,r.name,r.path));
+                    assert_eq!(pack(namespace_disk::resolve(&mut actual,2,2,path,follow,missing,retain,true)),
+                        pack(namespace_disk::resolve(&mut expected,2,2,path,follow,missing,retain,false)),
+                        "path={path:?} follow={follow} missing={missing} retain={retain}");
+                }
+            }
+        }
+    }
+    // Overlong later components must not supersede an earlier missing name.
+    let path=[b"/a/b/sub/missing/".as_slice(),&[b'z';256]].concat();
+    let mut r=prefix_subtree();
+    namespace_disk::resolve(&mut r,2,2,b"/a/b",true,false,false,true).unwrap();
+    assert!(matches!(namespace_disk::resolve(&mut r,2,2,&path,true,false,false,true),Err(Error::Missing)));
+}
+
+#[test]
+fn canonical_prefix_chooses_longest_exact_directory_and_keeps_key_and_shape_limits() {
+    let mut cache=resolved_path::Cache::new();
+    for (path,inode,parent) in [(b"/a".as_slice(),10,2),(b"/a/b",11,10),(b"/a/b/sub",50,11)] {
+        cache.store(2,2,path,true,&path_walk::Resolved { node:Some(Node { inode,kind:Kind::Directory }),
+            parent,name:Vec::new(),path:path.to_vec() });
+    }
+    assert_eq!(cache.parent(2,2,b"/a/b/sub/deep/value",true),Some((50,b"deep/value".as_slice())));
+    assert_eq!(cache.parent(2,2,b"/a/b/submarine/deep/value",true),Some((11,b"submarine/deep/value".as_slice())));
+    for (root,start,follow) in [(3,2,true),(2,3,true),(2,2,false)] {
+        assert!(cache.parent(root,start,b"/a/b/sub/deep/value",follow).is_none());
+    }
+    for path in [b"/a/b/sub//value".as_slice(),b"/a/b/sub/./value",b"/a/b/sub/../value",b"/a/b/sub/value/",
+        b"//a/b/sub/value",b"a/b/sub/value",b"/a/b/sub/val\0ue"] {
+        assert!(cache.parent(2,2,path,true).is_none(),"{path:?}");
+    }
+    cache.invalidate();assert!(cache.parent(2,2,b"/a/b/sub/deep/value",true).is_none());
+}
+
+#[test]
+fn canonical_prefix_reads_new_component_metadata_and_invalidates_before_namespace_changes() {
+    let mut r=prefix_subtree();
+    namespace_disk::resolve(&mut r,2,2,b"/a/b",true,false,false,true).unwrap();
+    r.inode_reads=0;r.metadata.get_mut(&52).unwrap().size=8197;
+    let (result,inode)=namespace_disk::resolve(&mut r,2,2,b"/a/b/sub/deep/value",true,false,false,true).unwrap();
+    assert_eq!(result.node.unwrap().inode,52);assert_eq!(inode.unwrap().size,8197);
+    assert_eq!(r.inode_reads,3);
+    // A previously unknown suffix component's I/O failure is still observed.
+    r.dentry_cache.store(51,b"error",Some(56));r.fail_inode_number=Some(56);
+    assert!(matches!(namespace_disk::resolve(&mut r,2,2,b"/a/b/sub/deep/error",true,false,false,true),Err(Error::Io)));
+    r.fail_inode_number=None;
+    directory::invalidate(&mut r);
+    r.dentry_cache.store(10,b"b",Some(60));r.metadata.insert(60,Ext2Inode { mode:EXT2_S_IFDIR,size:73 });
+    r.dentry_cache.store(60,b"sub",Some(50));
+    let result=namespace_disk::resolve(&mut r,2,2,b"/a/b/sub/deep/value",true,false,false,true).unwrap().0;
+    assert_eq!(result.node.unwrap().inode,52);
+    // Repeat after another namespace change to a nondirectory: no old prefix.
+    directory::invalidate(&mut r);
+    r.metadata.get_mut(&60).unwrap().mode=0x8000;
+    assert!(matches!(namespace_disk::resolve(&mut r,2,2,b"/a/b/sub/deep/value",true,false,false,true),Err(Error::NotDirectory)));
+}
+
+#[test]
+fn canonical_parent_reuse_skips_shared_components_for_distinct_sibling_files() {
+    let mut counts = [0; 2];
+    for (optimized, count) in [false, true].into_iter().zip(&mut counts) {
+        let (mut runtime, mut prefix, _) = namespace_chain(true);
+        prefix.truncate(prefix.iter().rposition(|&byte| byte == b'/').unwrap() + 1);
+        for index in 0..96 {
+            let name = format!("leaf{index:03}");
+            runtime.dentry_cache.store(14, name.as_bytes(), Some(100 + index));
+            runtime.metadata.insert(100 + index, Ext2Inode { size: index, mode: 0x8000 });
+        }
+        for index in 0..96 {
+            let mut path = prefix.clone(); path.extend_from_slice(format!("leaf{index:03}").as_bytes());
+            runtime.metadata.get_mut(&(100 + index)).unwrap().size = 4096 + index;
+            let (resolved, inode) = namespace_disk::resolve(&mut runtime, 2, 2,
+                &path, true, false, false, optimized).unwrap();
+            assert_eq!(resolved.node, Some(Node { inode: 100 + index, kind: Kind::File }));
+            assert_eq!(resolved.parent, 14);
+            assert_eq!(resolved.path, path);
+            assert!(resolved.name.is_empty());
+            assert_eq!(inode.unwrap().size, 4096 + index);
+        }
+        *count = runtime.inode_reads;
+    }
+    println!("CANONICAL-PARENT distinct-files=96 components=6 inode_reads_before={} inode_reads_after={}", counts[0], counts[1]);
+    assert_eq!(counts, [576, 101]);
+}
+
+#[test]
+fn parent_reuse_matches_full_walk_across_siblings_links_dotdot_and_missing_modes() {
+    let paths: &[&[u8]] = &[b"/a/b/value", b"/a/b/a", b"/a/b/b", b"/a/b/missing",
+        b"/a/b/absolute", b"/a/b/link/value", b"/a/b/../value", b"/a/b/./value",
+        b"/a/b/value/child", b"/a/b/value/", b"/a/b/loop", b"/a/b/empty",
+        b"//value", b"/", b"/a\0/value", b"/a/b/.."];
+    for follow in [false, true] {
+        for missing in [false, true] {
+            let mut actual = namespace_tree(true); let mut expected = namespace_tree(true);
+            for round in 0..8 {
+                for path in paths {
+                    let retain = round % 3 == 2;
+                    let pack = |result: Result<(path_walk::Resolved, Option<Ext2Inode>), Error>|
+                        result.map(|(r, _)| (r.node, r.parent, r.name, r.path));
+                    assert_eq!(pack(namespace_disk::resolve(&mut actual, 2, 2, path, follow, missing, retain, true)),
+                        pack(namespace_disk::resolve(&mut expected, 2, 2, path, follow, missing, retain, false)),
+                        "path={path:?} follow={follow} missing={missing} retain={retain}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_parent_keys_reject_alias_paths_and_root_slash_ambiguity() {
+    let mut cache = resolved_path::Cache::new();
+    let mut result = path_walk::Resolved { node: Some(Node { inode: 11, kind: Kind::Directory }),
+        parent: 10, name: Vec::new(), path: b"/a/b".to_vec() };
+    cache.store(2, 2, b"/a/b", true, &result);
+    assert_eq!(cache.parent(2, 2, b"/a/b/value", true), Some((11, b"value".as_slice())));
+    assert_eq!(cache.parent(2, 2, b"/a/other", true), Some((10, b"other".as_slice())));
+    for path in [b"/a/b/".as_slice(), b"/a/b/.", b"/a/b/..", b"/a/b//value", b"/a/./other", b"a/b/value", b"/a/b/a\0"] {
+        assert!(cache.parent(2, 2, path, true).is_none(), "{path:?}");
+    }
+    assert!(cache.parent(3, 2, b"/a/b/value", true).is_none());
+    assert!(cache.parent(2, 3, b"/a/b/value", true).is_none());
+    assert!(cache.parent(2, 2, b"/a/b/value", false).is_none());
+    cache.invalidate();
+    cache.store(2, 2, b"/link", true, &result);
+    assert!(cache.parent(2, 2, b"/other", true).is_none());
+    assert!(cache.parent(2, 2, b"/link/value", true).is_none());
+    result.path = b"/".to_vec(); result.node = Some(Node { inode: 2, kind: Kind::Directory }); result.parent = 2;
+    cache.store(2, 2, b"/", true, &result);
+    assert!(cache.parent(2, 2, b"//value", true).is_none());
+    assert_eq!(cache.parent(2, 2, b"/value", true), Some((2, b"value".as_slice())));
+}
+
+#[test]
+fn parent_reuse_reads_current_leaf_and_discards_old_parent_after_namespace_mutation() {
+    let mut r = namespace_tree(true);
+    namespace_disk::resolve(&mut r, 2, 2, b"/a/b/a", true, false, false, true).unwrap();
+    r.metadata.get_mut(&12).unwrap().size = 8197;
+    let (_, inode) = namespace_disk::resolve(&mut r, 2, 2, b"/a/b/value", true, false, false, true).unwrap();
+    assert_eq!(inode.unwrap().size, 8197);
+    directory::invalidate(&mut r);
+    r.dentry_cache.store(2, b"a", Some(20));
+    r.dentry_cache.store(20, b"b", Some(21));
+    r.dentry_cache.store(21, b"value", Some(22));
+    r.metadata.insert(22, Ext2Inode { size: 37, mode: 0x8000 });
+    let (resolved, _) = namespace_disk::resolve(&mut r, 2, 2, b"/a/b/value", true, false, false, true).unwrap();
+    assert_eq!(resolved.node.unwrap().inode, 22);
+    // Another leaf in the newly proven parent still performs its inode I/O.
+    r.dentry_cache.store(21, b"error", Some(23));
+    r.fail_inode_number = Some(23);
+    assert!(matches!(namespace_disk::resolve(&mut r, 2, 2, b"/a/b/error", true, false, false, true), Err(Error::Io)));
+}
+
+#[test]
+fn resolved_path_reuse_skips_component_walks_but_reads_current_leaf_metadata() {
+    let mut counts = [0; 2];
+    for (optimized, count) in [false, true].into_iter().zip(&mut counts) {
+        let (mut runtime, path, leaf) = namespace_chain(true);
+        runtime.metadata.insert(leaf, Ext2Inode { size: 0, mode: 0x8000 });
+        for size in 0..128 {
+            runtime.metadata.get_mut(&leaf).unwrap().size = size;
+            let (resolved, known) = namespace_disk::resolve(
+                &mut runtime, 2, 2, &path, true, false, false, optimized).unwrap();
+            assert_eq!(resolved.path, path);
+            assert_eq!(resolved.node, Some(Node { inode: leaf, kind: Kind::File }));
+            assert!(resolved.name.is_empty());
+            let inode = known.unwrap_or_else(|| read_inode(&mut runtime, leaf).unwrap());
+            assert_eq!(inode.size, size);
+        }
+        *count = runtime.inode_reads;
+        if optimized {
+            runtime.fail_inode_number = Some(leaf);
+            let (_, known) = namespace_disk::resolve(
+                &mut runtime, 2, 2, &path, true, false, false, true).unwrap();
+            assert!(known.is_none());
+            assert!(read_inode(&mut runtime, leaf).is_err());
+        }
+    }
+    println!("RESOLVED-PATH calls=128 components=6 inode_reads_before={} inode_reads_after={}", counts[0], counts[1]);
+    assert_eq!(counts, [768, 133]);
+}
+
+#[test]
+fn resolved_path_cache_keys_own_bytes_and_bound_fifo_storage_without_truncation() {
+    let mut cache = resolved_path::Cache::new();
+    let mut input = b"/a".to_vec();
+    let mut result = path_walk::Resolved { node: Some(Node { inode: 19, kind: Kind::File }),
+        parent: 17, name: Vec::new(), path: b"/canonical/a".to_vec() };
+    cache.store(2, 7, &input, true, &result);
+    input[1] = b'b'; result.path.fill(b'x');
+    let found = cache.load(2, 7, b"/a", true).unwrap();
+    assert_eq!(found.path, b"/canonical/a"); assert_eq!(found.parent, 17);
+    for (root, start, path, follow) in [(3,7,b"/a".as_slice(),true),(2,8,b"/a",true),
+        (2,7,b"/b",true),(2,7,b"/a/",true),(2,7,b"/a",false)] {
+        assert!(cache.load(root,start,path,follow).is_none());
+    }
+    cache.invalidate();
+    for i in 0..9 {
+        let input = format!("/f{i}"); result.path = input.as_bytes().to_vec();
+        cache.store(2,2,input.as_bytes(),true,&result);
+    }
+    assert!(cache.load(2,2,b"/f0",true).is_none());
+    for i in 1..9 { assert!(cache.load(2,2,format!("/f{i}").as_bytes(),true).is_some()); }
+    for (input_bytes, output_bytes, present, leaf_name) in [(129,2,true,false),(2,257,true,false),
+        (2,2,false,false),(2,2,true,true),(0,2,true,false)] {
+        let input = vec![b'z';input_bytes];
+        let result = path_walk::Resolved {
+            node: present.then_some(Node { inode: 33, kind: Kind::Directory }), parent: 2,
+            name: if leaf_name { b"z".to_vec() } else { Vec::new() }, path: vec![b'z';output_bytes],
+        };
+        cache.store(2,2,&input,true,&result);
+        assert!(cache.load(2,2,&input,true).is_none());
+        assert!(cache.load(2,2,b"/f1",true).is_some());
+    }
+    cache.invalidate(); assert!(cache.load(2,2,b"/f8",true).is_none());
+}
+
+#[test]
+fn resolved_path_reuse_matches_walks_for_links_dotdot_missing_and_error_precedence() {
+    let paths: &[&[u8]] = &[b"/a/b/value",b"/link/value",b"/absolute",b"/absolute/..",
+        b"/a/../value",b"/a/b/../../a",b"/value/child",b"/value/",b"/missing",b"/loop",b"/empty",b"/",b"",b"/a\0/b"];
+    for follow in [false,true] {
+        for allow_missing in [false,true] {
+            for path in paths {
+                let mut actual=namespace_tree(true);let mut expected=namespace_tree(true);
+                for _ in 0..3 {
+                    let pack = |result: Result<(path_walk::Resolved,Option<Ext2Inode>),Error>|
+                        result.map(|(r,_)| (r.node,r.parent,r.name,r.path));
+                    assert_eq!(pack(namespace_disk::resolve(&mut actual,2,2,path,follow,allow_missing,false,true)),
+                        pack(namespace_disk::resolve(&mut expected,2,2,path,follow,allow_missing,false,false)),
+                        "path={path:?} follow={follow} missing={allow_missing}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn directory_invalidation_discards_resolved_links_and_leaf_names_bypass_reuse() {
+    let mut r=namespace_tree(true);
+    let first=namespace_disk::resolve(&mut r,2,2,b"/absolute",true,false,false,true).unwrap().0;
+    assert_eq!(first.node.unwrap().inode,12);
+    let raw=namespace_disk::resolve(&mut r,2,2,b"/absolute",false,false,false,true).unwrap().0;
+    assert_eq!(raw.node.unwrap().inode,15);
+    directory::invalidate(&mut r);
+    r.links.insert(15,b"/a/b".to_vec());
+    let changed=namespace_disk::resolve(&mut r,2,2,b"/absolute",true,false,false,true).unwrap().0;
+    assert_eq!(changed.node,Some(Node { inode:11,kind:Kind::Directory }));
+    let name=namespace_disk::resolve(&mut r,2,2,b"/absolute",true,false,true,true).unwrap().0;
+    assert!(!name.name.is_empty());
+    assert_eq!(name.path,changed.path);
+    let missing=namespace_disk::resolve(&mut r,2,2,b"/missing",true,true,false,true).unwrap().0;
+    assert!(missing.node.is_none());
+    assert!(r.resolved_paths.load(2,2,b"/missing",true).is_none());
+    r.dentry_cache.store(2,b"missing",Some(99));
+    assert_eq!(namespace_disk::resolve(&mut r,2,2,b"/missing",true,true,false,true).unwrap().0.node.unwrap().inode,99);
+    directory::invalidate(&mut r);
+    r.fail_inode_number=Some(11);
+    assert!(matches!(namespace_disk::resolve(&mut r,2,2,b"/absolute",true,false,false,true),Err(Error::Io)));
+}
+
+#[test]
 fn namespace_parent_validation_uses_the_previous_node_kind_on_warm_components() {
     for warm in [false, true] {
         let (mut r, path, last) = namespace_chain(warm);
@@ -290,10 +701,81 @@ fn namespace_parent_validation_uses_the_previous_node_kind_on_warm_components() 
         ).unwrap();
         assert_eq!(resolved.node, Some(Node { inode: last, kind: Kind::Directory }));
         assert_eq!(resolved.path, path);
-        assert_eq!(r.inode_reads, if warm { 6 } else { 12 });
+        assert_eq!(r.inode_reads, if warm { 6 } else { 7 });
         assert_eq!(r.reads, if warm { 0 } else { 6 });
         println!("NAMESPACE-PARENT-KIND warm={warm} components=6 inode_reads={}", r.inode_reads);
     }
+}
+
+#[test]
+fn repeated_container_roots_reuse_the_walk_until_metadata_changes() {
+    fn root(runtime: &mut Ext2Runtime, path: &[u8]) -> Result<u32, Error> {
+        let session = ClientSession { shm_local: path.as_ptr() as usize, shm_size: path.len() };
+        canonical_path::resolve_root(runtime, session, 0, path.len())
+    }
+
+    let (mut runtime, _) = fixture(8);
+    let components = [b"alter".as_slice(), b"linux", b"tinycore", b"rootfs"];
+    let path = b"/alter/linux/tinycore/rootfs";
+    for (index, name) in components.iter().enumerate() {
+        runtime.dentry_cache.store(2 + index as u32, name, Some(3 + index as u32));
+    }
+    const CALLS: usize = 128;
+    for _ in 0..CALLS {
+        directory::invalidate(&mut runtime);
+        assert_eq!(root(&mut runtime, path), Ok(6));
+    }
+    let uncached = runtime.inode_reads;
+    assert_eq!(uncached, CALLS * components.len());
+    runtime.inode_reads = 0;
+    directory::invalidate(&mut runtime);
+    for _ in 0..CALLS {
+        assert_eq!(root(&mut runtime, path), Ok(6));
+    }
+    assert_eq!(runtime.inode_reads, components.len());
+    println!("ROOT-PATH-LOOKUP calls={CALLS} inode_reads_before={uncached} inode_reads_after={}", runtime.inode_reads);
+
+    let long = [b"/".repeat(128), path.to_vec()].concat();
+    assert_eq!(root(&mut runtime, &long), Ok(6));
+    assert_eq!(root(&mut runtime, b"/"), Ok(2));
+    runtime.inode_reads = 0;
+    assert_eq!(root(&mut runtime, path), Ok(6));
+    assert_eq!(runtime.inode_reads, 0);
+
+    directory::invalidate(&mut runtime);
+    runtime.dentry_cache.store(5, b"rootfs", Some(7));
+    runtime.fail_inode_number = Some(7);
+    assert_eq!(root(&mut runtime, path), Err(Error::Io));
+    runtime.fail_inode_number = None;
+    assert_eq!(root(&mut runtime, path), Ok(7));
+    assert_eq!(root(&mut runtime, b"alter/linux/tinycore/rootfs"), Err(Error::Invalid));
+
+    directory::invalidate(&mut runtime);
+    runtime.metadata.insert(4, Ext2Inode { mode: EXT2_S_IFLNK, size: 4 });
+    assert_eq!(root(&mut runtime, path), Err(Error::Missing));
+    assert_eq!(root(&mut runtime, b"/alter/linux"), Err(Error::NotDirectory));
+}
+
+#[test]
+fn rooted_leaf_metadata_is_owned_and_scoped_to_the_exact_inode_and_walk() {
+    let mut runtime = namespace_tree(true);
+    let known = Node { inode: 2, kind: Kind::Directory };
+    {
+        let mut disk = namespace_disk::Disk::new(&mut runtime, known);
+        let result = path_walk::resolve_reference(&mut disk, 2, 2, b"/a/b/value", true, false).unwrap();
+        let leaf = result.node.unwrap();
+        assert_eq!(leaf.inode, 12);
+        assert_eq!(disk.last_inode(leaf.inode).unwrap().size, 37);
+        assert!(disk.last_inode(2).is_none());
+    }
+    assert_eq!(runtime.inode_reads, 3);
+    runtime.metadata.get_mut(&12).unwrap().size = 93;
+    let mut disk = namespace_disk::Disk::new(&mut runtime, known);
+    assert!(disk.last_inode(12).is_none());
+    let result = path_walk::resolve_reference(&mut disk, 2, 2, b"/absolute", true, false).unwrap();
+    let leaf = result.node.unwrap();
+    assert_eq!(disk.last_inode(leaf.inode).unwrap().size, 93);
+    assert!(disk.last_inode(15).is_none());
 }
 
 fn namespace_tree(warm: bool) -> Ext2Runtime {

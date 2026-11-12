@@ -36,8 +36,12 @@ mod state {
     use super::*;
     pub struct Runtime;
     impl Runtime {
-        pub fn add_mapping(&mut self, _: Word, _: Word, _: Word, _: Word) -> bool {
-            true
+        pub fn add_mapping(&mut self, _: Word, base: Word, bytes: Word, rights: Word) -> bool {
+            BACKEND.with_borrow_mut(|b| {
+                if b.fail_track { return false; }
+                b.tracked.push((base, bytes, rights));
+                true
+            })
         }
     }
 }
@@ -51,6 +55,10 @@ struct Backend {
     writes: usize,
     zeroed: usize,
     fail_at: Option<usize>,
+    tracked: Vec<(Word, Word, Word)>,
+    protections: Vec<(Word, Word, Word)>,
+    fail_track: bool,
+    fail_protect: bool,
 }
 thread_local! {
     static BACKEND: RefCell<Backend> = RefCell::new(Backend::default());
@@ -123,8 +131,11 @@ pub fn request_process_memory_write(
         Ok(())
     })
 }
-pub fn request_process_mapping_protect(_: Word, _: Word, _: Word, _: Word) -> Result<(), ()> {
-    Ok(())
+pub fn request_process_mapping_protect(_: Word, base: Word, bytes: Word, rights: Word) -> Result<(), ()> {
+    BACKEND.with_borrow_mut(|b| {
+        b.protections.push((base, bytes, rights));
+        if b.fail_protect { Err(()) } else { Ok(()) }
+    })
 }
 
 #[path = "../../nanami/servers/apps/alter/shared/src/common/dynamic.rs"]
@@ -140,6 +151,38 @@ mod tests {
     };
     const BASE: Word = 0x6000_0000;
 
+    #[test]
+    fn acknowledged_main_permissions_remove_four_rpcs_with_identical_vma_publication() {
+        let mut segments = [segment(0, PAGE, PAGE), segment(2 * PAGE, PAGE, PAGE),
+            segment(4 * PAGE, PAGE, PAGE), segment(6 * PAGE, PAGE, 2 * PAGE)];
+        for (seg, flags) in segments.iter_mut().zip([4, 5, 4, 6]) { seg.flags = flags; }
+        let (_storage, interpreter, main) = fixture_with_metadata(&segments);
+        let mut snapshots = Vec::new();
+        for installed in [false, true] {
+            BACKEND.with_borrow_mut(|b| *b = Backend::default());
+            assert!(track(&mut state::Runtime, 1, &main, Some(&interpreter), installed));
+            snapshots.push(BACKEND.with_borrow(|b| (b.tracked.clone(), b.protections.clone())));
+        }
+        assert_eq!(snapshots[0].0, snapshots[1].0);
+        assert_eq!(snapshots[0].1.len(), 4);
+        assert!(snapshots[1].1.is_empty());
+        assert_eq!(snapshots[1].0.last(), Some(&(BASE, 8 * PAGE, 7)));
+        println!("INITIAL-ELF-RIGHTS main_loads=4 protect_rpcs_before=4 protect_rpcs_after=0 vmas_equal=true interpreter_unchanged=true");
+    }
+
+    #[test]
+    fn initial_permission_ack_keeps_metadata_failures_and_legacy_protect_errors_authoritative() {
+        let (_storage, _interpreter, main) = fixture_with_metadata(&[segment(0, PAGE, PAGE)]);
+        for installed in [false, true] {
+            BACKEND.with_borrow_mut(|b| { *b = Backend::default(); b.fail_track = true; });
+            assert!(!track(&mut state::Runtime, 1, &main, None, installed));
+            BACKEND.with_borrow(|b| assert!(b.protections.is_empty()));
+        }
+        BACKEND.with_borrow_mut(|b| { *b = Backend::default(); b.fail_protect = true; });
+        assert!(!track(&mut state::Runtime, 1, &main, None, false));
+        BACKEND.with_borrow(|b| assert_eq!(b.protections.len(), 1));
+    }
+
     fn segment(start: Word, file: Word, memory: Word) -> LoadSegment {
         LoadSegment {
             offset: start,
@@ -151,6 +194,11 @@ mod tests {
     }
 
     fn fixture(segments: &[LoadSegment]) -> (Vec<u8>, Interpreter) {
+        let (data, interpreter, _) = fixture_with_metadata(segments);
+        (data, interpreter)
+    }
+
+    fn fixture_with_metadata(segments: &[LoadSegment]) -> (Vec<u8>, Interpreter, ElfMetadata) {
         let empty = segment(0, 0, 0);
         let mut loads = [empty; crate::elf::MAX_LOAD_SEGMENTS];
         loads[..segments.len()].copy_from_slice(segments);
@@ -209,7 +257,7 @@ mod tests {
         let interpreter = prepare_in_root(&mut state::Runtime, &executable, b"")
             .unwrap()
             .unwrap();
-        (data, interpreter)
+        (data, interpreter, metadata)
     }
 
     fn compare_legacy_contents(segments: &[LoadSegment]) {

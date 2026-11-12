@@ -13,5 +13,7 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+lto = "fat"
+codegen-units = 1
 
 [workspace]

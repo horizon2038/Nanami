@@ -296,7 +296,8 @@ fn handle_request(request: ServiceRequest, display: &mut DisplayState) -> (Word,
     match request.code {
         nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_CAPABILITIES => (
             nanami_runtime::OS_RESPONSE_OK,
-            nanami_client::gfx::DISPLAY_CAP_GPU_INTERFACE,
+            nanami_client::gfx::DISPLAY_CAP_GPU_INTERFACE
+                | nanami_client::gfx::DISPLAY_CAP_GPU_PRESENT_BATCH,
             0,
         ),
         nanami_client::gfx::DISPLAY_SERVICE_REQUEST_GET_SCREEN_INFO => {

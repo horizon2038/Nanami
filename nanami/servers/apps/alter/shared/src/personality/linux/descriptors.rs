@@ -176,12 +176,9 @@ pub(super) fn sys_lseek(
     if file.kind != LinuxFileKind::Posix {
         return Err(EBADF);
     }
-    map_word(posix::posix_seek(
-        runtime.posix_port,
-        file.posix_fd,
-        offset,
-        whence,
-    ))
+    runtime.with_cursor_file_reader(file, pid, "seek", |runtime| {
+        map_word(runtime.seek_posix(file.posix_fd, offset, whence))
+    })
 }
 
 pub(super) fn sys_fcntl(

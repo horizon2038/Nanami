@@ -10,7 +10,7 @@ pub(super) fn initialize(
     offset: Word,
     bytes: Word,
     permissions: Option<Word>,
-) -> Result<(), i32> {
+) -> Result<bool, i32> {
     // Full pages go directly from the POSIX read window to new backing.
     // Only a short read's partial page needs bounded local buffering.
     // Only [..buffered] is initialized or published. A full-page publish
@@ -22,7 +22,7 @@ pub(super) fn initialize(
     let mut initialized = 0;
     let mut copied = 0;
     while copied < bytes {
-        let chunk = (bytes - copied).min(runtime.posix_read_buffer_size());
+        let chunk = (bytes - copied).min(runtime.posix_image_read_buffer_size());
         if chunk == 0 {
             return Err(EIO);
         }
@@ -41,7 +41,11 @@ pub(super) fn initialize(
         if buffered == 0 && read == bytes - copied
             && read <= mapped.saturating_sub(initialized)
         {
+            if copied == 0 && super::file_snapshot::map_uncached_readonly(
+                runtime, pid, base, mapped, source, read, offset, permissions,
+            )? { return Ok(true); }
             publish(
+                runtime,
                 pid,
                 base + initialized,
                 mapped - initialized,
@@ -49,8 +53,8 @@ pub(super) fn initialize(
                 read,
                 permissions,
             )
-            .map_err(map_request_error)?;
-            return Ok(());
+            ?;
+            return Ok(false);
         }
         let mut consumed = 0;
         if buffered != 0 {
@@ -66,6 +70,7 @@ pub(super) fn initialize(
             consumed += chunk as Word;
             if buffered == tail.len() {
                 publish(
+                    runtime,
                     pid,
                     base + initialized,
                     LINUX_PAGE_SIZE,
@@ -73,7 +78,7 @@ pub(super) fn initialize(
                     LINUX_PAGE_SIZE,
                     permissions,
                 )
-                .map_err(map_request_error)?;
+                ?;
                 initialized += LINUX_PAGE_SIZE;
                 buffered = 0;
             }
@@ -81,6 +86,7 @@ pub(super) fn initialize(
         let full = (read - consumed) & !(LINUX_PAGE_SIZE - 1);
         if full != 0 {
             publish(
+                runtime,
                 pid,
                 base + initialized,
                 full,
@@ -88,7 +94,7 @@ pub(super) fn initialize(
                 full,
                 permissions,
             )
-            .map_err(map_request_error)?;
+            ?;
             initialized += full;
             consumed += full;
         }
@@ -110,6 +116,7 @@ pub(super) fn initialize(
         // initialize its partial page and every remaining zero page together.
         let remaining = mapped.saturating_sub(initialized).max(LINUX_PAGE_SIZE);
         publish(
+            runtime,
             pid,
             base + initialized,
             remaining,
@@ -117,11 +124,12 @@ pub(super) fn initialize(
             buffered as Word,
             permissions,
         )
-        .map_err(map_request_error)?;
+        ?;
         initialized += remaining;
     }
     if initialized < mapped {
         publish(
+            runtime,
             pid,
             base + initialized,
             mapped - initialized,
@@ -129,20 +137,24 @@ pub(super) fn initialize(
             0,
             permissions,
         )
-        .map_err(map_request_error)?;
+        ?;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn publish(
+    runtime: &Runtime,
     pid: Word, base: Word, mapped: Word, source: Word, bytes: Word,
     permissions: Option<Word>,
-) -> Result<(), nanami_runtime::RequestError> {
+) -> Result<(), i32> {
+    super::private_memory::with_mapping_mutation(runtime, pid, base, mapped, true, || {
     if let Some(permissions) = permissions {
         nanami_runtime::request_process_map_initialized_protected_at(
             pid, base, mapped, source, bytes, permissions,
-        )
+        ).map_err(map_request_error)
     } else {
         nanami_runtime::request_process_map_initialized_at(pid, base, mapped, source, bytes)
+            .map_err(map_request_error)
     }
+    })
 }

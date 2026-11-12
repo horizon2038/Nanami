@@ -287,11 +287,9 @@ pub(super) fn sys_fstat(
     if !file.has_posix_backend() {
         return Err(EBADF);
     }
-    let stat = posix::posix_fstat_flags(
-        runtime.posix_port,
-        file.posix_fd,
-        posix::POSIX_STAT_INCLUDE_MODE,
-    )
+    let stat = runtime.with_file_reader(file, |runtime| runtime.file_reader.fstat(
+        runtime.posix_port, file.posix_fd, posix::POSIX_STAT_INCLUDE_MODE,
+    ))
     .map_err(map_request_error)?;
     write_linux_stat(runtime, pid, stat_ptr, stat)?;
     Ok(0)

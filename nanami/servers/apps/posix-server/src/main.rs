@@ -41,7 +41,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::ipc::init_ipc_tls()
         .map_err(|e| log_error("[posix-server] ipc tls init failed: ", e))?;
 
-    let vfs_port = connect_vfs_service();
+    let (vfs_port, vfs_provider_pid) = connect_vfs_service();
     let (vfs_shm, vfs_shm_size) =
         nanami_client::vfs::vfs_attach_shared_memory(vfs_port, VFS_SHM_BYTES)
             .map_err(|e| log_error("[posix-server] vfs shm attach failed: ", e))?;
@@ -52,6 +52,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 
     let mut runtime = Runtime {
         vfs_port,
+        vfs_provider_pid,
         vfs_shm,
         vfs_shm_size,
         sessions: [Session::EMPTY; MAX_SESSIONS],
@@ -104,11 +105,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     }
 }
 
-fn connect_vfs_service() -> Word {
+fn connect_vfs_service() -> (Word, Word) {
     let mut tries = 0usize;
     loop {
-        match nanami_client::registry::connect_vfs_service(SLOT_VFS_SERVICE) {
-            Ok(()) => return nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE),
+        match nanami_client::registry::connect_service_with_pid(
+            nanami_client::registry::VFS_SERVICE, SLOT_VFS_SERVICE,
+        ) {
+            Ok(pid) => return (nanami_runtime::ipc::process_slot_descriptor(SLOT_VFS_SERVICE), pid),
             Err(e) => {
                 if tries == 0 {
                     log_request_error("[posix-server] waiting vfs-service: ", e);
@@ -148,7 +151,7 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_ENV_COUNT => handle_env_count(runtime, request),
         POSIX_REQUEST_ENV_AT => handle_env_at(runtime, request),
         POSIX_REQUEST_READ | POSIX_REQUEST_PREAD => handle_read(runtime, request),
-        POSIX_REQUEST_READ_DIRECT | POSIX_REQUEST_PREAD_DIRECT => {
+        POSIX_REQUEST_READ_DIRECT | POSIX_REQUEST_PREAD_DIRECT | POSIX_REQUEST_PREAD_VERSIONED => {
             handle_read_direct(runtime, request)
         }
         POSIX_REQUEST_WRITE | POSIX_REQUEST_PWRITE => handle_write(runtime, request),
@@ -158,7 +161,8 @@ fn handle_request(runtime: &mut Runtime, request: ServiceRequest) -> ReplyAction
         POSIX_REQUEST_STAT => handle_stat(runtime, request),
         POSIX_REQUEST_MKDIR => handle_mkdir(runtime, request),
         POSIX_REQUEST_CREATE_SOCKET_NODE => handle_create_socket_node(runtime, request),
-        POSIX_REQUEST_PATH | POSIX_REQUEST_OPEN_ROOTED => namespace::handle(runtime, request),
+        POSIX_REQUEST_PATH | POSIX_REQUEST_OPEN_ROOTED | POSIX_REQUEST_OPEN_ROOTED_GRANTED
+            | POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED => namespace::handle(runtime, request),
         POSIX_REQUEST_FCHMOD => namespace::handle_fchmod(runtime, request),
         POSIX_REQUEST_UNLINK => handle_unlink(runtime, request),
         POSIX_REQUEST_LINK => handle_link(runtime, request),

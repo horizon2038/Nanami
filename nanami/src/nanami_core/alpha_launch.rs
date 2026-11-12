@@ -16,11 +16,16 @@ use nun::{
 };
 
 const PAGE: usize = 4096;
+const LARGE_BITS: usize = 21;
+const LARGE_PAGE: usize = 1 << LARGE_BITS;
 const ROOT_RADIX: usize = 12;
 const FRAME_RADIX: usize = 14;
 const BACKING_RADIX: usize = 14;
 const TABLE_RADIX: usize = 10;
 pub const TEMP: usize = 0x7400_0000;
+// A separate PD entry: a previously installed 4K leaf table at TEMP prevents
+// mapping a large Frame there, even after all of its small leaves are unmapped.
+pub const LARGE_TEMP: usize = TEMP + LARGE_PAGE;
 const ARCHIVE: usize = 0x2000_0000;
 const CONFIGURATION: usize = 0x2400_0000;
 const MAX_IMAGE: usize = 64 * 1024 * 1024;
@@ -45,15 +50,15 @@ pub struct LaunchSlots {
 /// A mapped page is valid only until the corresponding UNMAP. The native
 /// writer accesses that mapping; host tests model it without raw host pointers.
 pub trait PageWriter {
-    fn zero(&mut self, address: usize);
+    fn zero(&mut self, address: usize, bytes: usize);
     fn copy(&mut self, address: usize, bytes: &[u8]);
 }
 
 pub struct NativeWriter;
 impl PageWriter for NativeWriter {
-    fn zero(&mut self, address: usize) {
+    fn zero(&mut self, address: usize, bytes: usize) {
         unsafe {
-            core::ptr::write_bytes(address as *mut u8, 0, PAGE);
+            core::ptr::write_bytes(address as *mut u8, 0, bytes);
         }
     }
     fn copy(&mut self, address: usize, bytes: &[u8]) {
@@ -76,6 +81,8 @@ struct Builder<'a> {
     next_table: usize,
     frames: Word,
     next_frame: usize,
+    large_enabled: bool,
+    large_frames: usize,
 }
 
 fn invalid<T>() -> Result<T, CapabilityError> {
@@ -90,12 +97,9 @@ fn align(value: usize, bytes: usize) -> Result<usize, CapabilityError> {
 
 /// Reserve a whole Generic unit before converting its contents. This makes the
 /// externally recorded extent independent of padding inside a kernel object.
-fn reserve(
-    source: &mut AlphaEnvironment,
-    radix: usize,
-    node: Word,
-    index: usize,
-) -> Result<Word, CapabilityError> {
+fn select_resource(source: &AlphaEnvironment, radix: usize)
+    -> Result<Option<(usize, usize)>, CapabilityError>
+{
     let bytes = 1usize
         .checked_shl(radix as u32)
         .ok_or(CapabilityError::InvalidArgument)?;
@@ -137,7 +141,16 @@ fn reserve(
             break;
         }
     }
-    let (i, limit, _) = selected.ok_or(CapabilityError::InvalidArgument)?;
+    Ok(selected.map(|(i, limit, _)| (i, limit)))
+}
+
+fn reserve(
+    source: &mut AlphaEnvironment,
+    radix: usize,
+    node: Word,
+    index: usize,
+) -> Result<Word, CapabilityError> {
+    let (i, limit) = select_resource(source, radix)?.ok_or(CapabilityError::InvalidArgument)?;
     arch::generic::convert(
         source.resources[i].capability,
         CapabilityType::Generic,
@@ -185,9 +198,10 @@ impl Builder<'_> {
         &mut self,
         address_space: Word,
         address: usize,
+        leaf_bits: usize,
     ) -> Result<(), CapabilityError> {
         loop {
-            let depth = arch::address_space::get_unset_depth(address_space, address, 12)?;
+            let depth = arch::address_space::get_unset_depth(address_space, address, leaf_bits)?;
             if depth == 0 {
                 return Ok(());
             }
@@ -207,35 +221,82 @@ impl Builder<'_> {
             arch::address_space::map(address_space, table, address, Attribute::ALL)?;
         }
     }
-    fn mapped_page(
+    fn initialize_leaf(
         &mut self,
         address_space: Word,
         address: usize,
-        fill: impl FnOnce(&mut dyn PageWriter),
+        frame: Word,
+        bits: usize,
+        fill: impl FnOnce(usize, usize, &mut dyn PageWriter),
         writer: &mut impl PageWriter,
-    ) -> Result<Word, CapabilityError> {
-        if self.next_frame >= 1 << FRAME_RADIX {
+    ) -> Result<(), CapabilityError> {
+        let temporary = if bits == LARGE_BITS { LARGE_TEMP } else { TEMP };
+        let bytes = 1 << bits;
+        let own_as = self.source.capabilities.address_space;
+        self.ensure_tables(own_as, temporary, bits)?;
+        arch::address_space::map(own_as, frame, temporary, Attribute::READ | Attribute::WRITE)?;
+        writer.zero(temporary, bytes);
+        fill(temporary, bytes, writer);
+        arch::address_space::unmap(own_as, frame, temporary)?;
+        self.ensure_tables(address_space, address, bits)?;
+        arch::address_space::map(address_space, frame, address, Attribute::ALL)?;
+        Ok(())
+    }
+
+    /// Image/input storage is permanent for the target Alpha's lifetime. Keep
+    /// logical 4K slot numbering (holes inside large leaves), so header and IPC
+    /// aliases retain their existing descriptor indices and remain small.
+    fn mapped_block(
+        &mut self, address_space: Word, address: usize, allow_large: bool,
+        mut fill: impl FnMut(usize, usize, usize, &mut dyn PageWriter),
+        writer: &mut impl PageWriter,
+    ) -> Result<(Word, usize), CapabilityError> {
+        let large = allow_large && self.large_enabled && address & (LARGE_PAGE - 1) == 0
+            && select_resource(self.source, LARGE_BITS)?.is_some();
+        let pages = if large { LARGE_PAGE / PAGE } else { 1 };
+        let first = self.next_frame;
+        if first.checked_add(pages).is_none_or(|end| end > 1 << FRAME_RADIX) {
             return invalid();
         }
-        let index = self.next_frame;
-        self.next_frame += 1;
-        let frame = self.object(
-            CapabilityType::Frame,
-            KernelObjectKind::Frame,
-            12,
-            self.frames,
-            FRAME_RADIX,
-            index,
-        )?;
-        let own_as = self.source.capabilities.address_space;
-        self.ensure_tables(own_as, TEMP)?;
-        arch::address_space::map(own_as, frame, TEMP, Attribute::READ | Attribute::WRITE)?;
-        writer.zero(TEMP);
-        fill(writer);
-        arch::address_space::unmap(own_as, frame, TEMP)?;
-        self.ensure_tables(address_space, address)?;
-        arch::address_space::map(address_space, frame, address, Attribute::ALL)?;
-        Ok(frame)
+        if large {
+            if self.next_backing >= 1 << BACKING_RADIX { return invalid(); }
+            let unit_index = self.next_backing;
+            let unit = reserve(self.source, LARGE_BITS, self.backing, unit_index)?;
+            self.next_backing += 1;
+            match arch::generic::convert(unit, CapabilityType::Frame, LARGE_BITS, 1, self.frames, first) {
+                Ok(()) => {
+                    self.next_frame += pages;
+                    let frame = child(self.frames, FRAME_RADIX, first);
+                    self.initialize_leaf(address_space, address, frame, LARGE_BITS,
+                        |temporary, bytes, writer| fill(address, temporary, bytes, writer), writer)?;
+                    self.large_frames += 1;
+                    return Ok((frame, LARGE_PAGE));
+                }
+                Err(CapabilityError::InvalidArgument | CapabilityError::InvalidDepth | CapabilityError::IllegalOperation) => {
+                    // A conversion error can have installed a capability. No
+                    // leaf has been published; revoke its isolated owner and
+                    // require the ACK before reusing its RAM/capability slots.
+                    arch::node::revoke(self.backing, unit_index)?;
+                    self.large_enabled = false;
+                }
+                Err(error) => return Err(error),
+            }
+            for page in 0..pages {
+                let index = self.next_frame;
+                self.next_frame += 1;
+                arch::generic::convert(unit, CapabilityType::Frame, 12, 1, self.frames, index)?;
+                self.initialize_leaf(address_space, address + page * PAGE,
+                    child(self.frames, FRAME_RADIX, index), 12,
+                    |temporary, bytes, writer| fill(address + page * PAGE, temporary, bytes, writer), writer)?;
+            }
+        } else {
+            self.next_frame += 1;
+            let frame = self.object(CapabilityType::Frame, KernelObjectKind::Frame, 12,
+                self.frames, FRAME_RADIX, first)?;
+            self.initialize_leaf(address_space, address, frame, 12,
+                |temporary, bytes, writer| fill(address, temporary, bytes, writer), writer)?;
+        }
+        Ok((child(self.frames, FRAME_RADIX, first), pages * PAGE))
     }
     fn input(
         &mut self,
@@ -247,13 +308,19 @@ impl Builder<'_> {
         if data.is_empty() {
             return Ok(MappedInput::default());
         }
-        for (page, bytes) in data.chunks(PAGE).enumerate() {
-            self.mapped_page(
+        let mut offset = 0;
+        while offset < data.len() {
+            let (_, bytes) = self.mapped_block(
                 address_space,
-                address + page * PAGE,
-                |writer| writer.copy(TEMP, bytes),
+                address + offset,
+                data.len() - offset >= LARGE_PAGE,
+                |va, temporary, bytes, writer| {
+                    let start = va - address;
+                    writer.copy(temporary, &data[start..(start + bytes).min(data.len())]);
+                },
                 writer,
             )?;
+            offset += bytes;
         }
         Ok(MappedInput {
             address,
@@ -380,6 +447,8 @@ pub fn prepare(
         next_table: 0,
         frames: 0,
         next_frame: 0,
+        large_enabled: cfg!(target_arch = "x86_64"),
+        large_frames: 0,
     };
     let pcb = builder.object(
         CapabilityType::ProcessControlBlock,
@@ -434,25 +503,31 @@ pub fn prepare(
         0
     };
     let mut ipc_frame = 0;
-    for va in (begin..end).step_by(PAGE) {
-        let frame = builder.mapped_page(
+    let mut va = begin;
+    while va < end {
+        let large_end = va.checked_add(LARGE_PAGE).unwrap_or(usize::MAX);
+        let large = large_end <= end
+            && !(va < environment_end && environment_va < large_end)
+            && !(va <= ipc_va && ipc_va < large_end);
+        let (frame, bytes) = builder.mapped_block(
             address_space,
             va,
-            |writer| {
+            large,
+            |va, temporary, bytes, writer| {
                 for segment in &image.segments[..image.segment_count] {
                     let start = va.max(segment.virtual_address);
-                    let limit = (va + PAGE).min(segment.virtual_address + segment.file_size);
+                    let limit = (va + bytes).min(segment.virtual_address + segment.file_size);
                     if start < limit {
                         let offset = segment.offset + start - segment.virtual_address;
                         writer.copy(
-                            TEMP + start - va,
+                            temporary + start - va,
                             &input.image[offset..offset + limit - start],
                         );
                     }
                 }
                 if va == ipc_va {
                     let offset = nun::TLS_BASE_OFFSET as usize * nun::BYTE_BITS;
-                    writer.copy(TEMP + offset, &ipc_va.to_ne_bytes());
+                    writer.copy(temporary + offset, &ipc_va.to_ne_bytes());
                 }
             },
             writer,
@@ -460,9 +535,12 @@ pub fn prepare(
         if va == ipc_va {
             ipc_frame = frame;
         }
+        va += bytes;
     }
     arch::node::copy(root, 6, ipc_frame)?;
+    let image_large = builder.large_frames;
     let archive = builder.input(address_space, ARCHIVE, input.archive, writer)?;
+    let archive_large = builder.large_frames - image_large;
     let configuration = builder.input(address_space, CONFIGURATION, input.configuration, writer)?;
     let mut target = *builder.source;
     target.capabilities = SelfCapabilities {
@@ -580,6 +658,10 @@ pub fn prepare(
         0,
     )?;
     arch::node::copy(own_root, slots.control, pcb)?;
+    #[cfg(not(test))]
+    nun::println!("[alpha.launch] image-2m={} archive-2m={}", image_large, archive_large);
+    #[cfg(test)]
+    let _ = (image_large, archive_large);
     Ok(PreparedAlpha {
         control: slot(ROOT_RADIX, slots.control),
         environment: target,

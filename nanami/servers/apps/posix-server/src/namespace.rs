@@ -50,7 +50,9 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
     let original = unsafe {
         core::ptr::read_unaligned((session.shm_local + message.arg0) as *const PathRequest)
     };
-    if (message.code == POSIX_REQUEST_OPEN_ROOTED) != (original.operation == VFS_PATH_OPEN_READONLY) {
+    let cursor_open = message.code == POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED;
+    let granted = cursor_open || message.code == POSIX_REQUEST_OPEN_ROOTED_GRANTED;
+    if (message.code == POSIX_REQUEST_OPEN_ROOTED || granted) != (original.operation == VFS_PATH_OPEN_READONLY) {
         // The legacy PATH entry must not silently acquire/return raw VFS handles.
         return (VFS_PATH_RESPONSE_ERROR, VFS_PATH_ERROR_UNSUPPORTED, 0);
     }
@@ -145,8 +147,30 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
     unsafe {
         core::ptr::write_unaligned(runtime.vfs_shm as *mut PathRequest, request);
     }
-    match vfs_path_request(runtime.vfs_port, 0) {
-        Ok((mut detail0, detail1)) => {
+    let result = if granted && !resolve_only {
+        let mut delegated = request;
+        delegated.flags |= runtime.sessions[index].direct_vfs_delegate << VFS_DELEGATE_ID_SHIFT;
+        unsafe { core::ptr::write_unaligned(runtime.vfs_shm as *mut PathRequest, delegated); }
+        let result = if cursor_open {
+            match vfs_rooted_open_cursor_granted_request(runtime.vfs_port, 0) {
+                Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)) =>
+                    vfs_rooted_open_granted_request(runtime.vfs_port, 0),
+                result => result,
+            }
+        } else { vfs_rooted_open_granted_request(runtime.vfs_port, 0) };
+        match result {
+            Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)) => {
+                unsafe { core::ptr::write_unaligned(runtime.vfs_shm as *mut PathRequest, request); }
+                vfs_path_request(runtime.vfs_port, 0)
+            }
+            other => other,
+        }
+    } else { vfs_path_request(runtime.vfs_port, 0) };
+    match result {
+        Ok((mut detail0, wire_type)) => {
+            let cursor = cursor_open && wire_type & VFS_OPEN_CURSOR_TYPE_FLAG != 0;
+            let detail1 = if granted { wire_type & VFS_OPEN_GRANT_TYPE_MASK } else { wire_type };
+            let detail1 = if cursor_open { detail1 & !VFS_OPEN_CURSOR_TYPE_FLAG } else { detail1 };
             if resolve_only {
                 let Some(total) = detail0.checked_add(open_prefix) else { return invalid; };
                 detail0 = total;
@@ -161,6 +185,8 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
                     || unsafe { *((runtime.vfs_shm + OUTPUT_OFFSET + open_prefix) as *const u8) } != b'/'
                     || (opened.descriptor != VFS_PATH_OPEN_NONE
                         && !matches!(detail1, VFS_FILE_TYPE_REGULAR | VFS_FILE_TYPE_DIRECTORY))
+                    || (cursor && (opened.descriptor == VFS_PATH_OPEN_NONE
+                        || detail1 != VFS_FILE_TYPE_REGULAR || wire_type >> VFS_OPEN_GRANT_TYPE_BITS == 0))
                 {
                     if opened.descriptor != VFS_PATH_OPEN_NONE {
                         let _ = vfs_close(runtime.vfs_port, opened.descriptor);
@@ -182,6 +208,8 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
                         // The allocator closes the VFS handle on either failure.
                         return (status, 0, 0);
                     }
+                    let open_index = runtime.sessions[index].fds[fd].open_file;
+                    runtime.open_files[open_index].vfs_cursor = cursor;
                     fd
                 };
                 unsafe {
@@ -207,7 +235,7 @@ pub(crate) fn handle(runtime: &mut Runtime, message: ServiceRequest) -> (Word, W
                     );
                 }
             }
-            (nanami_runtime::OS_RESPONSE_OK, detail0, detail1)
+            (nanami_runtime::OS_RESPONSE_OK, detail0, if granted { wire_type } else { detail1 })
         }
         Err(PathError::Filesystem(error)) => (VFS_PATH_RESPONSE_ERROR, error, 0),
         Err(PathError::Transport(error)) => (map_request_error_to_status(error), 0, 0),

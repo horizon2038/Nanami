@@ -23,6 +23,9 @@ impl Backend for Adapter<'_> {
         caps
     }
     fn present(&mut self, source: Buffer, rect: Rect) -> Result<(), RequestError> {
+        self.present_batch(source, core::slice::from_ref(&rect))
+    }
+    fn present_batch(&mut self, source: Buffer, rects: &[Rect]) -> Result<(), RequestError> {
         let display = &mut *self.0;
         if source.layout.width != display.screen.width
             || source.layout.height != display.screen.height
@@ -42,8 +45,11 @@ impl Backend for Adapter<'_> {
             peer_vaddr: source.allocation.peer,
             bytes: source.layout.bytes,
         };
-        let result =
-            present_shared_framebuffer(display, source.owner, rect.position(), rect.size());
+        let result = presentation::present_shared_framebuffers(
+            display,
+            source.owner,
+            rects.iter().map(|rect| (rect.position(), rect.size())),
+        );
         display.shared = SharedFramebuffer {
             owner_pid: source.owner,
             ..previous

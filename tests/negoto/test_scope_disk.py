@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import struct
@@ -89,9 +90,20 @@ class ScopeDiskTests(unittest.TestCase):
                 self.assertEqual(data, packet(mode))
                 self.assertEqual(result[f"scope-packet-{mode}.bin"]["sha256"], hashlib.sha256(data).hexdigest())
             self.assertEqual(hashlib.sha256(disk.read_bytes()).hexdigest(), before)
+            self.assertEqual(list(output.glob("*.img")), [])
+            receipt = output / "scope-disk-extraction.json"
+            before_receipt = receipt.read_bytes()
+            exported = Path(json.loads(before_receipt)[0]["argv"][-1])
+            self.assertFalse(exported.parent.exists())
             with self.assertRaises(ValueError):
                 extract(overlay, output, True)
+            self.assertEqual(receipt.read_bytes(), before_receipt)
             off_output = directory / "incorrect-off"
             off_output.mkdir()
             with self.assertRaises(ValueError):
                 extract(overlay, off_output, False)
+            self.assertEqual(list(off_output.glob("*.img")), [])
+            self.assertTrue((off_output / "scope-disk-extraction.json").is_file())
+            failed_commands = json.loads((off_output / "scope-disk-extraction.json").read_text())
+            self.assertFalse(Path(failed_commands[0]["argv"][-1]).parent.exists())
+            self.assertTrue(overlay.is_file())

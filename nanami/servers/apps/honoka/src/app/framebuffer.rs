@@ -103,6 +103,7 @@ pub struct Framebuffer {
     bytes: Word,
     screen: ScreenInfo,
     merged_present: bool,
+    batch_present: bool,
     gpu: Option<gpu::Surface>,
     gpu_failed: Cell<bool>,
 }
@@ -128,6 +129,7 @@ impl Framebuffer {
             bytes,
             screen,
             merged_present: false,
+            batch_present: false,
             gpu: None,
             gpu_failed: Cell::new(false),
         })
@@ -161,6 +163,7 @@ impl Framebuffer {
             bytes: layout.bytes,
             screen,
             merged_present: false,
+            batch_present: false,
             gpu: Some(surface),
             gpu_failed: Cell::new(false),
         }))
@@ -231,13 +234,22 @@ impl Framebuffer {
         );
     }
 
-    pub fn with_merged_present(mut self, enabled: bool) -> Self {
-        self.merged_present = enabled;
+    pub fn with_present_modes(mut self, merged: bool, batch: bool) -> Self {
+        self.merged_present = merged;
+        self.batch_present = batch && self.gpu.is_some();
         self
     }
 
     pub fn merged_present(&self) -> bool {
         self.merged_present
+    }
+
+    pub fn present_batch_size(&self) -> usize {
+        if self.batch_present {
+            gpu::MAX_PRESENT_BATCH
+        } else {
+            1
+        }
     }
 
     pub fn screen(&self) -> ScreenInfo {
@@ -252,12 +264,9 @@ impl Framebuffer {
         self.bytes
     }
 
-    pub fn present(&self, rect: Rect) -> Result<(), nanami_runtime::RequestError> {
-        if self.gpu_failed.get() {
-            return Err(nanami_runtime::RequestError::Transport);
-        }
+    fn clip_present_rect(&self, rect: Rect) -> Option<gpu::Rect> {
         if rect.is_empty() {
-            return Ok(());
+            return None;
         }
         let x = clamp_i32(rect.x, 0, self.screen.width as i32) as Word;
         let y = clamp_i32(rect.y, 0, self.screen.height as i32) as Word;
@@ -272,21 +281,44 @@ impl Framebuffer {
             self.screen.height as i32,
         ) as Word;
         if x1 <= x || y1 <= y {
-            return Ok(());
+            return None;
         }
+        Some(gpu::Rect {
+            x,
+            y,
+            width: x1 - x,
+            height: y1 - y,
+        })
+    }
+
+    pub fn present(&self, rects: &[Rect]) -> Result<(), nanami_runtime::RequestError> {
+        use nanami_runtime::RequestError;
+        if self.gpu_failed.get() {
+            return Err(RequestError::Transport);
+        }
+        if rects.len() > self.present_batch_size() {
+            return Err(RequestError::InvalidArgument);
+        }
+        let mut clipped = rects.iter().filter_map(|&rect| self.clip_present_rect(rect));
+        let Some(first) = clipped.next() else {
+            return Ok(());
+        };
         fence(Ordering::Release);
         if let Some(surface) = &self.gpu {
-            return self.gpu_result(gpu::present(
-                surface,
-                gpu::Rect {
-                    x,
-                    y,
-                    width: x1 - x,
-                    height: y1 - y,
-                },
-            ));
+            let Some(second) = clipped.next() else {
+                return self.gpu_result(gpu::present(surface, first));
+            };
+            let rects = [first, second, clipped.next().unwrap_or_default()];
+            let count = 2 + usize::from(rects[2].width != 0);
+            return self.gpu_result(gpu::present_batch(surface, &rects[..count]));
         }
-        nanami_client::gfx::display_service_present(self.display_port, x, y, x1 - x, y1 - y)
+        nanami_client::gfx::display_service_present(
+            self.display_port,
+            first.x,
+            first.y,
+            first.width,
+            first.height,
+        )
     }
 
     pub fn color(&self, r8: u8, g8: u8, b8: u8) -> u32 {
@@ -577,6 +609,36 @@ impl Framebuffer {
 
     pub fn draw_cursor(&self, cx: i32, cy: i32, color: u32, outline: u32, clip: Rect) {
         cursor::draw(self, cx, cy, color, outline, clip);
+    }
+
+    /// Convert one unscaled RGB row into owned RAM. Ineligible formats or
+    /// incomplete rows return false before any store, retaining pixel fallback.
+    pub fn blit_rgb24_row(&self, x: i32, y: i32, source: &[u8]) -> bool {
+        if !self.screen.packed_rgb888() || source.len() % 3 != 0 || x < 0 || y < 0 {
+            return false;
+        }
+        let pixels = source.len() / 3;
+        let Some(end_x) = (x as usize).checked_add(pixels) else { return false; };
+        if end_x > self.screen.width || y as usize >= self.screen.height {
+            return false;
+        }
+        let Some(offset) = (y as usize).checked_mul(self.screen.stride_bytes)
+            .and_then(|row| (x as usize).checked_mul(4).and_then(|x| row.checked_add(x)))
+        else { return false; };
+        let Some(bytes) = pixels.checked_mul(4) else { return false; };
+        if offset.checked_add(bytes).is_none_or(|end| end > self.bytes)
+            || self.vaddr.checked_add(offset).and_then(|base| base.checked_add(bytes)).is_none()
+        { return false; }
+        if self.gpu_failed.get() { return true; }
+        let reverse = self.screen.red_position == 0;
+        let destination = (self.vaddr + offset) as *mut u32;
+        for (index, rgb) in source.chunks_exact(3).enumerate() {
+            let color = (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+            // The complete owned destination row was checked above. The
+            // wallpaper source is a distinct immutable RGB asset.
+            unsafe { destination.add(index).write(if reverse { color.swap_bytes() >> 8 } else { color }); }
+        }
+        true
     }
 
     pub fn put_pixel(&self, x: i32, y: i32, color: u32) {

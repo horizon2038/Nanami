@@ -226,6 +226,7 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
             directory.mkdir(exist_ok=True)
             (directory / "config.json").write_text(json.dumps(configuration(smoke), indent=2) + "\n")
         if graphical:
+            loader_caches = desktop.build_loader_cache(guest)
             font_caches = desktop.build_font_cache(guest)
             directory = overlay / "tinycore-desktop"
             directory.mkdir()
@@ -235,6 +236,7 @@ def assemble(archive, rebuild=False, graphical=False, offline=False, output=None
                     "omitted_device_nodes": skipped,
                     "entry": ["/bin/busybox", "sh", "/init"]}
         if desktop_lock is not None:
+            manifest["loader_caches"] = loader_caches
             manifest["font_caches"] = font_caches
             manifest["desktop"] = desktop_lock
             manifest["profile_symlinks"] = profile_links

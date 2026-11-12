@@ -300,6 +300,11 @@ impl Alpha {
         let initial_stack_pointer = stack_top - 32;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
         let raw_fault_process = elf.ipc_buffer_start.is_none() && resolver_port.is_some();
+        let omit_image_holes = raw_fault_process && !auto_resume && preinstall_image_permissions
+            && elf.initial_permissions_complete(PAGE_SIZE,
+                USER_STACK_BASE..USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE);
+        let has_image_holes = omit_image_holes
+            && (image_base..image_end).step_by(PAGE_SIZE).any(|va| !elf.is_load_page(va, PAGE_SIZE));
         let prepared_pool = memory_pages::prepared_pool_allowed(raw_fault_process, auto_resume, preinstall_image_permissions);
         spawn_stage = "ipc-buffer";
         let (has_ipc_buffer, ipc_buffer_va, ipc_buffer_frame_slot, ipc_buffer_tls_base) =
@@ -363,13 +368,20 @@ impl Alpha {
         } else {
             None
         };
-        let mut image_batch = if prepared_pool && (image_source.is_some() || image_plan.is_some()) {
+        // A dense batch owns every physical page before construction. Sparse
+        // raw images instead allocate only their LOAD pages; retain original
+        // VA-relative Frame slot numbers and stack/heap reservation positions.
+        let mut image_batch = if !has_image_holes && prepared_pool && (image_source.is_some() || image_plan.is_some()) {
             spawn_try!(self.prepare_preinstall_pool_batch(pid, child_root, image_base, image_pages))
         } else { None };
         let image_result = (|| -> Result<(), CapabilityError> {
             let mut image_page = 0usize;
             while image_page < image_pages {
                 let image_va = image_base + image_page * PAGE_SIZE;
+                if has_image_holes && !elf.is_load_page(image_va, PAGE_SIZE) {
+                    image_page += 1;
+                    continue;
+                }
                 let permissions = if raw_fault_process && preinstall_image_permissions {
                     elf.spawn_page_permissions(image_va, PAGE_SIZE)
                 } else { 7 };
@@ -400,6 +412,13 @@ impl Alpha {
             }
         }
         spawn_try!(image_result);
+        #[cfg(not(test))]
+        if has_image_holes && option_env!("NANAMI_ELF_GAP_DIAG") == Some("1") {
+            let omitted = (image_base..image_end).step_by(PAGE_SIZE)
+                .filter(|&va| !elf.is_load_page(va, PAGE_SIZE)).count();
+            crate::force_info!("[elf.gaps] pid={} phase=spawn span-pages={} load-pages={} omitted={}",
+                pid, image_pages, image_pages - omitted, omitted);
+        }
         self.processes.drop_image_lazy_mappings_for_pid(pid);
         let ipc_buffer_frame = if has_ipc_buffer {
             process_frame_descriptor(child_root, ipc_buffer_frame_slot)
@@ -894,7 +913,7 @@ impl Alpha {
     pub(super) fn handle_process_spawn_memory_fault_handler_suspended_request(
         &mut self,
         request: OsRequestEvent,
-    ) -> Result<usize, CapabilityError> {
+    ) -> Result<(usize, usize), CapabilityError> {
         if request.identifier == 0 {
             return Err(CapabilityError::PermissionDenied);
         }
@@ -932,6 +951,11 @@ impl Alpha {
             PROCESS_SLOT_SERVICE_PORT,
         );
         let (image_bytes, image_source) = self.stage_spawn_image(request.identifier, image_vaddr, size_bytes)?;
+        // The streaming plan carries the exact parsed raw ELF used below.
+        // Other images retain the old reply/protection path without reparsing.
+        let final_permissions = image_source.is_some_and(|(_, elf)|
+            elf.initial_permissions_complete(PAGE_SIZE,
+                USER_STACK_BASE..USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE));
         let pid = self.spawn_process_from_elf(
             "rootfs-linux.elf",
             image_bytes,
@@ -967,13 +991,13 @@ impl Alpha {
             "[proc] spawned memory with fault-handler caller={:>3} pid={:>3} pcb_slot={:>3} bytes={:#x} priority={:>2}",
             request.identifier, pid, destination_slot, size_bytes, priority
         );
-        Ok(pid)
+        Ok((pid, if final_permissions { nanami_uapi::os::OS_PROCESS_IMAGE_FINAL_PERMISSIONS } else { 0 }))
     }
 
     pub(super) fn handle_process_exec_memory_request(
         &mut self,
         request: OsRequestEvent,
-    ) -> Result<usize, CapabilityError> {
+    ) -> Result<(usize, usize), CapabilityError> {
         let caller_pid = request.identifier;
         let target_pid = request.arg0;
         let image_vaddr = request.arg1;
@@ -997,9 +1021,9 @@ impl Alpha {
         if target.pcb == 0 || target.root_node == 0 || target.address_space == 0 {
             return Err(CapabilityError::InvalidDescriptor);
         }
-        // Replacing a shared VM must first detach/terminate its other tasks.
-        // Never revoke live aliases or reset the original owner's frame arena.
-        if target.memory_owner != target.pid || self.processes.has_memory_peers(target.pid) {
+        if target.memory_owner != target.pid {
+            self.prepare_shared_exec(target)?;
+        } else if self.processes.has_memory_peers(target.pid) {
             return Err(CapabilityError::IllegalOperation);
         }
 
@@ -1033,10 +1057,13 @@ impl Alpha {
             let image = self.read_process_memory_into_static_buffer(caller_pid, image_vaddr, size_bytes)?;
             (image, parse_elf64(image)?)
         };
+        let final_permissions = target.capabilities_sealed
+            && elf.initial_permissions_complete(PAGE_SIZE,
+                USER_STACK_BASE..USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE);
         self.replace_process_image_from_memory(
             target_pid, target, image_bytes, elf, priority,
             snapshot_source.filter(|_| elf.ipc_buffer_start.is_none()),
-        )
+        ).map(|entry| (entry, if final_permissions { nanami_uapi::os::OS_PROCESS_IMAGE_FINAL_PERMISSIONS } else { 0 }))
     }
 
     pub(super) fn replace_process_image_from_memory(
@@ -1072,6 +1099,9 @@ impl Alpha {
         let image_pages = (image_end - image_base) / PAGE_SIZE;
         let total_frames = image_pages + USER_STACK_PAGES;
         let heap_base = align_up(image_end.max(USER_ANONYMOUS_MAP_BASE), PAGE_SIZE);
+        let omit_image_holes = target.capabilities_sealed
+            && elf.initial_permissions_complete(PAGE_SIZE,
+                USER_STACK_BASE..USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE);
 
         // Request-local admission selected the staging path. Every alias
         // commit below still revalidates the source after replacing the VM.
@@ -1079,9 +1109,15 @@ impl Alpha {
 
         let installation = (|| -> Result<usize, CapabilityError> {
             let begin = exec_profile::stamp();
-            self.drop_process_runtime_mappings(pid, target)?;
+            if target.memory_owner == pid {
+                self.drop_process_runtime_mappings(pid, target)?;
+            }
             let dropped = exec_profile::stamp();
-            self.recreate_process_address_space_for_exec(target)?;
+            if target.memory_owner == pid && !target.capabilities_sealed {
+                self.recreate_process_address_space_for_exec(target)?;
+            } else if target.memory_owner != pid {
+                self.detach_shared_exec(target)?;
+            }
             let space = exec_profile::stamp();
             self.processes.reset_runtime_memory_for_exec(
                 pid,
@@ -1106,6 +1142,10 @@ impl Alpha {
             let mut image_page = 0usize;
             while image_page < image_pages {
                 let image_va = image_base + image_page * PAGE_SIZE;
+                if omit_image_holes && !elf.is_load_page(image_va, PAGE_SIZE) {
+                    image_page += 1;
+                    continue;
+                }
                 if let Some((caller, source)) = snapshot_source {
                     if let Some((offset, permissions)) = elf.snapshot_page(image_va, PAGE_SIZE) {
                         let mut pages = 1usize;
@@ -1137,6 +1177,15 @@ impl Alpha {
                     None,
                 )?;
                 image_page += 1;
+            }
+            #[cfg(not(test))]
+            if omit_image_holes && option_env!("NANAMI_ELF_GAP_DIAG") == Some("1") {
+                let omitted = (image_base..image_end).step_by(PAGE_SIZE)
+                    .filter(|&va| !elf.is_load_page(va, PAGE_SIZE)).count();
+                if omitted != 0 {
+                    crate::force_info!("[elf.gaps] pid={} phase=exec span-pages={} load-pages={} omitted={}",
+                        pid, image_pages, image_pages - omitted, omitted);
+                }
             }
             let image_done = exec_profile::stamp();
             let mut stack_page = stack_population::exec_first_page(
@@ -1211,41 +1260,6 @@ impl Alpha {
         }
 
         self.initialize_exec_image_page_content(base_page, kind, page_va, source, source_pages)
-    }
-
-    pub(super) fn recreate_process_address_space_for_exec(
-        &mut self,
-        target: crate::nanami_core::process::ProcessEntry,
-    ) -> Result<(), CapabilityError> {
-        arch::node::remove(target.root_node, PROCESS_SLOT_ADDRESS_SPACE as Word)?;
-        arch::generic::convert(
-            self.process_arena_for_root(target.root_node)?,
-            CapabilityType::AddressSpace,
-            0,
-            1,
-            target.root_node,
-            PROCESS_SLOT_ADDRESS_SPACE as Word,
-        )?;
-        let config = nun::capability_call::process_control_block::ConfigurationInfo::new(
-            true, false, false, false, false, false, false, false, false, false,
-        );
-        arch::process_control_block::configure(
-            target.pcb,
-            config,
-            target.address_space,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )?;
-        // Configuration has now dropped the stopped PCB's final alias of the
-        // old address space. New tables have not been installed yet.
-        self.memory.release_page_tables(target.address_space)
     }
 
     pub(super) fn drop_process_runtime_mappings(

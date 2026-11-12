@@ -95,9 +95,10 @@ fn abandon_lock(runtime: &mut Runtime, pid: Word, node: Word, offset: isize) {
             return;
         }
         let desired = (observed & WAITERS) | OWNER_DIED;
-        let Ok(previous) = nanami_runtime::request_process_memory_compare_exchange_u32(
-            pid, address, observed, desired,
-        ) else {
+        let Ok(previous) = super::private_memory::with_private_write(runtime, pid, address, 4, || {
+            nanami_runtime::request_process_memory_compare_exchange_u32(pid, address, observed, desired)
+                .map_err(|_| super::EFAULT)
+        }) else {
             return;
         };
         if previous == observed {

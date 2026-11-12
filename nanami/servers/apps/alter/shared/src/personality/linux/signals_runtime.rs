@@ -295,7 +295,9 @@ pub fn deliver(
 ) -> Delivery {
     // Linux defers ordinary handlers while vfork waits for exec/exit. The child
     // release will wake the parent; SIGKILL must still be able to terminate it.
-    if interrupted.is_some_and(|context| context.number == SYS_VFORK)
+    if interrupted.is_some_and(super::vfork_wait::is_vfork_wait)
+        && runtime.managed_process(pid).is_some_and(|p| p.signal_waiting
+            && super::vfork_wait::is_vfork_wait(p.signal_context))
         && runtime
             .managed_process(pid)
             .and_then(|process| process.signals())
@@ -607,7 +609,7 @@ pub fn notify_child(runtime: &mut Runtime, child: Word, code: i32, status: Word)
         .map_or(Action::default(), |state| state.action(signals::SIGCHLD));
     if runtime
         .managed_process(parent)
-        .is_some_and(|process| process.signal_waiting && process.signal_context.number == SYS_VFORK)
+        .is_some_and(|process| process.signal_waiting && super::vfork_wait::is_vfork_wait(process.signal_context))
     {
         super::wake_waiter_for_child(runtime, child);
     }

@@ -35,9 +35,17 @@ pub(super) fn prctl(runtime: &mut Runtime, pid: Word, args: [Word; 6]) -> Result
             runtime.managed_process_mut(pid).ok_or(ESRCH)?.comm = name;
             #[cfg(feature = "syscall-scope")]
             {
-                let _ = runtime.syscall_scope.command(
+                let _command = runtime.syscall_scope.command(
                     pid, &name, nanami_runtime::diagnostics::local_stamp,
                 ).map_err(|_| EINVAL)?;
+                #[cfg(not(test))]
+                match _command {
+                    crate::common::scope_controller::Command::Started { .. } =>
+                        crate::state::page_window::report_lease_diagnostics("begin", pid),
+                    crate::common::scope_controller::Command::Stopped(_) =>
+                        crate::state::page_window::report_lease_diagnostics("end", pid),
+                    _ => {},
+                }
             }
             Ok(0)
         }

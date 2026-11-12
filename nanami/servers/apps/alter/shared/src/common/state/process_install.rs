@@ -89,6 +89,7 @@ impl Runtime {
                 stored_name[..image_name.len()].copy_from_slice(image_name);
                 self.managed[i] = ManagedProcess {
                     vm_private_shared: false,
+                    vm_writable_private_shared: false,
                     pid,
                     tgid: pid,
                     vm_group: pid,

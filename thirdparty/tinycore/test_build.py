@@ -3,8 +3,11 @@ import gzip
 import io
 import json
 import hashlib
+import os
 from pathlib import Path
+import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -14,6 +17,32 @@ from unittest import mock
 
 import build
 import desktop
+import loader_cache
+import font_cache
+
+
+def elf_library(name):
+    """Minimal target ELF, independent of the test host's object format."""
+    strings = b"\0" + name.encode() + b"\0"
+    data = bytearray(0x200 + len(strings))
+    struct.pack_into("<16sHHIQQQIHHHHHH", data, 0, b"\x7fELF\x02\x01\x01" + b"\0" * 9,
+                     3, 62, 1, 0, 64, 0, 0, 64, 56, 2, 0, 0, 0)
+    struct.pack_into("<IIQQQQQQ", data, 64, 1, 4, 0, 0x400000, 0, len(data), len(data), 4096)
+    struct.pack_into("<IIQQQQQQ", data, 120, 2, 4, 0x180, 0x400180, 0, 64, 64, 8)
+    for index, item in enumerate([(5, 0x400200), (10, len(strings)), (14, 1), (0, 0)]):
+        struct.pack_into("<qQ", data, 0x180 + index * 16, *item)
+    data[0x200:] = strings
+    return bytes(data)
+
+
+def loader_entries(data):
+    assert data[:12] == b"ld.so-1.7.0\0"
+    count = struct.unpack_from("<I", data, 12)[0]
+    strings = data[16 + count * 12:]
+    def string(offset):
+        return strings[offset:strings.index(0, offset)].decode()
+    return [(string(key), string(value), flags)
+            for flags, key, value in struct.iter_unpack("<iII", data[16:16 + count * 12])]
 
 
 def archive(records):
@@ -95,6 +124,175 @@ class ArchiveTests(unittest.TestCase):
 
 
 class DesktopTests(unittest.TestCase):
+    def test_loader_cache_indexes_guest_dsos_with_original_search_precedence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            root = temporary / "root"
+            for name in ("lib", "usr/lib", "usr/local/lib", "etc"):
+                (root / name).mkdir(parents=True)
+            (root / "etc/ld.so.conf").write_text("/usr/local/lib\n")
+            library = root / "usr/local/lib/libnanami-cache.so.1.0"
+            library.write_bytes(elf_library("libnanami-cache.so.1"))
+            (library.parent / "libnanami-cache.so.1").symlink_to(library.name)
+            shutil.copy2(library, root / "usr/lib/libnanami-cache.so.1")
+            first = desktop.build_loader_cache(root)
+            data = (root / "etc/ld.so.cache").read_bytes()
+            self.assertEqual(loader_entries(data), [
+                ("libnanami-cache.so.1", "/usr/local/lib/libnanami-cache.so.1", 0x303),
+                ("libnanami-cache.so.1", "/usr/lib/libnanami-cache.so.1", 0x303)])
+            self.assertNotIn(str(temporary).encode(), data)
+            self.assertEqual(first, desktop.build_loader_cache(root))
+            self.assertEqual(data, (root / "etc/ld.so.cache").read_bytes())
+            self.assertEqual((library.parent / "libnanami-cache.so.1").readlink(), Path(library.name))
+            self.assertFalse((root / "var").exists())
+            self.assertEqual((root / "etc/ld.so.cache").stat().st_mode & 0o777, 0o644)
+
+    def test_loader_cache_failure_preserves_existing_cache_and_leaves_no_partial_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("lib", "usr/lib", "usr/local/lib", "etc"):
+                (root / name).mkdir(parents=True)
+            cache = root / "etc/ld.so.cache"
+            cache.write_bytes(b"previous cache")
+            with mock.patch.object(loader_cache, "generate", side_effect=ValueError("bad ELF")):
+                with self.assertRaisesRegex(ValueError, "bad ELF"):
+                    desktop.build_loader_cache(root)
+            self.assertEqual(cache.read_bytes(), b"previous cache")
+            self.assertEqual(list(cache.parent.iterdir()), [cache])
+
+    def test_loader_cache_aliases_guest_links_and_numeric_soname_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in (*loader_cache.DIRECTORIES, "etc"):
+                (root / name).mkdir(parents=True)
+            directory = root / "usr/local/lib"
+            for name in ["libfixture.so.2", "libfixture.so.10", "libfixture-a.so.1"]:
+                (directory / name).write_bytes(elf_library(name))
+            (directory / "libfixture.so").symlink_to("/usr/local/lib/libfixture.so.2")
+            (directory / "libalias.so").symlink_to("libfixture-a.so.1")
+            (directory / "libbroken.so.1").symlink_to("missing")
+            (directory / "libscript.so").write_text("INPUT (libfixture.so.2)")
+            result = desktop.build_loader_cache(root)
+            data = (root / "etc/ld.so.cache").read_bytes()
+            self.assertEqual([name for name, _, _ in loader_entries(data)],
+                             ["libfixture.so.10", "libfixture.so.2", "libfixture.so", "libfixture-a.so.1"])
+            self.assertEqual(result["etc/ld.so.cache"], hashlib.sha256(data).hexdigest())
+            if sys.platform.startswith("linux") and shutil.which("ldconfig"):
+                oracle = root / "etc/oracle.cache"
+                subprocess.run([shutil.which("ldconfig"), "-X", "-i", "-c", "old", "-r", str(root),
+                                "-C", "/etc/oracle.cache", "/usr/local/lib", "/usr/lib", "/lib"],
+                               check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.assertEqual(loader_entries(data), loader_entries(oracle.read_bytes()))
+
+    def test_loader_cache_rejects_damaged_elf_and_escaping_or_cyclic_links(self):
+        data = elf_library("libfixture.so.1")
+        for broken in [data[:20], data[:140], data[:-1]]:
+            with self.subTest(length=len(broken)), self.assertRaises(ValueError):
+                loader_cache.soname(broken)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "escape").symlink_to("../outside")
+            (root / "cycle").symlink_to("cycle")
+            for name in ["escape", "cycle"]:
+                with self.subTest(name=name), self.assertRaises(ValueError):
+                    loader_cache.guest_file(root, name)
+
+    def test_font_cache_serializes_without_external_commands_or_host_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            for name in font_cache.INPUTS:
+                (root / name).mkdir(parents=True)
+            font = root / "usr/local/lib/X11/fonts/fixture.pcf"
+            font.write_bytes(b"fixed font input")
+            before = (font.read_bytes(), font.stat().st_mtime_ns)
+            facts = dict(format="fontconfig-le64-cache-9",
+                         fontconfig_package_sha256=json.loads(desktop.LOCK.read_text())["packages"]["fontconfig.tcz"]["sha256"],
+                         input_sha256=font_cache.fingerprint(root),
+                         values=[], directories=[dict(path="/usr/local/lib/X11/fonts", subdirs=[], fonts=[])])
+            lock = Path(temporary) / "facts.json"
+            lock.write_text(json.dumps(facts))
+            with mock.patch.object(font_cache, "LOCK", lock), \
+                    mock.patch.object(desktop.subprocess, "run", side_effect=AssertionError("external command")):
+                result = desktop.build_font_cache(root)
+            self.assertEqual(len(result), 1)
+            path = root / next(iter(result))
+            data = path.read_bytes()
+            self.assertEqual(struct.unpack_from("<IIq", data), (0xFC02FC04, 9, len(data)))
+            self.assertNotIn(str(root).encode(), data)
+            self.assertIn(b"/usr/local/lib/X11/fonts\0", data)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(before, (font.read_bytes(), font.stat().st_mtime_ns))
+            self.assertEqual(list(path.parent.parent.glob(".font-cache-*")), [])
+
+    def test_changed_font_inputs_fail_before_publishing_a_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "root"
+            for name in font_cache.INPUTS:
+                (root / name).mkdir(parents=True)
+            font = root / "usr/local/lib/X11/fonts/fixture.pcf"
+            font.write_bytes(b"original")
+            facts = dict(format="fontconfig-le64-cache-9",
+                         fontconfig_package_sha256=json.loads(desktop.LOCK.read_text())["packages"]["fontconfig.tcz"]["sha256"],
+                         input_sha256=font_cache.fingerprint(root),
+                         values=[], directories=[])
+            lock = Path(temporary) / "facts.json"
+            lock.write_text(json.dumps(facts))
+            font.write_bytes(b"changed")
+            with mock.patch.object(font_cache, "LOCK", lock):
+                with self.assertRaisesRegex(ValueError, "inputs changed"):
+                    desktop.build_font_cache(root)
+            self.assertFalse((root / "var/cache/fontconfig").exists())
+            self.assertFalse((root / "var").exists())
+
+    def test_fontconfig_package_change_requires_reviewed_facts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            lock = Path(temporary) / "desktop.lock.json"
+            lock.write_text(json.dumps({"packages": {"fontconfig.tcz": {"sha256": "changed"}}}))
+            with mock.patch.object(font_cache, "PACKAGE_LOCK", lock):
+                with self.assertRaisesRegex(ValueError, "Fontconfig package changed"):
+                    font_cache.generate(Path(temporary))
+
+    def test_loader_cache_rejects_aliased_input_parents_and_output(self):
+        for alias in ("usr", "usr/local/lib", "etc/ld.so.cache"):
+            with self.subTest(alias=alias), tempfile.TemporaryDirectory() as temporary:
+                temporary = Path(temporary)
+                root = temporary / "root"
+                outside = temporary / "outside"
+                outside.mkdir()
+                (outside / "keep").write_bytes(b"unmodified")
+                for name in ("lib", "usr/lib", "usr/local/lib", "etc"):
+                    (root / name).mkdir(parents=True)
+                path = root / alias
+                if path.is_dir():
+                    shutil.rmtree(path)
+                path.symlink_to(outside)
+                with self.assertRaises(ValueError):
+                    desktop.build_loader_cache(root)
+                self.assertEqual((outside / "keep").read_bytes(), b"unmodified")
+                self.assertEqual(len(list(outside.iterdir())), 1)
+
+    def test_desktop_library_environment_uses_cache_and_preserves_explicit_overrides(self):
+        startup = (build.HERE / "profile/usr/local/bin/nanami-desktop").read_text()
+        startup = startup.split("# Xfbdev deliberately", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "cache"
+            script = startup.replace("/etc/ld.so.cache", str(cache))
+            script += "printf '%s\\n' \"${LD_LIBRARY_PATH-unset}\"\n"
+            for cached in (False, True):
+                if cached:
+                    cache.write_bytes(b"cache")
+                for override in (None, "", "/custom/lib"):
+                    with self.subTest(cached=cached, override=override):
+                        env = {key: value for key, value in os.environ.items()
+                               if key != "LD_LIBRARY_PATH"}
+                        if override is not None:
+                            env["LD_LIBRARY_PATH"] = override
+                        output = subprocess.check_output(["sh", "-c", script], env=env, text=True).rstrip("\n")
+                        expected = override
+                        if override is None:
+                            expected = "unset" if cached else "/usr/local/lib:/usr/lib:/lib"
+                        self.assertEqual(output, expected)
+
     def test_x11_latency_framing_and_partial_io_without_an_x_server(self):
         with tempfile.TemporaryDirectory() as temporary:
             executable = Path(temporary) / "x11-latency-test"
@@ -287,15 +485,18 @@ class DesktopTests(unittest.TestCase):
             temporary = Path(temporary)
             with mock.patch.object(desktop, "install", return_value={"packages": {}}), \
                     mock.patch.object(desktop, "build_readiness", return_value={"helper": "digest"}) as readiness, \
+                    mock.patch.object(desktop, "build_loader_cache", return_value={"etc/ld.so.cache": "loader-digest"}) as loader, \
                     mock.patch.object(desktop, "build_font_cache", return_value={"cache": "digest"}) as caches:
-                graphical = build.assemble(data, graphical=True, output=temporary / "desktop")
+                graphical = build.assemble(data, graphical=True, offline=True, output=temporary / "desktop")
                 console = build.assemble(data, output=temporary / "console")
             manifest = json.loads((graphical / "manifest.json").read_text())
             self.assertEqual(manifest["profile_symlinks"], desktop.PROFILE_LINKS)
             self.assertEqual(manifest["profile_helpers"], {"helper": "digest"})
+            self.assertEqual(manifest["loader_caches"], {"etc/ld.so.cache": "loader-digest"})
             self.assertEqual(manifest["font_caches"], {"cache": "digest"})
             readiness.assert_called_once()
-            caches.assert_called_once()
+            loader.assert_called_once()
+            caches.assert_called_once_with(readiness.call_args.args[0])
             self.assertTrue((graphical / "overlay/tinycore/rootfs/root/.wmx/Editor").is_symlink())
             self.assertNotIn("profile_symlinks", json.loads((console / "manifest.json").read_text()))
             self.assertFalse((console / "overlay/tinycore/rootfs/root/.wmx").exists())

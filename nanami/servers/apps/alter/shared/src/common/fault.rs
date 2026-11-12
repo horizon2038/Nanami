@@ -41,8 +41,13 @@ pub fn handle_fault(runtime: &mut Runtime, fault: FaultEvent) -> FaultAction {
         if matches!(fault.reason, 1 | 2) {
             if let Some(process) = runtime.process_for_fault_identifier(fault.identifier) {
                 if !crate::linux::bus_fault(runtime, process.pid, fault.kernel_call_number)
-                    && crate::linux::materialize_stack_fault(runtime, process.pid,
-                        fault.kernel_call_number, fault.architecture_fault_code)
+                    && ((process.personality == crate::state::OsPersonality::Linux
+                        && (crate::linux::materialize_private_write_fault(runtime, process.pid,
+                            fault.kernel_call_number, fault.architecture_fault_code)
+                            || crate::linux::materialize_snapshot_fault(runtime, process.pid,
+                                fault.kernel_call_number, fault.architecture_fault_code)))
+                        || crate::linux::materialize_stack_fault(runtime, process.pid,
+                            fault.kernel_call_number, fault.architecture_fault_code))
                 {
                     return FaultAction::Continue {
                         hardware_context: fault.hardware_context,

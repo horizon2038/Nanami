@@ -258,12 +258,10 @@ impl Compositor {
             }
             present_count = 1;
         }
-        i = 0;
-        while i < present_count {
-            if let Err(error) = self.framebuffer.present(self.dirty_rects[i]) {
+        for rects in self.dirty_rects[..present_count].chunks(self.framebuffer.present_batch_size()) {
+            if let Err(error) = self.framebuffer.present(rects) {
                 nanami_runtime::println!("[honoka] display present failed: {}", error);
             }
-            i += 1;
         }
         self.profile.record(before, composited, count);
 
@@ -922,12 +920,23 @@ impl Compositor {
     }
 
     fn render_rect(&self, dirty: Rect) {
+        let mut budget = MAX_WINDOWS * 2;
+        self.render_rect_partitioned(dirty, MAX_WINDOWS, &mut budget);
+    }
+
+    fn render_rect_partitioned(&self, dirty: Rect, upper: usize, budget: &mut usize) {
+        if dirty.is_empty() { return; }
+        if *budget == 0 {
+            self.render_rect_unpartitioned(dirty);
+            return;
+        }
         // A dirty rect spanning an opaque client's content and its frame used
         // to redraw the entire background/lower windows. Isolate the covered
         // content so the existing occlusion rule can skip that work. Present
-        // still receives the original dirty rect once; this only clips RAM
-        // composition into disjoint regions, with no recursive subdivision.
-        for index in (1..MAX_WINDOWS).rev() {
+        // still receives the original dirty rect once. Revisit the uncovered
+        // parts for lower opaque clients, with at most 32 splits and a depth
+        // bounded by MAX_WINDOWS. Exhaustion retains ordinary composition.
+        for index in (1..upper).rev() {
             let window = self.windows[index];
             if !window.used || !window.visible
                 || window.opacity != nanami_client::gfx::honoka::HONOKA_WINDOW_OPACITY_OPAQUE
@@ -938,14 +947,15 @@ impl Compositor {
             let bottom = center.y.saturating_add(center.height);
             let dirty_right = dirty.x.saturating_add(dirty.width);
             let dirty_bottom = dirty.y.saturating_add(dirty.height);
+            *budget -= 1;
+            self.render_rect_unpartitioned(center);
             for part in [
-                center,
                 Rect::new(dirty.x, dirty.y, dirty.width, center.y - dirty.y),
                 Rect::new(dirty.x, bottom, dirty.width, dirty_bottom - bottom),
                 Rect::new(dirty.x, center.y, center.x - dirty.x, center.height),
                 Rect::new(right, center.y, dirty_right - right, center.height),
             ] {
-                self.render_rect_unpartitioned(part);
+                self.render_rect_partitioned(part, index, budget);
             }
             return;
         }
@@ -963,6 +973,14 @@ impl Compositor {
         if reference { self.render_rect_unpartitioned(dirty); }
         else { self.render_rect(dirty); }
         self.background_pixels.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_budget_for_test(&self, dirty: Rect, initial_budget: usize) -> (usize, usize) {
+        self.background_pixels.set(0);
+        let mut budget = initial_budget;
+        self.render_rect_partitioned(dirty, MAX_WINDOWS, &mut budget);
+        (self.background_pixels.get(), initial_budget - budget)
     }
 
     #[cfg(test)]
@@ -1834,6 +1852,20 @@ fn draw_scaled_pnm(framebuffer: &Framebuffer, desktop: Rect, dirty: Rect, image:
     while y < dirty.y + dirty.height {
         let rel_y = y.saturating_sub(desktop.y) as usize;
         let src_y = rel_y.saturating_mul(image.height) / dst_h;
+        if image.width == dst_w && dirty.width > 0 && dirty.x >= desktop.x {
+            let row = src_y.checked_mul(image.width)
+                .and_then(|row| row.checked_add((dirty.x - desktop.x) as usize))
+                .and_then(|pixel| pixel.checked_mul(3))
+                .and_then(|start| (dirty.width as usize).checked_mul(3)
+                    .and_then(|len| start.checked_add(len).map(|end| (start, end))))
+                .and_then(|(start, end)| image.pixels.get(start..end));
+            if let Some(row) = row {
+                if framebuffer.blit_rgb24_row(dirty.x, y, row) {
+                    y += 1;
+                    continue;
+                }
+            }
+        }
         let mut x = dirty.x;
         while x < dirty.x + dirty.width {
             let rel_x = x.saturating_sub(desktop.x) as usize;
@@ -1854,6 +1886,13 @@ fn draw_scaled_pnm(framebuffer: &Framebuffer, desktop: Rect, dirty: Rect, image:
         }
         y += 1;
     }
+}
+
+#[cfg(test)]
+pub(crate) fn draw_pnm_for_test(framebuffer: &Framebuffer, desktop: Rect, dirty: Rect,
+    width: usize, height: usize, pixels: &[u8])
+{
+    draw_scaled_pnm(framebuffer, desktop, dirty, PnmImage { width, height, pixels });
 }
 
 fn draw_wallpaper_disc(

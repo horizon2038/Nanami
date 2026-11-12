@@ -47,6 +47,7 @@ struct Alpha {
     shared_releases: usize,
 }
 impl Alpha {
+    fn split_private_large_mappings(&mut self, _: usize, _: usize, _: usize, _: bool) -> Result<(), CapabilityError> { Ok(()) }
     fn new() -> Self {
         CALLS.with(|calls| *calls.borrow_mut() = Calls::default());
         let mut processes = manager();
@@ -466,6 +467,42 @@ fn mixed_order_sparse_release_preserves_newest_duplicates_and_deferred_records()
             vec![0x1000, 0x3000]
         );
     });
+}
+
+#[test]
+fn snapshot_batch_release_keeps_unmapped_tail_owned_until_prefix_unmap_ack() {
+    for fail_at in [None, Some(0), Some(2), Some(4)] {
+        let mut a = Alpha::new();
+        let base = 0x1000000;
+        let pages = 66;
+        a.processes.register_pool_page_run(2, 0x2000000, 100, 1000, pages).unwrap();
+        a.processes.register_pool_page_run(1, base, 200, 1000, pages).unwrap();
+        for page in 0..5 {
+            let va = base + page * PAGE_SIZE;
+            let vm = a.processes.vm_space_mut(1).unwrap();
+            vm.record_frame(va, 1_000_001_000 + page).unwrap();
+            vm.set_permissions(va, 5);
+        }
+        a.processes.vm_space_mut(1).unwrap().mark_mapping_uncertain(base + 4 * PAGE_SIZE);
+        CALLS.with_borrow_mut(|c| c.fail_at = fail_at);
+        assert_eq!(a.release(base, pages * PAGE_SIZE, true),
+            if fail_at.is_some() { Err(CapabilityError::Fatal) } else { Ok(()) });
+        if fail_at.is_some() {
+            assert_eq!(a.processes.physical_pages_in_range(1, base, base + pages * PAGE_SIZE).len(), pages);
+            assert_eq!(a.processes.deferred_physical_allocations_for_pid(1).count(), 0);
+            for page in 0..pages {
+                let allocation = a.processes.find_active_physical_allocation_reference(2, 0x2000000 + page * PAGE_SIZE, 1).unwrap();
+                assert_eq!(a.processes.physical_reference_count(allocation), 2);
+            }
+            CALLS.with_borrow_mut(|c| c.fail_at = None);
+            a.release(base, pages * PAGE_SIZE, true).unwrap();
+        }
+        assert!(a.processes.physical_pages_in_range(1, base, base + pages * PAGE_SIZE).is_empty());
+        let deferred: Vec<_> = a.processes.deferred_physical_allocations_for_pid(1).collect();
+        assert_eq!(deferred.len(), pages);
+        assert!(deferred.iter().all(|allocation| !allocation.owns_frame_cap));
+        CALLS.with_borrow(|c| assert!(c.unmaps.iter().all(|&(_, _, va)| va < base + 5 * PAGE_SIZE)));
+    }
 }
 
 #[test]

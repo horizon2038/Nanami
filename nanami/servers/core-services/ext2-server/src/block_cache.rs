@@ -64,6 +64,10 @@ pub(super) struct BlockCache {
     #[cfg(test)]
     lookup_calls: usize,
     #[cfg(test)]
+    range_copies: usize,
+    #[cfg(test)]
+    store_copies: usize,
+    #[cfg(test)]
     pub(super) directory_scans: usize,
     entries: Vec<Entry>,
     data: Vec<u8>,
@@ -74,7 +78,194 @@ pub(super) struct BlockCache {
     error: Option<RequestError>,
 }
 
+const INLINE_READ_BLOCKS: usize = 64;
+const MISSING_SLOT: usize = usize::MAX;
+
+enum ReadSlots {
+    Inline { slots: [usize; INLINE_READ_BLOCKS], count: usize },
+    Large(Vec<usize>),
+}
+
+/// Request-local residency only. Device reads may fill separate scratch but
+/// must not mutate this cache until finish_read has consumed the plan.
+pub(super) struct ReadPlan {
+    block: usize,
+    slots: ReadSlots,
+}
+
+impl ReadPlan {
+    fn slots(&self) -> &[usize] {
+        match &self.slots {
+            ReadSlots::Inline { slots, count } => &slots[..*count],
+            ReadSlots::Large(slots) => slots,
+        }
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn cached_blocks(&self) -> usize {
+        self.slots().iter().filter(|&&slot| slot != MISSING_SLOT).count()
+    }
+
+    pub(super) fn missing_runs(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let slots = self.slots();
+        let mut next = 0;
+        core::iter::from_fn(move || {
+            while next < slots.len() && slots[next] != MISSING_SLOT { next += 1; }
+            let first = next;
+            while next < slots.len() && slots[next] == MISSING_SLOT { next += 1; }
+            (first < next).then_some((first, next - first))
+        })
+    }
+}
+
 impl BlockCache {
+    pub(super) fn capacity_bytes(&self) -> usize { self.data.len() }
+
+    /// Device I/O borrows the cache immutably. Every resident block stays
+    /// available for the final copy, including unflushed dirty data.
+    pub(super) fn read_gaps(&self, blocks: core::ops::Range<usize>)
+        -> impl Iterator<Item = core::ops::Range<usize>> + '_ {
+        let mut next = blocks.start;
+        let end = blocks.end;
+        let mut cached = self.index.range(blocks);
+        core::iter::from_fn(move || {
+            for (&block, _) in cached.by_ref() {
+                let start = next;
+                next = block + 1;
+                if start < block { return Some(start..block); }
+            }
+            if next < end {
+                let start = next;
+                next = end;
+                return Some(start..end);
+            }
+            None
+        })
+    }
+
+    /// Copy a streamed run once all its gaps have been read into scratch.
+    /// The cache index is still current. Leave the cold stream out of it.
+    pub(super) fn finish_streamed_read(
+        &mut self, blocks: core::ops::Range<usize>, scratch: &[u8], offset: usize,
+        target: &mut [u8],
+    ) -> bool {
+        let Some(capacity) = blocks.len().checked_mul(self.block_size) else { return false; };
+        let Some(end) = offset.checked_add(target.len()) else { return false; };
+        if offset >= self.block_size || end > capacity || scratch.len() < capacity {
+            return false;
+        }
+        if target.is_empty() { return true; }
+        let first = blocks.start;
+        let mut copied = offset;
+        let mut copies = 0;
+        let mut cached_blocks = 0;
+        let mut entries = self.index.range(blocks).peekable();
+        while let Some((&block, &slot)) = entries.next() {
+            let begin = (block - first) * self.block_size;
+            if begin >= end { break; }
+            // The immutable range walk keeps slot identities stable. Join
+            // only adjacent file blocks held in adjacent cache slots, and
+            // stop at the last block intersecting the requested output.
+            let mut run = 1;
+            while let Some(&(&next_block, &next_slot)) = entries.peek() {
+                if next_block != block + run || next_slot != slot + run
+                    || (next_block - first) * self.block_size >= end {
+                    break;
+                }
+                entries.next();
+                run += 1;
+            }
+            if copied < begin {
+                target[copied - offset..begin - offset].copy_from_slice(&scratch[copied..begin]);
+                copies += 1;
+            }
+            let start = copied.max(begin);
+            let finish = (begin + run * self.block_size).min(end);
+            let source = slot * self.block_size + (start - begin);
+            target[start - offset..finish - offset]
+                .copy_from_slice(&self.data[source..source + (finish - start)]);
+            for entry in &mut self.entries[slot..slot + run] { entry.referenced = true; }
+            copies += 1;
+            cached_blocks += run;
+            copied = finish;
+        }
+        if copied < end {
+            target[copied - offset..].copy_from_slice(&scratch[copied..end]);
+            copies += 1;
+        }
+        #[cfg(test)]
+        { self.range_copies += copies; }
+        #[cfg(not(test))]
+        if cached_blocks > 1 && option_env!("NANAMI_STREAMED_CACHE_COPY_DIAG") == Some("1") {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static REPORTS: AtomicUsize = AtomicUsize::new(0);
+            if REPORTS.fetch_add(1, Ordering::Relaxed) < 16 {
+                nanami_runtime::println!("[ext2.stream-copy] bytes={} cached-blocks={} copies={}",
+                    target.len(), cached_blocks, copies);
+            }
+        }
+        // Used only for opt-in diagnostics in a production build.
+        #[cfg(test)]
+        let _ = cached_blocks;
+        true
+    }
+
+    pub(super) fn plan_read(&self, block: usize, count: usize) -> Option<ReadPlan> {
+        let end = block.checked_add(count)?;
+        let mut cached = self.index.range(block..end);
+        let (&first, &slot) = cached.next()?;
+        let mut storage = if count <= INLINE_READ_BLOCKS {
+            ReadSlots::Inline { slots: [MISSING_SLOT; INLINE_READ_BLOCKS], count }
+        } else {
+            ReadSlots::Large(vec![MISSING_SLOT; count])
+        };
+        let slots = match &mut storage {
+            ReadSlots::Inline { slots, count } => &mut slots[..*count],
+            ReadSlots::Large(slots) => slots,
+        };
+        slots[first - block] = slot;
+        for (&number, &slot) in cached { slots[number - block] = slot; }
+        Some(ReadPlan { block, slots: storage })
+    }
+
+    /// All missing runs have completed in scratch. Validate every cached
+    /// identity before the first output store, then copy each requested byte
+    /// once. Cache fills follow output, so they cannot evict a needed source.
+    pub(super) fn finish_read(&mut self, plan: ReadPlan, scratch: &[u8], offset: usize, target: &mut [u8]) -> bool {
+        let slots = plan.slots();
+        let Some(capacity) = slots.len().checked_mul(self.block_size) else { return false; };
+        if offset >= self.block_size || scratch.len() < capacity
+            || offset.checked_add(target.len()).is_none_or(|end| end > capacity)
+            || slots.iter().enumerate().any(|(index, &slot)|
+                slot != MISSING_SLOT && self.entries.get(slot).is_none_or(|entry| entry.block != Some(plan.block + index)))
+        { return false; }
+        let mut copied = 0;
+        let mut index = 0;
+        while copied < target.len() {
+            let slot = slots[index];
+            let mut end = index + 1;
+            while end < slots.len() && if slot == MISSING_SLOT {
+                slots[end] == MISSING_SLOT
+            } else { slots[end] == slot + end - index } { end += 1; }
+            let start = if index == 0 { offset } else { 0 };
+            let bytes = ((end - index) * self.block_size - start).min(target.len() - copied);
+            let source = if slot == MISSING_SLOT {
+                &scratch[index * self.block_size + start..index * self.block_size + start + bytes]
+            } else {
+                for &slot in &slots[index..end] { self.entries[slot].referenced = true; }
+                &self.data[slot * self.block_size + start..slot * self.block_size + start + bytes]
+            };
+            target[copied..copied + bytes].copy_from_slice(source);
+            copied += bytes;
+            index = end;
+        }
+        for (first, count) in plan.missing_runs() {
+            self.store_read_misses(plan.block + first,
+                &scratch[first * self.block_size..(first + count) * self.block_size]);
+        }
+        true
+    }
+
     #[cfg(test)]
     pub(super) fn take_name_hash_bytes() -> usize {
         NAME_HASH_BYTES.swap(0, core::sync::atomic::Ordering::Relaxed)
@@ -90,6 +281,10 @@ impl BlockCache {
             tree_lookup: false,
             #[cfg(test)]
             lookup_calls: 0,
+            #[cfg(test)]
+            range_copies: 0,
+            #[cfg(test)]
+            store_copies: 0,
             #[cfg(test)]
             directory_scans: 0,
             entries: vec![
@@ -142,6 +337,16 @@ impl BlockCache {
     #[cfg(test)]
     pub(super) fn take_lookup_calls(&mut self) -> usize {
         core::mem::take(&mut self.lookup_calls)
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_range_copies(&mut self) -> usize {
+        core::mem::take(&mut self.range_copies)
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_store_copies(&mut self) -> usize {
+        core::mem::take(&mut self.store_copies)
     }
 
     #[cfg(test)]
@@ -283,6 +488,8 @@ impl BlockCache {
         if count == 1 {
             let Some(slot) = self.lookup(block) else { return false; };
             let start = slot * self.block_size + offset;
+            #[cfg(test)]
+            { self.range_copies += 1; }
             target.copy_from_slice(&self.data[start..start + target.len()]);
             self.entries[slot].referenced = true;
             return true;
@@ -311,6 +518,8 @@ impl BlockCache {
                 let start = if index == 0 { offset } else { 0 };
                 let len = ((end - index) * self.block_size - start).min(target.len() - copied);
                 let source = slot * self.block_size + start;
+                #[cfg(test)]
+                { self.range_copies += 1; }
                 target[copied..copied + len].copy_from_slice(&self.data[source..source + len]);
                 for &slot in &slots[index..end] { self.entries[slot].referenced = true; }
                 copied += len;
@@ -324,13 +533,32 @@ impl BlockCache {
             return false;
         }
         let mut copied = 0;
-        for (&number, &slot) in self.index.range(block..end) {
+        let mut copies = 0;
+        let mut entries = self.index.range(block..end).peekable();
+        while let Some((&number, &slot)) = entries.next() {
+            let mut run = 1;
+            while let Some(&(&next_block, &next_slot)) = entries.peek() {
+                if next_block != number + run || next_slot != slot + run { break; }
+                entries.next();
+                run += 1;
+            }
             let start = if number == block { offset } else { 0 };
-            let len = (self.block_size - start).min(target.len() - copied);
+            let len = (run * self.block_size - start).min(target.len() - copied);
             let source = slot * self.block_size + start;
             target[copied..copied + len].copy_from_slice(&self.data[source..source + len]);
-            self.entries[slot].referenced = true;
+            for entry in &mut self.entries[slot..slot + run] { entry.referenced = true; }
             copied += len;
+            copies += 1;
+        }
+        #[cfg(test)]
+        { self.range_copies += copies; }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_LARGE_CACHE_READ_DIAG") == Some("1") {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static REPORTS: AtomicUsize = AtomicUsize::new(0);
+            if REPORTS.fetch_add(1, Ordering::Relaxed) < 16 {
+                nanami_runtime::println!("[ext2.cache-range] bytes={} blocks={} copies={}", target.len(), count, copies);
+            }
         }
         true
     }
@@ -368,17 +596,58 @@ impl BlockCache {
         self.store_resolved(block, source, None, None);
     }
 
+    /// A just-read missing run in separate device scratch. Reserve each slot
+    /// with the same CLOCK operations as scalar fills, then copy consecutive
+    /// source/slot extents together. Slot selection reads only metadata: no
+    /// cache payload is consumed until the synchronous fill has returned.
+    pub(super) fn store_read_misses(&mut self, block: usize, source: &[u8]) {
+        debug_assert_eq!(source.len() % self.block_size, 0);
+        let mut pending: Option<(usize, usize, usize)> = None;
+        for index in 0..source.len() / self.block_size {
+            let number = block + index;
+            debug_assert!(!self.index.contains_key(&number));
+            let slot = self.claim_store_slot(number, None, None);
+            if let Some((first, start, count)) = pending {
+                if slot == Some(first + count) {
+                    pending = Some((first, start, count + 1));
+                    continue;
+                }
+                // Flush before starting the next extent, including a wrap
+                // that reused one of these slots under dirty-cache pressure.
+                self.copy_store_extent(first, &source[start * self.block_size..(start + count) * self.block_size]);
+            }
+            pending = slot.map(|slot| (slot, index, 1));
+        }
+        if let Some((first, start, count)) = pending {
+            self.copy_store_extent(first, &source[start * self.block_size..(start + count) * self.block_size]);
+        }
+    }
+
     fn store_resolved(&mut self, block: usize, source: &[u8], dirty: Option<BlockKind>, resident: Option<usize>) {
+        if let Some(slot) = self.claim_store_slot(block, dirty, resident) {
+            assert_eq!(source.len(), self.block_size);
+            self.copy_store_extent(slot, source);
+        }
+    }
+
+    fn copy_store_extent(&mut self, slot: usize, source: &[u8]) {
+        #[cfg(test)]
+        { self.store_copies += 1; }
+        let start = slot * self.block_size;
+        self.data[start..start + source.len()].copy_from_slice(source);
+    }
+
+    fn claim_store_slot(&mut self, block: usize, dirty: Option<BlockKind>, resident: Option<usize>) -> Option<usize> {
         let slot = if let Some(slot) = resident {
             // An uncached read must never replace a pending write.
             if dirty.is_none() && self.entries[slot].dirty.is_some() {
-                return;
+                return None;
             }
             slot
         } else {
             if self.dirty_count == self.entries.len() {
                 assert!(dirty.is_none());
-                return;
+                return None;
             }
             let mut chosen = None;
             for _ in 0..self.entries.len() * 2 {
@@ -400,7 +669,7 @@ impl BlockCache {
             }
             let Some(slot) = chosen else {
                 assert!(dirty.is_none());
-                return;
+                return None;
             };
             if let Some(old) = self.entries[slot].block {
                 self.index.remove(&old);
@@ -418,7 +687,7 @@ impl BlockCache {
             referenced: true,
             directory: None,
         };
-        self.data[slot * self.block_size..(slot + 1) * self.block_size].copy_from_slice(source);
+        Some(slot)
     }
 
     pub(super) fn flush(&mut self, port: Word, scratch: &mut [u8]) -> Result<(), RequestError> {

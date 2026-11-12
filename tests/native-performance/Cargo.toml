@@ -81,6 +81,10 @@ name = "linux-anonymous-mapping"
 path = "linux-anonymous-mapping.rs"
 
 [[test]]
+name = "linux-address-gap"
+path = "linux-address-gap.rs"
+
+[[test]]
 name = "linux-guest-copy"
 path = "linux-guest-copy.rs"
 
@@ -558,4 +562,18 @@ uefi = { version = "=0.35.0", default-features = false }
 name = "linux-file-read"
 path = "linux-file-read.rs"
 
+[[test]]
+name = "ahci-transfer"
+path = "ahci-transfer.rs"
+
+[[test]]
+name = "ahci-session"
+path = "ahci-session.rs"
+
 [workspace]
+
+[profile.dev]
+incremental = false
+
+[profile.test]
+incremental = false

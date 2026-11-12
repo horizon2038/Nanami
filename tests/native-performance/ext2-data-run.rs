@@ -85,6 +85,29 @@ fn read_run(runtime: &mut Ext2Runtime, inode: &Ext2Inode, logical: usize, maximu
 }
 
 #[test]
+fn megabyte_runs_cross_single_and_multiple_double_indirect_leaves() {
+    for (pages, expected) in [(3097usize, (13, 4)), (3432, (14, 4)), (1156, (5, 2))] {
+        let mut commands = Vec::new();
+        for maximum in [256, 1024] {
+            let (mut r, inode) = fixture(256, false);
+            r.block_count = 100_000;
+            let mut copied = 0;
+            let mut count = 0;
+            while copied < pages {
+                let (physical, run) = read_run(&mut r, &inode, copied, maximum.min(pages - copied)).unwrap();
+                assert_eq!(physical as usize, 1000 + copied);
+                assert_eq!(run, maximum.min(pages - copied));
+                copied += run;
+                count += 1;
+            }
+            commands.push(count);
+        }
+        assert_eq!(commands, [expected.0, expected.1]);
+        println!("EXT2-MEGABYTE-MAP blocks={pages} data_commands_before={} data_commands_after={}", commands[0], commands[1]);
+    }
+}
+
+#[test]
 fn sparse_read_runs_match_current_zero_pointers_and_stop_before_data_or_boundaries() {
     let (mut runtime, _) = fixture(256, false);
     let inode = Ext2Inode { block: [0; 15] };

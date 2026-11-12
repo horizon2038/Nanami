@@ -62,6 +62,8 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
         parent.pid != 0
             && parent.tgid == child.parent_pid
             && parent.signal_waiting
+            && (!super::vfork_wait::is_vfork_wait(parent.signal_context)
+                || parent.signal_wait_target == child_pid)
             && !parent.signal_stopped()
     }) else {
         return;
@@ -75,7 +77,7 @@ pub fn wake_waiter_for_child(runtime: &mut Runtime, child_pid: Word) {
             EmulationAction::Return(value) => value,
             _ => return,
         }
-    } else if context.number == SYS_VFORK && (child.exited || child.job.executed) {
+    } else if super::vfork_wait::is_vfork_wait(context) && (child.exited || child.job.executed) {
         child_pid as isize
     } else {
         return;

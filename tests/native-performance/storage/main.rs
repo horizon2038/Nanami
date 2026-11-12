@@ -53,7 +53,7 @@ struct Ext2Runtime {
     frozen_by: Option<Word>,
     handles: [FileHandle; 2],
     mapping: Vec<u32>,
-    scratch: Box<[u8; BUFFER_SIZE]>,
+    scratch: Box<[u8]>,
     directory_invalidations: usize,
 }
 #[derive(Default)]
@@ -159,6 +159,7 @@ struct Fake {
     disk: Vec<u8>,
     durable: Vec<u8>,
     shm: usize,
+    shm_bytes: usize,
     reads: Vec<(usize, usize)>,
     read_error: Option<usize>,
     writes: Vec<(usize, usize)>,
@@ -181,9 +182,9 @@ pub mod block {
         count: Word,
         offset: Word,
     ) -> Result<Word, RequestError> {
-        assert!(offset + count * BLOCK_SIZE <= BUFFER_SIZE);
         FAKE.with(|fake| {
             let mut fake = fake.borrow_mut();
+            assert!(offset + count * BLOCK_SIZE <= fake.shm_bytes);
             fake.reads.push((first, count));
             let bytes = count * BLOCK_SIZE;
             if fake.read_error == Some(first) {
@@ -352,12 +353,17 @@ fn map_request_error_to_status(_error: RequestError) -> Word {
 }
 
 fn runtime(mapping: Vec<u32>) -> Ext2Runtime {
-    let mut scratch = Box::new([0xcc; BUFFER_SIZE]);
+    runtime_with_window(mapping, BUFFER_SIZE, 128 * BLOCK_SIZE)
+}
+
+fn runtime_with_window(mapping: Vec<u32>, window: usize, cache_budget: usize) -> Ext2Runtime {
+    let mut scratch = vec![0xcc; window].into_boxed_slice();
     FAKE.with(|fake| {
         *fake.borrow_mut() = Fake {
             disk: vec![0x77; 1024 * BLOCK_SIZE],
             durable: vec![0x77; 1024 * BLOCK_SIZE],
             shm: scratch.as_mut_ptr() as usize,
+            shm_bytes: window,
             next_block: 512,
             ..Fake::default()
         }
@@ -367,10 +373,10 @@ fn runtime(mapping: Vec<u32>) -> Ext2Runtime {
         mapped_pages: MappedPages::default(),
         block_port: 1,
         block_shm: scratch.as_mut_ptr() as usize,
-        block_shm_size: BUFFER_SIZE,
+        block_shm_size: window,
         block_size: BLOCK_SIZE,
         block_count: 1024,
-        block_cache: block_cache::BlockCache::new(BLOCK_SIZE, 128 * BLOCK_SIZE, BUFFER_SIZE),
+        block_cache: block_cache::BlockCache::new(BLOCK_SIZE, cache_budget, window),
         writeback: writeback::Writeback::new(Some(SLOT_TIMER_SERVICE)),
         frozen_by: None,
         handles: [

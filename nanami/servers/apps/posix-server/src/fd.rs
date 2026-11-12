@@ -160,6 +160,7 @@ fn alloc_open_file(runtime: &mut Runtime, kind: FdKind, vfs_handle: Word) -> Opt
         if !runtime.open_files[i].active {
             runtime.open_files[i] = OpenFile {
                 active: true,
+                vfs_cursor: false,
                 kind,
                 offset: 0,
                 status_flags: 0,

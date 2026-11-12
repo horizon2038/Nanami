@@ -2,7 +2,11 @@
 # Official, unmodified Xfbdev and FLWM, using Alter's window-local devices.
 set -e
 export PATH=/usr/local/bin:/usr/local/sbin:/bin:/sbin:/usr/bin:/usr/sbin
-export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib
+# The builder indexes the pinned libraries in ld.so.cache. Preserve explicit
+# user overrides and support older bundles which do not contain the cache.
+if [ "${LD_LIBRARY_PATH+x}" != x ] && [ ! -s /etc/ld.so.cache ]; then
+    export LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib
+fi
 # Xfbdev deliberately has no TCP listener. A bare :0 lets Xlib fall back to
 # TCP if a client starts before the local socket exists, blocking startup
 # instead of letting the startup loop retry. Require local UNIX transport.

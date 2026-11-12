@@ -5,6 +5,8 @@ use posix::*;
 mod state;
 use process::find_session;
 use state::*;
+#[path = "server_cursor.rs"]
+mod cursor_tests;
 fn map_request_error_to_status(error: RequestError) -> Word {
     if let RequestError::Status(status) = error {
         status
@@ -185,6 +187,23 @@ mod process {
 #[path = "../../../nanami/servers/apps/posix-server/src/io.rs"]
 mod io;
 
+#[test]
+fn versioned_pread_forwards_the_identity_without_advancing_the_shared_offset() {
+    let mut runtime = runtime();
+    let identity = 3 << 32 | 7;
+    let mut req = request(POSIX_REQUEST_PREAD_VERSIONED, 3, 0, 1024);
+    req.arg3 = identity;
+    assert_eq!(io::handle_read_direct(&mut runtime, req), (OS_RESPONSE_OK, 1024, identity));
+    assert_eq!(runtime.open_files[0].offset, 123);
+    BACKEND.with(|backend| assert_eq!(backend.borrow().calls.as_slice(), &[Call {
+        code: vfs::VFS_REQUEST_READ_VERSIONED, handle: 9, offset: identity,
+        len: 1024, delegate: 5, buffer: 0,
+    }]));
+    req.arg1 = 1;
+    assert_eq!(io::handle_read_direct(&mut runtime, req), (OS_RESPONSE_INVALID_ARGUMENT, 0, 0));
+    BACKEND.with(|backend| assert_eq!(backend.borrow().calls.len(), 1));
+}
+
 fn directory_runtime(cursor: Word) -> (Runtime, Vec<u8>, Vec<u8>) {
     let mut runtime = runtime();
     let mut source = vec![0x31u8; 65536];
@@ -259,6 +278,7 @@ fn runtime() -> Runtime {
     reset();
     let mut runtime = Runtime {
         vfs_port: 23,
+        vfs_provider_pid: 42,
         vfs_shm: 0,
         vfs_shm_size: 0,
         sessions: [Session::EMPTY; MAX_SESSIONS],
@@ -280,6 +300,7 @@ fn runtime() -> Runtime {
     session.fds[4] = session.fds[3]; // dup: both descriptors refer to the same offset.
     runtime.open_files[0] = OpenFile {
         active: true,
+        vfs_cursor: false,
         kind: FdKind::Regular,
         offset: 123,
         status_flags: 0,

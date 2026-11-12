@@ -4,6 +4,15 @@ use nanami_runtime::Word;
 
 #[cfg(test)]
 static FILL_STORES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static FILL_CALLS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static CELL_DRAWS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub(super) fn take_paint_calls() -> (usize, usize) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (FILL_CALLS.swap(0, Relaxed), CELL_DRAWS.swap(0, Relaxed))
+}
 
 #[cfg(test)]
 pub(super) fn take_fill_stores() -> usize {
@@ -55,19 +64,34 @@ pub(super) fn paint(
     let end = ((bottom as i64 - 1 - ink_top as i64).div_euclid(FONT_H as i64) + 1).max(0) as usize;
     let end = end.min(terminal.rows()).min(height / FONT_H);
     let cursor = terminal.cursor();
+    let cursor_shown = terminal.cursor_visible && terminal.at_bottom();
+    let blank_space = text.space_is_blank();
     for row in first..end {
         let y = row * FONT_H;
-        for (column, cell) in terminal
-            .view_row(row)
-            .iter()
-            .enumerate()
-            .take(width / FONT_W)
-        {
-            let mut cell = *cell;
-            if terminal.cursor_visible && terminal.at_bottom() && cursor == (column, row) {
+        let cells = terminal.view_row(row);
+        let limit = cells.len().min(width / FONT_W);
+        let mut column = 0;
+        while column < limit {
+            let mut cell = cells[column];
+            if cursor_shown && cursor == (column, row) {
                 core::mem::swap(&mut cell.fg, &mut cell.bg);
             }
             let x = column * FONT_W;
+            if blank_space && cell.byte == b' ' && !cell.underline {
+                let mut stop = column + 1;
+                while stop < limit {
+                    let next = cells[stop];
+                    let background = if cursor_shown && cursor == (stop, row) { next.fg } else { next.bg };
+                    if next.byte != b' ' || next.underline || background != cell.bg { break; }
+                    stop += 1;
+                }
+                // No ink occurs inside this span. Keep its fill after any
+                // preceding overhang and before the following glyph/underline.
+                fill(pixels, width, x, y.max(top), stop * FONT_W,
+                    (y + FONT_H).min(bottom), cell.bg);
+                column = stop;
+                continue;
+            }
             fill(
                 pixels,
                 width,
@@ -77,6 +101,8 @@ pub(super) fn paint(
                 (y + FONT_H).min(bottom),
                 cell.bg,
             );
+            #[cfg(test)]
+            CELL_DRAWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             text.draw_cell_in_band(
                 pixels,
                 width,
@@ -98,6 +124,7 @@ pub(super) fn paint(
                     cell.fg,
                 );
             }
+            column += 1;
         }
     }
 }
@@ -111,6 +138,8 @@ fn fill(
     bottom: usize,
     color: u32,
 ) {
+    #[cfg(test)]
+    FILL_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     #[cfg(test)]
     FILL_STORES.fetch_add(
         right.saturating_sub(left) * bottom.saturating_sub(top),

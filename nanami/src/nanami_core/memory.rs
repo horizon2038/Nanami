@@ -6,6 +6,9 @@ pub use delegation::DelegationId;
 #[cfg(test)]
 pub use delegation::{DelegationInfo, DelegationState};
 mod frames;
+mod bootstrap_heap;
+mod private_large;
+pub(crate) use private_large::{PrivateLargeAllocation, PrivateLargeMapping};
 mod page_tables;
 mod sources;
 
@@ -59,13 +62,18 @@ pub struct MemoryManager {
     capability_directory: CapabilityDirectory,
     node_pool: NodePool,
     bootstrap_frames: Option<FrameRange>,
+    bootstrap_prefix_frames: Option<FrameRange>,
+    bootstrap_large_heap: Option<bootstrap_heap::BootstrapHeapFrames>,
     physical_frames: BTreeMap<usize, FrameRange>,
+    private_large: private_large::PrivateLarge,
     // Completed pool ranges are permanent. Cache identity/descriptor metadata,
     // never RAM contents, allocation ownership or process mapping authority.
     ready_frame_range: core::cell::Cell<Option<FrameRange>>,
     ready_frame_range_other: core::cell::Cell<Option<FrameRange>>,
     #[cfg(test)]
     frame_range_index_lookups: core::cell::Cell<usize>,
+    #[cfg(test)]
+    frame_range_probes: core::cell::Cell<usize>,
     physical_sources: BTreeMap<(usize, usize), PhysicalSource>,
     page_tables: PageTables,
     process_arena_directory: CapabilityDescriptor,
@@ -181,11 +189,16 @@ impl MemoryManager {
             capability_directory: CapabilityDirectory::new(physical_generic_directory.descriptor),
             node_pool: NodePool::new(initial_frame_leaf_pool),
             bootstrap_frames: None,
+            bootstrap_prefix_frames: None,
+            bootstrap_large_heap: None,
             physical_frames: BTreeMap::new(),
+            private_large: private_large::PrivateLarge::new(environment.capabilities.address_space),
             ready_frame_range: core::cell::Cell::new(None),
             ready_frame_range_other: core::cell::Cell::new(None),
             #[cfg(test)]
             frame_range_index_lookups: core::cell::Cell::new(0),
+            #[cfg(test)]
+            frame_range_probes: core::cell::Cell::new(0),
             physical_sources: BTreeMap::new(),
             page_tables: PageTables::new(page_table_pool_node, page_table_generics),
             process_arena_directory,
@@ -208,7 +221,11 @@ impl MemoryManager {
         &self,
         frame_index: usize,
     ) -> Option<CapabilityDescriptor> {
-        self.frame_range(frame_index)?.descriptor(frame_index)
+        let address = frame_index.checked_mul(PAGE_SIZE)?;
+        if self.bootstrap_large_heap.is_some_and(|heap| heap.overlaps(address, PAGE_SIZE)) { return None; }
+        let range = self.frame_range(frame_index)?;
+        if let Some(key) = self.private_large_frame_key(range, frame_index) { return Some(key); }
+        range.descriptor(frame_index)
     }
 
     pub fn frame_descriptor_from_physical(
@@ -249,6 +266,7 @@ impl MemoryManager {
         attribute: Attribute,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        if private_large::is_slice_key(frame_descriptor) { return Err(CapabilityError::InvalidArgument); }
         if !vm_space.page_tables_ready(virtual_address) {
             self.ensure_page_tables(address_space, virtual_address, vm_space)?;
         }
@@ -283,6 +301,7 @@ impl MemoryManager {
         attribute: Attribute,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        if private_large::is_slice_key(frame_descriptor) { return Err(CapabilityError::InvalidArgument); }
         if !vm_space.page_tables_ready(virtual_address) {
             self.ensure_page_tables(address_space, virtual_address, vm_space)?;
         }
@@ -324,6 +343,7 @@ impl MemoryManager {
             || self
                 .bootstrap_frames
                 .is_some_and(|range| range.contains_descriptor(frame))
+            || self.bootstrap_prefix_frames.is_some_and(|range| range.contains_descriptor(frame))
     }
 
     pub fn ensure_process_arena(
@@ -519,6 +539,10 @@ impl MemoryManager {
         physical_address: usize,
         size_bytes: usize,
     ) -> Result<(), CapabilityError> {
+        self.prepare_private_large_free(physical_address, size_bytes)?;
+        if self.bootstrap_large_heap.is_some_and(|heap| heap.overlaps(physical_address, size_bytes)) {
+            return Err(CapabilityError::PermissionDenied);
+        }
         if self
             .delegations
             .iter()
@@ -634,6 +658,9 @@ impl MemoryManager {
         if size_bytes == 0 {
             return Err(CapabilityError::InvalidArgument);
         }
+        if self.bootstrap_large_heap.is_some_and(|heap| heap.overlaps(physical_address, size_bytes)) {
+            return Err(CapabilityError::PermissionDenied);
+        }
 
         let page_base = physical_address & !(PAGE_SIZE - 1);
         let offset = physical_address - page_base;
@@ -697,9 +724,16 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        self.ensure_page_tables_for_leaf(address_space, virtual_address, PAGE_BITS, vm_space)
+    }
+
+    pub(crate) fn ensure_page_tables_for_leaf(
+        &mut self, address_space: CapabilityDescriptor, virtual_address: usize,
+        leaf_bits: usize, vm_space: &mut impl VmTracker,
+    ) -> CapabilityResult {
         loop {
             let depth =
-                arch::address_space::get_unset_depth(address_space, virtual_address, PAGE_BITS)?;
+                arch::address_space::get_unset_depth(address_space, virtual_address, leaf_bits)?;
             if depth == 0 {
                 return Ok(());
             }
@@ -740,7 +774,9 @@ impl MemoryManager {
     /// The caller must first destroy the address space, after stopping every
     /// task using it. Reclaiming a live table could corrupt another process.
     pub fn release_page_tables(&mut self, address_space: CapabilityDescriptor) -> CapabilityResult {
-        self.page_tables.release(address_space)
+        self.page_tables.release(address_space)?;
+        self.private_large.retire_space(address_space);
+        Ok(())
     }
 }
 

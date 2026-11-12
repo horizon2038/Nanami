@@ -1,6 +1,227 @@
 use super::*;
 
 #[test]
+fn streamed_megabyte_read_copies_four_extents_instead_of_514_fragments() {
+    use block_cache::{BlockCache, BlockKind};
+    let mut bulk = BlockCache::new(BLOCK_SIZE, 1024 * BLOCK_SIZE, 1024 * BLOCK_SIZE);
+    let mut scalar = BlockCache::new(BLOCK_SIZE, 1024 * BLOCK_SIZE, 1024 * BLOCK_SIZE);
+    let expected: Vec<u8> = (0..1024 * BLOCK_SIZE).map(|i| ((i * 7 + i / BLOCK_SIZE) % 251) as u8).collect();
+    let mut scratch = expected.clone();
+    for index in (0..256).chain(512..768) {
+        let bytes = &expected[index * BLOCK_SIZE..(index + 1) * BLOCK_SIZE];
+        let dirty = (index % 17 == 0).then_some(BlockKind::Data);
+        for cache in [&mut bulk, &mut scalar] { cache.store(100 + index, bytes, dirty); }
+        // A streamed device read never initializes scratch for cached data.
+        scratch[index * BLOCK_SIZE..(index + 1) * BLOCK_SIZE].fill(0xa5);
+    }
+    let mut output = vec![0x5a; expected.len() + 6];
+    assert!(bulk.finish_streamed_read(100..1124, &scratch, 0, &mut output[3..3 + expected.len()]));
+    let after = bulk.take_range_copies();
+    assert_eq!(after, 4);
+    assert_eq!(&output[3..3 + expected.len()], expected);
+    assert_eq!(&output[..3], &[0x5a; 3]);
+    assert_eq!(&output[3 + expected.len()..], &[0x5a; 3]);
+    for index in (0..256).chain(512..768) {
+        assert!(scalar.load(100 + index, &mut vec![0; BLOCK_SIZE]));
+    }
+    bulk.assert_same_cache_for_test(&scalar);
+    println!("STREAMED-CACHE bytes={} cached_blocks=512 copies_before=514 copies_after={after} bytes_and_clock_equal=true", expected.len());
+}
+
+#[test]
+fn streamed_extents_match_scalar_dirty_bytes_partial_edges_and_exact_reference_marks() {
+    use block_cache::{BlockCache, BlockKind};
+    for seed in 0..32usize {
+        for (offset, len) in [(0, 0), (0, 1), (7, 1), (0, 64 * 8), (3, 61 * 8), (7, 64 * 8 - 7)] {
+            let mut bulk = BlockCache::new(8, 64 * 8, 64 * 8);
+            let mut scalar = BlockCache::new(8, 64 * 8, 64 * 8);
+            let mut residents = 0;
+            // Reordered groups split cache slots independently of file gaps.
+            for group in [2, 0, 3, 1] {
+                for index in group * 16..(group + 1) * 16 {
+                    if (index + seed) % 7 < seed % 7 { continue; }
+                    let bytes = (index as u64 + 0xd000).to_le_bytes();
+                    let dirty = ((index + seed) % 3 == 0).then_some(BlockKind::Metadata);
+                    for cache in [&mut bulk, &mut scalar] { cache.store(100 + index, &bytes, dirty); }
+                    residents += 1;
+                }
+            }
+            // Eviction clears CLOCK reference bits before slot reuse, so
+            // touching a cached block beyond target.len() changes the oracle.
+            for index in 0..64 - residents {
+                for cache in [&mut bulk, &mut scalar] {
+                    cache.store(1000 + index, &[0x51; 8], None);
+                }
+            }
+            for cache in [&mut bulk, &mut scalar] {
+                cache.store(2000, &[0x71; 8], None);
+            }
+            let scratch: Vec<u8> = (0..64u64).flat_map(|i| (i + 0x3000).to_le_bytes()).collect();
+            let mut expected = scratch[offset..offset + len].to_vec();
+            for index in 0..(offset + len).div_ceil(8) {
+                if len == 0 { break; }
+                let mut bytes = [0; 8];
+                if scalar.load(100 + index, &mut bytes) {
+                    let start = offset.max(index * 8);
+                    let end = (offset + len).min((index + 1) * 8);
+                    expected[start - offset..end - offset].copy_from_slice(&bytes[start - index * 8..end - index * 8]);
+                }
+            }
+            let mut output = vec![0xa5; len + 6];
+            assert!(bulk.finish_streamed_read(100..164, &scratch, offset, &mut output[3..3 + len]));
+            assert_eq!(&output[3..3 + len], expected, "seed={seed} offset={offset} len={len}");
+            assert_eq!(&output[..3], &[0xa5; 3]);
+            assert_eq!(&output[3 + len..], &[0xa5; 3]);
+            bulk.assert_same_cache_for_test(&scalar);
+        }
+    }
+}
+
+#[test]
+fn megabyte_cold_fill_copies_one_extent_with_scalar_bytes_and_clock_state() {
+    let bytes: Vec<u8> = (0..1024 * 1024).map(|i| ((i * 7 + i / BLOCK_SIZE) % 251) as u8).collect();
+    let mut bulk = block_cache::BlockCache::new(BLOCK_SIZE, bytes.len(), bytes.len());
+    let mut scalar = block_cache::BlockCache::new(BLOCK_SIZE, bytes.len(), bytes.len());
+    bulk.store_read_misses(100, &bytes);
+    for (index, source) in bytes.chunks_exact(BLOCK_SIZE).enumerate() {
+        scalar.store_read_miss(100 + index, source);
+    }
+    bulk.assert_same_cache_for_test(&scalar);
+    let before = scalar.take_store_copies();
+    let after = bulk.take_store_copies();
+    assert_eq!((before, after), (1024, 1));
+    let mut guarded = vec![0xa5; bytes.len() + 6];
+    assert!(bulk.load_range(100, 0, &mut guarded[3..3 + bytes.len()]));
+    assert_eq!(&guarded[3..3 + bytes.len()], bytes);
+    assert_eq!(&guarded[..3], &[0xa5; 3]);
+    assert_eq!(&guarded[3 + bytes.len()..], &[0xa5; 3]);
+    println!("CACHE-FILL bytes={} copies_before={before} copies_after={after} all_bytes_and_clock_equal=true", bytes.len());
+}
+
+#[test]
+fn bulk_cold_fill_matches_scalar_through_dirty_slots_wrap_and_repeated_eviction() {
+    use block_cache::{BlockCache, BlockKind};
+    for slots in [1, 2, 5, 64, 257] {
+        for seed in 0..24 {
+            let mut bulk = BlockCache::new(8, slots * 8, 8);
+            let mut scalar = BlockCache::new(8, slots * 8, 8);
+            for index in 0..slots {
+                let bytes = (index as u64 + 17).to_le_bytes();
+                let dirty = if (index + seed) % 4 < seed % 5 {
+                    Some(if index % 2 == 0 { BlockKind::Data } else { BlockKind::Metadata })
+                } else { None };
+                for c in [&mut bulk, &mut scalar] {
+                    c.store(index + 1, &bytes, dirty);
+                    if index % 3 == 0 { c.load_record::<4>(index + 1, 0); }
+                }
+            }
+            for (round, count) in [0, 1, slots / 2, slots, slots + 1, slots * 3 + 7].into_iter().enumerate() {
+                let first = 10_000 + round * 1000;
+                let payload: Vec<u8> = (0..count).flat_map(|i| ((first + i) as u64).to_le_bytes()).collect();
+                bulk.store_read_misses(first, &payload);
+                for (i, bytes) in payload.chunks_exact(8).enumerate() {
+                    scalar.store_read_miss(first + i, bytes);
+                }
+                bulk.assert_same_cache_for_test(&scalar);
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_fill_never_copies_uninitialized_cached_scratch_or_replaces_dirty_bytes() {
+    use block_cache::{BlockCache, BlockKind};
+    let mut bulk = BlockCache::new(8, 64 * 8, 8);
+    let mut scalar = BlockCache::new(8, 64 * 8, 8);
+    for c in [&mut bulk, &mut scalar] {
+        for index in [0, 5, 17, 63] {
+            c.store(100 + index, &(index as u64 + 0xd0).to_le_bytes(), Some(BlockKind::Data));
+        }
+    }
+    let mut scratch = vec![0xa5; 64 * 8];
+    for index in 0..64 {
+        if ![0, 5, 17, 63].contains(&index) {
+            scratch[index * 8..(index + 1) * 8].copy_from_slice(&(index as u64 + 0x30).to_le_bytes());
+        }
+    }
+    let plan = bulk.plan_read(100, 64).unwrap();
+    let mut output = vec![0xa5; 64 * 8];
+    assert!(bulk.finish_read(plan, &scratch, 0, &mut output));
+    for index in 0..64 {
+        if ![0, 5, 17, 63].contains(&index) {
+            scalar.store_read_miss(100 + index, &scratch[index * 8..(index + 1) * 8]);
+        }
+        let expected = if [0, 5, 17, 63].contains(&index) { index + 0xd0 } else { index + 0x30 };
+        assert_eq!(&output[index * 8..(index + 1) * 8], &(expected as u64).to_le_bytes());
+    }
+    bulk.assert_same_cache_for_test(&scalar);
+}
+
+#[test]
+fn large_cached_transfer_copies_contiguous_extents_with_exact_bytes_and_clock_state() {
+    for split in [false, true] {
+        let blocks = 256;
+        let mut cache = block_cache::BlockCache::new(BLOCK_SIZE, 1024 * BLOCK_SIZE, BLOCK_SIZE);
+        let mut scalar = block_cache::BlockCache::new(BLOCK_SIZE, 1024 * BLOCK_SIZE, BLOCK_SIZE);
+        let groups = if split { [1, 0, 3, 2] } else { [0, 1, 2, 3] };
+        let payload = |block: usize| -> Vec<u8> {
+            (0..BLOCK_SIZE).map(|i| ((block * 7 + i * 3) % 251) as u8).collect()
+        };
+        for group in groups {
+            for i in group * 64..(group + 1) * 64 {
+                let bytes = payload(100 + i);
+                cache.store(100 + i, &bytes, None);
+                scalar.store(100 + i, &bytes, None);
+            }
+        }
+        for c in [&mut cache, &mut scalar] {
+            c.store(229, &vec![0x37; BLOCK_SIZE], Some(block_cache::BlockKind::Data));
+            c.take_range_copies();
+        }
+        for (offset, trim) in [(0, 0), (7, 14), (BLOCK_SIZE - 1, BLOCK_SIZE - 1)] {
+            let len = blocks * BLOCK_SIZE - offset - trim;
+            let mut output = vec![0xa5; len + 6];
+            assert!(cache.load_range(100, offset, &mut output[3..3 + len]));
+            let copies = cache.take_range_copies();
+            let mut expected = Vec::new();
+            for block in 100..100 + blocks {
+                let mut bytes = vec![0; BLOCK_SIZE];
+                assert!(scalar.load(block, &mut bytes));
+                expected.extend_from_slice(&bytes);
+            }
+            assert_eq!(&output[3..3 + len], &expected[offset..offset + len]);
+            assert_eq!(&output[..3], &[0xa5; 3]);
+            assert_eq!(&output[3 + len..], &[0xa5; 3]);
+            cache.assert_same_cache_for_test(&scalar);
+            println!("LARGE-CACHE-RANGE blocks={blocks} bytes={len} split={split} copies={copies}");
+            assert_eq!(copies, if split { 4 } else { 1 });
+        }
+    }
+}
+
+#[test]
+fn read_plan_rejects_stale_cached_identity_and_bounds_before_output_stores() {
+    let mut cache=block_cache::BlockCache::new(8,16,8);
+    cache.store(100,&[0x31;8],None);
+    let plan=cache.plan_read(100,2).unwrap();
+    assert_eq!(plan.missing_runs().collect::<Vec<_>>(),[(1,1)]);
+    cache.store(200,&[0x51;8],None);cache.store(201,&[0x52;8],None);
+    let mut output=[0xaa;16];
+    assert!(!cache.finish_read(plan,&[0x77;16],0,&mut output));
+    assert_eq!(output,[0xaa;16]);
+    assert!(cache.plan_read(100,0).is_none());
+    assert!(cache.plan_read(100,65).is_none());
+    assert!(cache.plan_read(usize::MAX,2).is_none());
+    assert!(cache.plan_read(100,2).is_none());
+    cache.store(100,&[0x31;8],None);
+    for (offset,bytes,scratch) in [(8,1,16),(0,17,16),(0,1,15),(usize::MAX,2,16)] {
+        let plan=cache.plan_read(100,2).unwrap();let mut output=vec![0xaa;bytes];
+        assert!(!cache.finish_read(plan,&[0x77;16][..scratch],offset,&mut output));
+        assert!(output.iter().all(|&byte|byte==0xaa));
+    }
+}
+
+#[test]
 fn cold_read_fill_does_not_repeat_residency_lookups_after_the_gap_scan() {
     let mut r = runtime(vec![]);
     r.block_cache.take_lookup_calls();
@@ -196,11 +417,11 @@ fn writeback_preserves_entire_staged_scratch_across_dirty_sizes_kinds_and_errors
                     _ => Err(RequestError::Transport),
                 };
                 assert_eq!(cache.flush(1, &mut runtime.scratch[..]), expected);
-                assert_eq!(runtime.scratch.as_slice(), staged);
+                assert_eq!(&runtime.scratch[..], staged);
                 assert_eq!(cache.is_dirty(), failure != 0);
                 let events = FAKE.with(|f| f.borrow().events.clone());
                 assert_eq!(cache.flush(1, &mut runtime.scratch[..]), expected);
-                assert_eq!(runtime.scratch.as_slice(), staged);
+                assert_eq!(&runtime.scratch[..], staged);
                 FAKE.with(|f| assert_eq!(f.borrow().events, events));
                 for index in 0..count {
                     let mut bytes = vec![0xa5; BLOCK_SIZE];
@@ -448,7 +669,7 @@ fn cached_range_rejects_invalid_offsets_and_block_overflow_without_copying() {
 
 #[test]
 fn bounded_and_large_cached_ranges_keep_physical_order_partial_edges_and_current_dirty_bytes() {
-    for blocks in [2, 3, 16, 63, 64, 65, 129] {
+    for blocks in [2, 3, 16, 63, 64, 65, 129, 256] {
         let mut cache = block_cache::BlockCache::new(BLOCK_SIZE, (blocks + 8) * BLOCK_SIZE, BLOCK_SIZE);
         let payload = |block: usize| -> Vec<u8> {
             (0..BLOCK_SIZE).map(|i| ((block * 7 + i * 3) % 251) as u8).collect()
@@ -473,7 +694,7 @@ fn bounded_and_large_cached_ranges_keep_physical_order_partial_edges_and_current
 
 #[test]
 fn missing_blocks_on_either_side_of_slot_bound_leave_output_and_clock_state_unchanged() {
-    for blocks in [2, 16, 64, 65, 129] {
+    for blocks in [2, 16, 64, 65, 129, 256] {
         for missing in [0, blocks / 2, blocks - 1] {
             let capacity = blocks + 8;
             let mut range = block_cache::BlockCache::new(BLOCK_SIZE, capacity * BLOCK_SIZE, BLOCK_SIZE);
@@ -500,7 +721,7 @@ fn missing_blocks_on_either_side_of_slot_bound_leave_output_and_clock_state_unch
 
 #[test]
 fn multi_block_slot_capture_keeps_clock_eviction_equal_to_individual_cached_reads() {
-    for blocks in [2, 16, 64, 65] {
+    for blocks in [2, 16, 64, 65, 256] {
       for forward in [false, true] {
         let capacity = blocks + 8;
         let mut range = block_cache::BlockCache::new(BLOCK_SIZE, capacity * BLOCK_SIZE, BLOCK_SIZE);
@@ -531,7 +752,7 @@ fn multi_block_slot_capture_keeps_clock_eviction_equal_to_individual_cached_read
 #[test]
 fn contiguous_and_split_cache_extents_copy_exact_partial_edges_and_current_dirty_data() {
     for size in [1usize, 4, 1024, 4096] {
-        for blocks in [2, 3, 16, 63, 64, 65] {
+        for blocks in [2, 3, 16, 63, 64, 65, 256, 257] {
             let orders: Vec<Vec<usize>> = vec![
                 (0..blocks).collect(),
                 (0..blocks).rev().collect(),

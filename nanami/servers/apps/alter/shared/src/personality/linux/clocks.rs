@@ -221,9 +221,13 @@ pub(super) fn sleep_deadline(
             runtime.monotonic_ticks
         }
     };
-    let hz = runtime.monotonic_tick_hz as u128;
-    let ticks = (seconds as u128 * hz + (nanoseconds as u128 * hz).div_ceil(1_000_000_000))
-        .min(Word::MAX as u128) as Word;
+    let hz = runtime.monotonic_tick_hz;
+    let ticks = if hz == 1_000_000_000 {
+        seconds.saturating_mul(1_000_000_000).saturating_add(nanoseconds)
+    } else {
+        (seconds as u128 * hz as u128 + (nanoseconds as u128 * hz as u128).div_ceil(1_000_000_000))
+            .min(Word::MAX as u128) as Word
+    };
     let deadline = base.saturating_add(ticks);
     if deadline <= runtime.monotonic_ticks {
         return Ok(None);

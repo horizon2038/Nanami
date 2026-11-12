@@ -26,6 +26,22 @@ mod x86;
 use signals::*;
 
 #[test]
+fn clone_clear_sighand_preserves_mask_altstack_and_ignored_handlers_without_mutating_parent() {
+    let mut parent = Signals::new();
+    parent.blocked = bit(12);
+    parent.altstack = AltStack { sp: 0x10000, size: 8192, flags: 0 };
+    parent.set_action(10, Action { handler: 0x400000, ..Action::default() });
+    parent.set_action(12, Action { handler: SIG_IGN, ..Action::default() });
+    let mut child = parent.fork();
+    child.clear_caught_handlers();
+    assert_eq!(child.action(10), Action::default());
+    assert_eq!(child.action(12).handler, SIG_IGN);
+    assert_eq!(child.blocked, parent.blocked);
+    assert_eq!(child.altstack, parent.altstack);
+    assert_eq!(parent.action(10).handler, 0x400000);
+}
+
+#[test]
 fn late_signal_membership_preserves_local_group_fifo_and_last_duplicate() {
     let mut counts = Vec::new();
     for group in [false, true] {

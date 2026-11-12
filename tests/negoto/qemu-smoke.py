@@ -155,8 +155,10 @@ if args.host_vcpu_cpus is not None:
     kernel_release=os.uname().release if hasattr(os, "uname") else None,
     machine=os.uname().machine if hasattr(os, "uname") else None), indent=2) + "\n")
 with (logs / "qemu.log").open("w") as diagnostics:
+    # Keep disposable snapshot writes off the persistent log filesystem.
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=diagnostics, env=dict(os.environ, TMPDIR=str(logs)))
+                               stderr=diagnostics,
+                               env=dict(os.environ, TMPDIR=os.environ.get("QEMU_TMPDIR", "/tmp")))
     try:
         def checked_serial():
             if process.poll() is not None:

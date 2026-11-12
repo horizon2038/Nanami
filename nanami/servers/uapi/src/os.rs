@@ -17,6 +17,8 @@ pub const OS_REQUEST_DMA_REQUEST: Word = 0x1006;
 pub const OS_REQUEST_MMIO_REQUEST: Word = 0x1007;
 
 pub const OS_REQUEST_SHARED_MEMORY_CREATE: Word = 0x1008;
+// With peer=0, nonzero arg2/arg3 specify a source prefix and its length.
+// Construct owned readonly RAM after copying that prefix and zeroing the tail.
 
 pub const OS_REQUEST_SELF_PID: Word = 0x1009;
 
@@ -63,6 +65,11 @@ pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED: Word = 0x101d
 pub const OS_REQUEST_PROCESS_SPAWN_MEMORY_SUSPENDED: Word = 0x101e;
 
 pub const OS_REQUEST_PROCESS_EXEC_MEMORY: Word = 0x101f;
+/// Optional successful EXEC_MEMORY / SPAWN_MEMORY_FAULT_HANDLER_SUSPENDED
+/// response arg1. All nonempty raw LOADs have disjoint page ranges and final
+/// nonzero rights, with no stack overlap. Valid only for this stopped initial
+/// image, before any main-image mutation. Older Alpha replies zero.
+pub const OS_PROCESS_IMAGE_FINAL_PERMISSIONS: Word = 1;
 
 pub const OS_REQUEST_PROCESS_MEMORY_CLONE: Word = 0x1020;
 
@@ -122,12 +129,42 @@ pub const OS_REQUEST_PROCESS_WRITE_VIEW: Word = 0x1033;
 pub const OS_REQUEST_PROCESS_PRIVATE_SNAPSHOT: Word = 0x1034;
 /// Trusted supervisor: source VA, source bytes, final R/W/X permissions.
 /// Ordinary MAP_ANONYMOUS retains its original two-word initializer contract.
+// arg2 == 0 selects automatic heap placement; nonzero selects a fixed base.
+// arg3 points to [source, source_bytes, permissions]; the DEFER flag adds a
+// fourth word with eager prefix bytes.
 pub const OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED: Word = 0x1035;
+/// MAP_INITIALIZED_PROTECTED permission flag: a fourth descriptor word gives
+/// eager prefix bytes. Only supervised sealed R mappings accept it. Every
+/// byte is initialized; available huge leaves may be mapped in full, while
+/// remaining small PTEs are populated by the supervisor on demand.
+pub const OS_MAP_INITIALIZER_DEFER: Word = 1 << 8;
+/// Create immutable owned RAM without mapping it into the native caller.
+/// (0, capacity, source VA, initialized prefix bytes) -> (source address, 0).
+/// The returned address identifies backing for Alpha copies/private snapshots;
+/// it is not a CPU-accessible pointer. Self MAPPING_PROTECT(R) can map it later.
+/// No writable mapping/share/view of this source is permitted.
+pub const OS_REQUEST_MEMORY_SOURCE_CREATE: Word = 0x1036;
+/// Populate initialized deferred snapshot backing, including a bounded cluster.
+/// (supervised PID, page VA, required R/W/X bit, 0) -> populated/already-present.
+pub const OS_REQUEST_PROCESS_POPULATE_SNAPSHOT: Word = 0x1037;
+/// PRIVATE_SNAPSHOT permission flag: descriptor adds page-aligned eager bytes.
+/// Only R snapshots accept it; remaining initialized pages retain logical R
+/// while their PTE is deferred. A matching supervisor handles missing faults.
+pub const OS_PRIVATE_SNAPSHOT_DEFER: Word = 1 << 8;
 pub const OS_PRIVATE_WRITE_QUERY: Word = 0;
 pub const OS_PRIVATE_WRITE_DETACH: Word = 1;
-/// PROCESS_FORK arg3 opt-in. Only sealed tasks may share private R/RX backing.
-/// Their reaper must quiesce all users of the source VM before this fork.
-/// Their reaper must DETACH before privileged writes or granting write access.
+/// Sealed target, same supervisor quiescence contract as DETACH. A copied
+/// pool-backed replacement may retain its old logical rights with an absent
+/// PTE, ready for the caller's following PROTECT. The supervisor must support
+/// POPULATE_SNAPSHOT faults if that later protection fails or is abandoned.
+pub const OS_PRIVATE_WRITE_DETACH_DEFERRED: Word = 2;
+// PRIVATE_WRITE response arg0 is a boolean: QUERY found shared private pages,
+// or DETACH successfully repaired a nonempty set. No shared pages returns 0.
+/// PROCESS_FORK arg3 opt-in (legacy name). Sealed tasks share eligible private
+/// backing with read-only hardware leaves, including logically writable COW.
+/// Their reaper must quiesce all source VM users and revoke writable views
+/// before this fork, handle COW write faults, and DETACH before privileged
+/// writes or granting hardware write access. Zero retains eager fork.
 pub const OS_FORK_SHARE_READONLY: Word = 1;
 pub const OS_MEMORY_COPY_VECTOR_MAX: usize = 16;
 

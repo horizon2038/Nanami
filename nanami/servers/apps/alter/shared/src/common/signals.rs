@@ -233,6 +233,14 @@ impl Signals {
     }
 
     pub fn exec(&mut self) {
+        self.clear_caught_handlers();
+        self.altstack = AltStack::DISABLED;
+        self.suspend_mask = None;
+        self.wait_mask = None;
+        self.trampoline = 0;
+    }
+
+    pub fn clear_caught_handlers(&mut self) {
         // exec unshares dispositions before resetting caught handlers.
         let actions = *self.actions.borrow();
         self.actions = Rc::new(RefCell::new(actions));
@@ -241,10 +249,6 @@ impl Signals {
                 *action = Action::default();
             }
         }
-        self.altstack = AltStack::DISABLED;
-        self.suspend_mask = None;
-        self.wait_mask = None;
-        self.trampoline = 0;
     }
 
     pub fn pending_mask(&self) -> u64 {

@@ -15,6 +15,8 @@ pub const DISPLAY_CAP_EDID: Word = 8;
 pub const DISPLAY_CAP_MONITOR_MODES: Word = 16;
 /// The selected display endpoint also implements `gpu` protocol version 1.
 pub const DISPLAY_CAP_GPU_INTERFACE: Word = 32;
+/// The GPU interface accepts sparse PRESENT_BATCH requests.
+pub const DISPLAY_CAP_GPU_PRESENT_BATCH: Word = 64;
 pub const DISPLAY_SERVICE_REQUEST_CONNECTOR_INFO: Word = 0x5005;
 pub const DISPLAY_SERVICE_REQUEST_READ_EDID: Word = 0x5006;
 pub const DISPLAY_SERVICE_REQUEST_MONITOR_MODE: Word = 0x5007;

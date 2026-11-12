@@ -7,7 +7,7 @@ use path_walk::{Error, Filesystem, Kind, Node};
 
 #[path = "namespace_disk.rs"]
 mod disk;
-use disk::{Disk, kind};
+use disk::kind;
 
 fn input(session: ClientSession, offset: Word, bytes: Word) -> Result<Vec<u8>, Error> {
     if bytes > path_walk::PATH_MAX
@@ -53,9 +53,16 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
         {
             return Err(Error::Invalid);
         }
-        let request = unsafe {
+        let mut request = unsafe {
             ptr::read_unaligned((session.shm_local + message.arg0) as *const PathRequest)
         };
+        let cursor = message.code == VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED;
+        let granted = cursor || message.code == VFS_REQUEST_OPEN_ROOTED_GRANTED;
+        let delegate = if granted { request.flags >> VFS_DELEGATE_ID_SHIFT } else { 0 };
+        if granted {
+            if request.operation != VFS_PATH_OPEN_READONLY { return Err(Error::Invalid); }
+            request.flags &= VFS_DELEGATE_VALUE_MASK;
+        }
         if request.flags
             & !(VFS_PATH_FOLLOW_FINAL | VFS_PATH_ALLOW_MISSING | VFS_PATH_WITH_METADATA)
             != 0
@@ -64,13 +71,7 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
         {
             return Err(Error::Invalid);
         }
-        super::path_input::root(session.shm_local, session.shm_size,
-            request.root_offset, request.root_bytes)?;
-        let root = lookup_path(runtime, session, request.root_offset, request.root_bytes)
-            .ok_or(Error::Missing)?;
-        if kind(read_inode(runtime, root).map_err(|_| Error::Io)?) != Kind::Directory {
-            return Err(Error::NotDirectory);
-        }
+        let root = canonical_path::resolve_root(runtime, session, request.root_offset, request.root_bytes)?;
         let mut path_storage = [0u8; 256];
         let path = super::path_input::path(session.shm_local, session.shm_size,
             request.path_offset, request.path_bytes, &mut path_storage)?;
@@ -95,15 +96,13 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                 && request.flags & VFS_PATH_ALLOW_MISSING != 0);
         // Only SYMLINK consumes the owned final name (including rollback).
         // Keep the same complete walk and canonical path for other requests.
-        let resolved = path_walk::resolve_with_leaf_name(
-            &mut Disk::new(runtime, Node { inode: root, kind: Kind::Directory }),
-            root,
-            start,
-            &path,
-            follow,
-            allow_missing,
-            request.operation == VFS_PATH_SYMLINK,
-        )?;
+        let cacheable = matches!(request.operation,
+            VFS_PATH_RESOLVE | VFS_PATH_OPEN_READONLY | VFS_PATH_READLINK | VFS_PATH_STAT);
+        let (resolved, inode) = disk::resolve(runtime, root, start, &path, follow,
+            allow_missing, request.operation == VFS_PATH_SYMLINK, cacheable)?;
+        let load_inode = |runtime: &mut Ext2Runtime, number| {
+            inode.map_or_else(|| read_inode(runtime, number).map_err(|_| Error::Io), Ok)
+        };
         match request.operation {
             VFS_PATH_OPEN_READONLY => {
                 let flags = super::path_input::word(session.shm_local, session.shm_size,
@@ -121,12 +120,24 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                         request.output_bytes.min(total),
                     )
                 };
-                readonly_open::complete(&resolved.path, resolved.node.map(|node| node.kind),
+                let mut grant = 0;
+                let result = readonly_open::complete(&resolved.path, resolved.node.map(|node| node.kind),
                     flags, output, || {
                         let node = resolved.node.ok_or(Error::Missing)?;
-                        let inode = read_inode(runtime, node.inode).map_err(|_| Error::Io)?;
-                        Ok(alloc_handle(runtime, message.identifier, node.inode, inode))
-                    })
+                        let inode = load_inode(runtime, node.inode)?;
+                        let handle = alloc_handle(runtime, message.identifier, node.inode, inode);
+                        if granted {
+                            if let Some(handle) = handle {
+                                grant = super::read_grants::issue(runtime, handle, message.identifier, delegate);
+                                if cursor && grant != 0 {
+                                    runtime.handles[handle].cursor = Some(0);
+                                }
+                            }
+                        }
+                        Ok(handle)
+                    });
+                result.map(|(bytes, kind)| (bytes, kind | (grant << VFS_OPEN_GRANT_TYPE_BITS)
+                    | if cursor && grant != 0 { VFS_OPEN_CURSOR_TYPE_FLAG } else { 0 }))
             }
             VFS_PATH_RESOLVE => {
                 let metadata_bytes = if request.flags & VFS_PATH_WITH_METADATA != 0 {
@@ -146,7 +157,7 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
                 if metadata_bytes != 0 {
                     let metadata = match resolved.node {
                         Some(node) => {
-                            let inode = read_inode(runtime, node.inode).map_err(|_| Error::Io)?;
+                            let inode = load_inode(runtime, node.inode)?;
                             PathMetadata {
                                 inode: node.inode as Word,
                                 size: inode.size as Word,
@@ -180,7 +191,7 @@ pub(super) fn handle(message: ServiceRequest, runtime: &mut Ext2Runtime) -> (Wor
             }
             VFS_PATH_STAT => {
                 let number = resolved.node.ok_or(Error::Missing)?.inode;
-                let inode = read_inode(runtime, number).map_err(|_| Error::Io)?;
+                let inode = load_inode(runtime, number)?;
                 Ok((
                     number as Word,
                     (inode.size as Word) | (file_kind(inode.mode) << VFS_STAT_TYPE_SHIFT),

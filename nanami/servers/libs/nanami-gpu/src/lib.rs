@@ -55,6 +55,9 @@ pub trait Backend {
         Ok(())
     }
     fn present(&mut self, source: Buffer, damage: Rect) -> Result<(), RequestError>;
+    fn present_batch(&mut self, _source: Buffer, _damage: &[Rect]) -> Result<(), RequestError> {
+        Err(RequestError::Unsupported)
+    }
 }
 
 pub fn cpu_fill(destination: Buffer, rect: Rect, color: u32) {
@@ -115,7 +118,7 @@ impl Service {
         Ok(*buffer)
     }
     pub fn handles(code: Word) -> bool {
-        (GET_INFO..=PRESENT).contains(&code)
+        (GET_INFO..=PRESENT_BATCH).contains(&code)
     }
     pub fn request(
         &mut self,
@@ -216,6 +219,24 @@ impl Service {
                     }
                     backend.present(buffer, rect)?;
                 }
+                Ok((0, 0))
+            }
+            PRESENT_BATCH => {
+                if backend.supported() & CAP_PRESENT == 0 {
+                    return Err(RequestError::Unsupported);
+                }
+                let buffer = self.buffer(owner, args[0])?;
+                let count = args[1..]
+                    .iter()
+                    .rposition(|word| *word != 0)
+                    .ok_or(RequestError::InvalidArgument)?
+                    + 1;
+                let mut rects = [Rect::default(); MAX_PRESENT_BATCH];
+                for (rect, &word) in rects[..count].iter_mut().zip(&args[1..]) {
+                    *rect = Rect::decode_packed(buffer.layout, word)
+                        .ok_or(RequestError::InvalidArgument)?;
+                }
+                backend.present_batch(buffer, &rects[..count])?;
                 Ok((0, 0))
             }
             COPY => {

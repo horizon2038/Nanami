@@ -4,6 +4,7 @@ use super::*;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    ptr,
 };
 
 const PAGE_SIZE: usize = 4096;
@@ -25,9 +26,14 @@ struct Machine {
     next_page: usize,
     freed: usize,
     zero_calls: usize,
+    initialization_calls: usize,
+    large_initialization: bool,
+    large_zero_initializations: usize,
+    user_map_calls: usize,
     copy_calls: usize,
     cap_copy_calls: usize,
     chunk_calls: usize,
+    descriptor_lookups: usize,
     operation: usize,
     fail_at: Option<usize>,
     fail_unmap: bool,
@@ -114,6 +120,7 @@ mod arch {
             attributes: a9n_abi::capability_call::address_space::Attribute,
         ) -> Result<(), CapabilityError> {
             machine(|m| {
+                if space != 0 { m.user_map_calls += 1; }
                 operation(m)?;
                 assert!(m.pool_frames.contains_key(&frame));
                 assert!(m.maps.insert((space, va), frame).is_none());
@@ -144,6 +151,7 @@ mod arch {
 
 struct Memory;
 impl Memory {
+    fn map_private_large_alias(&mut self, _: usize, _: Option<usize>) -> Result<Option<(usize, usize)>, CapabilityError> { Ok(None) }
     fn ensure_page_tables(
         &mut self,
         _: usize,
@@ -209,8 +217,32 @@ impl Memory {
             Ok(())
         })
     }
+    fn allocation_frame_hint(&self, first: usize, pages: usize) -> Option<(usize, usize)> {
+        (pages >= 256).then_some((first, pages))
+    }
+    fn ensure_alpha_frame_for_allocation(&mut self, page: usize, hint: Option<(usize, usize)>) -> Result<(), CapabilityError> {
+        if let Some((first, pages))=hint { assert!(page>=first && page-first<pages); }
+        self.ensure_alpha_frame_at_physical_index(page)
+    }
+    fn ensure_alpha_frames_for_allocation(&mut self, first: usize, pages: usize) -> Result<(), CapabilityError> {
+        let hint = self.allocation_frame_hint(first, pages);
+        for page in first..first + pages {
+            self.ensure_alpha_frame_for_allocation(page, hint)?;
+        }
+        Ok(())
+    }
+    fn read_ready_pool_frames(&self, first: usize, frames: &mut [usize]) -> Result<(), CapabilityError> {
+        for (offset, frame) in frames.iter_mut().enumerate() {
+            *frame = self.physical_frame_descriptor_from_index(first + offset)
+                .ok_or(CapabilityError::InvalidArgument)?;
+        }
+        Ok(())
+    }
     fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> {
-        machine(|m| m.pool_frames.contains_key(&pool_frame(page))).then_some(pool_frame(page))
+        machine(|m| {
+            m.descriptor_lookups += 1;
+            m.pool_frames.contains_key(&pool_frame(page))
+        }).then_some(pool_frame(page))
     }
     fn map_frame_strict(
         &mut self,
@@ -219,7 +251,16 @@ impl Memory {
         va: usize,
         vm: &mut vm_space::VmSpace,
     ) -> Result<(), CapabilityError> {
+        self.map_frame_strict_with_attribute(space, frame, va,
+            a9n_abi::capability_call::address_space::Attribute::from_bits(7).unwrap(), vm)
+    }
+    fn map_frame_strict_with_attribute(
+        &mut self, space: usize, frame: usize, va: usize,
+        attributes: a9n_abi::capability_call::address_space::Attribute,
+        vm: &mut vm_space::VmSpace,
+    ) -> Result<(), CapabilityError> {
         machine(|m| {
+            if space != 0 { m.user_map_calls += 1; }
             assert!(
                 m.pool_frames.contains_key(&frame),
                 "tracked a revocable child alias"
@@ -230,10 +271,13 @@ impl Memory {
                 m.maps.insert((space, va), frame).is_none(),
                 "overwrote live mapping"
             );
+            if attributes.bits() != 7 { m.permissions.insert((space, va), attributes.bits()); }
             // Fail AFTER installing the PTE, as a TLB update error could do.
             operation(m)
         })?;
         vm.record_frame(va, frame).unwrap();
+        // Like production Memory, record only the Frame. The constructor must
+        // record its logical rights separately from hardware leaf attributes.
         Ok(())
     }
 }
@@ -246,12 +290,58 @@ struct OsRequestEvent {
     arg2: usize,
     arg3: usize,
 }
+#[derive(Clone, Copy)]
+struct PageSource { pid: usize, address: usize, bytes: usize }
 struct Alpha {
     processes: ProcessManager,
     memory: Memory,
     copy_window: memory_copy::CopyWindow,
 }
 impl Alpha {
+    fn split_private_large_mappings(&mut self, _: usize, _: usize, _: usize, _: bool) -> Result<(), CapabilityError> { Ok(()) }
+    fn prepare_large_protection(&mut self, _: usize, _: usize, _: usize, _: usize)
+        -> Result<Vec<mapping_protection::LargeProtection>, CapabilityError> { Ok(Vec::new()) }
+    fn apply_large_protection(&mut self, _: usize, _: usize, _: &[mapping_protection::LargeProtection],
+        _: core::ops::Range<usize>, _: usize) -> Result<(), CapabilityError> { unreachable!() }
+    fn validate_owned_memory_initializer(&mut self, source: PageSource, capacity: usize) -> Result<(), CapabilityError> {
+        if source.address == 0 || source.bytes == 0 || source.bytes > capacity { return Err(CapabilityError::InvalidArgument); }
+        let end = source.address.checked_add(source.bytes).ok_or(CapabilityError::InvalidArgument)?;
+        for va in (align_down(source.address, PAGE_SIZE)..end).step_by(PAGE_SIZE) { self.process_frame_for_page(source.pid, va)?; }
+        Ok(())
+    }
+    // Model only initialization order/failure here; alpha-private-pages runs
+    // the actual production byte initializer with real host page contents.
+    fn initialize_owned_with_large_frames(&mut self, first: usize, pages: usize, source: Option<PageSource>)
+        -> Result<bool, CapabilityError> {
+        if pages < 512 || !machine(|m| m.large_initialization) { return Ok(false); }
+        self.memory.ensure_alpha_frames_for_allocation(first, pages)?;
+        if let Some(source) = source {
+            self.initialize_owned_physical_pages(first, pages, source)?;
+        } else {
+            // Model successful zeroing plus demotion as one operation. This
+            // fixture checks the transaction; alpha-private-pages checks bytes.
+            machine(|m| {
+                m.initialization_calls += 1;
+                m.large_zero_initializations += 1;
+                operation(m)?;
+                assert!(m.maps.values().all(|frame| {
+                    let page = frame_page(m, *frame);
+                    page < first || page >= first + pages
+                }));
+                for page in first..first + pages { m.zeroed.insert(page); }
+                Ok(())
+            })?;
+        }
+        Ok(true)
+    }
+    fn initialize_owned_physical_pages(&mut self, first: usize, pages: usize, _: PageSource) -> Result<(), CapabilityError> {
+        machine(|m| {
+            m.initialization_calls += 1;
+            operation(m)?;
+            for p in first..first+pages { assert!(m.pool_frames.contains_key(&pool_frame(p))); m.zeroed.insert(p); }
+            Ok(())
+        })
+    }
     // This fixture models zeroing without constructing initialization aliases;
     // the copy-window suite combines both production window implementations.
     fn cached_initialization_frame(&self, _: usize) -> Option<usize> { None }
@@ -355,10 +445,31 @@ mod memory_copy;
 
 #[path = "../../nanami/src/nanami_core/alpha/checked_memory.rs"]
 mod checked_memory;
-#[path = "../../nanami/src/nanami_core/alpha/shared_memory.rs"]
-mod implementation;
+mod implementation {
+    include!("../../nanami/src/nanami_core/alpha/shared_memory.rs");
+
+    // Build the historical cap-backed ownership kind with production setup.
+    // Current buffer/view/share APIs all use pool references; legacy cleanup
+    // must still retain RAM until child-cap removals have acknowledged.
+    pub(super) fn legacy_create(alpha: &mut Alpha, pages: usize)
+        -> Result<(usize, usize), CapabilityError>
+    {
+        let mut mappings = [alpha.reserve_shared_mapping(1, pages, true)?,
+            alpha.reserve_shared_mapping(2, pages, true)?];
+        let first = alpha.memory.allocate_physical_any(pages * PAGE_SIZE)?;
+        for mapping in &mappings {
+            let r = mapping.reservation;
+            alpha.processes.register_physical_allocation(mapping.entry.pid,
+                r.base_va, r.start_slot, first, pages)?;
+        }
+        alpha.install_shared_memory(&mut mappings, first, None)?;
+        Ok((mappings[0].reservation.base_va, mappings[1].reservation.base_va))
+    }
+}
 #[path = "../../nanami/src/nanami_core/alpha/mapping_protection.rs"]
 mod mapping_protection;
+#[path = "../../nanami/src/nanami_core/alpha/memory_snapshot.rs"]
+mod memory_snapshot;
 
 fn alpha() -> Alpha {
     machine(|m| {
@@ -387,6 +498,359 @@ fn create(alpha: &mut Alpha, pages: usize) -> Result<(usize, usize), CapabilityE
         arg2: 0,
         arg3: 0,
     })
+}
+
+// Retain historical cap-removal ACK coverage after all shared mapping APIs
+// have stopped creating these unused capabilities.
+fn legacy_create(alpha: &mut Alpha, pages: usize) -> Result<(usize,usize),CapabilityError> {
+    implementation::legacy_create(alpha, pages)
+}
+
+fn owned_request(bytes: usize, source: usize, copied: usize) -> OsRequestEvent {
+    OsRequestEvent { identifier:1,arg0:0,arg1:bytes,arg2:source,arg3:copied }
+}
+
+fn large_arena() -> Alpha {
+    let mut a=alpha();let e=a.processes.find_entry_by_pid(1).unwrap();
+    a.processes.install_process(1,e.reaper_pid,e.root_slot,e.root_node,e.pcb,
+        e.address_space,e.os_port,e.os_port_identifier,e.affinity,e.next_frame_slot,
+        e.user_heap_next_va,0x1000000).unwrap();
+    a
+}
+
+#[test]
+fn immutable_source_admission_checks_whole_mixed_reservation_with_permission_words() {
+    use crate::vm_space::VmSpace;
+    let mut a = large_arena();
+    let pages = 1024;
+    let (input, _) = a.handle_shared_memory_request(owned_request(pages * PAGE_SIZE, 0, 0)).unwrap();
+    let (source, _) = a.handle_memory_source_request(owned_request(pages * PAGE_SIZE, input, pages * PAGE_SIZE)).unwrap();
+    for i in [0, 63, 64, 511, 1023] {
+        a.handle_mapping_protect_request(OsRequestEvent { identifier: 1, arg0: 1,
+            arg1: source + i * PAGE_SIZE, arg2: PAGE_SIZE, arg3: 1 }).unwrap();
+    }
+    let before = machine(|m| (m.user_map_calls, m.unmap_calls, m.cap_copy_calls));
+    VmSpace::take_immutable_permission_counts();
+    // Even a one-page request rechecks the complete immutable reservation.
+    a.check_private_snapshot_source(1, source, PAGE_SIZE).unwrap();
+    let counts = VmSpace::take_immutable_permission_counts();
+    assert_eq!(counts, (0, 16));
+    assert_eq!(machine(|m| (m.user_map_calls, m.unmap_calls, m.cap_copy_calls)), before);
+    for rights in [2, 4, 7, 17, usize::MAX] {
+        a.processes.vm_space_mut(1).unwrap().set_permissions(source + (pages - 1) * PAGE_SIZE, rights);
+        assert_eq!(a.check_private_snapshot_source(1, source, PAGE_SIZE), Err(CapabilityError::PermissionDenied));
+    }
+    a.processes.vm_space_mut(1).unwrap().set_permissions(source + (pages - 1) * PAGE_SIZE, 1);
+    a.check_private_snapshot_source(1, source, PAGE_SIZE).unwrap();
+    println!("IMMUTABLE-SOURCE-ADMISSION reservation_pages=1024 request_pages=1 point_queries=0 permission_words=16 maps_added=0");
+    release(&mut a, 1, source, pages).unwrap();
+    release(&mut a, 1, input, pages).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn unmapped_immutable_source_removes_every_native_map_and_releases_without_unmaps() {
+    for pages in [1,64,378,512,775,858,1024] {
+        let mut a=large_arena();
+        let (input,_)=a.handle_shared_memory_request(owned_request(pages*PAGE_SIZE,0,0)).unwrap();
+        let before=machine(|m|(m.user_map_calls,m.unmap_calls,m.cap_copy_calls,m.initialization_calls));
+        let (source,peer)=a.handle_memory_source_request(owned_request(pages*PAGE_SIZE,input,pages*PAGE_SIZE-17)).unwrap();
+        assert_eq!(peer,0);
+        let r=a.processes.shared_memory_reservation(1,source,pages).unwrap();
+        assert!(r.immutable_source());assert!(!r.owns_frame_caps());
+        let vm=a.processes.vm_space(1).unwrap();
+        for page in 0..pages {
+            let va=source+page*PAGE_SIZE;
+            assert!(vm.find_frame(va).is_some());assert_eq!(vm.permissions(va),0);
+            assert!(vm.private_page_shared(va));assert!(!vm.frame_may_be_present(va));
+            assert!(!vm.page_tables_ready(va));
+        }
+        machine(|m|assert_eq!((m.user_map_calls,m.unmap_calls,m.cap_copy_calls,m.initialization_calls),
+            (before.0,before.1,before.2,before.3+1)));
+        let descriptors = machine(|m| m.descriptor_lookups);
+        release(&mut a,1,source,pages).unwrap();
+        assert_eq!(machine(|m|m.unmap_calls),before.1);
+        assert_eq!(machine(|m| m.descriptor_lookups), descriptors);
+        // The uniquely owned object is retired as one whole extent.
+        assert_eq!(machine(|m|m.freed),1);
+        release(&mut a,1,input,pages).unwrap();assert_empty();
+        println!("UNMAPPED-SOURCE pages={pages} native-map-before={pages} native-map-after=0");
+    }
+}
+
+#[test]
+fn immutable_source_collision_rolls_back_complete_words_without_forgetting_the_collision() {
+    const WORD_PAGES: usize = vm_space::FRAME_WORD_PAGES;
+    let mut alpha = large_arena();
+    let pages = 3 * WORD_PAGES;
+    let bytes = pages * PAGE_SIZE;
+    let (input, _) = alpha.handle_shared_memory_request(owned_request(bytes, 0, 0)).unwrap();
+    let base = input + bytes;
+    let collision = base + (2 * WORD_PAGES - 1) * PAGE_SIZE;
+    alpha.processes.vm_space_mut(1).unwrap().record_frame(collision, 123).unwrap();
+
+    let unmaps = machine(|m| m.unmap_calls);
+    let request = owned_request(bytes, input, bytes);
+    assert_eq!(alpha.handle_memory_source_request(request), Err(CapabilityError::IllegalOperation));
+    assert!(alpha.processes.shared_memory_reservation(1, base, pages).is_none());
+    let vm = alpha.processes.vm_space_mut(1).unwrap();
+    assert_eq!(vm.forget_frame(collision), Some(123));
+    assert!(!vm.has_backed_aligned_pages(base, base + bytes));
+    assert!(!vm.has_deferred_mappings(base, base + bytes));
+    machine(|m| {
+        assert_eq!(m.unmap_calls, unmaps);
+        assert_eq!(m.live.len(), 1);
+    });
+
+    let (source, _) = alpha.handle_memory_source_request(request).unwrap();
+    assert_eq!(source, base);
+    let vm = alpha.processes.vm_space(1).unwrap();
+    assert!(vm.fully_backed_aligned_range(base, base + bytes));
+    for va in (base..base + bytes).step_by(PAGE_SIZE) {
+        assert_eq!(vm.permissions(va), 0);
+        assert!(vm.private_page_shared(va));
+        assert!(!vm.snapshot_page_managed(va));
+        assert!(!vm.frame_may_be_present(va));
+    }
+    release(&mut alpha, 1, source, pages).unwrap();
+    release(&mut alpha, 1, input, pages).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn immutable_source_optional_native_read_mapping_cannot_gain_write_or_writable_peer() {
+    let mut a=alpha();let(input,_)=a.handle_shared_memory_request(owned_request(4*PAGE_SIZE,0,0)).unwrap();
+    let(source,_)=a.handle_memory_source_request(owned_request(4*PAGE_SIZE,input,4*PAGE_SIZE)).unwrap();
+    let before=machine(|m|m.user_map_calls);
+    for permissions in [2,3,4,5,7] {
+        assert!(a.handle_mapping_protect_request(OsRequestEvent {identifier:1,arg0:1,arg1:source,
+            arg2:4*PAGE_SIZE,arg3:permissions}).is_err());
+    }
+    assert!(share(&mut a,1,2,source,4*PAGE_SIZE).is_err());
+    assert_eq!(machine(|m|m.user_map_calls),before);
+    a.handle_mapping_protect_request(OsRequestEvent {identifier:1,arg0:1,arg1:source+PAGE_SIZE,
+        arg2:PAGE_SIZE,arg3:1}).unwrap();
+    assert_eq!(machine(|m|m.user_map_calls),before+1);
+    a.handle_mapping_protect_request(OsRequestEvent {identifier:1,arg0:1,arg1:source,
+        arg2:4*PAGE_SIZE,arg3:1}).unwrap();
+    assert_eq!(machine(|m|m.user_map_calls),before+4);
+    assert!(a.processes.vm_space(1).unwrap().readonly_backed_range(source,source+4*PAGE_SIZE));
+    assert!(share(&mut a,1,2,source,4*PAGE_SIZE).is_err());
+    release(&mut a,1,source,4).unwrap();release(&mut a,1,input,4).unwrap();assert_empty();
+}
+
+#[test]
+fn immutable_source_native_map_failure_rolls_back_and_release_keeps_unacked_backing() {
+    for offset in [1,2,4] {
+        let mut a=alpha();let(input,_)=a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,0,0)).unwrap();
+        let(source,_)=a.handle_memory_source_request(owned_request(3*PAGE_SIZE,input,3*PAGE_SIZE)).unwrap();
+        machine(|m|m.fail_at=Some(m.operation+offset));
+        assert!(a.handle_mapping_protect_request(OsRequestEvent {identifier:1,arg0:1,arg1:source,arg2:3*PAGE_SIZE,arg3:1}).is_err());
+        machine(|m|m.fail_at=None);
+        let vm=a.processes.vm_space(1).unwrap();
+        for page in 0..3 {assert_eq!(vm.permissions(source+page*PAGE_SIZE),0);assert!(!vm.frame_may_be_present(source+page*PAGE_SIZE));}
+        a.handle_mapping_protect_request(OsRequestEvent {identifier:1,arg0:1,arg1:source,arg2:3*PAGE_SIZE,arg3:1}).unwrap();
+        machine(|m|m.fail_unmap=true);
+        assert!(release(&mut a,1,source,3).is_err());assert_eq!(machine(|m|m.freed),0);
+        assert!(a.processes.shared_memory_reservation(1,source,3).is_some());
+        machine(|m|m.fail_unmap=false);
+        release(&mut a,1,source,3).unwrap();release(&mut a,1,input,3).unwrap();assert_empty();
+    }
+}
+
+#[test]
+fn immutable_source_creation_failures_and_bad_arguments_never_leave_native_pte() {
+    for fail in 1..=5 {
+        let mut a=alpha();let(input,_)=a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,0,0)).unwrap();
+        let before=machine(|m|m.maps.clone());
+        machine(|m|m.fail_at=Some(m.operation+fail));
+        assert!(a.handle_memory_source_request(owned_request(3*PAGE_SIZE,input,3*PAGE_SIZE)).is_err());
+        machine(|m|{assert_eq!(m.maps,before);assert_eq!(m.live.len(),1);m.fail_at=None;});
+        release(&mut a,1,input,3).unwrap();assert_empty();
+    }
+    for case in 0..6 {
+        let mut a=alpha();let(input,_)=a.handle_shared_memory_request(owned_request(PAGE_SIZE,0,0)).unwrap();
+        let mut req=owned_request(PAGE_SIZE,input,1);
+        match case {0=>req.arg0=2,1=>req.arg2=0,2=>req.arg3=0,3=>req.arg3=PAGE_SIZE+1,
+            4=>{a.processes.seal_capabilities(1).unwrap();},_=>req.identifier=99}
+        let before=machine(|m|m.operation);
+        assert!(a.handle_memory_source_request(req).is_err());assert_eq!(machine(|m|m.operation),before);
+        release(&mut a,1,input,1).unwrap();assert_empty();
+    }
+}
+
+#[test]
+fn private_snapshot_from_unmapped_source_survives_source_retirement_in_both_orders() {
+    for source_first in [false,true] {
+        let mut a=alpha();let(input,_)=a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,0,0)).unwrap();
+        let(source,_)=a.handle_memory_source_request(owned_request(3*PAGE_SIZE,input,3*PAGE_SIZE)).unwrap();
+        let e=a.processes.find_entry_by_pid(2).unwrap();
+        a.processes.install_process(2,1,e.root_slot,e.root_node,e.pcb,e.address_space,e.os_port,
+            e.os_port_identifier,e.affinity,e.next_frame_slot,e.user_heap_next_va,e.user_heap_limit_va).unwrap();
+        a.processes.seal_capabilities(2).unwrap();
+        let before=machine(|m|m.user_map_calls);
+        a.map_process_private_snapshot(1,2,source,0x500000,3*PAGE_SIZE,5).unwrap();
+        assert_eq!(machine(|m|m.user_map_calls),before+3);
+        let reservation=a.processes.shared_memory_reservation(1,source,3).unwrap();
+        assert!(reservation.immutable_source());assert!(reservation.has_page_references());
+        for page in a.processes.physical_pages_in_range(2,0x500000,0x503000) {assert_eq!(a.processes.physical_reference_count(page),2);}
+        if source_first {release(&mut a,1,source,3).unwrap();assert_eq!(machine(|m|m.freed),0);}
+        let space=a.processes.memory_context(2).unwrap().address_space;
+        for page in a.processes.physical_pages_in_range(2,0x500000,0x503000) {
+            let frame=a.processes.vm_space(2).unwrap().find_frame(page.base_va).unwrap();
+            arch::address_space::unmap(space,frame,page.base_va).unwrap();
+            a.processes.vm_space_mut(2).unwrap().forget_frame(page.base_va);
+            let memory=&mut a.memory;
+            a.processes.retire_active_physical_allocation(2,page.base_va,1,|allocation,last| {
+                if last {memory.free_physical(allocation.base_page*PAGE_SIZE,PAGE_SIZE)} else {Ok(())}
+            }).unwrap();
+        }
+        if !source_first {assert_eq!(machine(|m|m.freed),0);release(&mut a,1,source,3).unwrap();}
+        release(&mut a,1,input,3).unwrap();assert_empty();
+    }
+}
+
+#[test]
+fn readonly_owned_snapshot_is_initialized_before_mapping_and_reclaims_normally() {
+    let mut a=alpha();let(source,_)=a.handle_shared_memory_request(owned_request(2*PAGE_SIZE,0,0)).unwrap();
+    let zero_calls=machine(|m|m.zero_calls);
+    let(target,peer)=a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,source+3,PAGE_SIZE+1)).unwrap();
+    assert_eq!(peer,0);assert_ne!(source,target);
+    let space=a.processes.memory_entry(1).unwrap().address_space;
+    let vm=a.processes.vm_space(1).unwrap();
+    assert!(vm.readonly_backed_range(target,target+3*PAGE_SIZE));
+    machine(|m|{assert_eq!(m.initialization_calls,1);assert_eq!(m.zero_calls,zero_calls);
+        for i in 0..3 {assert_eq!(m.permissions[&(space,target+i*PAGE_SIZE)],1);}
+    });
+    release(&mut a,1,target,3).unwrap();release(&mut a,1,source,2).unwrap();assert_empty();
+}
+
+#[test]
+fn owned_snapshot_large_initializer_is_not_repeated_before_readonly_publication() {
+    let mut a = alpha();
+    let entry = a.processes.find_entry_by_pid(1).unwrap();
+    a.processes.install_process(1, entry.reaper_pid, entry.root_slot, entry.root_node,
+        entry.pcb, entry.address_space, entry.os_port, entry.os_port_identifier,
+        entry.affinity, entry.next_frame_slot, entry.user_heap_next_va, 0x800000).unwrap();
+    a.processes.ensure_vm_space_for_pid(1).unwrap();
+    let (source, _) = a.handle_shared_memory_request(owned_request(PAGE_SIZE, 0, 0)).unwrap();
+    machine(|m| m.large_initialization = true);
+    let (target, _) = a.handle_shared_memory_request(owned_request(512 * PAGE_SIZE, source + 3, 17)).unwrap();
+    assert!(a.processes.vm_space(1).unwrap().readonly_backed_range(target, target + 512 * PAGE_SIZE));
+    machine(|m| { assert_eq!(m.initialization_calls, 1); assert_eq!(m.zeroed.len(), 513); });
+    release(&mut a, 1, target, 512).unwrap();
+    release(&mut a, 1, source, 1).unwrap();
+    assert_empty();
+}
+
+#[test]
+fn shared_zero_large_initializer_finishes_once_before_either_owner_is_mapped() {
+    for peer in [false, true] {
+        let mut a = large_arena();
+        machine(|m| m.large_initialization = true);
+        let (local, remote) = if peer { create(&mut a, 512).unwrap() }
+            else { a.handle_shared_memory_request(owned_request(512 * PAGE_SIZE, 0, 0)).unwrap() };
+        machine(|m| {
+            assert_eq!(m.large_zero_initializations, 1);
+            assert_eq!(m.initialization_calls, 1);
+            assert_eq!(m.zero_calls, 0);
+            assert_eq!(m.zeroed.len(), 512);
+            assert_eq!(m.cap_copy_calls, 0);
+        });
+        for (pid, base) in [(1, local), (2, remote)] {
+            if base == 0 { continue; }
+            let vm = a.processes.vm_space(pid).unwrap();
+            for page in 0..512 { assert_eq!(vm.permissions(base + page * PAGE_SIZE), 7); }
+        }
+        release(&mut a, 1, local, 512).unwrap();
+        if peer {
+            machine(|m| assert_eq!(m.freed, 0));
+            release(&mut a, 2, remote, 512).unwrap();
+        }
+        assert_empty();
+    }
+}
+
+#[test]
+fn shared_zero_large_initializer_failure_cleans_unpublished_ram_or_retains_unacknowledged_mapping() {
+    // ensure512 Frames, initialize, then each side maps its512 leaves.
+    for failure in [1, 512, 513, 514, 1025, 1026, 1537] {
+        let mut a = large_arena();
+        machine(|m| { m.large_initialization = true; m.fail_at = Some(m.operation + failure); });
+        assert!(create(&mut a, 512).is_err(), "failure {failure}");
+        machine(|m| m.fail_at = None);
+        assert_empty();
+    }
+    let mut a = large_arena();
+    machine(|m| {
+        m.large_initialization = true;
+        m.fail_at = Some(m.operation + 516);
+        m.fail_unmap = true;
+    });
+    assert!(create(&mut a, 512).is_err());
+    machine(|m| {
+        assert_eq!(m.large_zero_initializations, 1);
+        assert!(!m.maps.is_empty());
+        assert_eq!(m.live.len(), 1);
+        assert_eq!(m.freed, 0);
+    });
+}
+
+#[test]
+fn readonly_owned_snapshot_rejects_peer_and_bad_source_before_reservation() {
+    for mode in 0..5 {
+        let mut a=alpha();let(source,_)=a.handle_shared_memory_request(owned_request(2*PAGE_SIZE,0,0)).unwrap();
+        let mut req=owned_request(3*PAGE_SIZE,source,4097);
+        match mode {0=>req.arg0=2,1=>req.arg2=0,2=>req.arg3=0,3=>req.arg3=3*PAGE_SIZE+1,4=>req.arg2=usize::MAX,_=>unreachable!()}
+        let before=machine(|m|(m.operation,m.maps.clone(),m.live.clone()));
+        assert!(a.handle_shared_memory_request(req).is_err());
+        assert_eq!(machine(|m|(m.operation,m.maps.clone(),m.live.clone())),before);
+        release(&mut a,1,source,2).unwrap();assert_empty();
+    }
+}
+
+#[test]
+fn readonly_owned_snapshot_failure_matrix_cleans_prefix_or_retains_mapped_ram() {
+    for failure in 1..=8 {
+        let mut a=alpha();let(source,_)=a.handle_shared_memory_request(owned_request(2*PAGE_SIZE,0,0)).unwrap();
+        let before=machine(|m|m.maps.clone());machine(|m|m.fail_at=Some(m.operation+failure));
+        assert!(a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,source,4097)).is_err(),"operation {failure}");
+        machine(|m|{assert_eq!(m.maps,before);assert_eq!(m.live.len(),1);m.fail_at=None;});
+        release(&mut a,1,source,2).unwrap();assert_empty();
+    }
+    let mut a=alpha();let(source,_)=a.handle_shared_memory_request(owned_request(2*PAGE_SIZE,0,0)).unwrap();
+    machine(|m|{m.fail_at=Some(m.operation+6);m.fail_unmap=true;});
+    assert!(a.handle_shared_memory_request(owned_request(3*PAGE_SIZE,source,4097)).is_err());
+    machine(|m|{assert_eq!(m.live.len(),2);assert_eq!(m.freed,0);assert!(m.permissions.values().any(|&p|p==1));});
+}
+
+#[test]
+fn readonly_constructor_halves_leaf_maps_and_removes_all_protection_unmaps() {
+    fn arena() -> Alpha {
+        let mut a=alpha();let e=a.processes.find_entry_by_pid(1).unwrap();
+        // Two live 2MiB objects exceed the small fixture's 2MiB heap.
+        a.processes.install_process(1,e.reaper_pid,e.root_slot,e.root_node,e.pcb,
+            e.address_space,e.os_port,e.os_port_identifier,e.affinity,
+            e.next_frame_slot,e.user_heap_next_va,0x1000000).unwrap();
+        a
+    }
+    for pages in [1,4,64,378,512,775,858] {
+        let mut old=arena();
+        let(source,_)=old.handle_shared_memory_request(owned_request(pages*PAGE_SIZE,0,0)).unwrap();
+        let before=machine(|m|(m.user_map_calls,m.unmap_calls,m.zero_calls));
+        let(target,_)=old.handle_shared_memory_request(owned_request(pages*PAGE_SIZE,0,0)).unwrap();
+        old.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:1,arg1:target,arg2:pages*PAGE_SIZE,arg3:1}).unwrap();
+        let baseline=machine(|m|(m.user_map_calls-before.0,m.unmap_calls-before.1,m.zero_calls-before.2));
+        assert_eq!(baseline,(2*pages,pages,1));
+        release(&mut old,1,target,pages).unwrap();release(&mut old,1,source,pages).unwrap();assert_empty();
+        let mut new=arena();
+        let(source,_)=new.handle_shared_memory_request(owned_request(pages*PAGE_SIZE,0,0)).unwrap();
+        let before=machine(|m|(m.user_map_calls,m.unmap_calls,m.zero_calls));
+        let(target,_)=new.handle_shared_memory_request(owned_request(pages*PAGE_SIZE,source,pages*PAGE_SIZE-17)).unwrap();
+        assert_eq!(machine(|m|(m.user_map_calls-before.0,m.unmap_calls-before.1,m.zero_calls-before.2)),(pages,0,0));
+        assert!(new.processes.vm_space(1).unwrap().readonly_backed_range(target,target+pages*PAGE_SIZE));
+        release(&mut new,1,target,pages).unwrap();release(&mut new,1,source,pages).unwrap();assert_empty();
+    }
 }
 
 fn private_source(alpha: &mut Alpha) -> usize {
@@ -445,6 +909,75 @@ fn private_source(alpha: &mut Alpha) -> usize {
         .register_physical_allocation(2, source, slot, page, 1)
         .unwrap();
     source
+}
+
+#[test]
+fn shared_pool_mapping_work_preserves_leaf_identity_zeroing_and_references() {
+    for pages in [1,64,513,1024] {
+        let mut alpha=alpha();
+        for pid in 1..=2 {
+            let e=alpha.processes.find_entry_by_pid(pid).unwrap();
+            alpha.processes.install_process(pid,e.reaper_pid,e.root_slot,e.root_node,e.pcb,
+                e.address_space,e.os_port,e.os_port_identifier,e.affinity,e.next_frame_slot,
+                e.user_heap_next_va,0x1000000).unwrap();
+        }
+        let (source,peer)=create(&mut alpha,pages).unwrap();
+        let allocation=alpha.processes.find_active_physical_allocation_reference(1,source,pages).unwrap();
+        assert_eq!(alpha.processes.physical_reference_count(allocation),2);
+        for (pid,base) in [(1,source),(2,peer)] {
+            let vm=alpha.processes.vm_space_mut(pid).unwrap();
+            for i in 0..pages {
+                assert_eq!(vm.find_frame(base+i*PAGE_SIZE),Some(pool_frame(allocation.base_page+i)));
+                assert_eq!(vm.permissions(base+i*PAGE_SIZE),7);
+            }
+        }
+        machine(|m| {
+            println!("SHARED-POOL-WORK pages={pages} cap-copies={} chunks={} maps={}",m.cap_copy_calls,m.chunk_calls,m.user_map_calls);
+            assert_eq!((m.cap_copy_calls,m.chunk_calls,m.frames.len()),(0,0,0));
+            assert_eq!(m.user_map_calls,2*pages);
+            assert_eq!(m.zero_calls,1);
+            assert!((allocation.base_page..allocation.base_page+pages).all(|p|m.zeroed.contains(&p)));
+        });
+        release(&mut alpha,1,source,pages).unwrap();
+        assert_eq!(alpha.processes.physical_reference_count(allocation),1);
+        release(&mut alpha,2,peer,pages).unwrap();
+        assert_empty();
+    }
+    for writable in [false,true] {
+        let mut alpha=alpha();let source=private_source(&mut alpha);
+        let before=machine(|m|(m.cap_copy_calls,m.chunk_calls,m.remove_calls));
+        alpha.handle_process_page_view_request(view_request(source,0x80000000),writable).unwrap();
+        machine(|m|assert_eq!((m.cap_copy_calls-before.0,m.chunk_calls-before.1),(0,0)));
+        release(&mut alpha,1,0x80000000,1).unwrap();
+        machine(|m|assert_eq!(m.remove_calls-before.2,0));
+    }
+}
+
+#[test]
+fn pool_views_reuse_slots_without_caps_and_retain_loans_until_unmap_ack() {
+    let mut alpha=alpha();let source=private_source(&mut alpha);let local=0x80000000;
+    let allocation=alpha.processes.find_active_physical_allocation_reference(2,source,1).unwrap();
+    let baseline=machine(|m|(m.cap_copy_calls,m.chunk_calls,m.remove_calls,m.frames.len()));
+    for i in 0..128 {
+        let writable=i%2==0;
+        alpha.handle_process_page_view_request(view_request(source,local),writable).unwrap();
+        let r=alpha.processes.shared_memory_reservation(1,local,1).unwrap();
+        assert!(!r.owns_frame_caps());
+        assert_eq!(alpha.processes.physical_reference_count(allocation),2);
+        assert_eq!(alpha.processes.vm_space_mut(1).unwrap().permissions(local),if writable {3}else{1});
+        if i==64 {
+            machine(|m|m.fail_unmap=true);
+            assert!(release(&mut alpha,1,local,1).is_err());
+            assert_eq!(alpha.processes.physical_reference_count(allocation),2);
+            assert!(alpha.handle_process_page_view_request(view_request(source,local),writable).is_err());
+            assert_eq!(alpha.processes.physical_reference_count(allocation),2);
+            machine(|m|{assert_eq!(m.freed,0);m.fail_unmap=false;});
+        }
+        release(&mut alpha,1,local,1).unwrap();
+        assert_eq!(alpha.processes.physical_reference_count(allocation),1);
+    }
+    machine(|m|assert_eq!((m.cap_copy_calls,m.chunk_calls,m.remove_calls,m.frames.len()),baseline));
+    assert_eq!(alpha.processes.find_entry_by_pid(1).unwrap().next_frame_slot,1);
 }
 
 fn view_request(source: usize, local: usize) -> OsRequestEvent {
@@ -540,8 +1073,8 @@ fn read_view_is_readonly_and_keeps_backing_after_source_root_retirement() {
         alpha.processes.vm_space_mut(1).unwrap().permissions(local),
         1
     );
-    // Delete the source leaf and child capability. The independent Alpha pool
-    // Frame and caller copy remain valid; final view release owns the RAM.
+    // Delete the source leaf and child capability. The Alpha pool Frame and
+    // view's physical reference remain valid; final release owns the RAM.
     arch::address_space::unmap(
         source_entry.address_space,
         process_frame_descriptor(source_entry.root_node, allocation.start_slot),
@@ -608,7 +1141,7 @@ fn read_view_checks_source_authority_permissions_and_destination_before_publishi
 
 #[test]
 fn read_view_installation_failures_retain_source_ownership_and_recycle_clean_reservations() {
-    for failed_operation in 1..=5 {
+    for failed_operation in 1..=3 {
         let mut alpha = alpha();
         let source = private_source(&mut alpha);
         let local = 0x80000000;
@@ -657,7 +1190,7 @@ fn ambiguous_view_rollback_returns_fatal_and_preserves_ownership_until_retry() {
     let local = 0x80000000;
     machine(|m| {
         m.operation = 0;
-        m.fail_at = Some(5);
+        m.fail_at = Some(3);
         m.fail_unmap = true;
     });
     assert_eq!(
@@ -690,7 +1223,7 @@ fn ambiguous_view_rollback_returns_fatal_and_preserves_ownership_until_retry() {
 fn partially_completed_owner_retirement_keeps_peer_ram_until_final_release() {
     for fail_during_unmap in [true, false] {
         let mut alpha = alpha();
-        let (owner, peer) = create(&mut alpha, 3).unwrap();
+        let (owner, peer) = legacy_create(&mut alpha, 3).unwrap();
         let allocation = alpha
             .processes
             .find_active_physical_allocation_reference(1, owner, 3)
@@ -970,7 +1503,7 @@ fn shared_release_reuses_vm_and_preserves_every_failed_unmap_prefix() {
             assert!(alpha.processes.shared_memory_reservation(1, a, 4).is_some());
             machine(|m| {
                 assert_eq!(m.freed, 0);
-                assert_eq!(m.frames.len(), 8);
+                assert_eq!(m.frames.len(), 0);
                 m.fail_unmap_at = None;
             });
             alpha.processes.take_mutable_vm_lookups();
@@ -989,7 +1522,7 @@ fn shared_release_reuses_vm_and_preserves_every_failed_unmap_prefix() {
 #[test]
 fn ram_child_copy_alias_must_retire_before_its_cap_and_failure_is_retryable() {
     let mut alpha = alpha();
-    let (owner, peer) = create(&mut alpha, 1).unwrap();
+    let (owner, peer) = legacy_create(&mut alpha, 1).unwrap();
     let reservation = alpha
         .processes
         .shared_memory_reservation(1, owner, 1)
@@ -1096,7 +1629,7 @@ fn extent_free_failure_preserves_ownership_and_retry_skips_confirmed_unmaps() {
     for owns_caps in [false, true] {
         let mut alpha = alpha();
         let source = if owns_caps {
-            let (source, peer) = create(&mut alpha, 3).unwrap();
+            let (source, peer) = legacy_create(&mut alpha, 3).unwrap();
             release(&mut alpha, 2, peer, 3).unwrap();
             source
         } else {
@@ -1191,9 +1724,9 @@ fn canonical_shared_owner_releases_only_pages_without_other_references() {
 fn canonical_owner_cleanup_failures_retain_every_page_until_caps_are_removed() {
     for fail_unmap in [false, true] {
         let mut alpha = alpha();
-        // Two-sided SHM retains actual child caps; keep exercising their
-        // removal failures independently of the capless owned-buffer path.
-        let (source, original_peer) = create(&mut alpha, 3).unwrap();
+        // Mapping-share retains actual child caps; keep exercising their
+        // removal failures independently of pool-backed creation.
+        let (source, original_peer) = legacy_create(&mut alpha, 3).unwrap();
         release(&mut alpha, 2, original_peer, 3).unwrap();
         let r = alpha.processes.shared_memory_reservation(1, source, 3).unwrap();
         alpha.processes.canonicalize_shared_memory(1, r).unwrap();
@@ -1314,6 +1847,140 @@ fn share(
 }
 
 #[test]
+fn supervised_share_bulk_frame_index_work_and_identity() {
+    const DEST: usize = 0x1_0000_0000;
+    let mut counts = Vec::new();
+    for pages in [31, 32, 64, 65, 96, 128, 1024] {
+        let mut alpha = alpha();
+        // The default fixture has only a 2MiB virtual heap. Enlarge this
+        // test's empty contexts before constructing the 4MiB source extent.
+        for pid in 1..=2 {
+            let e = alpha.processes.find_entry_by_pid(pid).unwrap();
+            alpha.processes.install_process(pid, 0, e.root_slot, e.root_node, e.pcb,
+                e.address_space, e.os_port, e.os_port_identifier, e.affinity,
+                e.next_frame_slot, e.user_heap_next_va, 0x1000000).unwrap();
+        }
+        let (source, original_peer) = create(&mut alpha, pages).unwrap();
+        let e = alpha.processes.find_entry_by_pid(2).unwrap();
+        alpha.processes.install_process(2, 1, e.root_slot, e.root_node, e.pcb,
+            e.address_space, e.os_port, e.os_port_identifier, e.affinity,
+            e.next_frame_slot, e.user_heap_next_va, e.user_heap_limit_va).unwrap();
+        let before = machine(|m| (m.next_page, m.zero_calls, m.cap_copy_calls, m.maps.len()));
+        vm_space::VmSpace::take_frame_scalar_insertions();
+        PROTECT_ALLOCATIONS.with(|c| c.set(Some(0)));
+        let result = alpha.handle_mapping_share_request(OsRequestEvent {
+            identifier: 1, arg0: 2, arg1: source, arg2: pages * PAGE_SIZE, arg3: DEST,
+        });
+        let allocations = PROTECT_ALLOCATIONS.with(|c| c.replace(None).unwrap());
+        let scalars = vm_space::VmSpace::take_frame_scalar_insertions();
+        assert_eq!(result.unwrap(), (source, DEST));
+        let source_frames: Vec<_> = (0..pages).map(|page| alpha.processes.vm_space_mut(1).unwrap().find_frame(source + page * PAGE_SIZE).unwrap()).collect();
+        let vm = alpha.processes.vm_space_mut(2).unwrap();
+        assert_eq!(vm.backed_pages(DEST, DEST + pages * PAGE_SIZE).len(), pages);
+        for (page, &frame) in source_frames.iter().enumerate() {
+            let va = DEST + page * PAGE_SIZE;
+            assert_eq!(vm.find_frame(va), Some(frame));
+            assert_eq!(vm.permissions(va), 7);
+        }
+        machine(|m| assert_eq!((m.next_page, m.zero_calls, m.cap_copy_calls, m.maps.len()), (before.0, before.1, before.2, before.3 + pages)));
+        counts.push((pages, scalars, allocations));
+        release(&mut alpha, 2, DEST, pages).unwrap();
+        release(&mut alpha, 1, source, pages).unwrap();
+        release(&mut alpha, 2, original_peer, pages).unwrap();
+        assert_empty();
+    }
+    println!("SHARE-FRAME-WORDS (pages,scalar-insertions,handler-allocations)={counts:?}");
+    assert_eq!(counts.iter().map(|row| row.1).collect::<Vec<_>>(), [31, 0, 0, 1, 0, 0, 0]);
+    for (row, before) in counts.iter().zip([18, 20, 27, 28, 43, 54, 423]) {
+        if row.0 < 32 { assert!(row.2 <= before); } else { assert!(row.2 < before); }
+    }
+}
+
+#[test]
+fn supervised_share_bulk_failed_word_boundaries_remove_empty_metadata_and_aliases() {
+    const PAGES: usize = 128;
+    const DEST: usize = 0x1_0000_0000;
+    for failed_page in [0, 63, 64, 127] {
+        let mut alpha = alpha();
+        let (source, original_peer) = create(&mut alpha, PAGES).unwrap();
+        let e = alpha.processes.find_entry_by_pid(2).unwrap();
+        alpha.processes.install_process(2, 1, e.root_slot, e.root_node, e.pcb,
+            e.address_space, e.os_port, e.os_port_identifier, e.affinity,
+            e.next_frame_slot, e.user_heap_next_va, e.user_heap_limit_va).unwrap();
+        let storage_before = alpha.processes.vm_space_mut(2).unwrap().frame_storage_counts();
+        // No chunk/cap-copy operation precedes strict MAP. The failure follows
+        // installation of its PTE, including the packed-word boundary pages.
+        machine(|m| m.fail_at = Some(m.operation + failed_page + 1));
+        assert!(alpha.handle_mapping_share_request(OsRequestEvent {
+            identifier: 1, arg0: 2, arg1: source, arg2: PAGES * PAGE_SIZE, arg3: DEST,
+        }).is_err());
+        machine(|m| { m.fail_at = None; assert_eq!((m.frames.len(), m.maps.len(), m.freed), (0, 2 * PAGES, 0)); });
+        let vm = alpha.processes.vm_space_mut(2).unwrap();
+        assert_eq!(vm.frame_storage_counts(), storage_before);
+        assert!(vm.backed_pages(DEST, DEST + PAGES * PAGE_SIZE).is_empty());
+        for page in 0..PAGES { assert!(!vm.frame_may_be_present(DEST + page * PAGE_SIZE)); }
+        release(&mut alpha, 1, source, PAGES).unwrap();
+        release(&mut alpha, 2, original_peer, PAGES).unwrap();
+        assert_empty();
+    }
+}
+
+#[test]
+fn pool_share_outlives_legacy_source_caps_and_keeps_failed_unmap_loan_until_ack() {
+    const DEST: usize = 0x1_0000_0000;
+    for pages in [1, 64, 513, 1024] {
+        for fixed in [false, true] {
+            let mut alpha = alpha();
+            for pid in 1..=2 {
+                let e = alpha.processes.find_entry_by_pid(pid).unwrap();
+                alpha.processes.install_process(pid, if pid == 2 { 1 } else { 0 },
+                    e.root_slot, e.root_node, e.pcb, e.address_space, e.os_port,
+                    e.os_port_identifier, e.affinity, e.next_frame_slot,
+                    e.user_heap_next_va, 0x1000000).unwrap();
+            }
+            let (source, old_peer) = legacy_create(&mut alpha, pages).unwrap();
+            let allocation = alpha.processes.find_active_physical_allocation_reference(1, source, pages).unwrap();
+            assert_eq!(alpha.processes.physical_reference_count(allocation), 2);
+            let before = machine(|m| (m.next_page, m.zero_calls, m.cap_copy_calls, m.chunk_calls));
+            let (_, loan) = alpha.handle_mapping_share_request(OsRequestEvent {
+                identifier: 1, arg0: 2, arg1: source, arg2: pages * PAGE_SIZE,
+                arg3: if fixed { DEST } else { 0 },
+            }).unwrap();
+            let reservation = alpha.processes.shared_memory_reservation(2, loan, pages).unwrap();
+            assert!(!reservation.owns_frame_caps());
+            assert_eq!(alpha.processes.physical_reference_count(allocation), 3);
+            machine(|m| assert_eq!((m.next_page, m.zero_calls, m.cap_copy_calls, m.chunk_calls), before));
+            // Destroy both cap-backed owners. Only the pool loan pins RAM now.
+            release(&mut alpha, 1, source, pages).unwrap();
+            release(&mut alpha, 2, old_peer, pages).unwrap();
+            assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+            machine(|m| {
+                assert!(m.frames.is_empty());
+                assert_eq!(m.freed, 0);
+                let entry = alpha.processes.memory_entry(2).unwrap();
+                for page in 0..pages {
+                    assert_eq!(m.maps[&(entry.address_space, loan + page * PAGE_SIZE)], pool_frame(allocation.base_page + page));
+                }
+                m.fail_unmap = true;
+            });
+            assert!(release(&mut alpha, 2, loan, pages).is_err());
+            assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+            assert!(alpha.processes.shared_memory_reservation(2, loan, pages).is_some());
+            machine(|m| {
+                assert_eq!(m.freed, 0);
+                assert_eq!(m.cap_copy_calls, before.2);
+                m.fail_unmap = false;
+            });
+            let removals = machine(|m| m.remove_calls);
+            release(&mut alpha, 2, loan, pages).unwrap();
+            assert_eq!(alpha.processes.physical_reference_count(allocation), 0);
+            machine(|m| { assert_eq!(m.remove_calls, removals); assert_eq!(m.freed, 1); });
+            assert_empty();
+        }
+    }
+}
+
+#[test]
 fn supervised_share_checks_destination_once_and_keeps_collisions_untouched() {
     const PAGES: usize = 64;
     const DEST: usize = 0x1_0000_0000;
@@ -1384,7 +2051,7 @@ fn sharing_owned_ram_adds_a_reference_without_allocation_or_zeroing() {
             assert_eq!(m.next_page, next_page);
             assert_eq!(m.zero_calls, zero_calls);
             assert_eq!(m.live.len(), 1);
-            assert_eq!(m.frames.len(), 9);
+            assert_eq!(m.frames.len(), 0);
         });
         if source_first {
             release(&mut alpha, 1, source, 3).unwrap();
@@ -1437,15 +2104,15 @@ fn vm_restore(alpha: &mut Alpha, pid: usize, va: usize, frame: usize) {
 
 #[test]
 fn every_share_install_failure_preserves_the_source_and_original_peer() {
-    for fail in 1..=7 {
-        // ensure chunks, three copies, three strict maps.
+    for fail in 1..=3 {
+        // Three strict maps; no child capability preparation remains.
         let mut alpha = alpha();
         let (source, peer) = create(&mut alpha, 3).unwrap();
         machine(|m| m.fail_at = Some(m.operation + fail));
         assert!(share(&mut alpha, 1, 2, source, 3 * PAGE_SIZE).is_err());
         machine(|m| {
             m.fail_at = None;
-            assert_eq!(m.frames.len(), 6);
+            assert_eq!(m.frames.len(), 0);
             assert_eq!(m.maps.len(), 6);
             assert_eq!(m.live.len(), 1);
             assert_eq!(m.freed, 0);
@@ -1457,7 +2124,7 @@ fn every_share_install_failure_preserves_the_source_and_original_peer() {
 }
 
 #[test]
-fn both_release_orders_remove_caps_before_free_and_reuse_reservations() {
+fn both_release_orders_unmap_before_free_and_reuse_reservations() {
     for first in [1, 2] {
         let mut alpha = alpha();
         for _ in 0..1000 {
@@ -1467,7 +2134,7 @@ fn both_release_orders_remove_caps_before_free_and_reuse_reservations() {
             release(&mut alpha, first, addresses[first - 1], 3).unwrap();
             machine(|m| {
                 assert_eq!(m.live.len(), 1);
-                assert_eq!(m.frames.len(), 3);
+                assert_eq!(m.frames.len(), 0);
             });
             let last = 3 - first;
             release(&mut alpha, last, addresses[last - 1], 3).unwrap();
@@ -1579,7 +2246,7 @@ fn pool_copy_alias_survives_both_guest_aliases_and_recycled_physical_backing() {
         release(&mut alpha, 1, a, 1).unwrap();
         machine(|m| {
             assert_eq!(m.maps.len(), 2);
-            assert_eq!(m.frames.len(), 1);
+            assert_eq!(m.frames.len(), 0);
             assert_eq!(m.maps[&(0, alias)], fa);
         });
         release(&mut alpha, 2, b, 1).unwrap();
@@ -1617,7 +2284,7 @@ fn failed_guest_leaf_unmap_keeps_shared_cap_and_backing_live() {
     assert_eq!(alpha.processes.vm_space_mut(1).unwrap().permissions(a), 0);
     machine(|m| {
         assert_eq!(m.maps.len(), 3);
-        assert_eq!(m.frames.len(), 2);
+        assert_eq!(m.frames.len(), 0);
         assert_eq!(m.live.len(), 1);
         m.fail_unmap = false;
     });
@@ -1728,7 +2395,7 @@ fn overlap_failure_does_not_unmap_an_existing_fixed_mapping() {
 fn cleanup_failure_does_not_free_ram_or_recycle_still_owned_slots() {
     for fail_unmap in [true, false] {
         let mut alpha = alpha();
-        let (a, b) = create(&mut alpha, 3).unwrap();
+        let (a, b) = legacy_create(&mut alpha, 3).unwrap();
         machine(|m| {
             m.fail_unmap = fail_unmap;
             m.fail_remove = !fail_unmap;
@@ -1747,5 +2414,43 @@ fn cleanup_failure_does_not_free_ram_or_recycle_still_owned_slots() {
         let (next, _) = create(&mut alpha, 3).unwrap();
         assert_ne!(next, a);
         release(&mut alpha, 1, a, 3).unwrap();
+    }
+}
+
+fn deferred_guest() -> (Alpha,usize,usize,usize) {
+    let mut a=large_arena();let(input,_)=a.handle_shared_memory_request(owned_request(64*PAGE_SIZE,0,0)).unwrap();
+    let(source,_)=a.handle_memory_source_request(owned_request(64*PAGE_SIZE,input,64*PAGE_SIZE)).unwrap();
+    let e=a.processes.find_entry_by_pid(2).unwrap();
+    a.processes.install_process(2,1,e.root_slot,e.root_node,e.pcb,e.address_space,e.os_port,
+        e.os_port_identifier,e.affinity,e.next_frame_slot,e.user_heap_next_va,e.user_heap_limit_va).unwrap();
+    a.processes.seal_capabilities(2).unwrap();let base=0x1000000;
+    a.map_private_snapshot_with_prefix(1,2,source,base,64*PAGE_SIZE,1,None,Some(16*PAGE_SIZE)).unwrap();
+    (a,input,source,base)
+}
+#[test]
+fn deferred_protection_maps_final_rights_once_and_prot_none_never_unmaps_absent_leaf() {
+    for rights in [0,1,5] {
+        let(mut a,_,_,base)=deferred_guest();let va=base+32*PAGE_SIZE;
+        let before=machine(|m|(m.user_map_calls,m.unmap_calls));
+        a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:2,arg1:va,arg2:3*PAGE_SIZE,arg3:rights}).unwrap();
+        assert_eq!(machine(|m|m.unmap_calls),before.1);
+        assert_eq!(machine(|m|m.user_map_calls),before.0+if rights==0{0}else{3});
+        for i in 0..3 {let vm=a.processes.vm_space(2).unwrap();assert_eq!(vm.permissions(va+i*PAGE_SIZE),rights);assert!(!vm.mapping_deferred(va+i*PAGE_SIZE));}
+        if rights==0 {
+            a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:2,arg1:va,arg2:3*PAGE_SIZE,arg3:1}).unwrap();
+            assert_eq!(machine(|m|m.user_map_calls),before.0+3);
+        }
+    }
+}
+#[test]
+fn deferred_protection_failure_restores_logical_rights_and_original_absence() {
+    for failure in 1..=4 {
+        let(mut a,_,_,base)=deferred_guest();let va=base+32*PAGE_SIZE;
+        machine(|m|m.fail_at=Some(m.operation+failure));
+        assert!(a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:2,arg1:va,arg2:3*PAGE_SIZE,arg3:5}).is_err());
+        machine(|m|m.fail_at=None);
+        let vm=a.processes.vm_space(2).unwrap();
+        for i in 0..3 {let at=va+i*PAGE_SIZE;assert_eq!(vm.permissions(at),1);assert!(vm.mapping_deferred(at));assert!(!vm.frame_may_be_present(at));}
+        a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:2,arg1:va,arg2:3*PAGE_SIZE,arg3:5}).unwrap();
     }
 }

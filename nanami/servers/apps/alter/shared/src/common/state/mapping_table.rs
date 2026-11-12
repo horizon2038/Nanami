@@ -14,6 +14,8 @@ use core::{
 static NEXT_GENERATION: AtomicUsize = AtomicUsize::new(1);
 #[cfg(test)]
 static ENTRY_MOVES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static ACCESS_ENTRY_VISITS: AtomicUsize = AtomicUsize::new(0);
 fn next_generation() -> Word {
     NEXT_GENERATION
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
@@ -25,12 +27,25 @@ fn next_generation() -> Word {
 const MASK_BITS: usize = Word::BITS as usize;
 const MASK_WORDS: usize = ALTER_PROCESS_MAPPING_MAX.div_ceil(MASK_BITS);
 
+#[derive(Clone, Copy)]
+struct AccessProof { generation: Word, base: Word, end: Word }
+impl AccessProof {
+    const EMPTY: Self = Self { generation: 0, base: 0, end: 0 };
+}
+
 struct Storage {
     len: usize,
     generation: Cell<Word>,
+    // Placement hint shared by CLONE_VM peers. Retain reservation history
+    // after unmap: Alpha may still have a 4K table at an otherwise empty VA.
+    reservation_cursor: Cell<Word>,
     // Exact entry positions lacking each Linux R/W/X permission. Shared with
     // CLONE_VM aliases and maintained with the active prefix, never guest state.
     denied: [[Word; MASK_WORDS]; 3],
+    // One supervisor-only interval proven free of denied VMAs per permission.
+    // Shared aliases see the same never-reused mutation generation. This
+    // skips only VMA preflight: backing/lease/Alpha checks still run normally.
+    access_proofs: [Cell<AccessProof>; 3],
     // Only 0..len is initialized. Capacity is never exposed through Deref.
     entries: [MaybeUninit<ProcessMapping>; ALTER_PROCESS_MAPPING_MAX],
 }
@@ -42,6 +57,20 @@ pub struct MappingTable {
 
 impl MappingTable {
     pub const EMPTY: Self = Self { address: 0 };
+
+    pub fn reservation_cursor(&self) -> Word {
+        if self.address == 0 { return 0; }
+        unsafe { (*(self.address as *const Storage)).reservation_cursor.get() }
+    }
+
+    /// Only a hint for finding a new hole, never evidence that it is free.
+    /// Call after successful VMA publication; do not allocate just for a hint.
+    pub fn advance_reservation_cursor(&self, end: Word) {
+        if self.address != 0 {
+            let cursor = unsafe { &(*(self.address as *const Storage)).reservation_cursor };
+            cursor.set(cursor.get().max(end));
+        }
+    }
 
     pub(super) fn access_allowed(&self, base: Word, end: Word, permission: Word) -> bool {
         if permission & !7 != 0 {
@@ -55,6 +84,20 @@ impl MappingTable {
             return true;
         }
         let storage = unsafe { &*(self.address as *const Storage) };
+        let generation = storage.generation.get();
+        if base < end && generation != 0 && (0..3).all(|bit| {
+            if permission & (1 << bit) == 0 { return true; }
+            let proof = storage.access_proofs[bit].get();
+            proof.generation == generation && proof.base <= base && end <= proof.end
+        }) {
+            #[cfg(not(test))]
+            Self::record_access(true, 0);
+            return true;
+        }
+        let mut allowed_base = 0;
+        let mut allowed_end = Word::MAX;
+        #[cfg(not(test))]
+        let mut inspected = 0;
         for word in 0..storage.len.div_ceil(MASK_BITS) {
             let mut candidates = 0;
             for bit in 0..3 {
@@ -67,12 +110,47 @@ impl MappingTable {
                 candidates &= candidates - 1;
                 // Denied bits refer only to entries in the initialized prefix.
                 let mapping = unsafe { storage.entries[index].assume_init() };
-                if mapping.base < end && mapping.base.saturating_add(mapping.size) > base {
+                #[cfg(test)]
+                ACCESS_ENTRY_VISITS.fetch_add(1, Ordering::Relaxed);
+                #[cfg(not(test))]
+                if option_env!("NANAMI_ACCESS_CACHE_DIAG") == Some("1") { inspected += 1; }
+                let stop = mapping.base.saturating_add(mapping.size);
+                if mapping.base < end && stop > base {
+                    #[cfg(not(test))]
+                    Self::record_access(false, inspected);
                     return false;
                 }
+                if stop <= base { allowed_base = allowed_base.max(stop); }
+                if mapping.base >= end { allowed_end = allowed_end.min(mapping.base); }
             }
         }
+        if base < end && generation != 0 {
+            let proof = AccessProof { generation, base: allowed_base, end: allowed_end };
+            for bit in 0..3 {
+                if permission & (1 << bit) != 0 { storage.access_proofs[bit].set(proof); }
+            }
+        }
+        #[cfg(not(test))]
+        Self::record_access(false, inspected);
         true
+    }
+
+    #[cfg(test)]
+    pub fn take_access_entry_visits() -> usize { ACCESS_ENTRY_VISITS.swap(0, Ordering::Relaxed) }
+
+    #[cfg(not(test))]
+    fn record_access(hit: bool, inspected: usize) {
+        if option_env!("NANAMI_ACCESS_CACHE_DIAG") == Some("1") {
+            static CALLS: AtomicUsize = AtomicUsize::new(0);
+            static HITS: AtomicUsize = AtomicUsize::new(0);
+            static INSPECTED: AtomicUsize = AtomicUsize::new(0);
+            let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+            let hits = HITS.fetch_add(usize::from(hit), Ordering::Relaxed) + usize::from(hit);
+            let visits = INSPECTED.fetch_add(inspected, Ordering::Relaxed) + inspected;
+            if calls >= 1024 && calls.is_power_of_two() {
+                nanami_runtime::println!("[vma.access] calls={} hits={} inspected={}", calls, hits, visits);
+            }
+        }
     }
 
     pub fn same_storage(self, other: Self) -> bool {
@@ -108,7 +186,10 @@ impl MappingTable {
             unsafe {
                 core::ptr::addr_of_mut!((*storage).len).write(0);
                 core::ptr::addr_of_mut!((*storage).generation).write(Cell::new(next_generation()));
+                core::ptr::addr_of_mut!((*storage).reservation_cursor).write(Cell::new(0));
                 core::ptr::addr_of_mut!((*storage).denied).write([[0; MASK_WORDS]; 3]);
+                core::ptr::addr_of_mut!((*storage).access_proofs)
+                    .write([const { Cell::new(AccessProof::EMPTY) }; 3]);
             }
             self.address = storage as Word;
         }
@@ -150,6 +231,7 @@ impl MappingTable {
             );
         }
         storage.len = entries.len();
+        storage.reservation_cursor.set(source.reservation_cursor());
         for (index, mapping) in entries.iter().enumerate() {
             for bit in 0..3 {
                 if mapping.prot & (1 << bit) == 0 {
@@ -245,6 +327,8 @@ impl MappingTable {
                 let storage = &mut *(self.address as *mut Storage);
                 storage.len = 0;
                 storage.denied = [[0; MASK_WORDS]; 3];
+                // Clearing logical VMAs need not retire Alpha's leaf tables.
+                // Only releasing this Storage discards its placement history.
             }
             self.invalidate_views();
         }

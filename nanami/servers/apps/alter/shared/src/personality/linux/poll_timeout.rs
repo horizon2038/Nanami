@@ -74,6 +74,9 @@ pub(super) fn temporary_signal_mask(
 }
 
 pub(super) fn poll_deadline(now: Word, hz: Word, nanos: u128) -> Word {
+    if hz == 1_000_000_000 {
+        return now.saturating_add(nanos.min(Word::MAX as u128) as Word);
+    }
     // Split seconds/fraction to avoid overflowing u128 for very long waits.
     let ticks = (nanos / 1_000_000_000 * hz as u128)
         .saturating_add(((nanos % 1_000_000_000) * hz as u128).div_ceil(1_000_000_000));
@@ -97,10 +100,7 @@ pub(super) fn write_poll_timeout(
     let (seconds, nanos) = if ticks == 0 {
         (0, 0)
     } else {
-        (
-            ticks / hz,
-            ((ticks % hz) as u128 * 1_000_000_000 / hz as u128) as Word,
-        )
+        split_ticks(ticks, hz)
     };
     unsafe {
         write_u64(runtime.posix_shm, seconds);

@@ -85,6 +85,7 @@ pub struct ManagedProcess {
     pub tgid: Word,
     pub vm_group: Word,
     pub vm_private_shared: bool,
+    pub vm_writable_private_shared: bool,
     pub fs_group: Word,
     pub umask: Word,
     pub parent_pid: Word,
@@ -155,6 +156,7 @@ impl ManagedProcess {
         tgid: 0,
         vm_group: 0,
         vm_private_shared: false,
+        vm_writable_private_shared: false,
         fs_group: 0,
         umask: 0o022,
         parent_pid: 0,
@@ -261,6 +263,33 @@ fn parent(r: &mut Runtime) {
     p.argument_vector=0x7710; p.argument_count=3;
     p.terminal_canonical=false; p.terminal_echo=false; p.terminal_termios=Some([0x72;36]);
     p.program_break=0x9000; p.mapped_break=0xa000; p.vm_private_shared=true;
+    p.vm_writable_private_shared=true;
+}
+#[test]
+fn shared_vm_inherits_both_readonly_and_writable_private_sharing_state() {
+    for writable in [false, true] {
+        let mut r = Runtime::new(); parent(&mut r);
+        r.managed_process_mut(1).unwrap().vm_writable_private_shared = writable;
+        assert!(r.install_managed_child_task(2, 1, 9, 12, 7, b"child", false));
+        assert!(r.share_task_resources(1, 2, false, false, false));
+        let child = r.managed_process(2).unwrap();
+        assert!(child.vm_private_shared);
+        assert_eq!(child.vm_writable_private_shared, writable);
+    }
+}
+#[test]
+fn exec_drops_only_the_child_borrowed_mapping_handle_including_exited_peers() {
+    for exited in [false, true] {
+        let mut r = Runtime::new(); parent(&mut r);
+        assert!(r.install_managed_child_task(2, 1, 9, 12, 7, b"child", false));
+        assert!(r.share_task_resources(1, 2, false, true, false));
+        let storage = r.managed_process(1).unwrap().mappings.address;
+        r.managed_process_mut(1).unwrap().exited = exited;
+        assert!(r.detach_exec_mappings(2));
+        assert_eq!(r.managed_process(1).unwrap().mappings.address, storage);
+        let child = r.managed_process(2).unwrap();
+        assert_eq!((child.mappings.address, child.vm_group, child.fs_group), (0, 2, 2));
+    }
 }
 #[test]
 fn clone_files_installer_avoids_temporary_allocation_and_keeps_parent_table_alive() {
@@ -280,6 +309,7 @@ fn clone_files_installer_avoids_temporary_allocation_and_keeps_parent_table_aliv
             assert_eq!(p.files[9].posix_fd,123); assert_eq!(p.tgid,1);
             assert_eq!((p.program_break,p.mapped_break),(0x9000,0xa000));
             assert!(p.vm_private_shared);
+            assert!(p.vm_writable_private_shared);
             r.remove(2);
             assert_eq!(r.managed_process(1).unwrap().files[9].posix_fd,123);
         }

@@ -1,5 +1,2108 @@
 # Nanami / Alter optimization cycles
 
+## snapshot-source-word-view
+
+- Borrow source Frame words and sharing bits only for one immutable VM metadata walk. Resolve the dense index once per word; retain exact sparse/unaligned behavior and newest-duplicate selection. Single-reference pages skip sharing lookups. Each page still receives its live physical reference count, pool Frame lookup and exact slot/descriptor comparison. No cross-request cache, heap/payload buffer or persistent VM field is added.
+- Full release and CI-style Debug each pass2599/0/20, focused Debug462/0/6. A1024-page fixture replaces2048 Frame/sharing point queries with16 word selections, allocates nothing and performs0/16 sharing word reads for unique/shared pages. Production Alpha still performs1024 per-page pool checks and observes a changed Frame on a newly constructed view. Cover sparse/dense holes, descriptor0/full-width values, unaligned/high keys, mutations, COW, errors and duplicate fallback. Freeze391 sources before KVM.
+- Alpha80381b8f/1683768B and Booter5a5c1673/6929848B. Only Alpha and the ESP init payload change. Entire Core CPIO and both RootFS regions, all other product ELFs, Kernel/ABI/FPU/package versions/submodules/targets/linker/compiler profiles remain unchanged.
+- KVM owners all actually terminate0: strict73_a41ey/2025 SMP4 with4 markers and16 real guest huge leaves, normal Filesewi_vboj/48011, parent0siomj49/53752, diagnostic308aqvqj/16355. Files/control SMP1/CPU0 use images on the same tmpfs; all VMs use host THP. Normal ping1.315784664s/ACK1.214865778s and parent1.315940852s/ACK1.215085824s do not establish whole-launch improvement. Current+200ms root4/status0B, +500/+2000ms723B and keyboard/usr/local7 are viewed, as are parent+200ms/keyboard. Exact first paint/input readiness and the100ms goal remain unproven.
+- Pair all318 intact source-view/span markers with0 damaged/unpaired records:31061 pages,792 Frame-word selections,749 dense words and441 separate sparse Frame queries across setup and launch. Within observer-ready through first ping,52 successful contiguous validations cover6669 pages with155 word selections,154 dense words and4 sparse queries; targets42/43/44 include background work. The prior per-page algorithm's dense-index queries follow the page count; the new algorithm's count follows the word selections. These are metadata operations, not saved CPU time or a startup percentage; exclude diagnostic timing.
+- Retire ready-snapshot-word-frames media/logs/PNG123 files before copying new artifacts. Keep snapshot-source-word-view/desktop-loader-cache only:4images/26snapshots/8PNG,11 unchanged snapshots hardlinked. Remove the1665110016 allocated-byte native cache after tests, and product/helper/package/VM scratch after all actual owners exit. Keep final complete release/Debug logs; replace superseded passing initial/subset logs with compact receipts. No cumulative archives, commit/push or WSL stop; goal active.
+
+## ready-snapshot-word-frames
+
+- Collect deferred 64-page words from validated contiguous immutable snapshots through the existing Ready pool-range reader. Fragmented backing and failed bulk collection retain scalar resolution of every element before publication. Keep fresh source checks, references, rights, COW, ACKs and genuine huge-page handling; no new buffer, heap site, UAPI or Kernel/FPU/version/submodule/target/profile changes.
+- Full native2596/0/20 and focused debug542/0/2 pass. In the1024-page fixture, retain1024 source validation calls and replace960 later scalar descriptor calls with15 word requests. These are native API counts, not observed VM bulk totals or CPU time. Preserve the initial missing fixture shim and add its real4K-only reader. Freeze343 native inputs plus46 additional product inputs before KVM.
+- Alpha62c1fa75/1679680B (+128), Booter e382a80a/6925752B (same size). Core CPIO and both entire RootFS regions are byte-identical to the parent; ESP init is the only changed file. Detect the initial workspace link-map output, redirect it into tmpfs, and remove the final symlink. Keep the guard failure without rerunning a VM.
+- Final KVM owners all terminate0: strict jwiwxv9w/63000 SMP4, four required markers and16 genuine guest huge leaves; Files lbob5mc6/8407; fresh parent h3df5_wp/78403; diagnostic6nrsqtdr/51953. All use host THP, host hugetlb free0. Normal ping1.517517354s/ACK1.416541717s versus parent1.315508531s/ACK1.214587290s. No whole-launch gain or100ms paint/input readiness proof. View current200/500/2000ms and keyboard plus parent200ms/keyboard; both reach/usr/local with7 items.
+- Parse all302 source-span markers literally with0 damaged lines, including large contiguous mappings in PID42. The marker does not contain deferred arguments or a bulk-call counter; exclude diagnostic timing. Correct only the parser's actual Nanami INFO prefix, without a source/image/VM change.
+- Retire ahci-command-completion-state media/PNG/log125 files before new copies. Keep ready-snapshot-word-frames/read-only-snapshot-working-set:4images/26snapshots/8PNG,11 unchanged snapshots hardlinked. Remove963682304 unique allocated file bytes of product/helper/package/VM tmpfs work after actual exits; the preceding native batch also removed570171392B. No cumulative archives or WSL stop. Goal active, uncommitted; substantial startup work remains.
+
+## read-only-snapshot-working-set
+
+- Retain64 snapshot entries/24MiB instead of48/16MiB after actual cache-pressure evidence. Ordinary executable/writable admission keeps its2MiB cap; readonly admission remains bounded by the total. Add a64-bit victim-mask guard. Replacement order, fresh identity/size/version, immutable backing, COW, peer ACKs and uncertain ownership are preserved. Fixed metadata grows16 entries; maximum retained snapshot storage grows8MiB. No new runtime fields/heap sites/UAPI or Kernel/FPU/target/linker/profile/version/submodule changes. Extend explicit mapping-cache diagnostics with `=all`; normal ELFs have no marker.
+- A correct feature-enabled launch observer records12368 calls, mmap220 with the largest inclusive local-counter subtotal. Mapping shapes identify initial readonly file maps as relevant work; all220 READY-to-ping records match the independent packet. The old cache audit observes11 repeated identity/size fills totaling4059328 file bytes within launch PID42's first mappings, with7/8-owner retirements on larger admissions. New diagnostic window:72 hits,5 admissions/fills,0 observed re-admissions; maximum retention25030656B. Different diagnostic wrappers and uncalibrated local ticks do not establish counterfactual byte savings, physical CPU time or whole-launch speedup; exclude all diagnostic timing.
+- A finite-ready-poll prototype passes2598 tests/four VMs but its added path has0 real-workload markers; reject and restore exact source/canonical before this change. Preserve compact evidence only. Correct the missing initial observer, optimized-away literal-tag verification and the old16MiB/48-slot test fixtures without weakening budget/retirement checks. Final full native2595/0/20, focused snapshot59/0/0, source343 before KVM, including the highest victim bit.
+- Normal Linuxa3d0b306/860880B (+216), FreeBSD8bcb90e3/850000B (+240). Only both Alter RootFS files change. Full trees/modes/uid/gid/readbacks/e2fsck/outside-root bytes are checked; ESP/Core/Booter/Alpha/services/fixtures remain unchanged, with no Core/Booter rebuild.
+- Final KVM owners all terminate0: strictfn4sqr9x/41701 SMP4 with4 markers/16 genuine guest huge leaves, Fileslhqfvzhd/36560, diagnostic44ww1wbq/71085, fresh parent8f90i9o8/64841. Host hugetlb free0, all use THP. Normal ping1.315807443s/ACK1.215089338s; parent1.316149517s/ACK1.215148089s. View current+200ms root4/status0B, +500/+2000ms723B and keyboard/usr/local7/status0B; fresh parent+200ms/keyboard too. Whole-launch and100ms paint/input-ready goals remain unproven; goal active/uncommitted.
+- Retire ahci-dma-progress-poll media/PNG/log128 files before new copies. Retain read-only-snapshot-working-set/ahci-command-completion-state only:4images/26snapshots/8PNG,11 unchanged snapshots hardlinked. Delete all tmpfs batch work after actual exits:1324142592 unique recorded allocated B, idle/tmp2633728B. Keep compact text/packets only, no diagnostic media or cumulative archives; WSL stop/compaction remains unauthorized.
+
+Storage policy updated on 2026-11-12: retain only current/previous images, logs and source backups. Delete older cycle directories and cumulative archives. Historical archive references below describe the former policy; they do not authorize retaining older files.
+
+## ahci-command-completion-state
+
+- Track only verified successful command completion in the exclusive single-slot AHCI owner. The next command omits the redundant task-file BSY/DRQ wait; initial, stopped, reconfigured or failed state retains the existing fresh wait. Consume the proof before callbacks and restore only after the existing CI-clear/fresh-TFES/acquire success. Keep full per-command completion polling, errors, timeout iterations and yields. Add one Cell bit in existing padding: actual Runtime remains72B; remove Copy/Clone to preserve one state owner. No new mapping, heap, protocol, Kernel, FPU or clock cache.
+- Recover before replying to Transport/Protocol errors for every read/write staging window and flush, including private bounce buffers. Failed recovery propagates before a reply, so serving stops and DMA backing remains owned. No write or uncertain operation is replayed. Seven new production-module tests cover cold/warm/reset/controller/failure state and legacy-read/write/flush recovery. Full native2595/0/20, related AHCI/storage118/0/0;341 selected source hashes frozen. Normal AHCI38f352c4/37920B, Core371fa6d9/5196800B and Booter4344f97f/6925752B, all parent sizes. Only AHCI payload and ESP init change; full RootFS bytes/other services/Alpha/fixtures/Kernel/ABI/profiles/targets/submodules stay unchanged.
+- Before the change, refresh25 ELF models on the current image and collect211 execution-site observations/0 errors in KVM. Audit owner27657 actual0; debugger-paused2.129461150s is excluded from comparisons and counts are not CPU time/dominance. Namespace queries already use direct VFS+same-request metadata; retain poll's pre-scan deadline. Actual submit disassembly still has the unconditional readiness poll. Check the AHCI completion state-machine contract before selecting this change; retain current clock freshness.
+- All four final KVM owners terminate0: strict bpphxfrp/13698 (SMP4, four required markers,16 real guest huge leaves), Files lbeahm98/31053, diagnostic0wg4hfut/26658 and fresh parent7v8985zr/71854. Every VM uses host THP. Normal ping1.316013585s/ACK1.215090567s; parent1.316613341s/ACK1.215660492s. No whole-launch/100ms paint-input admission. View current200/500ms root4/status0B,2000ms723B, keyboard/usr/local7/status0B, and parent200ms/keyboard.
+- Parse all15 intact bounded submit markers literally. Through1024 successful commands including setup, only2 invoke cold readiness waits;1022 omit them after verified prior completion. Counts are wait invocations, not cold-loop MMIO totals or CPU time, and exclude failed/later commands. Diagnostic1.315751167s excluded. Retire hpet-service-sampling before new persistent copies; keep ahci-command-completion-state/ahci-dma-progress-poll,4images/26snapshots/8PNG,10 unchanged snapshots hardlinked. Remove all cycle tmpfs work after actual terminals (1493659648 recorded allocated B), plus the earlier audit scratch/actual VM directory. Archive old raw with SHA/max two archives. Goal active/uncommitted; WSL stop/compaction remains unauthorized.
+
+## ahci-dma-progress-poll
+
+- Use the private DMA command-header PRDBC only to trigger a fresh CI check. Read CI immediately and at least every 16 wait iterations; continue checking latched TFES every 16 iterations and before accepting any CI-clear. Keep the existing acquire fence, PAUSE backoff, iteration limit, yields and DMA lifetime/recovery. Zero-data flushes use legacy polling; stale/absent/early byte-count hints cannot accept a command or hide completion/errors. Pass expected bytes from the existing validated submit callers; no new runtime field, mapping, heap site or authority.
+- Add 5 production poller tests covering asynchronous completion and fewer MMIO reads, absent hints, early hints with CI still busy, latched errors and exact timeout/yield bounds. Existing command tests verify PRDBC reset between commands, preserving private received FIS and write/flush behavior. Full release2588/0/20, focused AHCI/storage111/0/0; source frozen339 files plus supplementary AHCI lockfile for340 pre-VM files. Normal AHCI10007e8c/37920B, Core867d5ced/5196800B, Booter07f981aa/6925752B, all parent sizes. Only AHCI payload and ESP init change; complete RootFS bytes, other services/Alpha/fixtures/Kernel/FPU/ABI/profiles/targets/linker/submodules remain unchanged.
+- All four KVM/host owners terminate0: strict5urlq4lg/75007 (SMP4, four required markers,16 real guest huge leaves), Files j7kidfco/62817, diagnostic j9a7o9bs/43899, fresh parent l70ihhpv/44567. Every VM uses host THP. Normal ping1.316405798s/ACK1.215530232s; parent1.518073475s/ACK1.417121234s. Prior accepted normal was also about1.315s. No whole-launch or100ms painted/input-ready admission. Actual current200/500ms root4/status0B,2000ms723B, keyboard/usr/local7/status0B; view parent200ms/keyboard too.
+- Diagnostic last intact checkpoint covers1024 successful commands including setup:30410 wait iterations,2870 CI reads,2855 status reads and27555 hint calls, skipping27540 CI checks in this run. Do not equate this with legacy-run MMIO/CPU savings, a launch-only interval or all later traffic. Classify all15 markers;14 intact records parsed literally and the first marker damaged by an interleaved USB message retained verbatim without value reconstruction. Fix the analyzer's completeness assumption without modifying source/image or replaying a VM. Exclude diagnostic1.518466003s from performance claims.
+- Retire inode-table-read-ahead media and selected PNGs before new persistent copies. Keep ahci-dma-progress-poll/hpet-service-sampling only:4images/26snapshots/8PNG, unchanged10 snapshots hardlinked. Remove all tmpfs work after actual terminals (1493495808 recorded allocated B); archive old raw with SHA verification/max two archives. Goal active/uncommitted, WSL stop/compaction remains unauthorized.
+
+## hpet-service-sampling
+
+- Reuse the last confirmed high word to bracket each fresh low with a fresh trailing high in the actual HPET service. Cold reads still obtain a leading high; rollover retries discard the low and reuse only the newly observed high. Keep unbounded coherence retry, exact conversions and 32-bit extension. Clock stays 24 bytes; no time/low-word cache, new mapping or heap site.
+- Remove the counter sample whose result is unused for wide comparators. Fresh samples immediately before programming and after the write, the 10 us guard, missed-write retries, narrow maintenance, timer expiry and IRQ acknowledgements remain. A warm wide counter sample needs 2 MMIO word reads instead of 3; a successful first wide-comparator programming attempt needs 4 instead of 9 counter-word reads, excluding the service event sample, register writes and rollover/retry paths. These are tested path counts, not measured CPU time or total runtime MMIO traffic.
+- Add 7 production Clock sampling tests: cold/warm freshness, rollover and long-idle hint recovery, more than 8 incoherent attempts, repeated narrow wraps, unchanged epoch semantics, 10,000 changing-hardware samples and the existing layout budget. Full native release 2583/0/20, focused debug 55/0/1; existing real PreparedTimer tests retain comparator/IRQ/deadline coverage. Initial full dispatch omitted documented single-thread harness execution and shared heap mocks interfered; preserve failure and rerun with --test-threads=1 without product/test changes.
+- Build normal/diagnostic HPET only, Core and Booter. HPET is 52280 B (+216), Core 5196800 B (+512), Booter remains 6925752 B. Only HPET CPIO payload/size and ESP init change; both complete RootFS regions and all other services/Alpha/fixtures/Kernel/FPU/ABI/targets/linker/profiles remain unchanged. Build fresh host FAT dependencies in tmpfs and match the existing abort strategy in the helper, retaining the initial helper failure and partial receipt. Keep the complete final package receipt; importing its producer is read-only.
+- All four KVM owners terminate 0: strict ijmhchul/60487 (SMP4, four required markers, 16 real guest huge leaves), Files xrrzo94i/45266, diagnostic 3blp_rm0/96932 and fresh parent k76vwgpe/12592. All use host THP. Normal ping 1.315677379 s / release ACK 1.214474824 s, parent 1.518582523 s / ACK 1.417631852 s. Prior accepted normal was also about 1.315 s; no whole-launch or 100 ms painted/input-ready admission. View current 200/500/2000 ms and keyboard plus parent 200 ms/keyboard images; keyboard reaches /usr/local with 7 items. Parse all 12 existing one-shot timer stages through successful arm/reply; exclude diagnostic timing. Fix only the parser's padded-tag assumption, with no extra VM replay.
+- Retire vfs-read-cursors media and selected PNGs before new persistent copies. Retain hpet-service-sampling/inode-table-read-ahead only: 4 images, 26 snapshots, 8 PNGs; unchanged 11 snapshots share hardlinks. Remove all work/cache/diagnostic/VM tmpfs after actual terminals (1488592896 recorded allocated B). Archive older raw with SHA verification and at most two archives. WSL stop/compaction remains unauthorized, goal active and changes uncommitted.
+
+## inode-table-read-ahead
+
+- Batch cold inode-table reads only when the preceding block in the same table is currently resident. Isolated cold lookups keep one-block demand. Limit speculation by table/FS end, existing transfer window, cache quarter and16 blocks. Preserve coherent dirty data and normal validation/retries; failed bulk reads fall back to the required block, reusing a completed prefix. No new buffer, persistent field or heap site; extra speculative bytes/cache pressure and error-path reads remain costs.
+- Add9 production reader/cache tests, final full release2576/0/20 and focused13/0/0. Sequential128-inode fixture requests16→2; isolated probes read only required blocks. Verify partial groups, independent groups, window/cache/FS limits, overflow geometry, dirty neighbors/updates and prefix/suffix failures. Actual old reader is red against the same final fixture. Fix the initial cross-build use of a test-only predicate with production read_gaps, preserving failure receipts and repeating final native/build validation.
+- Ext2 76838c2a/173184B (+88B), Core aa7093ab/5196288B and Booter bb8d0689/6925752B (both parent sizes). CPIO changes only Ext2 payload/size; RootFS is byte-identical and ESP changes only init. Other services/Alpha/fixtures/Kernel/FPU/ABI/profile/targets remain unchanged. Verify all actual RootFS trees, FAT inventories/readbacks and other image regions.
+- Final KVM strict qnxcc3_7/88182 and Files0wkimsba/61100 plus diagnostic0rc4oy2q/47645 all terminate0, strict four markers/16 guest huge leaves and all host THP. Reuse unchanged-parent control ddrh3lwo/28222 collected before locality refinement. Normal ping1.315654247s/ACK1.214748556s versus control1.315486231s/ACK1.214591100s; no whole-launch/paint-input-ready/100ms admission. View actual current200/500/2000ms/keyboard and parent200ms/keyboard PNGs. Parse all47 bulk markers (all16-block success),17 in spawn42/first-ping window including other processes; do not infer total device-read savings or CPU share. Diagnostic1.518496907s excluded.
+- Preserve the unmodified197-sample CPU audit as execution-site evidence, excluding pause-biased timing. Unconditional trial (2575 native, normal1.517674081s) is not adopted. Its global BOOT_IO_TRACE run timed out before observer ready; rebuild with inode-only logging, preserving all raw/fingerprints and the later test-only API compile failure. Retire direct-positioned-reads before persistent copies; keep inode-table-read-ahead/vfs-read-cursors only,4images/26snapshots/8PNG. Remove all tmpfs work after real terminals, archive old raw with verified SHA/max two archives. Goal active/uncommitted; WSL stop/compaction remains unauthorized.
+
+## vfs-read-cursors
+
+- Move sequential position authority to VFS only for newly negotiated readonly regular descriptions. Direct and POSIX-proxied reads/seeks, dup and inherited sessions share that cursor. Legacy descriptions retain POSIX offsets. Preserve live serial/peer/delegate/buffer checks, fresh fstat/versioned reads and accepted-byte sendfile advancement. Never replay uncertain cursor mutations; negotiate older servers only after definite unsupported replies.
+- Add31 production-module tests, final full release2567/0/20 and related debug173/0/0. Initial production compile rejected string equality in const Runtime::new; retain that raw failure, use a byte pattern with the pinned compiler, and repeat final full release/build validation. LinuxFile fields unchanged, Reader24→32B, Ext2 adds Option<Word> per64 handles, POSIX OpenFile stays56B; no new heap sites or payload cache. Kernel/FPU/ABI/targets/linker/profiles/Alpha/fixtures unchanged.
+- Build Ext2/POSIX/both Alters plus Core/Booter. RootFS changes only POSIX and both Alters; Core CPIO changes only Ext2 payload/size, ESP only init. Verify full trees/attributes/readbacks/e2fsck/FAT inventories and all other image regions. Four KVM/host owners terminate0; strict u_hquche has four markers/16 guest huge leaves, every VM uses host THP.
+- Parse all2700 scope boundaries/2695 direct markers. Launch read541 succeeds directly (PID42=532,43=3,44=6), omitting one POSIX forwarding round trip each. Seek160 also succeeds directly; old POSIX-local SET/CUR had one round trip too, so do not count these as incremental IPC savings. Pread10 is inherited optimization. No CPU-share/total-IPC claim or other-PID role inference.
+- Normal76dwugox ping1.922463562s/ACK1.821618382s; fresh parent65ly4p9l ping1.922046932s/ACK1.821047061s. Diagnostic5.555787218s excluded. View actual current200/500/2000ms and keyboard PNGs, plus parent200ms/keyboard. Whole-launch gain and exact painted/input-ready time unproven;100ms unmet. Retire scoped-mapping-views before new persistent copies; keep vfs-read-cursors/direct-positioned-reads only,4images/26snapshots/8PNG. Remove completed native target early and all remaining tmpfs work after terminal0. Archive old raw with SHA, max two archives; goal active/uncommitted, WSL stop/compaction unauthorized.
+
+## direct-positioned-reads
+
+- Reuse existing readonly-open grants for ordinary pread/sendfile. Select the exact input FD only after preflight and restore the outer synchronous reader on success/error. Fresh fstat remains fresh; POSIX still owns sequential offsets, seek and writes. Expired/legacy grants keep same-position fallback. Empty pread avoids connection; oversized sendfile read is rejected before publication. No new persistent fields, cache or heap sites; normal I/O quantum unchanged.
+- Add nine production-module native tests. Final full release2536/0/20, focused debug72/0/0. Preserve initial mock module/constant compile failure and successful pre-empty validation; final empty-read refinement repeats all required native/build checks. Build normal Linux/FreeBSD and diagnostic Linux; replace only both Alter payloads in actual RootFS. Full trees/attributes/readback/e2fsck and ESP/outside-region equality pass; other services, fixtures, Kernel/FPU/ABI/profile/targets unchanged.
+- Four KVM/host owners terminate0; strict34hfjd_6 retains four markers/16 guest huge leaves. Normal Filesg51wi8ba ping1.316126027s/ACK1.215318045s; fresh parentb97non5c1.518177278s/ACK1.417281755s. Both200ms captures are partial, current500ms root4/status0B,2000ms723B, later keyboard/usr/local7. No whole-launch/paint-input-ready/100ms performance admission.
+- Parse all108 scope boundaries and1372 direct markers. All54 pread scopes include53 direct successes and one nongranted scope. Launch interval has10 direct reads: Files PID42 four, PID43 two, PID44 four. Do not infer other PID roles, CPU share or total IPC reduction. Desktop sendfile count0; production native tests verify that path. Diagnostic timing excluded.
+- Keep direct-positioned-reads/scoped-mapping-views only,4images/26snapshots/8PNG. Retire older media before new persistent copies and remove all native/Cargo/diagnostic/four-VM tmpfs work after terminal0 (1349779456 recorded allocated B). Old raw logs archive with verified SHA, max two archives. Goal active, uncommitted; WSL shutdown/compaction still unauthorized.
+
+## scoped-mapping-views
+
+- Preserve disjoint Ready read/write leases after successful private mmap and nonwritable protection changes. Invalidate the whole generation before mutation; the large guard withdraws overlap only after peer-stop ACKs. Rebase only after hardware and metadata commits. Failed/uncertain release, COW/write upgrades and unknown extents retain the conservative policy.
+- Add six production-module native tests: exact/touching overlap, invalid ranges and failed release, repeated protection, failure/no-revival, invalid preflight and peer-stop ordering. Full release2527/0/20, focused debug83/0/0. Read2192B/write2224B and their fixed capacities remain unchanged, with no new allocation sites.
+- Build both normal Alters and diagnostic Linux. Change only the two Alter files in both real RootFS images. Independent verification confirms complete trees/attributes, ESP/outside-region equality, source/canonical/fixture identities, all native and VM receipts, retained media and manifest/archive index.
+- All five KVM/host owners terminate0; strict retains four markers and16 guest huge leaves. Current Files1.518562328s and repeat1.922615158s, fresh parent1.518151407s. Both first current/parent200ms captures are incomplete; current500ms shows root4/status0B and later keyboard reaches/usr/local7. No whole-startup or100ms readiness claim.
+- Parse all1044 literal diagnostic markers. Launch-window protection68 completions rebase read128/write145 aliases; these are repeated rebindings, not unique pages or a CPU/grant counterfactual. Exclude diagnostic timing. Keep scoped-mapping-views/failed-path-prefix-reuse only; all build/diagnostic/five-VM tmpfs work removed. Goal active, uncommitted, WSL shutdown/compaction still unauthorized.
+
+## failed-path-prefix-reuse
+
+lookup失敗時だけpositive parentを既存topology cacheへ。missingやinode metadataを保存せず、namespace無効化/リンクfallback維持。
+新3native、release2521/0/20・debug49/0/0。cold missing fixture ancestor reads1152→6、cache3400B同一。
+KVM全4VM0、診断起動窓215 non-root reuse、通常1.519s/fresh親1.720s。100ms未達・goal active。
+詳細session-handoff/logs/linux-native-scope-20261107/failed-path-prefix-reuse/RESULT.md。現/前2世代だけ、全/tmp削除。
+
+
+## direct-readonly-fds
+
+readonly openのgrantをlive handle/実caller peer/委譲bufferで毎回検証し、同期mmap/fstatでPOSIX hopを省略。
+新13nativeでclose/reuse/境界/version/legacy/scopeを検証、release2518/0/20・debug126/0/0。
+KVM全4VM実0、診断起動窓310 direct RPC、通常/親とも約1.72秒で100ms未達。
+詳細はsession-handoff/logs/linux-native-scope-20261107/direct-readonly-fds/RESULT.md。
+現/前2世代だけ保持、全/tmp生成物削除、停止圧縮未承認、goal active。
+
+
+Latest checkpoint `shared-zero-huge-initialization` (parent `direct-rooted-metadata`).
+The existing genuine2MiB owned initializer now accepts Option<PageSource> and
+zeros on None, including unpublished multi-owner pool buffers. All references
+are owned before construction; huge UNMAP ACK/revoke/demotion to real4KiB Frames
+finish before any user PTE. Warm/unsupported/fragmented/prefix/suffix cases keep
+the old path. No extra physical allocation/payload/heap site; final rights,
+per-owner references, unknown/failed-ACK retention and Kernel/FPU/ABI unchanged.
+
+Four added semantic tests: aligned/unaligned/multiple zero chunks and neighbors,
+no source copies or new physical allocation, real4K restoration, untouched warm
+fallback/failed demotion, both owners published only after one initialization,
+failed-prefix cleanup and unacknowledged mapping retention. Full release2505/0/20
+and related debug563/0/2 passed. All build/package/VM stages passed.
+Alpha4ce2c4df/1679552B and Booter30a040ad/6917560B, sizes unchanged. Only ESP init
+changes; all FAT payloads/readback/RootFS/outside-ESP bytes verified. Core/apps/
+Alters/Ext2/fixtures/targets/linker/profiles parent-identical.
+
+KVM host strict pwzcage9/35949 actual0:4 markers/16 guest huge mappings. Files
+f_4u636w/22439 actual0:1.922210565s (ACK1.821305417), fresh parent sd49g4vw/94061
+actual0:1.719765538s (ACK1.618893037). No whole-launch speedup claim;100ms goal
+unmet/active. Current200ms screenshot is partially painted;500/2000ms root4/
+723B, keyboard/usr/local7/0B. Parent200ms also partial, keyboard7.
+
+Diagnosticunmzon8a/67326 actual0:all5 markers parsed, a2025-page zero buffer
+uses3 huge chunks. Initialization-target MAPs for those chunks1536→3, before
+spawn42; no zero huge chunk inside its spawn→ping window. Two zero requests of
+1024/512pages keep huge0 fallback; existing stdC++/FOX copies each retain1 huge
+chunk. Marker is after demotion and before small suffix, not object completion.
+Source copies/final user PTEs/extra UNMAP/revoke/convert and later4K-alias reuse
+costs are separate; diagnostic1.723056920s excluded from performance. Host THP
+observed in every VM. Do not infer total CPU savings from the chunk count.
+
+Retire compact-dentry-cache before persistent copies; keep current shared-zero-
+huge-initialization/previous direct-rooted-metadata:4 images/26 snapshots/8 PNGs.
+All native/build/package/diagnostic/four-VM tmpfs removed after actual terminals
+(954134528 recorded allocated B, not C recovery); /tmp3.1MiB. VHDX unchanged,
+C free~11.5GiB; offline Ubuntu-stop/compaction remains unapproved. Uncommitted.
+Logs:session-handoff/logs/linux-native-scope-20261107/shared-zero-huge-initialization.
+
+Latest checkpoint `direct-rooted-metadata` (parent `compact-dentry-cache`).
+Absolute/root-relative RESOLVE/STAT/READLINK use a dedicated native Alter→VFS
+channel after comparing POSIX's connected provider PID with the registry's
+actual connection. All metadata stays fresh; POSIX FD translation/open/mutations
+retain the proxy. Separate64KiB control SHM preserves the delegated file window.
+Bounds/overflow/nonoverlap/reply lengths are checked; transport failures disable
+the channel and retry the readonly query via POSIX, retaining mapped ownership.
+Filesystem errors are returned without retries or output publication.
+
+Release2501/0/20, related debug113/0/0. New production namespace/channel tests
+cover changed/deleted metadata, absolute invalid-FD semantics, root-relative
+paths, FD/open/mutation routing, legacy/provider mismatch/attach failures,
+overflow/overlap, short mapping/malformed reply, fallback, exact readlink payload
+and STAT reply words. POSIX control and SDK wire helper also run in native tests.
+Initial additional SDK fixture used bool instead of Word for an unrelated exit
+stub; corrected only the harness and retained the failed compile log.
+
+Normal POSIX74224B (same size), Linux859384B (+4784), FreeBSD838848B (+5240).
+Only these3 RootFS files changed; all names/content/mode/UID/GID/readback/e2fsck
+and all bytes outside RootFS (including entire ESP) verified. Alpha/Core/Booter/
+Ext2/other services/fixtures/compiler profile/targets/linkers unchanged.
+
+KVM strict ijcglsro actual0:4 markers/16 genuine guest huge mappings. Files
+2530vjao actual0:1.518047373s, fresh parent ycdnclu_ actual0:1.317089124s;
+no whole-launch speedup established, goal100ms unmet/active. Current200ms PNG
+shows root4/status0B;500/2000ms723B; keyboard/usr/local7/status0B. Parent200ms
+and keyboard also inspected. Diagnostic3kjhf9x5 actual0:1624 complete markers,
+1442 successes/182 missing/0 transport errors. Spawn42→first ping window701
+queries (RESOLVE680/READLINK21, includes other processes) each omit1 POSIX
+forwarding roundtrip. Setup RPC/total IPC/CPU savings are separate; diagnostic
+2.557553805s excluded from normal performance. Host THP observed in every VM.
+
+Retire old owned-huge-initialization before writing persistent images; keep
+direct-rooted-metadata/compact-dentry-cache only:4 images/26 snapshots/8 PNGs.
+All tmpfs native/build/RootFS/diagnostic/four-VM files removed after actual
+terminal exits (942051328 recorded allocated B; not host free-space recovery).
+Windows VHDX compaction still needs explicit Ubuntu-stop approval. Uncommitted.
+Logs:session-handoff/logs/linux-native-scope-20261107/direct-rooted-metadata.
+
+Latest checkpoint `compact-dentry-cache` (parent `owned-huge-initialization`).
+512 total entries /128 long-name suffixes; exact255-byte keys, LRU and all
+invalidation rules preserved. Fixed metadata34692→58504B inside existing stack/
+heap limits; block cache/DMA stay1MiB. Free list removes empty-slot scans.
+Release2490/0/20, related debug57/0/0; KVM strict4markers/16huge and Files pass.
+Actual15817-reference stream: old128 LRU counterfactual1129 searches→actual752;
+PID42→ping8075 references569→375, includes other processes. All16621 markers/
+states/results validate; exact production replay agrees. Not CPU/device I/O.
+Normal1.316437606s versus fresh parent1.518520980s, one pair;100ms unmet.
+Ext2+184B; only Core Ext2 and ESP init change. Current/previous only; all tmpfs
+native/build/diagnostic/replay/four-VM files removed. Logs:
+session-handoff/logs/linux-native-scope-20261107/compact-dentry-cache/RESULT.md.
+Uncommitted, goal active.
+
+Previous checkpoint `owned-huge-initialization` (parent `userspace-lto`): temporary
+2MiB initialization of untouched owned RAM, demoted to real4KiB Frames before
+publication. Full release2488/0/20, related debug537/0/2, KVM strict/Files pass.
+Files~1.52s matches fresh parent;100ms unmet. Details are at the end of this file
+and in session-handoff/logs/linux-native-scope-20261107/owned-huge-initialization/RESULT.md.
+
+Previous checkpoint `userspace-lto` (parent `io-service-lto`).
+Admit release fat LTO/codegen-units1 for POSIX/Honoka/Shell/fb-server only,
+four Cargo files/eight lines. Both Alters were tried, then their Cargo/ELFs/
+canonical/RootFS restored byte-for-byte from parent after unfavorable timings.
+No Rust/target/linker/Kernel ABI/IPC fastpath/FPU/budget/clock/authority/VM/COW/
+ACK changes or new heap/compiler extension. ELF total90824B(about89KiB) and
+text22976B smaller; not CPU-time proof. POSIX7c0895e2/Honoka4e866892/Shell6aaba408/
+fb8ed46ca1/Booterf7ef36e6(6913464B). Actual flags/ELF checked, build21422=0.
+
+Initial2985=1 was a Core inventory assert after six successful service builds;
+Core has fb, the other five native servers are in RootFS. Preserve failed exact
+Cargo/tooling/logs. Final package17779=0 changes only fb core record and three
+RootFS files(POSIX/Honoka/Shell). Whole-tree/content/mode/UID/GID/readback/e2fs/
+outside/ESP proof; independent verifier re-extracts actual image trees in tmpfs.
+All other records/Alpha/Alters/AHCI/Ext2/fixtures/TinyCore/FOX match parent.
+Native Rust/harness/profile unchanged: explicitly reuse dentry-cache-lru19282=0
+release2481/0/20 and debug699/0/6, not new-LTO coverage. Use actual build/KVM.
+
+Six-setting trial strict55790, Files85172/repeat28453/parent29654 all exit0.
+Normal CPU0/SMP1 ping1.517940510s/repeat1.518166960s versus fresh parent
+1.315597225s. Final four settings strict9q6nidkz/1230=0(four markers/16 huge),
+Filesc5pjgcy1/76045=0 ping1.316425166s/ACK1.215546789s. Historical parent also
+measured1.518s; do not infer precise CPU regression/200ms gain. No whole-launch
+gain, exact painted/input-ready time unproved,100ms unmet, goal active.
+Final actual PNG200ms has partial file panel/status4items0B;500ms full root4/
+status0B;2000ms723B;keyboard/usr/local7/status0B. Parent200/500ms full root4/
+status0B and keyboard7 checked. Keep the early partial paint limitation.
+
+Reject Alter LTO here; exact six-setting source/raw/owners/codegen stay in
+trial-with-alter-lto, old trial media/Alter ELF versions retired. Fresh-log
+rustc-command and stale-parent-name verifier failures also preserved/repaired.
+Huge policy/host THP and FOX layout proof unchanged; final FreeBSD is parent ELF.
+
+Hole-punch316604416 zero allocated bytes after RootFS write, full size/SHA
+unchanged, now automatic in packager. Retire91136=0:23 records/996491264 recorded
+allocated bytes including hardlinks and replaced trial image versions, not free
+space recovery. Same image paths now hold separately verified final hashes.
+Retire older15 before new images, helpers immediately, all six-VM/cache temp
+files after actual exits/raw preservation. Keep current+parent four images/26
+snapshots andc5pjgcy1/0fa1np5v four-PNG sets, older raw automatically archived.
+/tmp3.1MiB/swap0/VHDX152992481280B unchanged/C free12598153216B; compaction
+awaits Ubuntu-stop approval. No live VM/commit. Evidence session-handoff/logs/
+linux-native-scope-20261107/userspace-lto/RESULT.md. Return next to substantial
+Frame-construction/IPC work; do not reinterpret4KiB sources as large resources.
+
+Previous checkpoint `io-service-lto` (parent `dentry-cache-lru`).
+Enable fat LTO/codegen-units1 for independently rooted Ext2/AHCI release builds;
+they do not inherit the root profile. Keep opt-level3/panic abort, target/linker,
+Rust implementation, Kernel ABI/IPC fastpath/FPU policy and ownership/VM/COW/
+ACK behavior. No new heap/cache capacity/compiler extension. Build-cost and
+unmeasured-workload effects are tradeoffs; two codegen settings change together.
+
+Build95008=0, actual rustc flags/ELF checked. AHCI ELF56920->37920B(33%),
+text29605->21509B(27%); Ext2 ELF207488->164424B(21%), text149925->138357B(8%).
+Total ELF62064B/text19664B removed. Static instruction/call-site counts are not
+dynamic execution/CPU-time proof. Parent IPC reply already inlined TLS checks;
+disappearing symbols alone do not prove a removed call on every reply.
+AHCI818e46cf, Ext2b798d0d5, Booterdffdc901/6933944B. Initial21704=1/Cargo101:
+runner omitted AHCI's standard linker script; use xtask's encoded link-arg -T,
+preserve failed exact sources/logs and verify parent canonical/images intact.
+
+Package92073=0: only AHCI/Ext2 core records and ESP init change; all other raw
+records/components/fixtures/RootFS bytes match parent, FAT/readback/outside proof.
+Rust/native harness/profile unchanged: explicitly reuse parent19282=0 native
+release2481/0/20 and debug699/0/6 with source/hash proof. No rerun or claim that
+native tests verify the new service release codegen; build/ELF/KVM cover that.
+
+KVM host strict SMP4 yusoiyr1/94627=0, four markers/16 guest huge samples.
+Files CPU0/SMP1 0fa1np5v/68277=0 ping1.518284505s/ACK1.416717736s. No fresh
+parent control or whole-launch gain claim; exact painted/input-ready time
+unproved,100ms unmet, goal active. Four actual PNGs verified: root4/status0B
+at200ms,723B at500/2000ms, keyboard /usr/local7/status0B. Host THP388/416MiB,
+hugetlb0, huge policy and FOX layout proof unchanged. No diagnostic media built.
+
+Retire20 generated paths/recorded353443840 allocated B, including older15 before
+new images (hardlinks included, not actual free-space recovery). Remove helper
+immediately, all tmpfs cache/two-VM data after actual exits/raw/PNG preservation.
+Keep current+parent four images/26 snapshots and0fa1np5v/4rqhu5ko four-PNG sets;
+older raw/source automatically archived. /tmp3.1MiB, swap0, VHDX152992481280B
+unchanged, C free12597182464B; Ubuntu-stop compaction remains unapproved.
+No live VM/commit. See session-handoff/logs/linux-native-scope-20261107/
+io-service-lto/RESULT.md. Preserve fresh HPET/authority/barriers/invalidation/
+COW/ACK-before-free. History follows.
+
+Previous checkpoint `dentry-cache-lru` (parent `sparse-elf-loads`).
+Ext2 keeps reused positive/negative names in the existing128-entry cache using
+LRU instead of FIFO. Keep entry layout, exact name/bucket checks and mutation
+invalidation. Remove both age/hash links on invalidation and reuse empty slots.
+Cache34440->34692B(+252B); hit age writes and up-to128-slot cold-store scans are
+costs. No new heap/payload/IPC/ABI/unsafe/Kernel/FPU/version/submodule changes.
+
+Two tests plus an independent ordered-list oracle cover hot names under1024
+cold-file churn, collisions, negative results, updates, misses and invalidation.
+Native19282=0: release2481/0/20, related debug699/0/6. Build14246/package90734=0:
+Ext28a95cfde/207488B(+376B), Bootera8be45f2. Only Ext2 core payload/size and ESP
+init change; all other records/components/fixtures/RootFS bytes match parent.
+Full FAT/readback/outside proof. Native targets/cache/media/scratch use tmpfs.
+
+KVM host strict SMP4 x11hx_79/12081=0: four markers/16 guest huge samples.
+Normal Files CPU0/SMP1 4rqhu5ko/65924=0 ping1.518224961s/ACK1.417227248s;
+fresh parent h73r3pk8/55094=0 is1.722475041s/1.621391079s. Whole-launch gain
+not established, exact painted/input-ready time unproved,100ms unmet, goal
+active. Four actual PNGs and parent keyboard verified; root4/status0B at200ms,
+723B at500/2000ms, /usr/local7/status0B after keyboard. Huge policy unchanged.
+
+Diagnostic54555/78642=0 after restoring normal canonical/source/core/images.
+All16550 markers/15370 lookups replay with zero actual-LRU mismatches. Same
+successful stream has FIFO counterfactual1287 versus LRU1128 directory searches;
+spawn42-to-first-ping interval7588 lookups gives659->568(about14%, includes
+other processes). Exact old/new production-source replay77e556=0 agrees.
+Not old-VM measured counts/device-I/O/CPU-time savings. Verbose19.7256s diagnostic
+timing excluded. Two initial parser failures from interleaved net-server text/
+delayed newlines preserved; normalization retains all marker/state/fill checks.
+
+Retire21 generated paths/recorded354111488 allocated B, including older15 media
+before new images. This includes hardlinks, not a claim of recovered space.
+Remove helpers immediately and all tmpfs cache/media/four-VM artifacts after
+actual exits/raw preservation. Keep current+parent four images/26 snapshots
+and only4rqhu5ko/zqua5a34 PNG runs; older raw/source automatically archived.
+C free12598087680B, VHDX152992481280B unchanged; Ubuntu-stop compaction remains
+unapproved. No live VM or commit. Preserve authority, fresh HPET, barriers, COW,
+invalidation and ACK-before-free. Evidence: session-handoff/logs/
+linux-native-scope-20261107/dentry-cache-lru/RESULT.md. History follows.
+
+Previous checkpoint `sparse-elf-loads` (parent `snapshot-contiguous-source`).
+Stopped raw spawn and sealed exec omit pages outside all LOAD memory extents
+only when the existing disjoint/nonzero/no-native-TLS/stack-safe initial-rights
+proof succeeds. Preserve BSS/partial pages, original VA-relative Frame slots,
+stack slots, image span, heap placement and quotas. Native/overlap/zero-rights/
+ambiguous layouts keep dense legacy behavior. Drop temporary image lazy plans
+after spawn as before. Sparse prepared spawn declines the dense RAM batch,
+using existing scalar allocation; small holes with large LOADs can therefore
+cost more allocator work. No persistent field/new heap site/wire/Kernel/FPU/
+version/submodule changes. Previously backed RWX non-LOAD holes become unbacked.
+
+Three tests check the launcher526->14pages/512 holes/original slots0..12,525,
+exact file/BSS/partial content, gap sizes0/1/63/64/65/512, reordered/empty headers
+and invalid size/key/count/overflow. Native58151=0: release2479/0/20, related
+debug675/0/7 including page-fill/launch. Initial18666=1/Cargo101 was a new test
+fixture's32KiB buffer with a50KiB LOAD; enlarged only that fixture to64KiB and
+preserved failed raw/source. Build59511/package76753=0: Alpha677beda3/1674560B
+(+112B), Booter3dd08103/6995384B. Core/services/fixture/RootFS parent-identical;
+only ESP init changes, full FAT/readback/outside proof.
+
+KVM host SMP4 strict y3jea58u/77681=0, four markers/16 huge samples. Normal Files
+CPU0/SMP1 zqua5a34/84587=0 ping1.519895744s/ACK1.418941032s; fresh parent
+30q0izjc/59654=0 is1.521817561s/ACK1.420991937s. No whole-launch gain proved;
+paint/input-ready instant unproved,100ms unmet, goal active. Four current PNGs
+and parent keyboard checked: root4/status0B at200ms,723B at500/2000ms, keyboard
+/usr/local7/status0B. Observer-ready to first ping serial fault-address reports
+drop1(0x60d380)->0; interval is not PID-exclusive, time contribution unmeasured.
+Host THP388/420MiB, parent426MiB, hugetlb free0; huge policy unchanged.
+
+Diagnostic7491/62903=0 restores normal source/canonical/images before VM.
+All21 successful image phases omit2063 construction pages, including526->14
+launcher shape. This counts cumulative construction, not peak RSS or total
+Kernel calls. Diagnostic ping1.518935575s excluded. Sampled max QEMU RSS
+483680KiB versus parent490300KiB; not exact guest RAM delta. Initial collector
+53b7d2=1 lacked inherited FOX layout proof; verified byte-identical RootFS,
+copied parent proof and reran with assertions unchanged.
+
+Retire42 files/396509184 allocated bytes, older15 before new images and19
+helper/readbacks immediately after packaging. Remove tmpfs build/cache/media/
+four-VM artifacts after actual exits, saving raw and four selected current PNGs.
+Keep current+parent four images/26 snapshots and zqua5a34/3s_va7c0 PNG runs.
+Native targets automatically deleted on success/failure. VHDX152992481280B
+unchanged, C about12GiB free, swap0; Ubuntu-stop/compaction unapproved. No live
+VM or commit. See session-handoff/logs/linux-native-scope-20261107/sparse-elf-loads/
+RESULT.md. Preserve authority, fresh clock, barriers, COW and ACK-before-free.
+
+Latest checkpoint `snapshot-contiguous-source` (parent `inode-cache-lru`).
+Use a request-local contiguous backing plan only for a fully validated dense
+immutable opaque pool source. Skip collecting one PhysicalPageReference Vec;
+retain per-page live Frame/slot/refcount/sharing checks and whole-reservation
+admission. Noncontiguous/ordinary/duplicate shapes retain the stable newest
+record fallback. Publish independently releasable target references before
+MAP, preserve uncertain PTE/tail ownership and private COW. No new persistent
+field/payload/IPC/Kernel ABI/FPU/version/submodule change. Enum branches and an
+extra walk for unsuitable immutable sources are costs; not allocation-free
+construction or a reduction in all target MAPs.
+
+Four new tests cover 1/63/64/65/513/1024pages, subranges/R/RX/deferred prefix,
+reference-vector allocations1->0, equal bytes/shares and independent COW,
+pre/post-MAP failure/tail ownership, newest-duplicate fallback and invalid
+source rejection before publication. Focused32990=0, native97145=0:
+release2476/0/20, related debug644/0/6. Build56128/package94964=0; normal
+Alpha d95034c0/1674448B(+520B), Booter d9e3f394/6995384B. Parent core/services/
+RootFS bytes unchanged, only ESP init changed with FAT/outside/readback proof.
+
+KVM host SMP4 strict pau9io5d/9008=0, all four markers/16 huge samples.
+Normal Files CPU0/SMP1 3s_va7c0/42568=0: ping1.520211794s, ACK1.419328968s.
+Four actual PNGs checked: root4/status0B at200ms, status723B at500/2000ms,
+keyboard /usr/local7/status0B. No fresh parent control or whole-launch gain
+claim; painted/input-ready instant unproved,100ms unmet, goal active. Host
+THP388/426MiB, hugetlb free0; parent FOX final-load eligibility proof retained.
+
+Diagnostic build/package15484=0 ran with416MiB Cargo cache in tmpfs, normal
+source/canonical/images restored before 7ybmc00b/1994=0. All301 admitted plans
+cover31722pages; target42 has37/4725. Marker is before target slot/root/MAP,
+so it counts validated source plans, not completed MAPs. Verbose diagnostic
+ping2.137827937s excluded. Initial strict axenbi5r/49400=1 timed out before
+initial render, serial43B/no actual timeout.png/cause unknown; preserve raw.
+
+Storage interruption removed6,884,814,848 allocated bytes of rebuildable
+files and punched1,251,979,264 zero image bytes without changing size/hash.
+C still has about12GiB free; VHDX142.5GiB compaction awaits Ubuntu-stop
+approval. Further work can use tmpfs: all three new VMs and diagnostic build
+left VHDX length152992481280 unchanged and swap0. Native runner now uses a
+disposable tmpfs target; build caches/diagnostic artifacts default to/tmp.
+Disable incremental, copy images sparsely, remove packet-extraction scratch
+on success/failure. Existing QEMU runner20 and real extraction3 tests pass.
+
+Retire23 generated files/696942592 allocated bytes including older15 before
+new images; this is separate from storage cleanup. Retire7 diagnostic helpers/
+readbacks just after packaging and all tmpfs build/media/runtime artifacts
+after actual terminal exit. Keep current+parent four images/26 snapshots and
+3s_va7c0/4m1wm83n selected PNGs; all source/text/raw retained. No live VM,
+uncommitted. See session-handoff/logs/linux-native-scope-20261107/
+snapshot-contiguous-source/RESULT.md. Preserve fresh HPET/authority/barriers/
+copy-window invalidation/COW/failed-ACK ownership. History follows.
+
+Latest checkpoint `inode-cache-lru` (parent `mapping-cache-working-set`).
+The existing64-entry Ext2 inode cache now retains recently reused metadata
+instead of evicting hot directories in FIFO order. Keep indexed hash/bucket
+links and exact CachedInode layout; update age on hits/stores, unlink both
+indexes on invalidation and reuse empty slots first. Cache5384->5508B(+124B);
+total Runtime/stack delta not measured. Age writes, up-to64 empty-slot checks
+on cold stores and code growth are tradeoffs. No new heap/payload/IPC/ABI/
+unsafe/Kernel/FPU/version/submodule changes or coherence relaxation.
+
+Two new native tests plus updated independent LRU metadata/collision/churn
+oracles pass. Hot-parent fetches144->8 for8 parents/1024 cold files, capacity64.
+Focused61831=0, native53246=0: release2472/0/20, related debug156/0/0.
+Build30943/package88137=0: Ext2516dd7f1/207112B, Booter1530e422/6995384B.
+Only Ext2 core record and ESP init change; all other core records/Alpha/Alters/
+AHCI/services/fixtures/Kernel match parent. RootFS byte-identical, FAT full
+inventory/readbacks/outside verified. KVM host strict SMP4 mifzreb0/45781=0,
+four markers/16 huge samples. Files CPU0/SMP1 4m1wm83n/7093=0:1.723158825s,
+fresh parent0tu0hoh9/23735=0:1.724257754s. No whole-launch/paint-input-ready
+gain proved;100ms unmet, goal active. Four actual PNGs and parent keyboard
+checked: root4/status0B at+200ms,723B at+500/+2000ms, /usr/local7/status0B.
+
+Diagnostic43512/85392=0 restores normal source/canonical/core/images before
+72g4nuvu. All24999 events/21389 reads replay with0 LRU mismatches/failed reads.
+Same-stream FIFO counterfactual fetch1395 versus actual-policy LRU1072;
+spawn42-to-ping778 versus542. The interval includes other processes. Direct
+non-cfg(test) replay of exact old/new production source agrees1395/1072.
+This is record-fetch work, not measured old-run/device-I/O/CPU/latency savings.
+Verbose diagnostic ping31.216488836s excluded. Huge policy unchanged: strict16
+samples, host THP388MiB/Files426MiB; parent FOX alias/layout proof retained.
+
+Retire60 generated artifacts/1105420288 allocated bytes, including older15
+before new images and native replay ELF immediately after completion. Keep
+current+parent four images/26 selected snapshots and4m1wm83n/grbygjp8 PNG runs;
+all source/text/raw retained. All VMs terminal, uncommitted; fresh HPET, sealed
+authority, barriers, COW independence, lease/copy-window invalidation and
+ACK-before-free preserved. Evidence: session-handoff/logs/linux-native-scope-20261107/inode-cache-lru.
+
+Latest checkpoint `mapping-cache-working-set` (parent `fork-anonymous-prefix`).
+Immutable readonly mmap now plans multiple cold owners when no single victim
+can admit a large file. Keep48 slots/16MiB, empty-slot/LRU and generation/failed
+owner preference. Invalidate each owner before release; remove only after ACK.
+Stop on any failure, retaining the exact failed/unattempted allocations and
+performing no new read/allocation. Writable/legacy and protected exec/PT_INTERP
+selection stay unchanged. Local bitmap only; no new resident fields, payload
+buffers, heap sites, IPC/ABI, Kernel/FPU/version/submodule changes. Cold fill,
+multiple retirements and later private-write detachment remain costs.
+
+Four new native tests cover fragmented budget/hot large owner, rounding/slots/
+generation preference, real sealed fill/reuse, and partial retirement failure/
+retry. Focused34371=0; native76813=0: release2470/0/20, debug86/0/0.
+Build69076/package46127=0: Linux28f5553b, FreeBSDf8223f6f. Alter binaries only;
+RootFS two members, full tree/mode/uid/gid/readback/e2fs/outside verified; ESP,
+Alpha/Booter/core/AHCI/other services/fixtures/Kernel match parent.
+
+KVM host strict SMP4 x5mkz0n3/5125=0, four markers/16 guest huge samples.
+Files CPU0/SMP1 grbygjp8/57978=0:1.524381465s, repeat ywu4e5wq/34720=0:
+1.521194525s. Fresh parent owslff_r/78971=0:1.318593028s, parent repeat
+iqltr2q5/53744=0:1.723307014s. Keep first candidate selected and every value;
+no general whole-launch gain/reproducible regression/exact paint/input-ready
+time proved,100ms unmet, goal active. Actual PNGs show root4/status0B at+200ms,
+723B at+500/+2000ms, keyboard/usr/local7/status0B; parent keyboard checked.
+
+Diagnostic build/package2208=0 restores/hash-checks normal source/canonical/
+images before pdkmnqeu/12191=0. FOX3514168B admission retires7 owners/3788800B,
+retained16449536->16175104B, preserving libstdc++ hits. No subsequent FOX cache
+hit in this real run; native reuse proves no extra read/allocation. Existing
+same-extent MAP_FIXED reuse already avoided rereads in the parent. Diagnostic
+timing is excluded. Huge allocation policy stays intact: strict16 samples,
+host THP388MiB/Files426MiB, reserved hugetlb free0. Files no longer emits the
+temporary whole-file huge allocation: exact image inode1022 matches FOX ELF,
+all four final LOADs are shorter than2MiB with no full aligned2MiB interval.
+Old temporary R huge overlaps later RX remap; this is a layout/code inference,
+not a final-PTE trace. Archive original collector/failure receipt (assert1)
+and replace its obsolete mandatory Files huge assertion with the layout proof.
+
+Preceding `elf-prefix-cache` experiment is fully removed: real prefix fill/hit
+zero, budget probe identifies single-victim admission instead. Preserve exact
+untyped/typed trial sources, all raw/results; no prefix/origin feature remains.
+Retirement72279=0 aggregates137 generated artifacts/7596298240 allocated bytes
+across those trials and this cycle. Keep current+parent four images/26 selected
+snapshots and only grbygjp8/mexzi45f PNG runs. Phase/path/hash retirement events
+distinguish scratch paths legitimately reused by successive packages. Full
+evidence: session-handoff/logs/linux-native-scope-20261107/mapping-cache-working-set.
+All VMs terminal; uncommitted. Fresh HPET, sealed authority, barriers, COW/private
+independence, uncertain-PTE ownership and ACK-before-free remain mandatory.
+
+Latest checkpoint `fork-anonymous-prefix` (parent `ahci-poll-backoff`).
+Existing writable-COW fork copies the anonymous arena prefix0x10000000..10080000
+eagerly, as it already does for stack and small writable runs. Allocator writes
+immediately after fork otherwise incur repeated faults and unconditional kernel
+register dumps. Keep readonly aliases and COW outside that region; original
+128KiB minimum applies to remaining contiguous writable runs. Therefore small
+edge remainders can copy too:512KiB describes the preferred region, not a strict
+upper bound on added copies. Extra independent RAM/copy work and fork memory
+pressure are tradeoffs. No new fields/heap sites/IPC/ABI/Kernel/FPU/version/
+submodule changes; constructors, ownership, barriers, view invalidation and
+ACK-before-free remain unchanged. Huge-page allocation/split policy unchanged.
+
+Three new native tests verify RW/RWX prefix independence, COW tail/detach,
+readonly aliases, addresses outside the region and31/32/33-page tail admission.
+Native96378=0: release2466/0/20, related debug640/0/6. Focused96250=0.
+Initial native23240=1/Cargo101: new failure test injected MAP failure into a
+host-only eager-copy helper that unwraps MAP, causing fixture panic. Archive raw
+and exact sources; replace that invalid test with the boundary case. Existing
+production-constructor failure/uncertain-PTE tests still pass.
+
+Build39311/package56630=0: Alpha05500608/1673928B, Booter94c47964/6991288B.
+Only Alpha/Booter change. Core/AHCI/Alters/other services/fixtures/Kernel match
+parent; RootFS byte-identical, ESP init only, FAT/readbacks/outside verified.
+KVM host strict SMP4 af1i_ban/55269=0,4 required markers/16 guest huge samples.
+Files CPU0/SMP1 mexzi45f/95557=0: ping1.523263084s/ACK1.422455343s. Fresh parent
+6jm4m42b/62602=0:1.595824257s/ACK1.494852603s. One normal pair observes72.56ms
+less; exact paint/input-ready time and general whole-launch gain unproved,
+100ms unmet, goal active. Actual four PNGs: root4/status0B at+200ms,723B at
++500/+2000ms, keyboard/usr/local7/status0B. Parent keyboard PNG also inspected.
+
+Same smoke serial reports144→6 total,140→5 before observer; Files spawn→ping
+interval4→1, not Files-exclusive. Anonymous addresses100124c0/10042db0/100258c0
+disappear; remaining0060d380 is outside the region. No Kernel logging change.
+Process benchmarks CPU0/SMP1, fresh HPET, same unchanged fixture: p7trk609/
+58483=0, parent t5ws_qd8/67263=0. Three-sample median per8 forks: ordinary
+27.24→26.06ms, fork/exec166.71→165.81ms, untouched1MiB46.57→49.00ms. All samples
+retained; the latter cost (~0.30ms/fork) and extra RAM are explicit tradeoffs,
+not a claim every workload gets faster. No further repeat required by these
+observations. Files huge PID42/0x100c00000; host THP strict388MiB/Files428MiB.
+
+Retire49 artifacts/736563200 allocated bytes (~702MiB),87185=0. Older15 removed
+before new images; keep current/previous4 images and13 snapshots each, PNG
+mexzi45f/24z0f4wz only. All source/text/raw/failure evidence retained. No VM,
+uncommitted. Details: session-handoff/logs/linux-native-scope-20261107/fork-anonymous-prefix.
+
+Previous checkpoint:
+
+Latest checkpoint `ahci-poll-backoff` (parent `deferred-elf-protection`).
+AHCI completion keeps its first CI read immediate, then inserts bounded CPU
+relaxation between busy polls: 1/2/4/8/16/32/64 PAUSEs, four polls per step.
+This spaces uncached MMIO reads/VM exits while asynchronous I/O completes.
+Latched TFES checks every16 busy polls and at completion, acquire fence,
+10-million-poll limit, yield every16384 polls, command/DMA ordering and1MiB
+window remain. The limit is still a poll count, not a wall-clock timeout;
+relaxation adds up to64 PAUSEs to each subsequent completion check and up to
+16×64 between error checks. No new fields, buffers, heap sites, IPC, ABI,
+Kernel/FPU/version/submodule changes. Huge-page policy stays opportunistic.
+
+Two new tests model asynchronous completion and bounded error/timeout behavior.
+Model4096 work units: CI4097→84, detection at4112; this is not guest CPU time.
+Focused46263=0/11 tests; full69138=0 release2463/0/20, related debug106/0/0.
+Initial build56658=1/Cargo101 omitted AHCI's linker script in the new tooling;
+archive raw/source and add explicit --config, with RUSTFLAGS unset. Build30558=0:
+AHCI ab64cba2/56920B, Booter b44c13f1/6991288B. Only AHCI record in core and
+ESP init change; RootFS byte-identical, FAT inventory/readbacks/outside verified,
+package3256=0. Alpha/Alters/Ext2/other services/fixtures/Kernel match parent.
+
+KVM host strict SMP4 1ua04zxa/96439=0, required4 markers/guest huge16. Normal
+Files CPU0/SMP1 24z0f4wz/35016=0: ping1.806074483s/ACK1.705077673s. Fresh parent
+cxkfuzcw/23043=0:2.018906578s/ACK1.918036612s. No whole-launch speedup or exact
+paint/input-ready time proved,100ms unmet, goal active. Actual PNGs: +200ms/root4/
+status0B; +500/+2000ms/status723B; keyboard/usr/local7/status0B. Parent keyboard
+PNG also inspected. Files PID42/0x100c00000 guest2MiB; host THP388/428MiB.
+Reserved hugetlb free0, so THP is the available host huge-page path.
+
+Diagnostic build34966/package34169/Files73489=0, run168s06lv. Same source,
+NANAMI_AHCI_POLL_DIAG only; normal canonical/source/images restored and hashed
+before VM. Successful cumulative prefix2048 commands has CI16692/IS2931 before
+Files ping, implying14644 busy polls followed by backoff. Includes boot and
+background work, not a Files-only total or measured old/new reduction. Diagnostic
+time excluded. Initial diagnostic packaging omitted executable mode on the FAT
+helper; archive the failure and use copy2 before any VM. Normal ELF has no tag.
+
+Preceding launch-cpu-audit is diagnostic only: first run22844=1 missed dock input
+because sampling began before release; HLT idle must not be kernel CPU work.
+Corrected run xy70vslr sampled after click,25 exact ELF models,222 observations,
+no sampler errors. Non-idle MMIO sites prompted this change; QMP pauses bias
+occupancy and do not measure CPU time. Owner88334 handle was unavailable after
+compaction; actual terminal exit is unknown, despite PASS text/no live QEMU.
+No audit timing or successful-owner claim is admitted; all raw/text retained.
+
+Retire65 artifacts/1115512832 allocated bytes (~1.04GiB),94287=0. Older15 retired
+before new images; current/previous images4 and13 snapshots each, PNG24z0f4wz/
+nqikdtnq only. Diagnostic/audit media removed, source/text/raw retained. No VM,
+uncommitted. Details: session-handoff/logs/linux-native-scope-20261107/ahci-poll-backoff.
+
+Previous checkpoint:
+
+Latest checkpoint `deferred-elf-protection` (parent `canonical-prefix-walk`).
+The named lazy ELF protection experiment was REJECTED and fully removed from
+production. Accepted delta is only Alpha's single-page equal-rights fast path:
+an uncertain PTE must run the ordinary UNMAP/ACK transaction. Its new test keeps
+ownership through injected UNMAP failure and confirms repair after clearing the
+persistent injection. No field/heap site/ABI/Kernel/FPU/clock change or normal
+startup speedup claimed. Source delta: mapping_protection.rs plus its core test.
+
+Trial added readonly KEEP_DEFERRED protection, Linux immutable extent opt-in,
+256KiB instruction clusters and2MiB data clusters limited to matching rights.
+Native MAP512→16 during protection, release2469/0/20 debug645/0/6 plus4 extracted
+transport tests all pass (native28266/build41959/package39464/strict46809=0).
+But Files xiikfg44/25244=0 takes4.738645819s/ACK4.637774894s, fresh parent
+fvua7ezv/19289=0 takes1.603457007s/ACK1.502529634s. Spawn→ping HAL fault reports
+76 versus4, interval not Files exclusive. Unconditional HAL reason/register
+logging accompanies faults; individual processing/serial costs not isolated.
+Thus no default-off feature left: restore UAPI/runtime/Alter/population exactly.
+trial/ preserves9 source-experiment files, hashes/patch/tooling/native/transport/
+build/package/runtime raw. Retire trial media before accepted images. Do not
+revive the same small-cluster direction; the established2MiB cluster stays.
+
+Final native32929=0: release2461/0/20 debug637/0/6. Build80308=0: Alpha a583ff3c/
+1673928B, Booterf013b941/6991288B. Both Alters ddc87a71/7e09e527, Ext2/core/other
+services/fixture/Kernel unchanged. RootFS byte-identical, ESP init only, all FAT
+members/readbacks/outside verified, package34533=0. Strict3emjfx4r/55115=0,4
+markers/16 sampled guest huge reports. Files CPU0/SMP1 nqikdtnq/22018=0:
+1.597064365s/ACK1.496112083s, fault reports4. PNG +200ms/root4/status0B,
++500/+2000ms/status723B, keyboard/usr/local7/status0B inspected. Exact paint/
+input-ready time and whole-launch gain unproven,100ms unmet, goal active.
+Files huge PID42/0x100c00000, host THP388/428MiB, both1MiB DMA windows retained.
+
+Initial failures retained separately: focused42637=101 non-Copy event fixture;
+native40255=1/Cargo101 diagnostic macro absent in core fixture; native35130=1/
+Cargo101 new test forgot to clear its persistent UNMAP injection. Trial final
+28266 and accepted final32929 are distinct. Accepted source excludes all trial
+diagnostics/flag/Copy fixture changes. Retired94 artifacts/2555551744 allocated
+bytes (~2.38GiB),28450=0, older15 before trial and trial37 before accepted images.
+Keep current/previous4 images/13 snapshots each, PNG nqikdtnq/xr6sa1h2 only.
+No VM/commit. Next inspect Files read/open/stat service RPC and buffer/lease
+reuse without introducing additional guest faults.
+
+Previous checkpoint:
+
+Latest checkpoint `canonical-prefix-walk` (parent `unix-endpoint-wake`).
+The existing8 positive topology entries now select the longest proven directory
+prefix, then look up every unknown suffix component with fresh inode metadata.
+Previously only one final component could reuse a parent. Keep exact root/start/
+follow keys and input=canonical proof. Only canonical absolute component shapes
+qualify; dot/dotdot, empty/repeated/trailing slash, NUL, long names and relative
+paths keep the original walk. New intermediate/followed-final links fall back
+to the complete ancestor/40-link state. Missing is allowed only at the final
+component, non-directory intermediates fail, retained leaf callers bypass.
+No new negative cache, storage budget/layout/field/heap site/ABI/Kernel/FPU/clock
+change. Existing pre-write namespace invalidation stays authoritative. Input
+validation/8entry search and duplicate lookup before a link fallback are costs.
+
+Four new tests (ext2-directory46):96 distinct missing descendants under a known
+6component directory, two allow_missing modes: ancestor inode reads1152→0 after
+priming. Successful unknown3component suffix reads3 current inodes. Full-walker
+oracle covers links/loops/empty targets/dotdot/shape/error precedence/retain;
+longest prefix/name boundaries/keys, fresh I/O failure and namespace parent/kind
+changes tested. Focused70797=0; final native46054=0, release2460/0/20 debug154/0/0.
+Build90718=0: Ext2 1a5da57a/202824B, core140595dc, Booterf799f1fb/6991288B.
+Only core Ext2 record and ESP init change. RootFS byte-identical, Alpha/Alters/
+other services/fixture/Kernel unchanged. FAT inventory/readback/outside verified,
+package24613=0.
+
+KVM host SMP4 1ajjtp19/78705=0,4 markers and16 sampled guest huge reports.
+Files CPU0/SMP1 xr6sa1h2/67892=0, first ping2.026266347s/ACK1.925403704s stays
+selected. PNG +200ms/root4/status0B, +500/+2000ms/status723B, keyboard/usr/local7/
+status0B inspected. Fresh parent guc6jwyj/95854=0:1.805771158s/ACK1.704831904s;
+same candidate repeat8gddq5zx/23648=0:1.603518479s/ACK1.502664253s. No whole-launch
+gain, repeatable regression or exact paint/input-ready time proven;100ms unmet.
+Files huge PID42/0x100c00000, host THP388/428MiB, both1MiB DMA windows retained.
+
+Diagnostic build/package32983=0, normal canonical Ext2/core/Booter/source/images
+restored before VM. l_tu5z8s/41855=0:13 padded-tag samples,2 in Files spawn→ping
+(count128/256,root103/parent321,cursor left_ptr/hash paths under /root/.icons).
+Actual non-root prefix use is proven; samples are not Files exclusive totals
+or saved guest time. Diagnostic timing excluded, normal ELF omits marker.
+Retired68 artifacts/1102000128 allocated bytes (~1.03GiB),75596=0, older15 before
+new images. Keep current/previous4 images/13 snapshots each and PNG xr6sa1h2/
+iv541mk2 only, preserve source/text/raw. No new native/build/package/VM failure.
+No VM/commit; goal active. Next inspect ELF protection's deferred-page mapping
+and fault population contract for larger loader work reduction; no design yet.
+
+Previous checkpoint:
+
+Latest checkpoint `unix-endpoint-wake` (parent `deferred-detach-protect`).
+AF_UNIX data/capacity changes carry bounded receiver/sender hints instead of
+rescanning every wait with the same notification direction. Runtime adds two
+Words (16B); IDs share modulo bits, so collisions only add scans. Multiple
+changes merge; unknown producers and record capacity keep broadcasts. Before
+copying a wait, the dispatcher checks current FD descriptions rather than
+retaining stale identities across CLONE_FILES. General sources, expired timers,
+invalid/replaced provider FDs and epoll preserve the ordinary scan. Public
+unqualified wakes and next-pass notification propagation remain unchanged.
+No heap site, guest copy, Native OS request, ABI, Kernel, FPU or clock change.
+Hint FD lookups/bit operations and collision scans are the tradeoff.
+
+Five new native tests cover both directions (32 provider scans→1), hint merge,
+collision, broadcast/reset, current FD replacement, invalid/other providers,
+HUP/timer, epoll and actual send/receive hint production. Final owner13669 exits0:
+release2456/0/20, related debug172/0/0. Initial build42430 exits1/Cargo101 because
+Runtime::new is const and derived Default is not; corrected to EMPTY, preserving
+raw failure. Final build33244 exits0: Linux ddc87a71/838912B, FreeBSD7e09e527/840504B.
+Only both Alters in both RootFS images change; all trees, modes, UID/GID,
+readbacks, e2fs and bytes outside RootFS (including ESP) verified, package61992=0.
+Alpha b845fb5e, Booter96f0d9e6, core, other services, fixture and Kernel unchanged.
+
+KVM host SMP4 first n8wrt0wm/2487 exits1 before OS initial render, only43 serial
+bytes and no timeout PNG; cause undetermined. Identical image retry, no rebuild
+or edits: nn2s2e8e/85443=0 with4 required markers and16 sampled guest huge reports.
+Normal Files CPU0/SMP1 iv541mk2/80752=0: ping1.594256146s, ACK1.493518832s.
+PNG +200ms/root4 entries/status0B, +500/+2000ms/status723B, keyboard/usr/local7
+entries/status0B inspected. Fresh parent ial9qes_/89122=0:1.598297119s/ACK1.497423327s.
+No whole-launch speedup or exact paint/input-ready time proven;100ms unmet.
+Guest huge PID42/0x100c00000, host THP strict388MiB/Files428MiB, both1MiB DMA
+read windows retained. Huge pages stay preferred wherever existing eligible
+backing/alignment permits them; reserved host hugetlb remains0.
+
+Diagnostic build/package88304=0, normal canonical/source/images restored before
+VM. jpw5lc5k/96325=0:17 padded-tag skip samples;2 between Files spawn and ping
+(counts2048/4096, PID41/poll7/read512). These prove actual branch use, not Files
+exclusive totals or saved guest time. Diagnostic timing excluded, normal ELFs
+omit marker. Retired54 artifacts/2654228480 allocated bytes (~2.47GiB),47436=0;
+older15 before new images, per-role RootFS scratch immediately after verification.
+Keep current/previous4 images/13 snapshots each and PNG iv541mk2/eypq9pyx only.
+Source/text/raw/failures retained. No VM or commit. Goal active. Next reduce
+larger remaining Files loader/I/O work, beyond wake bookkeeping.
+
+Previous checkpoint:
+
+Latest checkpoint `deferred-detach-protect` (parent `canonical-parent-reuse`).
+PRIVATE_WRITE mode2 permits copied pool replacements to retain old logical
+rights with confirmed absent PTEs before the following mprotect. Alpha requires
+a sealed target and the existing authorized supervisor/VM-quiescence contract.
+It copies first, acknowledges the old UNMAP, then publishes deferred backing;
+the following PROTECT maps final rights once. Child-cap removal keeps the old
+strict present/restore path. Last-owner and already-deferred cases remain.
+Ordinary writes and write faults keep mode1; only Linux protection preparation
+uses mode2. Query0/detach1, request IDs, response boolean and Kernel ABI stay;
+new Alters require matching Alpha. No retry after a possibly partial failure.
+
+Five new native tests verify64 pages with old rights1/3/5/7 to final3/7 (unequal
+pairs): guest MAP128→64 and UNMAP128→64, identical bytes, independent refs and
+final rights. Failed final protection restores absent old-rights backing that
+can fault in without unwanted WRITE; unacknowledged UNMAP keeps ownership;
+child-cap failures retain strict restoration; ordinary write/fault modes stay.
+Payload RAM/copies are unchanged; existing deferred bitmap entries may grow.
+No new permanent field/heap site/Kernel/FPU/clocksource change.
+
+Release2451/0/20, related debug619/0/6, owner4817 actual0. Runtime's actual API
+function passes4 transport tests (0/1/2, unknown3/overflow, malformed response/
+status/transport without retry), build13546 actual0. Initial focused52357 actual
+101 used an old test's now-valid mode2 as its unknown value; updated to3 and
+retained the failure. Corrected focused4115 actual0 predates expanded COW/cap
+cases; final full suites cover final source.
+
+Normal Alpha b845fb5e/Linux10eed31f/FreeBSDcb779f0e/Booter96f0d9e6. RootFS changes
+only both Alters, ESP only init; full tree/mode/readback/e2fs/FAT/outside checks.
+Core/services/fixtures/Kernel are parent bytes; package27574 actual0. KVM SMP4
+strict nkl2_eix owner64150 actual0 passes all four markers. Files CPU0/SMP1
+eypq9pyx owner16028 actual0: ping1.806825987s/ACK1.705209491s; four inspected PNGs
+show root entries/status0→723B then keyboard/usr/local7 entries/status0B. Files
+huge PID42/0x100c00000, host THP388/428MiB and DMA1MiB remain. No fresh parent
+control; historical parent2.229537148s/repeat1.601756637s. No whole-launch gain
+or exact paint/input-ready time claim;100ms unmet and goal active.
+
+Diagnostic Alpha0b10eb0f/Booter8e582b02 build/package12272 actual0 restores normal
+canonical/build outputs/source/images before VM. rxhttcyz owner4998 actual0
+shows count32/PID42/VA0x100040000/old-rights1/intermediate-maps0 after Files spawn
+and before ping. Actual Files use is proven; sampled counts are not guest totals
+or old elapsed-time reductions. Diagnostic speed is excluded. Retired52 files/
+2164719616 allocated bytes; current/parent four images and13 snapshots each,
+PNG eypq9pyx/kef_23oz only. Text/raw/source kept; all VMs terminal, uncommitted.
+Details: `session-handoff/logs/linux-native-scope-20261107/deferred-detach-protect/RESULT.md`.
+
+Latest checkpoint `canonical-parent-reuse` (parent `retained-huge-copy`).
+Ext2 reuses a canonical absolute parent from its existing eight positive
+resolved-path entries for sibling names or a known directory's direct child.
+Exact root/start/follow/input-to-canonical bytes are required; the new leaf
+still performs lookup and fresh inode I/O. Final followed symlinks, dot/dotdot,
+invalid shapes, mutators and leaf-name consumers retain the complete walker.
+Existing pre-write namespace invalidation, cache layout and budget remain.
+A new result-path allocation site replaces the full walk's owned result Vec;
+candidate checks and a possible extra final-symlink lookup are tradeoffs.
+
+Four new tests and all42 ext2-directory tests pass:96 distinct six-component
+siblings reduce inode queries576 to101, with current sizes, oracle-equivalent
+links/dotdot/missing/retained names, root slash/key bounds, mutation invalidation
+and current leaf I/O errors. Full release2446/0/20 and related debug150/0/0
+(owner55418 actual0). Normal Ext2 f9637050/Booter8c244fee, build54653 actual0.
+Only the core Ext2 record and ESP init change; RootFS and other records/binaries
+are parent bytes. Package/pre-VM46297 actual0 verifies readback and outer bytes.
+
+KVM SMP4 strict o55y6fzm owner52742 actual0 passes all four required markers.
+Files CPU0/SMP1 kef_23oz owner69261 actual0 initially has ping2.229537148s and
+ACK2.128618898s; this slower first run stays selected. Four inspected PNGs show
+root4 entries/status723B then keyboard/usr/local7 entries/status0B. Fresh parent
+5cb6zuvs owner68489 actual0 is1.595996837s; identical candidate repeat d1l3obea
+owner1892 actual0 is1.601756637s. No whole-launch gain or repeatable regression
+is proven; exact paint/input-ready time and100ms target remain unmet. Files
+huge PID42/0x100c00000, host THP388/428MiB and both1MiB DMA windows remain.
+
+Diagnostic build/package22427 actual0 restores normal canonical/core/source/
+images before VM. diptw7o_ owner18456 actual0 has14 parent-reuse samples; one
+completes between Files spawn and ping at count512 for/usr/local/share/xfe/xferc.
+This proves actual configuration-path use, not Files-exclusive counts/timing.
+The preceding temporary Files work audit also retains raw/overlay/restore
+evidence:4096-handler cap, possible pre-exec fork children, local-unverified
+counter including descheduling, diagnostic timing excluded. Initial overlay
+compile failure83354 actual1 is preserved, corrected build36982 and VM6965
+actual0; no audit overlay or ELF remains in normal sources/canonical binaries.
+
+Retired76 artifacts/1978294272 allocated bytes. Current/parent four images and
+13 snapshots each, normal PNG kef_23oz/tv7b9t0o remain; text/raw/source retained.
+All VMs terminal, uncommitted, goal active. Details:
+`session-handoff/logs/linux-native-scope-20261107/canonical-parent-reuse/RESULT.md`.
+
+Latest checkpoint `retained-huge-copy` (parent `fbdev-clean-capture`).
+Large page-aligned memory copies previously split the destination's freshly
+allocated huge backing unconditionally. For a current, fully backed uniform
+range of at least2MiB, equal source/target rights, no uncertain/deferred pages,
+and no target private aliases, Alpha now uses the existing checked transfer
+without changing the leaf shape or reapplying permissions. Different PIDs
+sharing a VM retain the original owner-aware page order. Other admissions
+retain the original path; existing4KiB backing is not promoted.
+
+Six new native tests cover bytes/rights0..7, unchanged huge Frame identities,
+independent private ownership, zero added guest MAP/UNMAP/cap COPY, overlapping
+memmove in both directions, fallback permissions, shared-VM ordering, copy
+failure and failed UNMAP ownership retention. Release2442/0/20 and related
+debug583/0/6 passed (owner73217 actual0). No new production heap site, permanent
+field, wire/Kernel/FPU change; private-write guards and VM barriers remain.
+
+Normal Alpha def14497/Booter963435a1, build75549 actual0. The guest fixture adds
+a4MiB fixed mremap, released-source reuse/isolation and partial mprotect.
+Only this RootFS fixture and ESP init change; other binaries/core/Kernel are
+parent bytes, with full tree/permission/readback/e2fs/FAT/outside verification.
+Strict KVM SMP4 hdbv032p owner62600 actual0 passes all four required markers.
+Files CPU0/SMP1 tv7b9t0o owner93217 actual0: ping1.809693876s, ACK1.708777144s;
+four inspected PNGs show root entries then keyboard navigation to/usr/local.
+Files keeps its2MiB leaf; host THP maxima388/428MiB; both DMA windows stay1MiB.
+Parent historical ping1.808086765s; no fresh control or whole-launch speedup
+claim. Paint/input-ready timestamp is unknown and100ms remains unmet.
+
+Diagnostic build/package15733 actual0 restores normal canonical/source/images
+before running. Initial cwy72s6g owner71055 actual1 timed out before OS initial
+render (43serial bytes, monitor closed; cause unknown). Raw/error receipt stay.
+The identical image, without rebuild, passes as05381beg owner91066 actual0 and
+logs the actual PID29 source0x30000000 to target0x30800000 copy of4194304B on
+the new path. This proves fixture use, not exclusive Files use or a measured
+old guest total. Diagnostic performance is excluded. Package self-copy and
+collector marker spelling errors are retained separately and corrected.
+
+Retired49 generated artifacts/2154622976 allocated bytes; only current/parent
+four final images and13 snapshots each, PNG tv7b9t0o/02pym67d remain. Text/raw/
+source retained, all VMs terminal, uncommitted; goal active. Details:
+`session-handoff/logs/linux-native-scope-20261107/retained-huge-copy/RESULT.md`.
+
+Latest checkpoint `fbdev-clean-capture` (parent `fbdev-dirty-spans`).
+Corrected the previous diagnostic interpretation: runtime pads its tags to20
+characters. The old regex omitted that padding; both retained Honoka runs
+actually contain16 desktop known-span samples. Corrected receipts/parsers/
+verifier and RESULT; original copies remain under tag-parser-original/.
+The Ext2 streaming diagnostic still has zero samples with the corrected regex.
+
+A logging-only mask overlay, restored before KVM _g_il_v6, observes repeated
+fully clean800x600 captures. One report completed between Files spawn and ping
+has36 clean bands/two partial bands and22 partial rows with adjacent dirty bits.
+Row masks are measured before sampling each row, and report placement is not
+exclusive Files attribution. This establishes relevant clean-comparison work
+and supports coalescing eligibility rather than inventing guest time savings.
+
+Unknown rows now compare16pixels/64B per decision, retaining one forward u64
+sample per word and storing only those sampled bytes. Known-dirty copies,
+quad/scalar tails, alignment/odd stride, damage order and stable captured
+rendering remain. No new asm/FPU/kernel/ABI/heap/payload/permanent field.
+Local sample32->64B may also store an unchanged neighboring32B group on change.
+Native idle800x600 decisions60000->actual30000, sample/compare480000 pixels
+unchanged, bytes/damage/guards equal. Release2436/0/20 and debug89/0/2 passed.
+CPU0 final old/new non-test source,9 alternating trials x64frames: full-1.9%,
+dialog-6.6%, striped+7.7%, sparse-16.3%, idle-16.2%. Keep the striped tradeoff;
+these are host capture costs, not whole guest startup improvements.
+
+Normal Honoka65cf05a0, only/bin/honoka replaced in both RootFS images; complete
+tree/metadata/readbacks/e2fsck/outside checked. Other binaries/core/ESP/kernel
+parent-identical. KVM host strict SMP4dl225p01 actual0/four markers/14 huge leaves;
+CPU0/SMP1 Files02pym67d actual0, ping1.808086765s/ACK1.707180654s with inspected
+paint/keyboard PNGs. Fresh parent zwx2ih7a actual0 ping2.018361223s; historical
+parent1.592872164s retained. Whole-launch gain/repeatable regression unproven.
+Diagnostic77mf_sed actual0 reports eight64B clean-path samples after normal
+canonical restoration; samples precede Files and do not prove exclusive totals.
+Guest2MiB/host THP374/428MiB/DMA1MiB maintained.57 generated files and3575365632
+allocated bytes retired incrementally. Current/previous images/snapshots,
+PNG02pym67d/2_0_6vy9 retained. All VM owners terminal, uncommitted,100ms unmet,
+goal active. Resume remaining Files load/mapping work rather than local copies.
+
+Latest checkpoint `fbdev-dirty-spans` (parent `streamed-cache-extents`).
+Its original no-marker interpretation below is superseded by the tag-padding
+correction above; original evidence remains archived with the correction.
+Honoka joins adjacent known-dirty tiles in a partial mask before invoking its
+existing sampled row copy. Unknown tiles, full-mask row copies, damage order,
+vertical merging, alignment/odd-stride/tail rules and stable captured rendering
+remain. No new unsafe primitive, asm/FPU code, heap, payload, persistent field,
+kernel or ABI change. The proposed REP MOVSQ copy regressed host full-frame
+cost by48.3% and was removed; its source/raw evidence is retained.
+
+Native800x16 with736 dirty pixels per row: old345 known-row entries versus
+actual new counter15; sampled12800/compared1760 pixels, exact bytes/damage.
+Two tests cover that count and readonly/protected-page boundaries, alongside
+existing exhaustive masks/independent alignment/odd stride/reference tests.
+Release2435/0/20 and related debug88/0/2 passed, focused/build80629 actual0.
+CPU0 old/new non-test source,9 alternating trials x64 frames: full+1.6%,
+dialog-26.6%, striped-24.3%, sparse-4.8%, idle-5.5%. These host costs do not
+establish guest FPS or whole Files startup gain.
+
+Normal Honoka35e5ae37 only replaced/bin/honoka in RootFS; complete tree,
+mode/UID/GID, readbacks/e2fsck/outside verified. Core/Booter/Alpha/both Alters/
+other services/fixtures/kernel unchanged. KVM host/netnone strict SMP4p6zglocb
+actual0 with four markers and14 huge leaves; Files CPU0/SMP1 2_0_6vy9 actual0,
+ping1.592872164s/ACK1.492008820s, inspected/root and/usr/local keyboard PNGs.
+Guest2MiB leaf and host THP374/428MiB plus1MiB DMA windows remain verified.
+
+Same-source diagnostic hu8owcj1 actual0 emitted no known-span sample. Additional
+logging-only compositor overlay was compiled then restored before route VM
+kwx7gih5 actual0. It confirms capture1920000B/800x600 and periodic drains, but
+no coalescing sample. Files use/count reduction remains unproven; diagnostic
+timing is excluded. All normal sources/outputs/images rechecked.47 generated
+files/3567820800 allocated bytes retired incrementally, current/previous image
+pairs and13 snapshots each, PNG2_0_6vy9/2o5n69hz kept. All VM owners terminal,
+no commit;100ms unmet and goal active. Inspect actual mask distribution and
+continue Files load/mapping/display work rather than assume local savings apply.
+
+Latest checkpoint `streamed-cache-extents` (parent `initial-elf-rights-ack`).
+Ext2's streamed mixed read now joins cached blocks only when both file block
+numbers and cache slots are adjacent. Output remains deferred until all gap
+I/O succeeds; dirty bytes, exact partial edges, requested reference marks,
+cache identity/CLOCK state and untouched output on earlier I/O errors remain.
+No new payload, persistent field, heap site, IPC or kernel change.
+
+The1MiB native model has512 cached blocks in two extents: the old scalar loop
+requires514 copies including two gaps, and the new actual counter records4.
+Added tests compare all bytes/guards/state and reordered slots, dirty data,
+partial/empty output and requested-only reference marks. Release2433/0/20 and
+related debug146/0/0 passed. Initial fixture budget/transfer mismatch failed101
+and was corrected to the real1MiB budget; its raw failure stays recorded.
+CPU0 old/new production-source host comparison,9 alternating trials of512
+runs: prefix about11.7% faster, split12.5% faster, cold0.1% slower and striped
+3.9% slower. These are mixed-copy costs, not guest startup improvements.
+
+Normal Ext2 ff546c33 and Booter ef2bdf41 built; only Ext2's core archive record
+and each ESP's init changed. RootFS and all other services/Alpha/fixtures/
+kernel remain parent bytes. KVM host/netnone strict SMP4 l6_b6jqp passed, then
+CPU0/SMP1 Files2o5n69hz passed with inspected/root and/usr/local keyboard PNGs.
+First candidate ping2.017306395s, parent control1.810221815s, identical candidate
+repeat1.598037331s. Selected remains the first candidate. Whole-launch gain
+or repeatable regression remains unproven. Native100ms/host200ms polling is
+unchanged; no exact painted/input-ready timestamp. Guest2MiB leaves and host
+THP374/428MiB, plus1MiB DMA read windows, remain verified.
+
+Diagnostic Files kb7np4ix passed after normal canonical restoration, but
+reported zero multi-cached streamed-copy samples. This provides no actual
+Files coalescing/count-reduction proof; do not attribute native/host savings
+to this launch. Diagnostic speed is excluded.69 generated files and1106403328
+allocated bytes retired, including the older generation before new images.
+Keep current/previous image pairs and13 snapshots each, PNG2o5n69hz/yv2ulzgo.
+No commit; all VM owners terminal; goal active and100ms unmet. Resume actual
+Files load/mapping/display work rather than further subdividing this copy.
+
+Latest checkpoint `initial-elf-rights-ack` (parent `snapshot-alias-batch`).
+Alpha optionally acknowledges final initial LOAD permissions in the unused
+second response detail of EXEC_MEMORY and fault-handler suspended memory
+spawn. Only raw images with disjoint page-expanded nonempty LOADs, nonzero
+known rights, no native IPC fixup or stack overlap qualify. Exec additionally
+requires a sealed target; spawn uses the exact immutable parsed streaming
+plan and existing preinstall policy. Acknowledgement follows successful
+installation/PCB copy. No new request number or kernel ABI change.
+
+Runtime preserves legacy APIs and exposes typed optional acknowledgement.
+Only the exact known value1 enables it; zero/unknown values retain the ordered
+protection path. Alter consumes it while the initial main image is stopped,
+publishes identical VMAs and omits redundant main LOAD PROTECT RPCs. Normal
+mprotect, exceptional layouts, interpreter RWX setup and all ownership/COW/
+barrier/uncertain-PTE/ACK rules remain. No new payload, persistent field or
+heap site; eligibility compares at most16 LOADs locally.
+
+Three new native tests verify4->0 main protection RPCs with identical VMAs
+and interpreter tracking, failure publication and eligibility against initial
+page rights. Four tests extract the actual runtime functions for old/new
+responses, errors/no replay and argument checks. Release2431/0/20 passed
+inside wrapper75083, which later exited1 on a misspelled debug target;
+corrected debug357/0/5 owner76520 passed. The initial private-field fixture
+compile failure and target-selection failure are retained with their actual
+statuses. Do not relabel the failed wrapper as a successful owner.
+
+Normal Alpha/Alters/Booter build and RootFS/ESP verification passed. KVM
+SMP4 strict0w6fd2i1 passed four markers and14 guest2MiB leaves. Normal Files
+CPU0/SMP1 yv2ulzgo ping1.596602081s/ACK1.495593549s; PNG/root and keyboard
+/usr/local confirm eventual paint/input. Files huge pages and host374/428MiB
+THP remain active. Diagnostic Alters from the same source, with canonical
+normal binaries restored before VM, report actual Files PID42/Xfe entry
+0x48d70/four LOADs/protect-rpcs0 in4ggenbm4. This proves the skip branch,
+not whole-launch old/new IPC totals or a speedup. Diagnostic speed is excluded.
+Parent historical ping1.595014738s is not a fresh control;100ms remains unmet.
+Retired59 files/2699505664 allocated bytes, current/previous only. Uncommitted.
+See session-handoff/logs/linux-native-scope-20261107/initial-elf-rights-ack/RESULT.md.
+
+Latest checkpoint `snapshot-alias-batch` (parent `cache-fill-extents`).
+Alpha private snapshot construction marks the exact source range shared once
+and registers all independent target pool references in one existing batch.
+This follows complete source admission, target conflict checks, canonical
+reference validation, slot/root validation and copy-window invalidation.
+Per-page Frame identity, logical/hardware rights, uncertainty, deferred bits,
+pre-MAP target records, COW and ACK-before-retirement rules remain intact.
+The change removes repeated source VM and ownership PID-head resolution;
+it does not reduce guest MAPs, transferred bytes or RPCs. No new production
+field, payload RAM, allocation site or wire/kernel/FPU change.
+
+The same64-page eager test observes130 mutable VM lookups on the captured old
+source and67 on the new source. New64/513/1024-page cases with R/RX observe
+67/516/1027 lookups, unchanged64/513/1024 guest MAPs and no additional RAM or
+cap copies. Three new tests cover offset source/non-word-aligned targets,
+independent references, MAP errors before/after installation at word edges,
+ownership of the full unmapped tail and the production range-release ACK
+barrier. A failed constructor now retains all registered tail references
+until cleanup; successful final ownership granularity is unchanged.
+Release2428/0/20 and related debug577/0/6 passed. The old regression run's
+exit101 is retained as expected evidence, not a passing test.
+
+Only Alpha and ESP init changed; core, RootFS, services, Alters and fixtures
+are parent-identical. Normal KVM SMP4 strict gum9gudn passed four required
+markers with14 guest2MiB leaves. Files CPU0/SMP1 tc5stngb ping1.595014738s,
+or1.494054466s from release ACK; inspected/root and keyboard/usr/local PNGs
+confirm eventual display and input. Guest huge pages and host374/428MiB THP
+remain active. Historical parent ping1.804155667s is not a fresh control or
+proof of launch speedup. The100ms painted/input goal remains open. Retired
+38 files/735166464 allocated bytes; current/previous only, uncommitted.
+See session-handoff/logs/linux-native-scope-20261107/snapshot-alias-batch/RESULT.md.
+
+Latest checkpoint `cache-fill-extents` (parent `ahci-megabyte-window`).
+Ext2 fills cold device-read cache runs by consecutive destination slot extents.
+Each block still gets exactly the original CLOCK selection and index/entry
+updates. Only the payload copies are delayed and joined until a slot gap or
+wrap, then completed before synchronous return. Selection reads no payload.
+The ordinary block read, cold file read and successful mixed read fills use
+this path. Mixed output and cached-identity validation finish before filling;
+only missing scratch bytes are read. Dirty entries, failure publication,
+retry/writeback, cache budget and ownership rules remain unchanged.
+
+The 1MiB/1024-block native case reduces fill copy calls from 1024 to one,
+with the same 1MiB copied. Four new tests check complete payload and relevant
+CLOCK/index state against scalar fills, dirty fragmentation/full pressure,
+wrap and repeated slot reuse beyond cache capacity, mixed scratch gaps,
+guards and production read_file/read_blocks. Release2425/0/20 and related
+debug148/0/0 passed. No new payload, production field or heap allocation site;
+there is one request-local pending tuple. BTreeMap and per-block CLOCK work
+remain. Counters are test-only.
+
+A CPU0 native comparison of captured old and current production source,
+alternating order over11 trials of96 distinct-identity runs, reports median
+fill time64KiB7379.125->6997.375ns and1MiB132733.479->123789.813ns.
+The1KiB case was slower:69.292->71.906ns. These are host fill measurements,
+not guest elapsed time or a startup speedup. Total guest fill extents/copies
+were not instrumented. Device requests and total payload bytes are unchanged.
+
+Only Ext2's core CPIO record and ESP init changed. Normal KVM host SMP4
+strict xbteka1q passed all four required markers with14 guest2MiB leaves.
+Files CPU0/SMP1 8vxb7tr8 replied to ping in1.804155667s, or1.703125971s
+from release ACK. PNG inspection showed/root at+200ms with status0B,
+status723B at+500/+2000ms, and keyboard navigation to/usr/local's seven
+entries. Files used a2MiB leaf; host THP reached374/428MiB strict/Files.
+Both DMA read windows remained1MiB. The parent's historical ping was
+1.595417131s; no fresh parent control or whole-launch speedup is established.
+The100ms painted/input goal remains open. Retirement removed39 files and
+739483648 allocated bytes, retaining current/previous only. Uncommitted.
+See session-handoff/logs/linux-native-scope-20261107/cache-fill-extents/RESULT.md.
+
+Latest checkpoint `ahci-megabyte-window` (parent `immutable-source-permission-words`).
+AHCI prefers a1MiB data window, falling back to the former256KiB command
+allocation if the larger contiguous request fails. The actual capacity travels
+in one Runtime word and bounds default attach, transfers before bounce copies,
+command encoding and private data slices. Explicit peer sizes remain exact;
+larger legacy SHM cannot overflow a small fallback bounce buffer. Ext2 already
+uses provider-selected capacity; its source and1MiB cache budget are unchanged.
+Ordinary Alter64KiB I/O and other block providers'64KiB defaults remain intact.
+
+Actual parent image data blocks for stdC++/FOX/X11 are contiguous. Production
+data-run models cross indirect leaves and reduce data requests13→4/14→4/5→2
+for256KiB→1MiB windows. Production read_file with the stdC++ size also reduces
+13→4 with identical bytes, partial edges and guards. Five added tests cover
+allocation failure/fallback, actual capacity, full command spans and late mixed
+read faults with dirty sources. Release2421/0/20 and debug424/0/2 passed.
+Existing command/DMA/metadata/privacy/recovery/flush tests cover the wider size.
+
+The larger existing private DMA, peer DMA and scratch-backup buffers add
+2.25MiB payload plus cap/PT/alignment costs; Runtime adds one word. Larger
+failure/publication/fairness units are a tradeoff. Retry, authority, bounds,
+DMA-stop-before-error, retain-on-failed-recovery and durability ACKs remain.
+
+Normal AHCI8322c64e / Booterd38c3cf7 changes only the AHCI core record and ESP
+init. A guest-instrumented diagnostic9vwoxb7s timed out before kernel logging
+(owner62781 exit1, HMP also failed, cause unknown); it is not adopted. Normal
+strict SMP4 vz7ew64_ and host-traced normal SMP4 mgwupp6x passed. Whole-boot
+QEMU trace sees4transfers above256KiB, max1047552B, including firmware, without
+Files-only or guest-only attribution. Both normal runs advertise1048576B.
+
+Untraced Files CPU0/SMP1 1v9k22hx ping1.595417131s / ACK1.494573514s. PNGs show
+/root/status progressing0→723B at+200/+500ms and keyboard /usr/local.14strict
+huge leaves and the Files2MiB leaf remain; host THP peaks374/428MiB. Parent
+historical ping2.229776919s has no fresh control; whole-launch speedup and100ms
+paint/input readiness remain unproven. Goal active. Retirement removed51files
+and1106718720allocated bytes, retaining current/previous generations. See
+session-handoff/logs/linux-native-scope-20261107/ahci-megabyte-window/RESULT.md.
+
+Latest checkpoint `immutable-source-permission-words` (parent `shadow-clean-blocks`).
+Alpha checks immutable source reservations' logical rights0/1 using existing
+revoked-W/X bitplanes instead of one permission lookup per page. Arbitrary
+subsets with native read aliases remain valid. Current whole-reservation Frame
+coverage and rejection of every uncertain key precede the word query. Missing
+permission metadata retains default7 and fails; sparse/exceptional values keep
+their full Word meaning. Caller/target authority, root, reservation boundaries
+and requested-page Frame/slot/reference/sharing checks remain unchanged. No
+persistent seal, heap, field, unsafe, ABI, kernel or FPU change was introduced.
+
+A4MiB/1024page mixed-rights model reduces point permission queries1024→0,
+using16permission words and zero query allocations. Production Alpha source
+creation plus optional R mappings verifies that a one-page request rechecks
+the whole reservation and rejects bad rights at its far end, without guest
+MAPs. Three new tests cover all ordinary rights, full exceptional values,
+sparse/packed boundaries, uncertainty, holes, unaligned metadata and top VA.
+Full release2416/0/20 and related debug574/0/6 passed.
+
+Normal Alpha e9556f74 / Booter6e4d2c1c; only ESP init changes. Core, RootFS,
+both Alters, framebuffer/storage services and fixtures match the parent.
+KVM host SMP4 strict unh_i8i2 passed four markers with14guest2MiB leaves.
+Files CPU0/SMP1 hj1zc1i2 ping2.229776919s / ACK2.128875584s is slower than the
+parent's historical2.018149092s, without a fresh control. At+200ms the window
+still has terminal remnants and an incomplete listing; +500/+2000ms show the
+full /root list/status723B. Keyboard navigation reaches /usr/local. Files
+retains its2MiB leaf; host THP peaks372/420MiB. Whole-launch improvement is
+unproven and the100ms paint/input objective remains active.
+
+Retirement removed38generated files, reclaiming735150080allocated bytes,
+with only current/previous images/snapshots and their PNGs retained. See
+session-handoff/logs/linux-native-scope-20261107/immutable-source-permission-words/RESULT.md.
+
+Latest checkpoint `shadow-clean-blocks` (parent `unix-bulk-gather`).
+fb-server excludes clean 64 KiB blocks throughout a present region, including
+gaps and suffixes after damage. Consecutive dirty blocks enter the original
+64B span copier together, preserving exact write ranges, adjacent-run merging,
+payload and byte counts. Partial rows, relative offsets, owner checks, pixel
+acknowledgement and framebuffer fences remain intact. No new heap site,
+persistent metadata, unsafe operation, wire or kernel change.
+
+The captured production old/new sources compare a 1920x1080 frame with three
+separated changed cells: fine checks129600→2624, bulk checks1→127, identical
+192 written bytes, write ranges and all pixels; duplicate writes remain zero.
+Two tests add cross-block dense runs, partial tails, relative offsets and
+successive frames checked against a hardware-span oracle. Full release2413/0/20
+and related debug89/0/2 passed.
+
+CPU0 host RAM comparison, nine alternating trials of32frames, gives medians:
+early update1.235→0.988ms, middle1.108→0.988ms, separated cells1.239→1.005ms.
+Dense, clean and last-cell-only inputs are approximately unchanged. Alternating
+64B stripes regress2.224→2.386ms, a7.3% tradeoff. Nested scanning and forced
+out-of-line variants were discarded and their raw results retained. These are
+function measurements, without a guest-wide speedup claim.
+
+Only fb-server's core archive record and ESP init change. Normal fb706c3e88 /
+Booter552ac1e0; RootFS, Alter, Alpha, AHCI, Ext2, fixtures and Kernel match the
+parent. KVM host strict SMP4 ov9yw_d9 passed four markers and14 huge leaves.
+Files CPU0/SMP1 fmp2l6jc ping2.018149092s / ACK1.917224596s is slower than the
+parent's historical1.595441814s, without a fresh parent control. Actual PNGs
+show /root and keyboard /usr/local, with root status still updating at+200ms
+and complete at+500ms. Files uses the8294400B framebuffer cache and a2MiB
+leaf; host THP peaks372/420MiB. The100ms paint/input goal remains active.
+Retirement removed40files and reclaimed746418176allocated bytes, keeping
+current and previous images/snapshots. See
+session-handoff/logs/linux-native-scope-20261107/shadow-clean-blocks/RESULT.md.
+
+Latest checkpoint `unix-bulk-gather` (parent `huge-frame-words`).
+Bulk writev/sendmsg input gathers up to four nonempty fields into one existing
+checked READ_VECTOR request. The accepted prefix must fit the existing copy
+quantum and include a field larger than the 16 KiB read-lease bound. All-small
+inputs retain read leases; single buffers and unsupported shapes keep scalar
+copies. A typed private MaybeUninit destination bounds every local pointer.
+Logical READ checks precede transport and Vec length is published only after
+complete success. Queue bytes, old tail/offset, rights and notifications remain
+transactional. No heap site, persistent field, wire or kernel change was added.
+
+Production guest-copy tests compare cold two/three/four-field input: checked
+requests fall from 2/3/4 to one, with exact bytes, accepted-prefix and guard
+checks. Five new tests cover bounded eligibility, denied sources, a later
+partially copied fault, stream backpressure, record kinds, retry and rights
+barriers. Full release 2411/0/20 and related debug 147/0/0 passed.
+
+Diagnostic KVM 8ry_cjwn completed 16 capped gather samples at PID 37, two fields
+and 49640–65536 bytes. Its /bin/aw-scope observer was absent from the inherited
+RootFS, exited 127 and timed out (owner 66972 actual exit 1). Samples establish
+execution only; this run supplies no Files launch result or speedup claim.
+Normal images use the available /bin/aw and replace only the two Alter binaries.
+Alpha, core, Booter, AHCI, Ext2 and fixtures remain equal to the parent.
+
+Normal KVM host SMP4 strict ra6iodnf passed four markers with 14 guest 2 MiB
+leaves. Files CPU0/SMP1 k1xf5li1 answered ping in 1.595441814s (1.494582066s
+from release ACK). Screenshots show /root, status updating from 0 to 723 bytes
+between +200 and +500ms, and keyboard navigation to /usr/local. Files retained
+its 2 MiB leaf; QEMU THP peaks were 376/420 MiB for strict/Files. The parent's
+historical ping is 1.595579070s; no fresh control or whole-launch speedup is
+established. The 100ms paint/input goal remains active. Retirement removed
+45 files and reclaimed 2653700096 allocated bytes, retaining current and
+previous generations. See
+session-handoff/logs/linux-native-scope-20261107/unix-bulk-gather/RESULT.md.
+
+Latest checkpoint `huge-frame-words` (parent `resolved-path-reuse`).
+Guest 2 MiB construction records its internal 4 KiB slice identities as eight
+64-page words instead of 512 point records. Memory validates a whole span
+inside one current private-large allocation before filling keys. These remain
+internal identities, never exported capabilities. VM insertion excludes existing
+aligned backing and uncertainty, records zero rights and grants no 4 KiB table
+hint. Initialization, ownership, final rights, one huge MAP, failure quarantine
+and ACK-before-free remain in place. The scratch array is 512 bytes; persistent
+metadata and the ordinary small-page fallback are unchanged.
+
+The production Alpha model records zero point calls instead of 512, with the
+same eight packed words, all slice keys, bytes, permissions, one huge PTE and
+successful release. Production MemoryManager tests reduce range probes from
+512 to eight and match every scalar key, with boundary/overflow/demotion
+rejection before stores. VM tests cover flags, uncertainty, collisions and
+absence of a 4 KiB table hint. Release 2406/0/20 and debug 571/0/6 passed.
+
+KVM host SMP4 strict m1gd9hft passed all four markers with 14 guest 2 MiB
+leaves. Files CPU0/SMP1 kozigs4a answered ping in 1.595579070s (1.494612711s
+from release ACK), displayed /root and handled keyboard navigation to
+/usr/local. Its status was still updating at the first capture. Files used a
+guest 2 MiB leaf and QEMU reached 420 MiB THP. The parent's historical ping
+was 1.806319131s; no fresh control or whole-launch speedup is established.
+The 100ms paint/input target remains open. Retirement reclaimed 743800832
+allocated bytes from 40 files, retaining current and previous generations.
+See session-handoff/logs/linux-native-scope-20261107/huge-frame-words/RESULT.md.
+
+Latest checkpoint `resolved-path-reuse` (parent `large-cache-extents`).
+Ext2 retains eight successful reference-path resolutions in fixed metadata
+under 4 KiB. Keys include namespace root, starting inode, follow-final and
+the complete owned input bytes. Inputs above 128 bytes and canonical results
+above 256 bytes bypass it. Missing/error results, mutation operations and
+leaf-name consumers keep the full walk. Directory invalidation clears all
+entries before topology metadata write attempts. File size/version and open
+descriptors are never cached. Hits leave the inode unset so open/stat reads
+current metadata even after regular-file writes that preserve directory state.
+
+The production Disk wrapper resolves a six-component path 128 times with
+fresh size changes: inode reads fall from 768 to 133. Tests cover exact keys,
+owned bytes, FIFO/bounds, symlinks, dot-dot, errors, invalidation and fresh leaf
+metadata failure. Release 2403/0/20 and related debug 136/0/0 passed. Diagnostic
+KVM 4lc_f03l reported 16 bounded hits in Tiny Core namespace root 103; these
+are not total hits or a Files-only attribution.
+
+Normal KVM host SMP4 strict fwsux6xc passed all four markers and created 14
+guest 2 MiB leaves. Files CPU0/SMP1 t695h0gx responded to ping in 1.806319131s
+(1.705506717s from release ACK), displayed /root and handled keyboard navigation
+to /usr/local. Its status was still updating at the first capture. The guest
+used a 2 MiB leaf and QEMU reached 420 MiB of THP. The parent's historical ping
+was 1.803646025s; no fresh control or startup speedup is established. The 100ms
+paint/input target remains open. Retirement reclaimed 1113075712 allocated
+bytes from 60 files and retains current and previous images/snapshots.
+See session-handoff/logs/linux-native-scope-20261107/resolved-path-reuse/RESULT.md.
+
+Latest checkpoint `large-cache-extents` (parent `ahci-direct-read-window`).
+Fully resident Ext2 reads above 64 blocks now copy each consecutive cache
+extent together. Both block identities and current slots must be consecutive.
+The complete residency preflight still precedes output and CLOCK mutations.
+The bounded small-range path, dirty data, cache budget and wire are unchanged.
+No heap or persistent metadata is added. Copy counters are test-only and
+the optional execution diagnostic is absent from normal binaries.
+
+For the same 256 KiB input, native copy calls fall from 256 to one with
+consecutive slots, or four with four extents. Output, guards, dirty bytes
+and scalar-read cache state match. Missing-range, eviction and size/slot
+tests also cover 256-block transfers. Release 2399/0/20 and related debug
+128/0/0 passed. Diagnostic KVM yli8zrs4 observed a 259360-byte, 254-block
+cached read using three copies during desktop boot. It is not attributed
+to the Files release-to-ping interval.
+
+Normal KVM host SMP4 strict tnhpe92e passed all four markers with 14 guest
+2 MiB leaves. Files CPU0/SMP1 wytmv6lh answered ping in 1.803646025s
+(1.702762690s from release ACK), displayed /root, and handled keyboard
+navigation to /usr/local. The status was still updating in the first capture.
+This is slower than the parent's historical 1.597603331s; there is no fresh
+parent control or demonstrated launch speedup. The 100ms target remains open.
+Files used guest huge pages and QEMU reached 420 MiB of THP. Retirement freed
+1112993792 allocated bytes from 60 files, retaining current and previous.
+See session-handoff/logs/linux-native-scope-20261107/large-cache-extents/RESULT.md.
+
+Latest checkpoint `ahci-direct-read-window` (parent `ahci-command-state`).
+Ext2 requests an optional provider-owned DMA read window. AHCI shares a
+separate, fully cleared data allocation and directs reads into that window.
+Its command and FIS memory remain private. Unsupported or failed attachment
+falls back to ordinary shared memory. Writes still snapshot through private
+staging; odd read offsets use the existing copy path.
+
+The optional protocol permits partial scratch changes after a failed read.
+Ext2 only consumes successful reads. A direct-read transport/protocol failure
+stops the DMA engines through port recovery before the error reply. Failed
+recovery stops serving and retains DMA backing. Native tests compare all
+256 KiB against legacy reads with the post-DMA staging copy reduced from
+262,144 bytes to zero. They cover fallbacks, owner and bounds checks, page
+padding, write snapshots, partial failures and recovery. Release 2398/0/20
+and related debug 404/0/2 passed.
+
+KVM host SMP4 strict czb7uczy passed all four markers and created 14 guest
+2 MiB leaves. Both strict and Files attached the 256 KiB DMA window. Files
+CPU0/SMP1 7m7y6wtd answered ping in 1.597603331s (1.496723249s from release
+ACK), displayed /root, and handled keyboard navigation to /usr/local.
+The status text was still updating at the first post-ping capture. Files
+used a guest 2 MiB leaf and QEMU used up to 420 MiB of THP. A launch-time
+improvement and the 100ms paint/input target remain unverified.
+Reclaimed 747589632 allocated bytes from 42 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/ahci-direct-read-window/RESULT.md.
+
+Latest checkpoint `ahci-command-state` (parent `rooted-inode-reuse`).
+Each AHCI command clears its 32-byte slot-zero header and complete
+144-byte command table, reducing metadata zeroing from 4,096 to 176 bytes.
+The initial DMA allocation still starts cleared. Tests verify the byte count,
+reserved fields, stale PRDT removal, and preservation of received FIS memory,
+unused slots, gaps and payload through read/write/flush/IDENTIFY sequences.
+Release 2392/0/20 and related debug 87/0/0 passed.
+
+KVM strict first boot 7a3620aq timed out after firmware-only output and failed
+monitor queries. The same image retry ou0955dg passed all four markers with
+14 guest 2 MiB leaves. Files CPU0/SMP1 tp16lmy5 answered ping in 1.596435249s
+(1.495558152s from release ACK), displayed the /root list, and handled
+keyboard navigation to /usr/local. The Files guest used a 2 MiB mapping and
+QEMU used up to 420 MiB of THP. An end-to-end speedup remains unverified.
+Reclaimed 747462656 allocated bytes from 42 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/ahci-command-state/RESULT.md.
+
+Latest checkpoint `rooted-inode-reuse` (parent `shared-frame-runs`).
+Ext2 retains one successful namespace root up to 128 bytes and clears it
+through the existing directory metadata invalidation before writes.
+The key is copied from client SHM before the lookup. Longer roots follow
+the existing path. The read-only namespace adapter also keeps the inode
+it just read for its next parent validation and final open or metadata reply.
+
+For 128 identical four-component roots, the native test records 512 inode
+calls before and four after. A cold six-component walk takes seven instead
+of 12. Tests cover metadata changes, root switching, long inputs, symlink
+replacement and a fresh leaf size on the next request. Release 2391/0/20
+and related debug 185/0/0 passed.
+
+KVM host SMP4 strict w_r875w5 passed all four markers and created 14 guest
+2 MiB leaves. Files CPU0/SMP1 eux7o46z answered ping in 2.017060787s
+(1.916198727s from release ACK). The /root list and keyboard navigation
+to /usr/local worked. Its guest process created a 2 MiB mapping and QEMU
+used up to 420 MiB of THP. A launch-time improvement remains unverified.
+Reclaimed 747532288 allocated bytes from 41 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/rooted-inode-reuse/RESULT.md.
+
+Latest checkpoint `shared-frame-runs` (parent `sparse-gpu-present`).
+Alpha prepares the permanent 4 KiB Frame caps of shared allocations a
+ready range at a time. On the same prepared 8 MiB span, the native
+test records 4,096 Frame range probes before and one after. Aligned
+immutable sources publish absent-PTE Frame metadata 64 pages at a
+time. Release skips Frame descriptor resolution for confirmed absent
+PTEs. Tests cover exact descriptors, range boundaries, conversion
+failure and prefix rollback. Release 2389/0/20 and related debug
+572/0/6 passed.
+
+KVM host SMP4 sc_5dkme passed all four file-mapping markers and created
+14 guest 2 MiB leaves. With CPU0/SMP1, Files ping took 2.229148869s and
+1.808543581s on the candidate and 1.595549264s on a fresh parent run.
+The candidate's /root list and keyboard navigation to /usr/local
+worked. All Files boots used guest 2 MiB pages and up to 420 MiB of
+host THP. The observations do not establish a launch-time improvement.
+Reclaimed 744169472 allocated bytes from 57 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/shared-frame-runs/RESULT.md.
+
+Latest checkpoint `sparse-gpu-present` (parent `versioned-image-read`).
+Honoka batches up to three sparse rectangles per synchronous request
+when the display service advertises support. The software framebuffer
+validates the surface owner and all rectangles before copying, leaves
+the gaps untouched, and drains hardware writes once for the batch.
+The same disjoint cursor move in native tests takes two display requests
+with the previous path and one with batching, with equal pixels and rectangles.
+Release 2387/0/20 and related debug 94/0/1 passed.
+
+KVM host SMP4 strict lc5k2rq1 passed all four markers and created 14
+guest 2 MiB mappings. Files CPU0/SMP1 xani_1pe responded to ping in
+1.593200236s (1.492284346s from release ACK), displayed the /root list
+by the screenshot 200ms after ping, and handled keyboard navigation
+to /usr/local. Its guest process created a 2 MiB mapping. The QEMU
+process used up to 420 MiB of transparent huge pages during that run.
+Reclaimed 1840406528 allocated bytes from 48 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/sparse-gpu-present/RESULT.md.
+
+Latest checkpoint `versioned-image-read` (parent `initializer-source-runs`).
+For an immutable image that fits the direct window, Ext2 verifies the
+expected identity and size and reads the complete file in one request.
+Alter can publish those bytes under the verified identity after
+initialization. The initial fstat still runs. An unsupported or failed
+positioned request retains the ordinary pread and final fstat path.
+
+The native loader comparison produces the same bytes with one read and
+reduces fstat calls from two to one. It rejects stale replies without
+publishing a snapshot. Tests cover owner and delegate checks, mapped-file
+pins, wrong sizes and a preserved shared FD offset. Release 2384/0/20 and
+related debug 183/0/0 passed.
+
+KVM host SMP4 strict t4q8d9vt passed all four markers. Files CPU0/SMP1
+3ylo54jg responded in 1.806512613s (1.705667919s from release ACK).
+The /root listing and keyboard navigation to /usr/local were confirmed.
+Reclaimed 1826394112 allocated bytes from 53 obsolete or temporary files.
+See session-handoff/logs/linux-native-scope-20261107/versioned-image-read/RESULT.md.
+
+Latest checkpoint `initializer-source-runs` (parent `deferred-frame-words`).
+Validate large, fully backed initializer inputs from the current VM's
+Frame index in one walk. Keep the ordered per-page fallback for holes
+and resolve the live source again during copying. Owned image
+initialization uses contiguous ready destination aliases through the
+existing initialization window.
+
+The native 1MiB comparison removes 256 per-page preflight resolutions.
+The 2MiB ready-destination comparison reduces destination alias resolver
+calls from 512 to 1. Both verify bytes and zero padding. Release
+2374/0/20, related debug 509/0/6 and the role-swap-disabled case passed.
+
+KVM host SMP4 strict rqkw0l_l passed all four markers. Files CPU0/SMP1
+_6b15wvf answered in 1.805962028s (1.705003565s from release ACK).
+The 500ms follow-up shows the /root list, and keyboard navigation to
+/usr/local passed. Reclaimed 759894016 allocated bytes from 40 files.
+See session-handoff/logs/linux-native-scope-20261107/initializer-source-runs/RESULT.md.
+
+Latest checkpoint `deferred-frame-words` (parent `cacheable-read-windows`).
+Publish complete 64-page words of deferred read-only backing with one
+update to the packed Frame, permission and pending metadata. Snapshot
+aliases batch source sharing and ownership-list insertion while retaining
+per-page physical references. The private constructor leaves a partially
+initialized word unpublished and keeps the available 2MiB leaves.
+
+The same native VM model registers 131072 pages in a median of 33.38ms
+with point updates and 1.79ms with word updates. Frame identities, rights,
+sharing and absent PTE state match. Release 2371/0/20 and related debug
+506/0/6 passed, including failed initialization and UNMAP retention.
+
+KVM host SMP4 strict vs_jf6ok passed four markers. Files CPU0/SMP1
+uaclpq3s responded in 1.806916109s (1.705955497s from release ACK).
+The /root listing and keyboard navigation to /usr/local were confirmed.
+39 obsolete or temporary files released 746336256 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/deferred-frame-words/RESULT.md.
+
+Latest checkpoint `cacheable-read-windows` (parent `whole-huge-mixed`).
+Ext2 now plans mixed resident and missing blocks across a full cacheable
+device window. It copies cached bytes directly to the client, fills the
+cache only after all missing runs succeed and retains the fully cached fast
+path. The larger plan uses request-local storage only on a mixed read.
+
+The 256KiB native case compares the prior scratch path at full cache
+occupancy. The output and guards match, device blocks fall from 254 to 253
+and scratch stays untouched at the three initially resident blocks. A late
+I/O failure leaves the output and cache intact. Release 2369/0/20 and
+related debug 130/0/0 passed.
+
+KVM host SMP4 strict nz_pk9ea passed four markers. Files CPU0/SMP1
+hkcq16xx answered in 1.806581960s (1.705650837s from release ACK). The
+/root listing and keyboard navigation to /usr/local were confirmed.
+40 obsolete or temporary files released 747343872 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/cacheable-read-windows/RESULT.md.
+
+Latest checkpoint `whole-huge-mixed` (parent `mixed-streaming-reads`).
+Preserve every stable 2MiB leaf covered by a protection request, including
+when old permissions differ or small pages are present. Change ordinary
+pages first, then whole leaves, and split one changing partial leaf last.
+Restore committed permissions in reverse order on failure and retain
+quarantined backing when shootdown or repair fails.
+
+For two 2MiB leaves plus a 4KiB tail, the native comparison reduced guest
+MAP/UNMAP calls from 2049/1027 to 3/3. Starting one page later reduced
+2048/1026 to 514/3 and kept the second leaf huge. Bytes and permissions
+matched. Full release 2368/0/20 and related debug 573/0/6 passed.
+
+KVM host SMP4 strict myqcm5w8 passed the mixed protection fixture and all
+four required markers. Files CPU0/SMP1 6cjii_1o answered in 2.072748611s
+(1.971879045s from release ACK). The /root listing and keyboard navigation
+to /usr/local were confirmed. The startup target remains unmet.
+Retained current and previous media and reclaimed 1296674816 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/whole-huge-mixed/RESULT.md.
+
+Latest checkpoint `mixed-streaming-reads` (parent `huge-initialization-span`).
+For a large Ext2 read exceeding the cache budget, a streamed run now
+reads only its missing blocks, including when the run has resident
+blocks. Copy the resident bytes and device scratch directly to the client
+after all gap reads succeed. Preserve dirty resident bytes and omit cache
+insertion for the cold stream. The index walk covers the full device run.
+
+The 512KiB native case uses two 256KiB windows with a full cache. Device
+blocks fall from 510 to 509 and follow-up reads of eight hot blocks from
+8 to 0. A late gap failure leaves the current output and cache contents
+intact. Full release 2367/0/20 and debug 129/0/0 passed with owner 44576.
+
+KVM host SMP4 strict ue1b82r2 (owner 97166) passed four markers. Files
+CPU0/SMP1 vnp26hed (owner 74907) responded in 1.596897175s
+(1.496056433s from release ACK). The root view and keyboard navigation to
+/usr/local passed. The core archive replaces the Ext2 record and the ESP
+contains the rebuilt init. Retained current and previous images and snapshots.
+43 obsolete files released 748953600 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/mixed-streaming-reads/RESULT.md.
+
+Latest checkpoint `huge-initialization-span` (parent `huge-metadata-batch`).
+Copy initialized huge backing through the existing contiguous destination
+alias. Resolve each source page once per span and zero the remaining suffix
+in one store. Pin the destination during all source mapping calls, including
+with the small-page role swap disabled. Publish the guest leaf after the
+copy and zeroing succeed.
+
+The native comparison uses the parent memory_large.rs and the same current
+copy code and contiguous model backing. For one 2MiB leaf, output alias
+resolutions fall from 512 to 1. With a 37-byte source offset, source alias
+resolutions fall from 1024 to 513. The byte contents and single guest leaf
+match the prior result. Full release 2366/0/20 and debug 572/0/6 passed with
+owner 57743. The pin regression also passed with role swapping disabled.
+
+KVM host SMP4 strict reayumfs (owner 7406) passed the four markers. Files
+CPU0/SMP1 68iww3_3 (owner 62576) responded in 1.616065842s
+(1.515131487s from release ACK). The root view and keyboard navigation to
+/usr/local passed. Retained the current and previous images and snapshots.
+43 obsolete files released 761397248 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/huge-initialization-span/RESULT.md.
+
+Latest checkpoint `huge-metadata-batch` (parent `partial-huge-protection`).
+Register the 512 page references of a huge allocation under one memory
+owner resolution and one allocation list head update. Preserve per-page
+reference counts, node order and partial retirement. Huge construction and
+whole protection update uniform permissions in eight packed 64-page words.
+Exceptional entries and readonly words without packed proof use the point
+setter. Zero rights clear pending bits and readonly proofs match backing.
+
+Same-binary release benchmark on CPU0, five alternating samples. Median
+permissions time for 8192 updates of one 2MiB region fell from 71.98ms to
+2.05ms. Registration time for 2048 regions fell from 34.44ms to 20.56ms.
+Two regression tests compare both batch operations with the point APIs.
+Full release 2365/0/20 and debug 571/0/6 passed with owner 29282.
+
+KVM host SMP4 strict zhinqw6h (owner 47899) passed all four markers with the
+existing fixture. Files CPU0/SMP1 hm2c7nhf (owner 55850) responded in
+2.017657945s (1.916834032s from release ACK). The root view and keyboard
+navigation to /usr/local passed. Whole launch speedup remains unverified.
+Retained the current and previous image pairs and component snapshots.
+42 obsolete files released 752373760 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/huge-metadata-batch/RESULT.md.
+
+Latest checkpoint `partial-huge-protection` (parent `copied-fork-huge`).
+When mprotect intersects one stable huge leaf, complete the ordinary pages
+first. A partial split installs each 4KiB page with its final permissions
+and leaves zero-rights pages absent. A fully covered huge leaf stays huge
+even when the request includes ordinary pages. Split failures restore the
+original leaf or quarantine it, then roll back the ordinary pages. A first
+partial protection of inaccessible huge backing prepares any missing upper
+tables and tracks the new leaf table for rollback.
+
+The libFOX layout model uses the recorded 269-page offset and 352-page
+execution range. Guest MAP falls from 864 to 621 and UNMAP from 244 to 1.
+For a whole 2MiB leaf plus one ordinary page, MAP/UNMAP falls from 1025/514
+to 2/2, with no demotion. The comparison substitutes the parent
+mapping_protection.rs in the same native harness. Four new tests cover
+mixed permissions and zero rights, failures before and after MAP in both
+phases, whole huge retention, and the first split without upper tables.
+Full release 2363/0/20 and debug 557/0/6 passed with owner 72171.
+
+KVM host SMP4 strict 64mp2qch (owner 74092) passed the mixed 2MiB + 4KiB
+fixture and the first partial restore in an inaccessible fork child.
+Files CPU0/SMP1 19k99pju (owner 59412) responded in 1.595367361s
+(1.494365958s from release ACK), with root and keyboard navigation to
+/usr/local verified from screenshots. The 100ms target remains open.
+The current and previous image pairs and component snapshots are retained.
+49 obsolete media files released 1835089920 allocated bytes.
+See session-handoff/logs/linux-native-scope-20261107/partial-huge-protection/RESULT.md.
+
+Latest checkpoint: `copied-fork-huge` (parent `unmapped-fork-pages`).
+Keep the parent's stable 2MiB Frames when private fork will eagerly copy
+them: PROT_NONE, write without read (including execute), and writable
+permissions in the non-COW mode. Require complete uniform VM backing,
+no uncertain/deferred/shared state, and a stable large record with no
+pending table or quarantine. The initializer reads the source through its
+existing trusted large aliases. The child owns distinct backing and uses
+huge Frames when available. Read-only sharing and writable COW still split
+before exporting 4KiB capabilities; pending records still use the existing
+split, rollback and quarantine path. No new fields, heap sites, budgets,
+windows, wire, Kernel, FPU, version or submodule changes.
+
+Four new tests cover both fork modes, all rights on 2/4MiB, mixed readonly
+sharing, preserved parent identity and child write isolation, copy failures,
+conservative VM fallback, and real MemoryManager stable versus failed,
+small and quarantined records. Full release2359/0/20 and debug553/0/6
+owner87647 actual0; normal build45902 and native comparison80893 actual0.
+The old comparison substitutes captured parent memory_private.rs into the
+same current native model. For 2MiB PROT_NONE, parent demotion1->0 and later
+parent MAP512->1. For write without read (rights2/6), fork MAP/UNMAP513/1->1/0
+and parent demotion1->0. Later whole restoration MAP/UNMAP512/512->1/1.
+Counts are modeled guest operations, not whole-machine calls or CPU time.
+
+Normal Alpha dc649a51 / Booter142afa40; RootFS fixtureec4e9124 only and
+ESP init only. Alts/core/AHCI/Ext2/Kernel unchanged. KVM host SMP4 strict
+o3pepixr owner47483 actual0/4 markers; new C fixture passes 16KiB/2MiB copies
+at rights0/2/6, whole rights restoration and all-byte isolation. Twelve
+guest huge creations include parent/child at 0x34800000 and 0x34c00000.
+Alpha image8/archive2/heap16/stack2 retained. Files CPU0/SMP1 ljp7f9to
+owner58618 actual0: ping1.804922617s / ACK1.703932029s, root and keyboard
+usr/local screenshots verified. PID42/0x100c00000 creation still occurs
+between observer and ping. Creation reports do not prove final leaf shape.
+Parent's earlier 2.438779649s is not a fresh control; whole launch speedup
+and the 100ms objective remain unproved.
+
+Keep current/previous4 images and12 snapshots each, PNG ljp7f9to/pzvibwpb.
+Retired49 obsolete/trial media,1835065344 allocated bytes; all raw/text/source
+preserved. Details: session-handoff/logs/linux-native-scope-20261107/
+copied-fork-huge/RESULT.md. Uncommitted, no VM, optimization goal active.
+
+Latest checkpoint: `unmapped-fork-pages` (parent `whole-huge-protection`).
+Private fork copies PROT_NONE runs directly into initialized, owned backing
+without publishing temporary guest PTEs. An internal fixed-base sealed-pool
+constructor accepts zero rights; ordinary protected initializers still reject
+zero. Available aligned large RAM stays in huge Frames with an absent guest
+leaf. Later whole protection installs a 2MiB leaf and prepares upper tables
+lazily; partial/small protection prepares the required 4KiB tables. Recording
+unmapped small backing preserves only preexisting table-ready hints. This also
+fixes restoring permissions after the parent's zero-rights huge split at fork.
+All retained bytes still copy; ordinary copy failures use existing ownership
+cleanup. No new field, budget, window, wire, Kernel, FPU, version or submodule
+change. Huge construction reports count only actually published guest leaves.
+
+Three new tests plus strengthened existing coverage exercise 1/16/512/1024
+pages with nonzero contents, no temporary guest MAP/UNMAP, whole/partial
+restoration, huge retention, child write isolation, copy-failure cleanup,
+unsealed/invalid targets, missing source, and real MemoryManager table/cap/RAM
+behavior. Full release2355/0/20 and debug549/0/6 owner40617 actual0; normal build
+25133 and native comparison30693 actual0. Expected parent red and all failed
+development tests are retained in test-history.json and raw logs.
+
+The native guest PTE model uses captured parent memory_private.rs versus the
+current branch, with the same current constructor/protection/mock primitives:
+16-page fork MAP/UNMAP16/16 ->0/0; 2MiB513/513 ->0/0. This measures modeled guest
+operations, not whole-machine calls or CPU time. Full-parent regression-before
+also recorded513/513. Sources and generated harness hashes are saved.
+
+Normal Alpha dcb8ad2a / Booter862ca748; RootFS changes fixturea29beff5 only,
+ESP init only, tree/readback/e2fs/outside verified. Alts/core/AHCI/Ext2/Kernel
+unchanged from parent. KVM host SMP4 strictp3ppygin owner55601 actual0, four
+literal markers. New C test restores every byte in parent/child after PROT_NONE
+fork for16KiB/2MiB, with child write isolation. Eight guest huge creations and
+Alpha image8/archive2/heap16/stack2 retained. Files CPU0/SMP1 pzvibwpb owner22682
+actual0: ping2.438779649s / ACK2.337935647s; PNG root3 folders+parent and keyboard
+usr/local6 folders+parent verified. PID42/0x100c00000 huge creation between
+observer and ping remains, not a final leaf-shape proof. Parent's earlier
+1.594908906s is not a fresh control; whole launch speedup/100ms remain unproved.
+
+Keep current/previous4 images and12 snapshots each; PNG pzvibwpb/ngknhbb2 only.
+Retired49 obsolete/trial media,1834979328 allocated bytes. All raw/text/source
+preserved. Details: session-handoff/logs/linux-native-scope-20261107/
+unmapped-fork-pages/RESULT.md. Uncommitted, no VM, optimization goal active.
+
+Latest checkpoint: `whole-huge-protection` (parent `file-huge-placement`).
+Aligned ranges backed entirely by stable huge Frames with uniform current
+rights can change permissions without demotion. Preflight VM coverage/rights,
+uncertainty/deferred/shared flags and every current large record, then retain
+the existing copy-window cleanup and supervisor VM barrier. Each leaf uses
+UNMAP ACK/MAP; PROT_NONE keeps the huge Frame with confirmed absence, and a
+later whole-range protection can map it again. Failure repairs the current leaf
+and reverses the committed prefix. Failed repair quarantines the Frame and
+marks all512 slices uncertain, retaining RAM. Partial/mixed/pending ranges keep
+the original transaction. Zero-rights partial split/rollback now preserves
+absence without mapping zero attributes. No new field/heap site/budget/window/
+wire/Kernel/FPU/version/submodule change; no per-page rollback Vec on this path.
+Tradeoff: an extra candidate preflight on eligible-looking ranges; nonuniform
+or partly small ranges retain their old split cost.
+
+Nine new tests cover2/4MiB across all rights and zero, stable bytes/keys/ownership,
+second-leaf pre/post-MAP failure and prefix repair, unacknowledged repair, zero
+partial split/rollback, mixed fallback, zero-rights fork/copy/release, and real
+MemoryManager cap/RAM/large-map counts and failure/zero-table restoration.
+Final release2352/0/20 and debug546/0/6 owner79649 actual0. Old-source regression
+owner20036 actual101; initial wrong Cargo target invocation exits101 and is
+corrected to core-process (the requested names were modules). All raw retained;
+no VM failures. Same-input native guest-PTE comparison owner23503 actual0 uses
+old/current actual Alpha protection/split code:2MiB3→1 MAP1024→1, UNMAP513→1,
+huge leaf0→1. Modeled guest operations only, not whole-machine totals/CPU time.
+Real production MemoryManager tests independently keep the huge cap/RAM and
+verify seven21-bit MAP/seven UNMAP across eight rights transitions, no retype.
+
+Normal Alpha3b778c66/Booter94ce6f41; ESP init and RootFS fixture0a475f7e only,
+verified tree/readback/e2fs/outside hashes. Alts/core/AHCI/Ext2/Kernel unchanged.
+KVM host strict SMP4 wcpi6upw owner37333 actual0: four markers, new C whole2MiB
+R→NONE→W and whole4MiB R/W cases pass, existing partial/COW/fork remain. Seven
+guest huge creations and Alpha image8/archive2/heap16/stack2 retained. Normal
+Files CPU0/SMP1 ngknhbb2 owner37805 actual0:1.594908906s/ACK1.494076539s; actual
+PNG/root→keyboard/usr/local six folders plus parent. PID42/0x100c00000 huge
+creation remains between observer and first ping, not a final-shape proof.
+Parent previous run1.595179656s, no fresh control/whole-launch speedup/100ms proof.
+Current/parent four images,12snapshots each, PNGngknhbb2/ch78eia6.49obsolete/
+trial media/1834991616 allocated bytes removed. Raw/text/source retained;
+uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/whole-huge-protection/RESULT.md`.
+
+Latest checkpoint: `file-huge-placement` (parent `automatic-huge-alignment`).
+Large virtual reservations prefer2MiB alignment beyond their prior reservation
+history. A low hole can still contain a retained4KiB table after unmap, blocking
+an otherwise possible huge leaf. Add an8-byte cursor to existing VMA Storage;
+CLONE_VM shares it, fork with live metadata copies it independently, removal/
+clear retain it and Storage release resets it. Update only after successful
+reservation publication, without changing permission generations. This is a
+placement hint: all current VMAs are still scanned and lack of aligned space/
+overflow falls back to the old4KiB first-fit. Small requests retain old choices.
+Existing allocator site grows8B/table; no extra payload backing/RPC/window,
+Kernel/FPU/version/submodule/Alpha change. Tradeoff: more VA gaps and retained
+placement history, and a preferred scan can precede the fallback scan. Actual
+huge construction still requires physical authority/RAM and a usable leaf slot.
+
+Four new tests cover fresh aligned placement beyond retired intervals, occupied
+hints/unaligned gaps/overflow/exhaustion/small choices,2400 randomized unordered
+VMA cases against exhaustive aligned search, shared/fork/clear/release/generation
+history. Final release2343/0/20 and related syscall-scope debug192/0/2 owner10526
+actual terminal0; no test/VM failures. Runtime fixture adds alignment assertions
+to its existing2MiB file R/W case, retaining all-byte/zero-tail/private disk data
+checks. Normal LinuxAltercdc6cf26/FreeBSDAltera255ab9d, RootFS only those Alters
+and fixturea01c9a27 changed; tree/readback/e2fs/outside verification passed.
+ESP/Alpha99321c93/Booter79b33180/core/AHCI/Ext2/Kernel unchanged.
+
+KVM host strict SMP4 ocbxw9g0 owner60044 actual0: four markers and seven huge
+leaves, including new file-arena0x100600000 and previous six; Alpha image8/archive2/
+heap16/stack2 remain. Normal Files CPU0/SMP1 ch78eia6 owner6657 actual0:
+1.595179656s/ACK1.494252937s, real PNG/root→keyboard/usr/local six folders plus
+parent. Between observer-ready and first ping, PID42/0x100c00000 reports one
+successful huge-leaf creation; parent's previous normal run had none. It can
+be split by later partial protection/remapping: do not claim final PTE shape,
+lifetime total MAP savings or CPU time. No fresh parent control or whole-launch/
+100ms proof. Current/parent four images,12snapshots each, PNGch78eia6/r5vxnc09.
+37obsolete/trial media/1775767552 allocated bytes removed; raw/text/source kept.
+Uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/file-huge-placement/RESULT.md`.
+
+Latest checkpoint: `automatic-huge-alignment` (parent `lease-owner-hash`).
+Automatic sealed-pool private allocations of at least2MiB prefer a2MiB-aligned
+heap base, allowing a complete huge leaf after a small allocation. Fixed bases,
+native/cap-backed mappings and smaller requests keep their old placement.
+If the aligned range cannot fit or rounding overflows, try the ordinary cursor;
+invalid/overflowing slot reservations leave both cursor and slots untouched.
+Padding consumes virtual addresses only, at most2MiB−4KiB per eligible request,
+with no backing/slot allocation. Physical authority/untouched-RAM and leaf-table
+availability still decide whether huge construction succeeds or falls back.
+No new field/heap site/budget/window/wire/Kernel/FPU/version/submodule change.
+
+New3 tests: automatic2/4MiB after a small allocation produces1/2 huge leaves,
+all zero bytes/logical rights/exact ownership/release, shared-VM cursor and
+near-limit fallback, padding slot counts, invalid alignment and rounding/slot
+overflow. Old-source regression owner70960 intentionally exits101 at unaligned
+base0x101000. Initial focused test assumed mock PTEs excluded huge leaves;
+initial full test used a heap fixture too small even for ordinary placement.
+Both test expectations corrected, all initial sources/raw failures preserved.
+Production unchanged after its initial implementation. Final release2339/0/20
+and debug537/0/6 (core/Alpha/physical/vm), owner36979 actual terminal0.
+
+KVM host strict SMP4 em13nhlg owner92667 actual0: new automatic huge leaf at
+PID29/0x10200000 plus the existing five fixed huge leaves; four literal markers
+pass. New C fixture checks automatic alignment after a small allocation, every
+zero byte, full read/write and release. Alpha image8/archive2/heap16/stack2 huge
+leaves remain. Normal Alpha99321c93/Booter79b33180; ESP init only and RootFS
+file-mapping fixture only, verified tree/readback/e2fs/outside hashes. Alts/core/
+AHCI/Ext2/Kernel unchanged. Normal Files CPU0/SMP1 r5vxnc09 owner55682 actual0:
+2.240626649s/ACK2.139772958s, actual PNG/root→keyboard/usr/local six folders plus
+parent. No guest.huge report in Files itself; no fresh parent control or whole
+launch/100ms improvement claim. Keep current/parent four images,12snapshots each,
+PNGr5vxnc09/n2ueq62o.47obsolete/trial media files/1817292800 allocated bytes
+removed; raw/text/source retained. Uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/automatic-huge-alignment/RESULT.md`.
+
+Latest checkpoint: `lease-owner-hash` (parent `initializer-copy-destination`).
+Mix the full VM owner before combining it with page bits in the bounded
+read/write lease cache. The old rotate-by-three placed adjacent owners32–39
+with identical page VAs in one four-way set. Keep16 sets/four ways, fixed local
+VAs, consecutive-page distribution and generation-independent placement for
+preserve_disjoint. Full owner/generation/page/Ready checks, current backing,
+rights, pending failures and vector revalidation remain. No new production
+field/heap/budget/window/wire/Kernel/FPU/version/submodule or huge-page change.
+Tradeoff: more integer mixing on each set lookup, no guarantee against all
+possible collision patterns.
+
+New regression: eight owners,64 rounds, both read/write, three separate page
+locations, changing current bytes each round. Each trace reduces grant calls
+1024→16 and replacement release calls1016→0 before final owner cleanup.
+The old-source red test exits101; final release2336/0/20 owner69938 actual0;
+confirmed debug with syscall-scope and huge-priority regression86/0/0 owner2318
+actual0; old-index release45/0/0 immediate exec805dcc actual0. Initial debug/
+legacy/build owners were lost across compaction; their logs remain and the
+relevant native tests were confirmed again with observed terminal exits.
+
+Old-index syscall-scope diagnostic7y046y4q owner32744 actual1: scope launcher
+exited127 before observer-ready, timeout. Preserve raw/page-fault logs and trial
+hashes. No completed scope window, real request comparison, diagnosis attributing
+this failure to the index, or diagnostic timing claim. New diagnostic not run.
+Default builds have no lease.hash diagnostic text.
+
+Normal LinuxAlter6542f3c8/FreeBSDAlter19dfd810; RootFS only those two members
+changed. ESP/Alpha/Booter/core/AHCI/Ext2/fixtures/Kernel parent-identical; tree,
+readback/e2fs and outside-partition verification passed. Strict SMP4 kg28jrgn
+owner55057 actual0: four markers and five guest2MiB leaves, including available
+0x2c200000/0x2c600000 beyond blocked small-table intervals. Alpha image8/archive2/
+heap16/stack2 huge leaves remain. Normal Files CPU0/SMP1 n2ueq62o owner49309
+actual0:1.959466232s/ACK1.858400422s; actual PNG/root→keyboard/usr/local six named
+folders plus parent. No fresh parent control or whole-launch/100ms proof.
+Retain current/parent four images,12snapshots each, PNGn2ueq62o/t6o331ni only.
+44 obsolete/trial media files,2653540352 allocated bytes removed; all raw/text/
+source evidence retained. Uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/lease-owner-hash/RESULT.md`.
+
+Latest checkpoint: `initializer-copy-destination` (parent `ext2-streaming-reads`).
+The small-page constructor can borrow an exact Ready permanent-pool destination
+already in CopyWindow when its initializer slot would miss. Resolve both source
+pieces first, retain prepared-source guards, pin the borrowed destination on
+later CopyWindow misses, initialize/zero every byte before guest publication.
+Ready initializer hits and Pending MAP/UNMAP cleanup retain their old paths.
+No change to the general initializer mapper/run spans or global copy mapper;
+huge aliases remain preferred on their existing paths. No new production
+field/heap/budget/window/wire/Kernel/FPU/version/submodule change. Misses add
+metadata/probe CPU work; no whole-launch performance claim.
+
+New4 tests: actual cache probe exact/Ready/pool identity and no side effects,
+post-MAP and failed-UNMAP rejection, initializer hit/pending/invalid eligibility,
+constructor bytes/zero tail/unaligned two-source pinning and failed-source
+nonpublication. Real cache metadata tests and constructor mock tests are
+separate. Full release2335/0/20 owner89093 actual0; related debug158/0/0 owner7769
+actual0; role-swap optout140/0/0 owner58240 actual0. No test/VM failure this cycle.
+Diagnostic KVMof9jmmqu owner16293 actual0: last before-first-ping cumulative
+report16384 probes/136 new Ready destination selections, report after observer.
+Includes boot/background; counts operations, not unique frames or an old-run
+total Kernel MAP difference. Do not sum cumulative rows or use diagnostic time.
+Normal diagnostic text absent.
+
+Normal Alpha2593805e/Booterfedbc289, core/RootFS/Alts/Ext23c8d91c4/AHCI/fixtures/
+Kernel parent-identical. ESP init only, outside ESP/RootFS verified. Strict SMP4
+ldykhti2 owner9482 actual0: four markers, guest huge5 and Alpha image8/archive2/
+heap16/stack2 remain. Normal Files CPU0/SMP1 t6o331ni owner92146 actual0:
+2.015227500s/ACK1.914286523s; PNG/root→keyboard/usr/local six folders plus parent.
+Previous-turn parent1.593623421s, no fresh control or whole-launch/painted-input
+100ms proof. Retain current/parent four images,12snapshots each, PNGt6o331ni/
+q2ryuenm.50 obsolete/trial media files,1087979520 allocated bytes removed; all
+raw/text/source retained. Uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/initializer-copy-destination/RESULT.md`.
+
+Latest checkpoint: `ext2-streaming-reads` (parent `vma-access-proof`).
+An Ext2 file read larger than its whole1MiB payload cache streams wholly cold
+physical runs of at least64KiB directly from existing device scratch to output.
+Skip read-cache admission/copy/index work for these runs, retaining hot metadata.
+Any resident block, including dirty data, keeps the ordinary coherent path.
+Reads fitting the cache, small tails, sparse holes, retry/size checks and output
+publication after successful I/O remain. No new field/heap/budget/window/wire,
+Alpha/Alts/Kernel/FPU/version/submodule or huge-page change. Tradeoff: oversized
+streams no longer retain every cold tail block for a later small random read.
+
+New5 tests cover equal bytes/guards with metadata followup device reads8→0,
+actual read_file admission/partial edges, dirty positions, failed-read retry and
+untouched output/cache, fitting-budget warm reuse. Full release2331/0/20 owner
+36633 actual0, related debug95/0/0 owner25649 actual0. Initial two failures were
+new test Vecs inferred as i32 instead of u8; both failure logs retained and
+initial test source reconstructed by reversing only those two annotations.
+Production source did not change after those failures.
+
+Diagnostic KVM1u_b5k7y owner29398 actual terminal0: before first ping the last
+cumulative report is64 runs/15925 blocks/16307200B bypassing admission. Report
+is after observer-ready, cumulative includes boot/background; do not sum rows
+or treat this as an old-run total-copy/CPU-time comparison. Normal diagnostic
+text absent. Normal Ext23c8d91c4/Booter89cc985a, core only Ext2 payload/size changed;
+all other core records, Alpha278caa23/Alts/RootFS/AHCI/fixtures/Kernel unchanged.
+Both ESPs only init changed, outside ESP/RootFS verified. Strict SMP4 qdsi8919
+owner78055 actual0: four markers, five guest huge leaves and Alpha image8/archive2/
+heap16/stack2 huge leaves. Normal Files CPU0/SMP1 q2ryuenm owner98679 actual0:
+1.593623421s/ACK1.492650174s; PNG/root→keyboard/usr/local six folders plus parent.
+No fresh parent control, whole-launch speedup or full painted-input100ms proof.
+Current/parent four images,12snapshots each, PNGq2ryuenm/9_vjanxl only.53 obsolete/
+trial media files,1097211904 allocated bytes removed. All raw/text/source retained;
+uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/ext2-streaming-reads/RESULT.md`.
+
+Latest checkpoint: `vma-access-proof` (parent `initializer-window-16m`).
+Cache the interval free of denied VMAs for each R/W/X permission, rather than
+rescanning denied entries for every small copy. Proofs live in existing shared
+MappingTable storage (+72B/table); match its never-reused nonzero generation,
+bounds and requested bits. Unknown permissions use the existing reference walk.
+Mutations invalidate via the existing generation; CLONE_VM shares proofs, fork
+starts empty, exhaustion disables caching. Untracked holes still require the
+ordinary lease/Alpha checked-copy validation. No extra heap site/RPC/window,
+guest authority, wire/Kernel/FPU/version/submodule or huge-page change.
+
+Full release2326/0/20 owner14009 actual0, related debug82/0/2 owner15406 actual0.
+New tests prove257 cold denied-entry visits→0 for10000 warm checks, exact bounds,
+combined permissions, shared mutation, fork/clear/reallocation. Existing random
+equivalence/overlap/overflow/permission/error tests remain. No native failures.
+Diagnostic KVM nyb7z_9j owner74124 actual terminal0: before first ping, the last
+cumulative report is32768 checks/25193 cache hits/340843 inspected denied entries.
+It occurs after observer-ready but includes boot/background, not Files-only or
+exclusive CPU time; do not sum cumulative rows. Normal diagnostic text absent.
+
+Normal LinuxAlter8110cfbb/FreeBSDAlter1b6164cf, RootFS both Alters only, ESP and
+Alpha278caa23/Booterf693339a/core/AHCI/Ext2/fixtures/Kernel unchanged. Strict SMP4
+first9p3he97s owner19855 actual1 timed out with only UEFI output; all raw retained.
+Same source/image SHA retry pecxyjv7 owner92854 actual0 passes four markers and
+five guest huge leaves; Alpha image8/archive2/heap16/stack2 huge leaves remain.
+Normal Files CPU0/SMP1 9_vjanxl owner2916 actual0:1.805480876s/ACK1.704577775s;
+actual PNG/root→keyboard/usr/local six folders plus parent. No fresh parent
+control or whole-launch/painted-input100ms proof. Retain current/parent four
+images,12snapshots each, PNG9_vjanxl/fkgegc8o.51 obsolete/trial media files,
+2653655040 allocated bytes removed; all raw/text/source retained. Uncommitted,
+goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/vma-access-proof/RESULT.md`.
+
+Latest checkpoint: `initializer-window-16m` (parent `elf-loader-metadata-prefix`).
+Prefer the existing 2MiB alias before the 4KiB initializer cache, including when
+a Ready small alias already exists; a new regression verifies this ordering and
+remaining huge-span bounds. Keep available huge guest ranges across blocked
+small-table intervals. Expand the remaining initializer alias cache from8MiB
+to16MiB inside its existing reserved VA region. Tags32→64KiB; no additional
+payload allocation, at most four extra4KiB leaf tables. Compact8MiB remains an
+option (`NANAMI_SMALL_INIT_WINDOW=1`). Ownership, zero/fill-before-publication,
+exact Ready identity, failed MAP/UNMAP retention and CopyWindow pinning remain.
+
+Fresh same-source diagnostic KVM runs small43_vrszb owner45813 / largebqjadtoa
+owner56173 both actual terminal0. Successful4KiB temporary MAP4898→4754 and
+UNMAP4876→4726; initializer subset4404→4286 each, never sum subset with total.
+Read counters by physical page-table walk while stopped, verify Alpha entry
+bytes and counter magic, then resume. Includes all Alpha/background work from
+before click through first observed ping; no isolated CPU/time attribution or
+whole-launch speedup claim. Normal build strips diagnostic counters (nm).
+
+Full release2324/0/20 owner55741 actual0; related debug167/0/1 owner47750 actual0;
+compact38/0/0 owner44010 actual0. Initial failures were stale capacity assumptions
+and a mistaken compact synthetic churn expectation, plus one wrong debug target;
+all raw failures retained. Corrected tests preserve eviction/pending/error cases.
+Normal Alpha278caa23/Booterf693339a, RootFS/core/Alts/AHCI/Ext2/fixtures/Kernel
+unchanged. Strict SMP4 34tajx02 owner49065 actual terminal0: four markers,
+five guest huge leaves including0x2c200000/0x2c600000 around blocked intervals,
+Alpha image8/archive2/heap16/stack2 huge leaves. Normal Files CPU0/SMP1
+fkgegc8o owner5077 actual0:2.021218534s, ACK1.919831729s; actual PNG shows/root,
+keyboard challenge/usr/local six named folders plus parent. Full paint/input100ms
+remains unproved. Retain current/parent four images,12snapshots each, PNG
+fkgegc8o/0_8in76y;50 obsolete/trial media files,1432657920 allocated bytes removed.
+All raw/text/source retained; uncommitted, goal active, no VM. Details:
+`session-handoff/logs/linux-native-scope-20261107/initializer-window-16m/RESULT.md`.
+
+Latest checkpoint: `elf-loader-metadata-prefix` (parent `ahci-completion-poll`).
+Keep a DSO's entire leading offset0/PF_R LOAD resident, page-rounded with the
+existing64KiB minimum; defer the temporary suffix. Retain header/full-LOAD
+admission, fallbacks, one cached/uncached constructor, source ownership/rights
+and huge opportunities. No extra RPC/field/backing/window/wire/Kernel change.
+Native2322/0/20, relevant debug81/0/0. Normal KVM Files0_8in76y owner32369 actual0
+has13→4 faults versus the previous-turn parent: missing reads9→0, present
+writes4→4, same observer→ping coverage including background. No logs disabled.
+Actual PNG/keyboard verified;2.023970819s/ACK1.922901937s. No fresh parent control
+or whole-launch/100ms proof. Strict SMP4 1rlp68wg owner51947 actual0 passes four
+markers and retains huge paths. Only RootFS Alters change; ESP/Alpha/core/
+AHCI/Ext2/fixture unchanged. Current/previous selected media only, goal active.
+Details: `session-handoff/logs/linux-native-scope-20261107/elf-loader-metadata-prefix/RESULT.md`.
+
+Latest checkpoint: `ahci-completion-poll` (parent `huge-available-ranges`).
+AHCI reads CI every lap, IS every16th busy lap and before every completion.
+Preserve error-before-success/acquire ordering, poll-count limit, yielding and
+DMA failure ownership. Busy errors can take15 extra CI reads to recognize.
+No extra production buffer/field/window/budget/wire/Kernel/FPU/version change.
+Actual diagnostic successful-command prefix2048: CI18550/IS3046, versus the old
+policy's18550 IS reads on that same trace,37100→21596 MMIO (~41.8% fewer).
+This includes boot/background, is a counterfactual old count, and proves no
+whole-launch gain. The initial padded-log search mistake and first revision
+are retained; final tests/native2319/0/20, debug92/0/0, KVM strict pkrpbted and
+normal Files xitjowp3 all pass with actual terminal0. Files2.045643354s/ACK
+1.944598375s; real PNG/keyboard verified, no fresh control or100ms proof.
+Only AHCI/core/Booter change; RootFS, Alpha, Alts, Ext2, fixtures identical.
+Preserve huge paths and current/previous media only. Details:
+`session-handoff/logs/linux-native-scope-20261107/ahci-completion-poll/RESULT.md`.
+
+Latest checkpoint: `huge-available-ranges` (parent `direct-deferred-image`).
+Retained 4KiB tables block only their own 2MiB intervals. Private construction
+now searches past blocked prefixes and resumes after blocked middle intervals,
+while preserving physical fallback, initialization offsets/zero tails, rights,
+ownership, deferred small PTEs and failed-UNMAP retention. No persistent field,
+wire, Kernel/FPU/version/submodule change; no existing-mapping promotion.
+
+Native release2316/0/20, related debug226/0/4; new regression fails with the
+previous constructor. KVM host strict SMP4 5j4pw3ts owner31033 actual0 proves
+huge leaves at0x2c200000/0x2c600000 despite small tables in the first/third
+intervals of an8MiB range (2048→1026 leaves). Full bytes, boundary copy, partial
+protect, release and four literal markers pass. Existing huge paths remain.
+Normal Files CPU0/SMP1 v15a8bx7 owner9591 actual0:2.480692311s, ACK2.379963059s;
+actual PNG/keyboard navigation verified. No fresh control or whole-launch
+speedup proof;100ms unproved. Alpha/Booter updated, both Alters/core identical;
+RootFS only rebuilt fixture, ESP only init, complete packaging checks passed.
+Current/previous media only; raw failures retained; uncommitted/goal active.
+Details: `session-handoff/logs/linux-native-scope-20261107/huge-available-ranges/RESULT.md`.
+
+## Earlier checkpoints
+
+Latest checkpoint: `mapping-share-pool` (parent `alpha-launch-huge`). Both
+automatic and fixed-VA mapping-share retain the existing permanent pool PTEs
+and use PoolExtent references instead of unused destination child capabilities.
+Four-MiB share copies1024→0; child Frame chunk preparation also disappears.
+Preserve PTE count/VA/rights/bytes, ownership, COW rejection, reaper checks and
+UNMAP ACK. No new heap allocation site/persistent field/budget/wire/Kernel/ABI.
+
+Native adds1: release2260/0/20, debug416/0/2. Validate1/64/513/1024pages and both
+placement modes; legacy owners/caps can disappear while the pool loan remains
+valid, references2→3→1→0, failed UNMAP retains RAM/reservation until ACK, with
+copy/chunk/remove0 for the loan. Retain legacy cap-removal failures by using
+production reserve/install methods in a test-only fixture; keep every remaining
+fallible MAP stage. Initial zero-test filter and mistaken free-call count failures
+archived. Normal Alpha41e39b97/Booter17111adf, core/Alts/RootFS unchanged; verified
+ESP init-only replacement. KVM strict SMP4 `dk5h0sor` owner12969 and CPU0/SMP1
+Files `u_nbhwzg` owner49890 both actual terminal0; PNG confirms keyboard navigation
+and seven `/usr/local` folders. All prior2MiB heap/stack/image/archive leaves persist.
+Files ping2.017961296s/ACK1.917053662s; no new parent control or whole-launch claim.
+Diagnostic `b1590qmw` owner40520 terminal0 records16 one-page auto/fixed shares,
+all copied0; bounded and not Files-exclusive or a large-share observation.
+Normal components/source restored before VM. Retired58 files/1116590080 allocated
+bytes; four images/twelve snapshots per current+parent, PNG sets `u_nbhwzg`/`l5s9rz_v`.
+Goal active/uncommitted. General guest huge-page demotion remains the priority;
+this capability cleanup does not complete it. Details:
+`session-handoff/logs/linux-native-scope-20261107/mapping-share-pool/RESULT.md`.
+
+Latest checkpoint: `alpha-launch-huge` (parent `shared-pool-mappings`). The
+permanent Alpha image and boot archive use complete aligned 2MiB leaves when
+available. Both normal KVM runs report image8/archive2, retaining heap16/stack2.
+Image5023 leaves→935 (8 large/927 small); archive1282→260. Header/IPC remain4KiB,
+with unchanged logical slot indices and intentional holes inside large leaves.
+Separate scratch PD entry avoids existing4KiB tables; child launches prepare
+parent-owned scratch tables before using child authority. NativeWriter clears
+every byte; image/BSS/archive tails, VA, rights and environment ABI stay intact.
+
+Unsupported conversion requires isolated-owner revoke ACK before using the same
+reserved2MiB as512 small Frames. Fatal/revoke/MAP/UNMAP failure stops and retains
+ownership; absent2MiB authority uses the original small path. No new heap
+allocation site/cache/Frame-node capacity/Kernel/ABI/FPU/submodule change.
+Alignment padding stays reserved and can increase by2MiB−4KiB per large reservation.
+General guest partial unmap/protect/COW demotion remains unimplemented.
+
+Native adds5: release2259/0/20, debug116/0/4. Test mixed-leaf contents, BSS, header,
+IPC, slot holes, table depth, fragmented authority, partially failed conversion,
+cleanup ACK, both MAPs, UNMAP and fatal failure. Initial mock compile and invalid
+bootstrap-exhaustion fixture failures retained. Alpha480326b5/Booterd8edae21;
+core/Alts/RootFS unchanged, ESP init-only verified. Strict SMP4 `_cq6_qga`
+owner22616 and CPU0/SMP1 Files `l5s9rz_v` owner11308 both actual terminal0;
+actual PNG confirms keyboard navigation and seven `/usr/local` folders.
+Files ping1.808301306s/ACK1.707463920s; no new parent control or whole-launch claim.
+Retired37 files/734334976 allocated bytes; four images/twelve snapshots per
+current+parent, PNG sets `l5s9rz_v`/`kkbdq_uk`. Goal active/uncommitted. Details:
+`session-handoff/logs/linux-native-scope-20261107/alpha-launch-huge/RESULT.md`.
+
+Latest checkpoint: `shared-pool-mappings` (parent `alpha-stack-huge`). Shared
+buffer and supervisor page-view PTEs already used permanent Alpha pool Frames;
+omit unused per-process child capabilities through existing PoolExtent ownership.
+Four-MiB two-sided creation copies2048→0 caps; each view removes one copy and
+one removal. Physical references, zeroing, permissions, PTE count, COW and UNMAP
+acknowledgments remain. Mapping-share's child-cap path stays supported/tested.
+No persistent field, allocation site, cache budget, wire, Kernel or ABI changes.
+
+Native adds2: release2254/0/20, debug415/0/2. Validate boundaries, both release
+orders,128 reused read/write views and failed-UNMAP pinning. Retain cap-removal
+failure tests using real mapping-share-created legacy owners; old count/failure
+expectations and all failures archived. KVM strict SMP4 `hwafkva3` owner84827,
+CPU0/SMP1 Files `kkbdq_uk` owner89063 both terminal0, actual PNG confirms keyboard
+navigation and seven `/usr/local` folders. Alpha929ff58b/Booter02caaf11; core,
+RootFS/Alts unchanged; heap2MiB×16 and stack2MiB×2 persist.
+Diagnostic `t4d1hbwa` owner32901 terminal0 confirms copied=0 in16 shared buffers
+and16 read/write views; bounded samples, not total counts or Files-exclusive.
+Normal components/source restored before VM. Files ping2.017992820s/ACK1.916937647s,
+no new parent control or whole-launch/100ms claim. Unused initializer-cache
+prototypes fully reverted, source/results retained. Retired119 files/6266519552
+allocated bytes; four images/twelve snapshots per current+parent, PNG sets
+`kkbdq_uk`/`eksc_szb`. Goal active/uncommitted. Details:
+`session-handoff/logs/linux-native-scope-20261107/shared-pool-mappings/RESULT.md`.
+
+Latest checkpoint: `alpha-stack-huge` (parent `large-copyout-views`). Permanent
+Alpha runtime stack4MiB now uses two2MiB leaves where supported, retaining the
+existing sixteen heap leaves. Reserve the unchanged total36MiB before RAM is
+converted to4KiB frames; retain the separate-stack fallback for smaller firmware
+extents. Size the large Frame node for18 leaves (32slots, previously8192); create
+the small-leaf fallback node only after all unpublished child revocations ACK.
+Zeroing, rights, stack VA/top, allocator ownership and failed-MAP retention remain.
+No general guest huge-leaf demotion for partial unmap/protect/COW yet.
+
+Native adds3 meaningful cases: release2252/0/20 and debug394/0/6; initial module
+privacy compile failure retained and corrected. Normal Alpha ed17b92f/Booter
+1cc9b2da, core/RootFS/Alts unchanged, ESP init-only verified. KVM host strict
+SMP4 `gez1khhp` owner7847 and CPU0/SMP1 Files `eksc_szb` owner95969 both terminal0;
+both serials show heap2MiB×16 and stack2MiB×2. Actual PNG confirms keyboard
+navigation to `/usr/local`, seven folders. Files ping2.020570322s, ACK1.919515356s;
+no new parent control or whole-launch improvement claim. Goal active/uncommitted.
+Retired40 artifacts/747978752 allocated bytes; current/parent only, four images,
+twelve snapshots each, PNG sets `eksc_szb`/`mwutcokr`; raw/text/source preserved.
+Details: `session-handoff/logs/linux-native-scope-20261107/alpha-stack-huge/RESULT.md`.
+
 Optimize user-level implementation work without removing service boundaries,
 permission checks or lifecycle guarantees. Avoid Kernel changes. Aim for at
 least 5% lower elapsed time per cycle on a declared Tiny Core workload; record
@@ -20497,3 +22600,647 @@ two diagnostic media/generated initramfs/eight duplicate VM dirs. Logical root
 usage619512->32512KiB is not physical APFS recovery. Reanalysis from retained
 copies is byte-identical. Keep accepted media, official inputs, current cache,
 all raw observations/private sources and small proof. Kernel clean/unbuilt.
+# 2026-11-10 shared-vfork-exec
+
+clone3/legacy clone VM|VFORK now uses the existing shared-AS raw task and parks
+the original parent until child exec/exit. A sealed nonowner exec creates only
+the child's AS/VM nodes and switches ownership after PCB configure, preserving
+the parent's RAM/Frames and borrowed Alter mapping table. Support CLEAR_SIGHAND
+while preserving ignored handlers/mask and VFORK altstack. Single-thread parent,
+independent files/fs/sighand/thread group only; ordinary SYS_VFORK remains private.
+New matching Alpha/Alter required; no Kernel/FPU/version/submodule changes.
+
+Full release2188/0/20; debug335/0/2. Native covers nine Alpha failure boundaries,
+parent Frame/rights/RAM references, deferred owner cleanup, runtime mappings,
+signal state and original clone3 context. Twelve guest clone/clone3 exec-success
+and ENOENT cases also check parent bytes/shared writes/handlers/mask/altstack.
+First strict _t98p1ok failed because a retained old desktop fixture expected
+ENOSYS and used an unmapped stack; preserve raw, rebuild the changed fixture.
+Final strict9s5oqryf KVM/host/SMP4 owner0. Files4bkbgh8q CPU0/SMP1 owner0 and
+actual /usr/local seven-folder keyboard navigation. Single matched parent
+kzxp5x01: ping2.014189823 ->1.805750165s. Private fork logs18/fault dumps144
+unchanged; actual Files shared-vfork entries unmeasured. No causal whole-launch
+or paint/input-ready claim, goal100ms unmet/active. Keep shared-vfork-exec and
+large-dso-window only, four images/ten snapshots each; reclaim1822359552B.
+Details: session-handoff/logs/linux-native-scope-20261107/shared-vfork-exec/RESULT.md.
+
+# 2026-11-10 inherited-vfork-stack
+
+Ordinary SYS_VFORK now shares the VM and inherits the stopped parent's RSP for
+single-thread leaders, using the previous child's exec detachment. Ignore all
+six argument registers; park/wake with the original PC/context. Multi-thread
+and nonleader parents retain private snapshot fallback. VM|VFORK clone also
+accepts stack0. No Alpha/Booter/Kernel/UAPI/FPU/version/submodule changes.
+Production dispatcher native tests +2; full release2190/0/20, debug10/0/0.
+Guest18 cases include six ordinary vfork success/ENOENT cases with shared
+marker, parent bytes, handlers/mask/altstack. KVM strict SMP4 p4d4_onl owner0,
+Files CPU0/SMP1 6hrh4i1j owner0 and actual /usr/local seven-folder navigation.
+Ping2.021761672s/ACK1.920856922s; no new parent control or whole-launch gain.
+Private fork logs18/fault dumps144 unchanged, actual Files vfork entries not
+measured. Keep goal100ms active. Retain inherited-vfork-stack/shared-vfork-exec
+only: four images/ten snapshots each, reclaim1775075328B. Further work should
+return to existing mmap/read/clock paths rather than only expanding fork APIs.
+
+# 2026-11-10 unreachable-exec-retirement
+
+Sealed exclusive exec now invalidates Alpha copy views, replaces the management
+AS cap and stopped PCB's alias, and successfully retires every old table owner
+before Frame caps/RAM. Remove the old per-present-leaf UNMAP walk. AS.revoke is
+a noop and is not the fence. Native/unsealed and shared-child detachment paths
+remain. Any failed switch/table prefix keeps all RAM; existing Fatal exec
+cleanup applies. Preserve peer/active/deferred references and Free retry.
+Avoid recreating the sealed AS twice. Diagnostic drop phase now includes AS
+switch, so older exec-profile phase attribution is not comparable.
+
+Replace/strengthen8 native retirement tests using real exec_space/PageTables/
+memory_exec/ProcessManager/refcounts, Kernel-only mocks. Eight failure boundaries
+both before/after effects, chunk/Free prefix, peer/uncertain tests. Full release
+2190/0/20, debug core+physical320/0/2. Native frames1/31/64/513/4096 old present
+walk UNMAP1/27/55/440/3511 ->0. Four table owners are fixture-specific, not real
+4096-page table topology. Guest total/elapsed contribution remains unmeasured.
+
+Alpha c7cee6fb/Booter d278ead2 only; entire RootFS/Alts/fixtures preserved and
+only ESP init changed. KVM strict SMP4 fz2_wuws owner0, Files CPU0/SMP1 sp44chex
+owner0 and actual /usr/local seven-folder keyboard navigation. Ping1.805440695s,
+ACK1.704065698s; no new parent control/whole-launch or100ms claim. Fork logs18,
+fault dumps143 vs previous144; no COW attribution. Keep goal active. Retain
+unreachable-exec-retirement/inherited-vfork-stack only, four images/ten snapshots
+each; reclaim742490112B. Details in the cycle RESULT.md and kernel source proof.
+
+# 2026-11-10 readonly-copyout-fastpath
+
+Separate readonly main/file aliases from possible writable private-fork sharing.
+Add a conservative process boolean, mark both sides/VM peers at COW fork, clear
+both at exec/new installation and inherit both with CLONE_VM. Readonly admission
+never downgrades a prior writable marker. Checked copyout after logical WRITE
+preflight needs no QUERY/DETACH for readonly-only sharing. Keep unchecked writes,
+memory_copy/futex CAS/protect/snapshot/fault guards. Preserve origin invalidation
+for scalar/vector writes; correct vector branch before any VM, rebuild/retest.
+
+Native+5, full release2195/0/20, debug67/0/0. Model2048 checked writes prep2048->0;
+readonly/cache/peer/detach failure, full guard for protect/unchecked, fork marker,
+VM inheritance and checked byte/fault-prefix tests. One additional process bool;
+layout increment unmeasured. Alpha/Booter/Kernel/UAPI/FPU/version unchanged, RootFS
+only both Alter ELFs. Strict SMP4 3l3_0g7s owner0; Files CPU0/SMP1 3vmbhbex owner0
+with real /usr/local seven-folder keyboard navigation. Ping1.808576548s, ACK
+1.707631202s, no new parent control or measured guest prep count. No whole-launch
+or100ms claim; keep goal active. Keep readonly-copyout-fastpath/unreachable-exec-
+retirement only, four images/ten snapshots each; reclaim1775038464B.
+
+# 2026-11-10 cached-writable-copyout
+
+After logical WRITE preflight, scalar owned/whitelisted scratch copyout with a
+writable-fork marker can use existing Ready writable leases without COW prep.
+Require matching owner/generation/page for every fragment before any store.
+Cached-only misses never grant/release/evict/store; retain the old guarded path.
+Alpha grants only logical RW, non-COW backing. Fork invalidates within its VM
+barrier; protection/unmap/exec invalidate generations/leases. Preserve origin
+invalidation, scratch ownership, vector preparation and unchecked/fault guards.
+
+Native+3, release2198/0/20, debug70/0/0. Real cache/adapter2048 warm writes need
+no extra grants/releases; later-page misses store nothing. Reject owner/gen0/
+generation/stale/unowned scratch; guest-copy hit skips failing prep, miss keeps
+the failure and permissions reject before stores. No new fields/heap/UAPI or
+Alpha/Booter/Kernel/FPU/version changes. Both Alter builds/package verified.
+
+KVM strict SMP4 3pawbpbs owner0; Files CPU0/SMP1 80pr8yk3 owner0 with actual
+seven-folder /usr/local keyboard navigation. Ping2.258800440s/ACK2.157904516s,
+longer than historical parent1.808576548s. No new parent control, guest RPC total,
+whole-launch improvement or100ms claim; keep goal active. Retain current and
+readonly-copyout-fastpath only, four images/ten snapshots each; reclaim1775050752B.
+
+# 2026-11-10 cached-vector-copyout
+
+Extend cached-only writable lease authorization to bounded owned vectors after
+logical WRITE preflight. Require every fragment Ready with matching owner/gen/
+page before storing the first field. Misses never grant/release/evict/store;
+retain single-page preparation and ordered scalar fallback. Keep origin
+invalidation, overlap order and committed prefixes on later permission faults.
+No extra fields/heap/UAPI or Alpha/Booter/Kernel/FPU/version changes.
+
+Native+2 plus real adapter coverage, release2200/0/20, debug72/0/0. Real cache/
+adapter2048 warm vectors need no extra grants/releases; later miss leaves all
+fields unchanged. Test same-set eviction, identity rejection, overlap and failing
+prep/permission prefixes. Both Alter builds/package verified. KVM strict SMP4
+e_27hwdo owner0; Files CPU0/SMP1 cunmmib0 owner0 with actual /usr/local seven-folder
+keyboard navigation. Ping2.229681133s/ACK2.128724428s vs historical2.258800440s.
+No new parent control, guest RPC totals, whole-launch or100ms claim. Whole serial
+fork18/fault144 includes fixtures, not launch attribution. Keep goal active.
+Retain current/cached-writable-copyout only, four images/ten snapshots each;
+reclaim1775034368B. All raw/text/source receipts preserved; uncommitted.
+
+# 2026-11-10 linear-reservation-gap
+
+Replace PROT_NONE reservation's full scan after every collision with first_fit.
+Continue after advancing unless the candidate reaches a previously seen future
+VMA; only then restart. Ordered VMAs need one pass; unordered layouts can still
+restart. Preserve exact first-fit choice, overflow/exhaustion and publication
+failure. No fields/heap/cache/UAPI; backing/initialization/protection unchanged.
+
+Native+4, release2204/0/20, debug55/0/2. Exhaustive page-candidate oracle matches
+38400 randomized unordered-table/length cases. Dense ordered512 VMA visits
+262656->512 (synthetic, actual guest scan count unmeasured). Cover earlier future
+entries, holes, exhaustion and overflow. Initial Alts compile caught missing
+explicit module path; fixed before both successful builds/VMs, failure log kept.
+Linux14d7209f/FreeBSD09eea1ad only; verified RootFS replacement. Other components,
+Kernel/Alpha/Booter/FPU/version/submodule unchanged.
+
+KVM strict SMP4 gzpk68k0 owner0; Files CPU0/SMP1 6dai41rb owner0 and actual seven
+folder /usr/local keyboard navigation. Initial ping2.655744989s/ACK2.554214225s,
+parent control uskv3t8g ping2.280463148s, unchanged candidate repeat10tfy5ki
+ping1.812678713s/ACK1.711799202s, both owner0. Preserve all raw and initial selected
+run. No whole-launch improvement/reproducible regression/100ms claim; goal active.
+Retain current/cached-vector-copyout only, four images/ten snapshots each;
+reclaim1777143808B in50 files. Uncommitted.
+
+# 2026-11-10 disjoint-copyout-origin
+
+Refresh current syscall scope first: separate diagnostic Alter and aw-scope,
+restore normal14d7209f before VM. Verified only those RootFS changes. KVM iir9j4n0
+owner0,12489 calls; mmap220 calls/33.8% inclusive handler ticks remains largest.
+Counter local-unverified, all Linux dispatch/background/RPC waits included;
+not normal CPU attribution. Keep raw in current-launch-scope. Initial wrong-cwd
+diagnostic link failure retained; correct cwd build/restoration succeeded.
+
+Keep immutable file provenance across permission-checked writes only when the
+current VM generation matches and destination is disjoint from the whole extent.
+Apply to scalar/cached/vector paths. Empty origin returns immediately; overlap,
+overflow, stale or missing process clears. Unchecked/protect/snapshot/fault keep
+full invalidation. Private readonly snapshot cannot have a writable guest alias;
+protection/remap generations and fresh file-version checks remain mandatory.
+No extra fields/heap/cache/UAPI or Alpha/Booter/Kernel/FPU/version changes.
+
+Native+1, release2205/0/20, debug70/0/0.2048 disjoint writes preserve covers proof,
+boundary overlap/overflow/stale/missing task clear, unchecked disjoint clears.
+Existing remap/copy tests pass; guest remap gain unmeasured. Linuxfd6a834b/
+FreeBSDdaefc727 only. KVM strict SMP4 hsmt86r9 owner0; Files CPU0/SMP1 c2e_7h7w
+owner0 and actual /usr/local seven-folder keyboard navigation. Ping2.019325131s,
+ACK1.918447901s; no new parent control/whole-launch/100ms claim, goal active.
+Retain current/linear-reservation-gap only, four images/ten snapshots each;
+reclaim3082838016B in47 files including diagnostics. All raw/text/source kept.
+
+# 2026-11-11 copied-readonly-remap
+
+Current mmap phase diagnostics d_4tk7qe/mag537tz owner0 identify four streamed
+initializations as libFOX, not large librsvg/GTK. Record fullR3,514,168B, RX
+1,441,792B, R790,528B and RW180,024B. Phase8 also runs outside mmap; totals are
+not exclusive CPU attribution. Temporary diagnostic hooks fully restored.
+
+Reject multi-victim-mapping prototype after native2208/debug65 and actual
+17cugixc admission via98,304B+372,736B retirements: added snapshot placement/
+retirement work and unfavorable inclusive observation. All sources/raw retained;
+restore cache/loader/cache-test to accepted parent SHA. Keep16MiB/48slot/4MiB.
+
+Instead remember fully initialized private copied R/RX extents after hardware
+rights and VMA commit. Reuse later fixed readonly segments via protection only,
+with existing fresh file version/size/offset/generation checks. Add one provenance
+bool to distinguish copied extents from shared snapshots for WRITE preparation.
+Native+2, full2207/0/20, debug72/0/0. Diagnosticm88vazm4 proves actual1,441,792B
+private copied remap, shared=false; avoid that request's read/copy. Do not claim
+all FOX segments reuse. No extra heap/cache/UAPI or Kernel/Alpha/Booter/FPU edits.
+
+Normal Linuxa8d79d3e/FreeBSD08d70e3a; RootFS both Alts only. KVM strict SMP4
+ysty_q09 owner0; Files CPU0/SMP1 z6g64lc7 owner0 and real seven-folder /usr/local
+keyboard navigation. Ping1.808014953s/ACK1.706819345s, no whole-launch/100ms claim.
+Keep current/disjoint-copyout-origin only, four images/ten snapshots each;
+reclaim6131990528B in87 files. Goal active, uncommitted. User now explicitly
+requires huge pages when available; existing Kernel21/30-bit support confirmed,
+Nanami adoption still pending and remains required.
+
+### 2026-11-11: permanent Alpha heap uses available 2MiB leaves
+
+Use existing Frame21/MAP support for the permanent32MiB Alpha heap:16 leaf maps
+instead of8192, no16 lowest-level tables. Align physical source to2MiB rather
+than whole32MiB, retaining the alignment prefix as ordinary reusable4KiB frames.
+Use16 isolated child Generics and a rooted destination sized for4KiB fallback.
+On unsupported conversion, acknowledge revocation of ALL created child sources
+before reusing any overlapping slot or cursor. Fatal/revoke/MAP failures abort
+and retain ownership. Ordinary trackers reject21bit leaves before PTE/MAP;
+large heap cannot be freed, rematerialized or exported as4KiB capabilities.
+
+Native release2215/0/20 and debug385/0/6 pass, covering first/middle/last source
+failure before/after installation, cleanup ACK failures and alignment prefix
+reuse. First strict69b7mewr used4KiB and was not admitted. Corrected strict
+_970v79z and Filesquvkwisl both ownerterminal0 and log actual2MiB×16 use.
+Four strict markers and actual Files /usr/local seven-folder keyboard navigation
+pass. Alphaed02aebd/Booter394e8b2a; parent Alts/RootFS unchanged, ESP init only.
+Ping2.025392566s/ACK1.924469222s is observational, no whole-launch/100ms claim.
+General guest huge leaves still require partial unmap/protect/COW demotion.
+Retain alpha-heap-huge and copied-readonly-remap only; goal active, uncommitted.
+
+### 2026-11-11: coherent HPET samples reuse the confirmed leading high word
+
+For the same live monotonic provider, reuse the previous confirmed trailing high
+as the next leading high. Every sample still reads fresh low/high and enable;
+on mismatch retry with the new high, bounded to8 attempts. Preserve source
+discovery/bracketing, backwards-time/disabled fallback and provider replacement.
+No cached NOW/low, TSC, device writes, UAPI or Kernel changes. First counter
+sample uses3 reads; steady counter3→2, with enable4→3. HPET1.0a section2.4.7
+warns even64bit reads may split, so do not substitute one read64. Extending the
+high/low/high bracket across samples relies on the live provider's monotonicity.
+
+Native+4, full2219/0/20, debug native-clock/linux-clocks/linux-readiness143/0/0.
+Verify exact offsets/counts, rollover during each read, bounded incoherence,
+reset-high fresh RPC and10,000 sparse/wrapping monotonic device traces against
+actual low-read instants. Normal Alts disassembly confirms the two MMIO reads
+on the ready-hint path. No actual guest device-read counter or whole-launch
+causality claim. Linuxdd10f725/FreeBSD85b971ba; parent Alpha/Booter/core unchanged.
+RootFS only both Alts, full tree/readbacks/e2fs/outside checks. KVM strict SMP4
+29j9l3tx ownerterminal0/4markers and Files CPU0/SMP1 eh5zc2zj ownerterminal0,
+actual /usr/local seven-folder keyboard navigation. Both retain Alpha2MiB×16.
+Ping1.594801481s/ACK1.493868023s observational;100ms goal remains active.
+Keep hpet-high-hint and alpha-heap-huge only; uncommitted.
+
+### 2026-11-11: checked copyout in foreign VMs preserves immutable origin
+
+Diagnostics mvj4kpup/w0t_tn7o identify a real lost copied libFOX origin: pid41's
+8B checked write(gen5370) clears pid42's whole-file origin(gen5534), causing
+subsequent private mappings to reread/copy. Add one VM-group Word to the origin;
+bind both aliased and copied private readonly extents on creation. Known live
+foreign-VM checked writes cannot mutate these bytes even at the same VA. Same
+VM requires current generation and disjoint range; unknown/exited/zero group/
+zero generation/overflow retain invalidation. Unchecked writes, protection,
+faults, COW preparation and stop/lease ACK contracts unchanged. Stale origins
+are not advanced, and reuse still checks fresh file version/size/offset/generation.
+
+Native+3, full2222/0/20, debug private-memory/file-remap/guest-copy75/0/0. Verify
+2048 foreign writes at coincident VAs for both copied/aliased origins, same-VM
+peers, unknown/stale cases and binding across readonly protection. Diagnostic
+qckizzp_ ownerterminal0 proves foreign-write preservation and copied remaps of
+1441792B+790528B. These match inspected libFOX LOAD segments; file attribution
+is inferred from prior file-size/offset probes plus ELF evidence, while the
+two reuse events themselves are direct runtime evidence. No new cache/heap.
+
+Linux0f879409/FreeBSD36c13845; only both Alts replaced in RootFS, all tree/
+readback/e2fs/outside gates pass. Normal diagnostic tags absent. KVM strict
+SMP4 510txe0e and Files CPU0/SMP1 p9lpjwfp ownerterminal0; actual /usr/local
+seven-folder keyboard navigation and Alpha2MiB×16 preserved. Ping2.016600420s/
+ACK1.915673889s observational; no whole-launch/100ms claim. Retain current and
+hpet-high-hint, four images/ten snapshots each, remove80 generated files and
+reclaim3535540224 allocated bytes. Raw/source kept; goal active, uncommitted.
+
+### 2026-11-11: writable fixed file remaps consume immutable origin
+
+Admit valid WRITE permissions2/3/6/7 for proven unchanged private MAP_FIXED
+extents, preserving fresh version/size/offset/generation checks. Reuse through
+ordinary sys_mprotect/private-write guard; retain COW/stop/lease/DETACH protocol.
+Consume the ENTIRE origin after WRITE success: later readonly downgrade cannot
+certify dirty bytes. Failure cleans only requested range. R/RX keep origin.
+Require aligned mapped length as well as base. No heap/cache/UAPI changes.
+
+Native+3, full2225/0/20/debug78/0/0. Real guard/remap adapter tests verify
+Query/stop/DETACH/protect/resume and failed ACK cleanup. Four guest cases cover
+snapshot/copy×RW/RWX, peer/file isolation, EOF zeros and dirty fixed reload.
+New fixture533e4173 selected/read back in both images; collector forwards final
+PASS only, whose source path requires all four cases. Diagnosticmfht879h
+ownerterminal0 proves6 writable reuse events/311296B. Shared snapshots still
+copy when COW requires it. libFOX copied RW mapped180224B, prefix180024B and
+zero suffix200B, skips reread/copy constructor. Add prot/file-size/offset to
+optional marker for direct request identification. Normal diagnostic tags absent.
+
+Linux1d8ea8ea/FreeBSD6151d0e8; RootFS only both Alts+fixture, complete tree/
+readback/e2fs/outside verified. Alpha/Booter/core/Kernel/ABI/version/FPU unchanged.
+Strict SMP4 oz_f28kt and Files CPU0/SMP1 g54ig3e_ ownerterminal0; real /usr/local
+seven-folder keyboard navigation and Alpha2MiB×16 maintained. Ping2.017133008s/
+ACK1.916219246s observational; no whole-launch/100ms claim. Keep current and
+vm-local-readonly-origin only; remove53 files/reclaim2654826496 allocated bytes.
+Goal active, uncommitted.
+
+### 2026-11-11: reuse Ready initializer aliases during private detach
+
+Refresh scope on current Alts: jv_53_8g ownerterminal0,12406 calls, mmap220/
+1023594005 local inclusive ticks largest, then read1230/441698752 and openat659/
+226732803. Includes RPC/background; no exclusive CPU/normal admission. Normal
+Alts restored. Setup cwd error stopped before Cargo; receipt retained.
+
+In Alpha detach, use existing map_process_transfer_frame for an exact permanent
+pool Frame's Ready initialization alias. Miss keeps old CopyWindow path. If
+the destination's initializer slot equals the pinned source alias, map the
+destination through CopyWindow using its permanent pool cap. Preserve live
+Frame/uncertain/rights/refcount checks, unpublished replacement ownership and
+rollback/COW/stop ACKs. No added heap/cache/slots/UAPI.
+
+Native+3, full2228/0/20, debug core-process/private-pages393/0/2. Test warm/cold,
+collision, alias failures with retained replacement, uncertain-source rejection,
+parent/child data/rights/refs.64-page cold-CopyWindow model requests64→0. Actual
+kernel MAP savings uncounted; warm old CopyWindow may already avoid MAP. Keep
+the existing168-allocation assertion after making new test instrumentation
+opt-in; cfg(not(test)) diagnostic macro fix and all failed logs retained.
+
+Alpha bcd9b1eb/Booter d553c961, parent RootFS/Alts/fixtures unchanged. ESP init
+only, full FAT inventory/readback/outside verified. Diagnosticr3pyrnl1 owner0
+proves Ready-source reuse including Files pid42; bounded per-PID bitmap is not
+a total count, collision=true verified in model only. Normal components restored.
+Strict SMP4 ynxxp0qe and Files CPU0/SMP1 v678f_vc ownerterminal0, real /usr/local
+seven-folder keyboard navigation and Alpha2MiB×16 maintained. Ping1.807452832s/
+ACK1.706492536s observational; no whole-launch/100ms claim. Keep current/previous
+writable-fixed-origin only; remove72 files/reclaim2430910464 allocated bytes.
+Goal active, uncommitted.
+
+## Private mmap preserves disjoint Ready read/write views
+
+Checkpoint disjoint-mmap-views, parent detach-ready-source. Successful private
+anonymous and ordinary-file mmap carries only exact entry-generation Ready
+leases outside its returned page-rounded extent into the final generation.
+The cache set excludes generation; full owner/generation/page checks remain.
+Only the outer file mmap commits after population/final protection, not its
+internal PROT_NONE reservation. Failure, overlap, stale/quarantined leases,
+changed/dead owner and shared/device mmap retain conservative invalidation.
+Full fork/exec/COW stop, invalidation and release acknowledgments remain.
+No persistent field, heap allocation, slot, wire, Kernel, ABI or FPU change.
+
+Native+4: full release2232/0/20, focused debug119/0/2. Production cache/model
+128 disjoint changes: read/write grants258->2 with identical bytes; high-bit
+generations, one-byte overlap, replacement, stale/foreign/zero/overflow,
+uncertain grant/release and full invalidation tested. Native adapter tests
+exercise real mappings. First focused failure was two test Machines sharing
+alias VAs; isolate the uncertain test Machine, preserve failure log and rerun.
+New mandatory guest case repeats8 disjoint mmaps and replaces both transfer
+pages with MAP_FIXED, rejecting stale source or destination aliases.
+
+Diagnostic baseline azr4gnh7/be2ghk_f ownerterminal0:511 ordinary file reads;
+service310795947 local-unverified inclusive ticks, copy21237248. All-scope
+write/read grants213/268. Candidate3ue_x_90 owner13453 terminal0: same511
+ordinary reads and copy shapes, grants157/227, total481->384 (observed-20.17%).
+Mmap220/openat659/exec7 unchanged, total scope calls12466->12512; background
+and waits included. This does not attribute all97 requests to the change or
+admit a normal wall-time gain. Bounded32 runtime markers prove actual reuse,
+not its total count. Temporary source and canonical normal ELF restored.
+
+Linux45149fc4/FreeBSDb0892437, new fixture7af6dc5e. RootFS changes only those
+three files, verified tree/readback/e2fs/outside; Alpha/Booter/core unchanged.
+Strict SMP4 y1xcbcdp owner46016 terminal0, four literal markers; Files CPU0/
+SMP1 zgtdg74b owner19076 terminal0, actual /usr/local seven folders and real
+keyboard navigation. Alpha2MiB×16 maintained. Normal ping1.803782908s,
+ACK1.702898576s; no new parent control, whole-launch/100ms unproven.
+Retain current/parent images4 and snapshots10 each, raw/text/source receipts;
+remove79 generated files, reclaim5698793472 allocated bytes. Goal active,
+uncommitted. Ordinary read service remains a large target; general guest huge
+leaves still require partial unmap/protect/COW demotion.
+
+## Mixed cached/cold file reads avoid scratch staging and later-hit reloads
+
+Checkpoint mixed-file-read, parent disjoint-mmap-views. Ext2 plans up to64
+blocks in512 request-local slot bytes. Existing cache hits remain pinned by
+the synchronous no-cache-mutation I/O interval; read only missing runs into
+their scratch offsets. After all required I/O succeeds, validate cached full
+block identities and bounds before any output store, copy cached bytes directly
+and missing bytes from scratch, then fill the clean misses. Full hits retain
+load_range; all-cold and over-limit reads retain the original path. No new
+persistent field, heap allocation, cache budget, wire, Kernel/ABI/FPU change.
+
+Clean-fill timing and CLOCK victims change deliberately. A late I/O failure
+does not retain earlier successful misses from that run; its output is still
+untouched. Dirty data and required-I/O retries/errors remain; earlier completed
+file-run output remains committed. Native+4, full release2236/0/20, debug
+storage/posix-io109/0/0. Bounds/edges/guards, first/last I/O error, dirty data,
+stale slot, overflow and pressure tested. Clean2-slot model I/O[(101,14),
+(115,1)]->[(101,14)] with identical bytes. Alternating8KiB dirty hits in16KiB
+payload need32->24KiB copying including clean fills, a model not a launch gain.
+First test failed because its new output Vec inferred i32; declare u8, rerun
+all tests and retain failure. Wrong initial test-target selection also logged.
+
+Ext22d3abc09/core781912c8/Booter2e2f324c. Rebuild with current libraries;
+only Ext2 payload/filesize changes in newc, all other raw records exact.
+Alpha/Alts/RootFS/fixtures unchanged. ESPs replace init only; full FAT
+inventory/readback/outside and embedded core/Alpha checks pass. First strict
+g73fjxyv owner16090 terminal1 times out before service-start evidence, serial
+43B and unresponsive monitor; cause unresolved. Identical source/image retry
+x38rwzq1 owner3268 terminal0 passes4 markers. Normal Files8d88k0nb owner77819
+terminal0, CPU0/SMP1, actual /usr/local seven folders and keyboard. Alpha2MiB×16
+maintained. Ping1.806544329s/ACK1.705646075s observational, no launch/100ms claim.
+
+Diagnostic Ext2258581f0/Bootere8fa9b9c runj1r81eyg owner2408 terminal0 proves
+mixed-path use in32 bounded samples, not total counts or exclusive Files work.
+Restore/fsync all canonical normal components before VM, normal ELF excludes
+payload marker. Keep current/parent images4 and snapshots11 each (add Ext2),
+all raw/text/source receipts. Remove54 generated files, reclaim1131761664B.
+Retention setup initially stopped before deletion on the parent's hash-field
+location; use merged canonical fields and complete. Goal active, uncommitted;
+ordinary service/RPC waits and general guest huge-leaf demotion remain targets.
+
+## Bound cold Frame capability creation by known large allocation extents
+
+Checkpoint allocation-frame-ceiling, parent mixed-file-read. Known contiguous
+RAM allocations of at least1MiB now carry a request-local conversion ceiling:
+the smallest aligned power-of-two envelope containing the allocation, capped
+at the existing8MiB limit. Source boundaries can further narrow conversions;
+alignment padding can remain. Existing Ready Frame ranges keep exact capability
+identity, and small requests retain old amortization. Apply to fresh initialized
+and mmap batches, preinstall RAM pools, and shared/owned RAM construction.
+No new persistent fields, allocation sites, cache budget or wire protocol.
+Ownership, RAM/device/delegation checks, failure quarantine/no-retry, data/zero,
+COW, PTE rights and ACKs remain. Future use of surrounding RAM can require more
+permanent FrameNodes/source fragments/conversions, a deliberate tradeoff.
+
+This is4KiB capability preparation, not general guest huge-leaf mapping.
+Alpha's permanent32MiB heap continues using16 supported2MiB huge pages in all
+three KVM runs. General guest partial unmap/protect/COW demotion is pending.
+Native+3, full release2239/0/20, focused debug434/0/2. Aligned775/858-page
+models create1024 instead of2048 Frames;256 pages creates256 instead of2048.
+Ready reuse, descriptor stability under ordinary/overlapping later requests,
+bounds/overflow, failed conversion quarantine and no retry are tested.
+
+Alpha e2c333b6/Booter ce60603d; Core781912c8/Ext22d3abc09/Alts/RootFS/fixtures
+unchanged. ESP replacement changes only init, checked by complete FAT
+inventory/readback, outside-ESP hashes, embedded Alpha/core and normal/source/
+git/native gates. Kernel/ABI/FPU/version/submodule unchanged. Strict SMP4
+47cfommt owner50715 actualterminal0 passes4 literal markers. Files CPU0/SMP1
+7tjsqoio owner41787 actualterminal0: actual /usr/local seven folders and keyboard
+navigation. Normal ping1.804559000s/ACK1.703556369s, no new parent control or
+whole-launch/100ms claim; painted/input-ready time remains unverified.
+
+Diagnostic Alpha2dd95cdf/Booter9fd2984d, aejuqjah owner83372 actualterminal0,
+shows17 bounded records, including775 and862 pages creating1024 Frames where
+the legacy containing span was2048. At most32 reports; these are not total
+counts or exclusive Files work. Each previous-span uses that moment's source
+snapshot; do not sum hypothetical savings across records. No kernel RPC total
+reduction claim. Restore/fsync canonical normal components before VM, verify
+normal marker absence. Compacted prior package/debug handles were unavailable;
+inspect completed receipts, rerun normal gate and obtain fresh debug actual
+terminal0 rather than infer an owner exit. Remove51 generated files and reclaim
+1122516992 allocated bytes. Keep current/parent images4, snapshots11 each,
+PNG7tjsqoio/8d88k0nb and all raw/text/source evidence. Goal active, uncommitted.
+
+## Larger provider-selected AHCI transfer windows
+
+Checkpoint ahci-read-window, parent allocation-frame-ceiling. The active KVM
+block device is AHCI. Ext2 now requests the existing size0 provider default
+instead of explicitly64KiB, and continues using its returned/validated capacity.
+AHCI's automatic shared window and bounded contiguous DMA data capacity become
+256KiB. Explicit requested sizes remain exact; USB/virtio/RAM retain64KiB auto.
+No new wire/request/Kernel/ABI/FPU/version/submodule changes. Existing AHCI
+private DMA, shared window and Ext2 scratch_backup allocation sites each add
+192KiB, total576KiB payload plus uncounted capability/page-table/index metadata.
+Ext2 cache payload remains1MiB, Alter ordinary I/O64KiB and image windows4/2MiB.
+
+Larger requests change failure-progress and fairness granularity. Keep all
+buffer/partition/disk/ATA/PRDT bounds, read retry limit4, dirty data and uncertain
+write freeze/barrier handling. Move the unchanged AHCI command encoder into a
+host-testable module; its4KiB clear, fences and layout stay unchanged.
+Native+6, full release2245/0/20, debug ahci-transfer/storage/ext2-data-run89/0/0.
+Production read_file model reads identical guarded/partial256KiB in4->1 device
+requests. Mixed dirty data/error output, full-window durable writeback,512-sector
+encoding/high physical bits/complete DMA bounds, long/flush/short reset and
+explicit/zero/overflow bounds tested. Initial host adapter Box slice as_slice
+compile errors and new test's missing4-retry expectation corrected; first AHCI
+standalone link missed the standard user linker script, supplied via cargo
+--config. All failure logs retained; no production config/toolchain edits.
+
+AHCI6099ac23/Ext22ec753e5/corea955671b/Booterdfe7cc84. Only the two service
+payloads/sizes change in newc; all other raw records exact. Alphae2c333b6/Alts/
+RootFS/fixtures unchanged. ESP init-only FAT inventory/readback/outside checks
+and normal/source/git/native gates pass. Strict SMP4 t0hgmcn7 owner25099 actual
+terminal0/4 markers; normal Files CPU0/SMP1 abmz34w9 owner96607 actualterminal0,
+actual /usr/local seven folders and keyboard. Alpha2MiB×16 in both runs.
+
+Normal ping1.597645294s/ACK1.496797982s. Same-condition parent image repeat
+ybqmzggy owner67419 actualterminal0:1.806192468s/ACK1.705135212s; observed delta
+-208547174ns. One observation each, host poll200ms/native observer100ms. This
+is ping, not painted/input-ready latency or100ms proof; no formal whole-launch
+percentage admission. Parent image identity verified on copy and after control.
+
+Diagnostic AHCI03470858/Booterd940b43c run5_am78s8 owner12476 actualterminal0
+shows16 bounded large-read samples, max249856B/244KiB, proving real >64KiB
+use, not a256KiB exact transfer, total counts or exclusive Files attribution.
+Restore/fsync normal AHCI/Ext2/core/Booter before VM, gate all identities and
+normal marker absence. Remove65 generated files, reclaim1132978176B. Keep
+current/parent images4, snapshots12 each with AHCI's parent identity verified
+against the old core payload, PNGabmz34w9/ybqmzggy and all raw/text/source/
+failure receipts. Goal active, uncommitted; refresh profiles for the next large
+mmap/read/openat work and retain general huge-leaf demotion as unfinished.
+
+## Repeated full-I/O-quantum copyouts through existing writable leases
+
+Checkpoint large-copyout-views, parent ahci-read-window. Fresh scopeivi6oj_7
+owner16876 actualterminal0:12503 calls, mmap220/769445974 inclusive local ticks,
+read1251/348059138, pselect439/733583773. Background/descheduling/waits included,
+not exclusive CPU or normal launch timing. Archive the8272B raw packet.
+
+Raise contiguous write views16->64KiB with the same16sets/4ways/64slots.
+An unaligned full quantum touches17 pages and revisits one set. Revalidate
+every prepared full lease identity before any store if the range wraps: a later
+miss can evict the first Ready hit without moving its replacement cursor.
+On failure keep whole checked fallback. Cached-only misses have no grant,
+release, eviction or store effects. COW/peer stop/release ACKs remain; read
+limit16KiB and vector limits unchanged. Fragment array120->408B, no new heap
+allocation site/slot/wire/Kernel/ABI/FPU/version/submodule changes.
+
+Unconditional cold admission was not retained: first strict3599etir owner82707
+terminal0, Filesyv2uo5l1 owner56430 terminal0/ping1.807947760s, with16/17 setup
+RPCs potentially replacing one checked transfer. Preserve its source/hash/raw
+records and retire binaries/images. Final admission adds32B/4 Words recording
+owner/generation/destination/length only. The first cold large request declines
+without view effects; an identical repeat can amortize setup. Fully Ready
+ranges work without the hint. Hint never authorizes memory and clears with its
+owner. Source/permission/current-generation/pinning checks remain authoritative.
+
+Native+4, full release2249/0/20, debug106/0/0. Missing17 pages, wrap eviction,
+uncertain final grant/release, cold/foreign/stale/cleanup admission and cached
+miss effects tested. Actual native adapter32 successful copies needs17 initial
+grants and0 later grants; cold initial attempt defers and guards/source stay
+unchanged. Correct the first host assertion's obsolete16385B limit to max+1;
+retain its failure log. New guest fixture097ddf5b requires repeated unaligned
+64KiB positioned reads into64 private pages, fork, middle-page MAP_FIXED in
+the child, new reads, and unchanged parent bytes/guards.
+
+Linux7be705c2/FreeBSDd966e376. RootFS replaces only both Alts and fixture,
+tree/readback/e2fs/outside verified. Alphae2c333b6/Booterdfe7cc84/corea955671b/
+AHCI6099ac23/Ext22ec753e5 unchanged. Strict SMP4 b3tdn2w5 owner42942 terminal0/
+4 literal markers. Files CPU0/SMP1 mwutcokr owner47043 terminal0, actual
+/usr/local seven folders and keyboard. Alpha2MiB×16 in both runs. Normal
+ping1.601468591s/ACK1.500753138s, no added parent control or whole-launch/100ms
+claim. Current normal optional diagnostic remains filtered to xfe.
+
+Filtered diagnosticixs4yxht owner92449 terminal0 found0 matching successes.
+Archive and use a temporary all-Linux probe instead. Its default build did
+not reproduce the normal ELF despite a diagnostic-only predicate edit; gate
+refused. Restore the exact production sourceSHA20d4067c and rebuild byte-exact
+normal7be705c2/d966e376 before VM. Widened probe338a69b2, xggr2rkr owner52278
+terminal0:32 bounded attempts, Xfbdev64KiB successes7 with grants[16,0,1,0,1,0,1],
+including3 requiring0 new view RPCs. Other cold/ineligible attempts retain
+the checked transfer with0 grants. Not total counts, Files-exclusive work,
+or a whole-scope RPC reduction. Archive temporary source/ELF hashes and all
+raws. Fix one archive setup normal-only FreeBSD hash lookup by merging fields.
+
+Remove79 generated artifacts, reclaim4973989888B. Keep current/parent images4,
+snapshots12 each, PNGmwutcokr/abmz34w9 and all source/text/raw/packet receipts.
+Goal active, uncommitted. Mmap/read service work and general guest huge-leaf
+demotion remain substantial targets.
+
+
+### guest-huge: opportunistic private guest 2-MiB leaves
+
+Use aligned still-untyped RAM for sealed private mappings when no small leaf table occupies the VA. Keep native/exported/small/unsupported paths on4KiB. Kernel Frame conversions and leaf MAPs512→1; logical per-page references remain512. Checked slice aliases initialize every byte, never export huge Frames as4KiB. Partial mutation and fork demote the same RAM under the supervisor VM barrier and strict alias/guest TLB acknowledgements. Restore failed splits via acknowledged table unlink or quarantine all512 slices. New Alpha/Alter must be deployed together; kernel/ABI/FPU/version/submodules unchanged.
+
+Final release2279/0/20, related debug238/0/1. KVM host SMP4 qzb4qpq5 actual owner20333 terminal0: three explicit fixture huge leaves, cross-boundary copy, concurrent CLONE_VM, partial protect/unmap-remap, COW fork and full release pass. Files CPU0/SMP1 mwd6h9__ owner64471 terminal0; visual usr/local7folders and keyboard navigation verified, ping2.020758474s/ACK1.919902877s. No Files-specific huge reports; no matched whole-launch speedup or100ms proof. Keep guest-huge/mapping-share-pool images4 and snapshots12 each, PNGmwd6h9__/u_nbhwzg. Remove49 generated artifacts/1813213184 allocated bytes. Goal active, uncommitted; receipts and all raw/development-failure logs in session-handoff/logs/linux-native-scope-20261107/guest-huge.
+
+
+### unmapped-image-source: omit native mappings of readonly mmap cache fills
+
+Create immutable backing identities without native leaf mappings; cold N-page fills remove N native MAPs. Guest aliases/copies retain actual PTEs, checked bytes and physical references. Exec/interpreter CPU consumers explicitly map R before dereferencing. Native SourceExtent/SourcePage rejects writes/writable shares; ordinary buffers retain strict readonly snapshot admission. Short reads/writable cold fills, version rechecks, budget16MiB, COW and failure/lifetime semantics remain. New request0x1036 needs new Alpha/Alter together; kernel/FPU/version/submodules unchanged.
+
+Eight added native tests, release2287/0/20, related debug459/0/2, extracted production runtime transport4. KVM host strict SMP4 nh8ghssv owner96013 actual0 plus guest-huge lifecycle passes. Files CPU0/SMP1 first4djpnhtd2.230804367s, matched parent ko7zsmyw1.805733289s, unchanged repeat1v1t_4241.595427113s/ACK1.494292740s; owners89665/36518/21433 actual0. All raw observations retained; no whole-launch speedup/100ms claim. Both final/parent PNGs inspected usr/local7folders and keyboard navigation. Same-source env diagnostic8m80_fzk owner8612 actual0 finds16 bounded xfe uses, including775pages, with native-maps0; not new-fill totals or aggregate savings. Normal Alts restored/fsynced/gated before diagnostic VM.
+
+Keep unmapped-image-source/guest-huge images4 and snapshots12 each, PNG1v1t_424/ko7zsmyw. Retire84 generated files/2701639680 allocated bytes, including older generation before new images. Goal active, uncommitted; full receipts/raw/failure logs in session-handoff/logs/linux-native-scope-20261107/unmapped-image-source.
+
+## 最新checkpoint: DSOの全面Rマップを遅延し、不要なPTE往復を削減
+
+最新deferred-elf-snapshot / 直前unmapped-image-source。検証済みET_DYN（256KiB以上、実行LOADあり、PHDRが64KiB内）の初回readonly mmapは先頭64KiBだけをマップし、残りも初期化済みRAM・物理参照・論理R権限を保持する。ローダーのMAP_FIXED/mprotectで必要セグメントを最終権限へ直接マップし、後からCPUが読む未マップページは新request0x1037で最大2MiB分の**4KiB PTE**を追加する。huge page自体は既存の利用可能な経路を維持。新Alpha/Alterの組が必須。Kernel/FPU/version/submodule変更なし。
+
+初案の64KiB fault clusterはFilesのobserver→ping区間で29 fault、2.751551787sと遅かったため拡大。最終版は12 fault、1.830566164s（release ACKから1.729645757s）、実PNGの/usr/local・7folders・keyboard操作を確認。親の過去1.595427113sとの全体短縮は未証明、100ms未達。最初の遅いrawも保存。最終native2297/0/20、debug578/0/6、実runtime transport4成功。SMP4 KVM strict vs0pu6pa owner57483実terminal0、Files i3gl3qll owner23847実terminal0。image8/archive2/heap16/stack2の2MiB経路を維持し、guest privateの0x28000000/0x28200000/0x28400000でも実hugeを確認。最初のUEFI停止x3dmy7rqはtimeout実terminal1、ソース/イメージ不変の再試行は成功。
+
+同一Alter policy/同一snapshot constructorの初案診断nbh6m6plでは、実xfeの10 uses（775pagesを含む）がeager16。最終Alphaとの差はfault cluster範囲、constructorの一致hashを保存。初回MAP数の検証であり、全実行のMAP削減総数/起動短縮率ではない。参照/checked copy/readonly/fork/COW/PROT_NONE/未ACK MAP・UNMAPの保持とrollbackをnative＋実DSO fixtureで検証。
+
+生成物105件・実割当4490657792Bを順次削除。current/previousのimage4本、各12snapshots、PNG i3gl3qll/1v1t_424のみ。詳細 `logs/linux-native-scope-20261107/deferred-elf-snapshot/RESULT.md`。未commit、goal active。VM生存中の変更/build/heavy hash禁止、所有exec実terminal後のみ次操作。
+
+## 最新checkpoint: キャッシュに入らないDSOも一時snapshotで遅延map
+
+最新transient-elf-snapshot / 直前deferred-elf-snapshot。現行scope（tjdnf87h owner37706実terminal0）でもmmap220/600378267 ticks、read1262/322750802が支配的。追加のxfe限定32件phase probe（_vhfp_v5 owner4095実terminal0）で最初の3528408B mmapがstreamed fallback、backing134667648 ticksだった。local-unverified/inclusive・待ち込みでCPU専有時間ではない。probeは保存後にvm.rsを元SHAへ完全復元し、以後の本番へ混ぜていない。
+
+未キャッシュの完全pread windowが検証済みET_DYNの全LOADを含む場合、初期化済みRAMをsource-only object→guest snapshotへ渡し、native所有者を直ちに退役する。最初は64KiB/16PTEだけ作り、既存のsegment保護/遅延fault/COWを使う。short read/offset/非ELF/writableは従来のstreaming初期化。cached DSOもLOADを全て含めば非LOAD footerの残量に依存せず遅延可能。16MiB cache予算は維持。一時release失敗は2 Word/16Bのowner記録に1件だけ保持し、ACK再試行前に次の確保をしない（payloadは既存image-read window以下、既定8MiB）。実行時にAlpha/source RAMをguestへCPU公開しない。
+
+全release2310/0/20、関連debug402/0/2。full cache時も容量不変、実read bytes/zero tail、失敗時owner保持/再確保阻止、alias失敗後退役、source退役後のunique pending DETACHを検証。KVM host strict SMP4 m09eev03 owner62367実terminal0/4 markers、非LOAD footerでcacheを必ず通らないDSO fixtureのwrite/fork/PROT_NONE/unmap成功。guest private huge3か所とAlpha image8/archive2/heap16/stack2を維持。
+
+通常Files m2_tjkvr owner84404実terminal0で2.267659445s（ACKから2.166621010s）、同条件親agjm_t8i owner85719実terminal0で2.076247053s。両PNGの/usr/local7folders・keyboard確認。起動全体の短縮/100ms未証明。診断71h497jw owner2998実terminal0で、実xfeの3514168B/862pagesがeager16/source-retired1を確認。通常canonicalは診断VM前に復元/fsync。これは初期MAPの検証であり、全lifetimeの総削減数/診断速度を通常性能に用いない。faultはobserver→pingが親12/新13。
+
+Alpha/Booter/Kernelは親同一、既存0x1035/36/37を再利用、wire/FPU/version/submodule変更なし。RootFSは両Alterとfixtureのみ、ESP含む外側不変を検証。source退役時のcopy-window全破棄を疑ったが、永久pool FrameはPOOL_OWNER0なので共有RAMの窓をcaller PIDで破棄しない。この仮説でAlphaを変更していない。次はまだ重いmmap/read本体、source canonicalization/retirement等の実仕事を確認して続ける。
+
+生成物85件・実割当4394807296B回収。現在/直前のimage4本＋各12snapshots、PNG m2_tjkvr/agjm_t8iのみ。全scope packet/text/source/差分を保存。詳細 `logs/linux-native-scope-20261107/transient-elf-snapshot/RESULT.md`。未commit、goal active、VMなし。VM生存中の変更/build/test/heavy hashは禁止、所有exec実terminal後のみ次操作。
+
+## 最新checkpoint: キャッシュ外DSOをguestへ直接初期化し、一時sourceを廃止
+
+最新direct-deferred-image / 直前transient-elf-snapshot。前回のcreate source→private snapshot→release sourceの3要求を、既存0x1035の直接初期化1要求へ統合。新permission flag0x100は4-word descriptor [source, bytes, 1|flag, eager]。従来の2/3-word要求は維持、**新Alpha/Booterと新Alterの組が必須**。各ページを初期化してから論理R/必要PTEを公開し、4KiB suffixは既存deferred bitmapと0x1037 fault populationを使用。RAMのcopy回数は従来も新も1回。一時Native所有・source canonicalization/退役・16Bのpending owner fieldを除去し、guestだけが最初からRAMを所有する。cached snapshot経路/16MiB cacheは維持。
+
+通常のprivateコンストラクタを共用するため、整列した未型付けRAMと空のleaf位置があれば2MiB hugeを従来通り作る。eager-prefixは全leaf数の上限ではない。native実装で862page/4KiB時の初期16PTE・全bytes/zero末尾・参照1・pending非shared、2MiB leaf1＋small suffix deferred、fork分離・absent unmap省略、tail初期化失敗と未ACK UNMAP保持を検証。全release2313/0/20、関連debug514/0/2。実Alpha handler抽出4/実runtime抽出3も通過し、旧word数/新4word・reaper/seal/exit/quarantine・権限/欠落word/overflow/replyを確認。
+
+KVM host strict SMP4 x7xj8b2p owner1762実terminal0/4 literal markers、fixtureは親同一binary（source commentだけ更新）。private huge0x28000000/0x28200000/0x28400000とAlpha image8/archive2/heap16/stack2を維持。通常Files lwcjbsxr owner28641実terminal0、2.264490815s/ACKから2.163654106s。実PNG /usr/local7folders・keyboard確認。親過去2.267659445sと今回fresh controlなし、起動全体短縮/100ms未証明。
+
+診断nusxof__ owner91144実terminal0で実xfe 3514168B/862pages/eager-prefix16/native-sources0を確認。同一最終sourceのenv診断、通常canonicalはVM前に復元/fsync。初期prefix要求とsource object廃止の適用確認であり、全MAP総数・Huge枚数・診断速度を通常性能に用いない。Alpha141f0c07/Booter256c5006/LinuxAlter f1779b63/FreeBSDAlter4fd89a9e。RootFSは両Alterのみ、ESPはinitのみ、Kernel/core/AHCI/Ext2/fixture/version/FPU/submoduleは親同一。
+
+生成物69件・実割当2715533312B回収。現在/直前image4本＋各12snapshots、PNG lwcjbsxr/m2_tjkvrのみ。詳細 `logs/linux-native-scope-20261107/direct-deferred-image/RESULT.md`。未commit、goal active、VMなし。複数のメモリ処理削減後も起動は約2秒のため、次はmmap/read内部だけでなくguest/native/kernel実行と待機のどこに残時間があるかを絞り、実装へ進む。旧inclusive scopeはCPU専有内訳ではない。VM生存中の変更/build/test/heavy hash禁止、所有exec実terminal後のみ次操作。
+# owned-huge-initialization: initialize cold owned RAM with temporary 2MiB Frames
+
+Inside an already-reserved single-owner object, prepare each untouched aligned
+2MiB chunk before constructing its small prefix. Initialize through one genuine
+huge alias; ACK unmap/revoke and demote to real 4KiB pool Frames before any
+publication. Warm/fragmented/unsupported cases keep their existing path and
+allocator policy. Reject interior failed preparation sentinels on whole-owner
+free; retain failed/uncertain ownership. No new payload buffer or kernel/ABI/
+FPU/version/submodule change. Final guest rights/huge/COW policy is unchanged.
+
+Seven new tests; full release2488/0/20, related debug537/0/2. Normal KVM strict
+SMP4 owner5076 actual0, four markers/16 guest huge leaves. Files owner29700
+actual0:1.517918553s/ACK1.417086628s; fresh parent10197 actual0:1.518304440s.
+Visual /root four items and keyboard /usr/local seven folders verified. No
+whole-launch gain or100ms proof. Final diagnostic37512 actual0 observes two
+cold2MiB chunks, including FOX-sized data between PID42 spawn and first ping:
+512→1 destination MAP each, excluding source MAPs and added demotion operations.
+Diagnostic-only force_info correction leaves normal ELF/image byte-identical;
+native exact source basis and all initial test/tool failures are preserved.
+
+Alpha+4992B/Booter+4096B; both RootFS and non-init FAT payloads unchanged. Keep
+owned-huge-initialization/userspace-lto images4/snapshots26/selectedPNG8. Retire
+older directories as well as media; all tmpfs native/build/diagnostic/five-VM
+artifacts removed. Logs:session-handoff/logs/linux-native-scope-20261107/owned-huge-initialization.
+Uncommitted, goal active; the remaining~1.5s still needs substantial work.

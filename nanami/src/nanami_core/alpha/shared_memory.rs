@@ -1,5 +1,6 @@
 use super::*;
 use crate::nanami_core::process::{ProcessEntry, SharedMemoryReservation};
+use crate::nanami_core::vm_space::{FRAME_WORD_BYTES, FRAME_WORD_PAGES};
 
 struct SharedMapping {
     entry: ProcessEntry,
@@ -10,8 +11,8 @@ struct SharedMapping {
 
 impl Alpha {
     /// A supervisor already has checked read authority. A view additionally
-    /// pins one ordinary RAM allocation. The normal management copy stays in
-    /// the trusted native supervisor's root; no descriptor is returned.
+    /// pins one ordinary RAM allocation through the permanent Alpha pool Frame.
+    /// Only the mapped VA is returned to the trusted native supervisor.
     /// It deliberately does not follow later changes in the source VM.
     pub(super) fn handle_process_read_view_request(
         &mut self,
@@ -90,7 +91,7 @@ impl Alpha {
             return Err(CapabilityError::PermissionDenied);
         }
         let mut mapping = self.reserve_shared_mapping_at(caller, 1, local_va)?;
-        if let Err(error) = self.processes.register_physical_allocation(
+        if let Err(error) = self.processes.register_pool_allocation(
             caller,
             local_va,
             mapping.reservation.start_slot,
@@ -102,17 +103,7 @@ impl Alpha {
             return Err(error);
         }
         let result = (|| {
-            let slot = mapping.reservation.start_slot;
-            self.ensure_process_frame_chunks(caller, mapping.entry.root_node, slot, 1)?;
-            arch::node::copy(
-                process_frame_chunk_descriptor(
-                    mapping.entry.root_node,
-                    slot / PROCESS_FRAME_CHUNK_PAGES,
-                ),
-                slot % PROCESS_FRAME_CHUNK_PAGES,
-                frame,
-            )?;
-            mapping.copied = 1;
+            self.process_root_slot(mapping.entry.root_node)?;
             let vm = self
                 .processes
                 .vm_space_mut(caller)
@@ -142,6 +133,14 @@ impl Alpha {
                 return Err(CapabilityError::Fatal);
             }
             return Err(error);
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_SHARED_POOL_DIAG") == Some("1") {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static VIEWS: AtomicUsize = AtomicUsize::new(0);
+            if VIEWS.fetch_add(1, Ordering::Relaxed) < 16 {
+                crate::force_info!("[view.pool] writable={} copied={}", writable, mapping.copied);
+            }
         }
         Ok(())
     }
@@ -177,6 +176,9 @@ impl Alpha {
         let end = source_va
             .checked_add(pages * PAGE_SIZE)
             .ok_or(CapabilityError::InvalidArgument)?;
+        if self.processes.immutable_source_overlapping_range(pid, source_va, end - source_va) {
+            return Err(CapabilityError::PermissionDenied);
+        }
         if self
             .processes
             .vm_space_mut(pid)
@@ -219,7 +221,7 @@ impl Alpha {
             }
         }
         let mut peer = if request.arg3 == 0 {
-            self.reserve_shared_mapping(peer_pid, pages, true)?
+            self.reserve_shared_mapping(peer_pid, pages, false)?
         } else {
             let entry = self
                 .processes
@@ -246,7 +248,7 @@ impl Alpha {
             {
                 return Err(CapabilityError::IllegalOperation);
             }
-            let reservation = self.processes.reserve_shared_memory_at(
+            let reservation = self.processes.reserve_owned_pool_memory_at(
                 peer_pid,
                 pages,
                 PROCESS_FRAME_TOTAL_PAGES,
@@ -259,7 +261,7 @@ impl Alpha {
                 mapped: 0,
             }
         };
-        if let Err(error) = self.processes.register_physical_allocation(
+        if let Err(error) = self.processes.register_pool_allocation(
             peer_pid,
             peer.reservation.base_va,
             peer.reservation.start_slot,
@@ -271,29 +273,10 @@ impl Alpha {
             return Err(error);
         }
         let result = (|| {
-            self.ensure_process_frame_chunks(
-                peer_pid,
-                peer.entry.root_node,
-                peer.reservation.start_slot,
-                pages,
-            )?;
-            for page in 0..pages {
-                let slot = peer.reservation.start_slot + page;
-                arch::node::copy(
-                    process_frame_chunk_descriptor(
-                        peer.entry.root_node,
-                        slot / PROCESS_FRAME_CHUNK_PAGES,
-                    ),
-                    (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                    if allocation.owns_frame_cap {
-                        process_frame_descriptor(source.root_node, allocation.start_slot + page)
-                    } else {
-                        self.memory.physical_frame_descriptor_from_index(allocation.base_page + page)
-                            .ok_or(CapabilityError::InvalidArgument)?
-                    },
-                )?;
-                peer.copied += 1;
-            }
+            // The PTEs use permanent pool Frames. The returned API contains
+            // only VAs; retain RAM through this peer's physical reference,
+            // without creating unused child Frame capabilities or their nodes.
+            self.process_root_slot(peer.entry.root_node)?;
             let vm = self
                 .processes
                 .vm_space_mut(peer_pid)
@@ -304,6 +287,9 @@ impl Alpha {
                     return Err(CapabilityError::IllegalOperation);
                 }
                 peer.mapped += 1;
+                // Bulk sharing has the same known span as fresh shared RAM.
+                // Prepare optional index storage without publishing a Frame.
+                if page == 0 || (va >> 12) & 63 == 0 { vm.prepare_frame_word(va, pages - page); }
                 if let Err(error) = self.memory.map_frame_strict(
                     peer.entry.address_space,
                     self.memory
@@ -327,6 +313,14 @@ impl Alpha {
             }
             return Err(error);
         }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_SHARED_POOL_DIAG") == Some("1") {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static SHARES: AtomicUsize = AtomicUsize::new(0);
+            if SHARES.fetch_add(1, Ordering::Relaxed) < 16 {
+                crate::force_info!("[share.pool] pages={} fixed={} copied={}", pages, request.arg3 != 0, peer.copied);
+            }
+        }
         Ok((source_va, peer.reservation.base_va))
     }
 
@@ -334,6 +328,22 @@ impl Alpha {
         &mut self,
         request: OsRequestEvent,
     ) -> Result<(usize, usize), CapabilityError> {
+        self.create_shared_memory(request, false)
+    }
+
+    pub(super) fn handle_memory_source_request(&mut self, request: OsRequestEvent)
+        -> Result<(usize, usize), CapabilityError> {
+        if request.arg0 != 0 || request.arg2 == 0 || request.arg3 == 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.processes.find_entry_by_pid(request.identifier)
+            .filter(|entry| !entry.exited && !entry.resource_quarantined && !entry.capabilities_sealed)
+            .ok_or(CapabilityError::PermissionDenied)?;
+        self.create_shared_memory(request, true)
+    }
+
+    fn create_shared_memory(&mut self, request: OsRequestEvent, source_only: bool)
+        -> Result<(usize, usize), CapabilityError> {
         let pid = request.identifier;
         let peer_pid = request.arg0;
         if pid == 0 {
@@ -348,11 +358,24 @@ impl Alpha {
             .ok_or(CapabilityError::InvalidArgument)?
             & !(PAGE_SIZE - 1);
         let pages = bytes / PAGE_SIZE;
-        let caller = self.reserve_shared_mapping(pid, pages, peer_pid != 0)?;
+        // Nonzero initializer arguments create owned, readonly RAM. Never
+        // permit a writable peer alias of an immutable snapshot constructor.
+        let initializer = if request.arg2 != 0 || request.arg3 != 0 {
+            if peer_pid != 0 { return Err(CapabilityError::InvalidArgument); }
+            let source = PageSource { pid, address: request.arg2, bytes: request.arg3 };
+            self.validate_owned_memory_initializer(source, bytes)?;
+            Some(source)
+        } else { None };
+        // MAP already uses the permanent pool Frame. Separate physical
+        // references pin each side; per-process Frame copies are unnecessary.
+        let mut caller = self.reserve_shared_mapping(pid, pages, false)?;
+        if source_only {
+            caller.reservation = self.processes.mark_immutable_memory_source(pid, caller.reservation)?;
+        }
         let mut mappings = Vec::with_capacity(2);
         mappings.push(caller);
         if peer_pid != 0 {
-            match self.reserve_shared_mapping(peer_pid, pages, true) {
+            match self.reserve_shared_mapping(peer_pid, pages, false) {
                 Ok(peer) => mappings.push(peer),
                 Err(error) => {
                     self.processes
@@ -381,7 +404,7 @@ impl Alpha {
                 self.processes.register_pool_allocation(mapping.entry.pid, r.base_va, r.start_slot, base_page, pages)?;
             }
         }
-        if let Err(error) = self.install_shared_memory(&mut mappings, base_page) {
+        if let Err(error) = self.install_shared_memory(&mut mappings, base_page, initializer) {
             for mapping in &mut mappings {
                 if let Err(cleanup_error) = self.remove_shared_mapping(mapping) {
                     // Fail closed: retain the reference and reservation when
@@ -395,6 +418,15 @@ impl Alpha {
             return Err(error);
         }
         let caller_va = mappings[0].reservation.base_va;
+        #[cfg(not(test))]
+        if option_env!("NANAMI_SHARED_POOL_DIAG") == Some("1") && peer_pid != 0 {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static BUFFERS: AtomicUsize = AtomicUsize::new(0);
+            if BUFFERS.fetch_add(1, Ordering::Relaxed) < 16 {
+                let copies: usize = mappings.iter().map(|mapping| mapping.copied).sum();
+                crate::force_info!("[shm.pool] pages={} owners={} copied={}", pages, mappings.len(), copies);
+            }
+        }
         let peer_va = mappings
             .get(1)
             .map_or(0, |mapping| mapping.reservation.base_va);
@@ -453,7 +485,7 @@ impl Alpha {
         }
         let reservation =
             self.processes
-                .reserve_shared_memory_at(pid, pages, PROCESS_FRAME_TOTAL_PAGES, base)?;
+                .reserve_owned_pool_memory_at(pid, pages, PROCESS_FRAME_TOTAL_PAGES, base)?;
         Ok(SharedMapping {
             entry,
             reservation,
@@ -466,6 +498,7 @@ impl Alpha {
         &mut self,
         mappings: &mut [SharedMapping],
         base_page: usize,
+        initializer: Option<PageSource>,
     ) -> Result<(), CapabilityError> {
         let pages = mappings[0].reservation.page_count;
         for mapping in mappings.iter() {
@@ -476,54 +509,96 @@ impl Alpha {
                 pages,
             )?; } else { self.process_root_slot(mapping.entry.root_node)?; }
         }
-        for page in 0..pages {
-            // Materialize each physical frame once, then copy to both peers.
-            self.memory
-                .ensure_alpha_frame_at_physical_index(base_page + page)?;
-            let source = self
-                .memory
-                .physical_frame_descriptor_from_index(base_page + page)
-                .ok_or(CapabilityError::InvalidArgument)?;
-            for mapping in mappings.iter_mut() {
-                if !mapping.reservation.owns_frame_caps() { continue; }
-                let slot = mapping.reservation.start_slot + page;
-                arch::node::copy(
-                    process_frame_chunk_descriptor(
-                        mapping.entry.root_node,
-                        slot / PROCESS_FRAME_CHUNK_PAGES,
-                    ),
-                    (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
-                    source,
-                )?;
-                mapping.copied += 1;
+        let owns_caps = mappings.iter().any(|mapping| mapping.reservation.owns_frame_caps());
+        // Every side already owns its reference, but no PTE has been published.
+        // A zero-filled shared buffer can use the same temporary huge Frame as
+        // a private snapshot; demotion finishes before exporting real 4K Frames.
+        let initialized = if !owns_caps && (initializer.is_none() || mappings.len() == 1) {
+            self.initialize_owned_with_large_frames(base_page, pages, initializer)?
+        } else { false };
+        if owns_caps {
+            let frame_hint = self.memory.allocation_frame_hint(base_page, pages);
+            for page in 0..pages {
+                self.memory.ensure_alpha_frame_for_allocation(base_page + page, frame_hint)?;
+                let source = self.memory.physical_frame_descriptor_from_index(base_page + page)
+                    .ok_or(CapabilityError::InvalidArgument)?;
+                for mapping in mappings.iter_mut().filter(|mapping| mapping.reservation.owns_frame_caps()) {
+                    let slot = mapping.reservation.start_slot + page;
+                    arch::node::copy(
+                        process_frame_chunk_descriptor(mapping.entry.root_node, slot / PROCESS_FRAME_CHUNK_PAGES),
+                        (slot % PROCESS_FRAME_CHUNK_PAGES) as Word,
+                        source,
+                    )?;
+                    mapping.copied += 1;
+                }
             }
+        } else if !initialized {
+            self.memory.ensure_alpha_frames_for_allocation(base_page, pages)?;
         }
         // Recycled physical pages must not disclose a previous owner's data.
-        self.zero_physical_pages(base_page, pages)?;
+        if !initialized {
+            if let Some(source) = initializer {
+                self.initialize_owned_physical_pages(base_page, pages, source)?;
+            } else {
+                self.zero_physical_pages(base_page, pages)?;
+            }
+        }
+        let attributes = nun::capability_call::address_space::Attribute::from_bits(
+            if initializer.is_some() { 1 } else { 7 },
+        ).ok_or(CapabilityError::InvalidArgument)?;
         for mapping in mappings.iter_mut() {
             let vm = self
                 .processes
                 .vm_space_mut(mapping.entry.pid)
                 .ok_or(CapabilityError::InvalidArgument)?;
-            for page in 0..pages {
+            while mapping.mapped < pages {
+                let page = mapping.mapped;
+                let va = mapping.reservation.base_va + page * PAGE_SIZE;
+                if mapping.reservation.immutable_source()
+                    && va & (FRAME_WORD_BYTES - 1) == 0
+                    && pages - page >= FRAME_WORD_PAGES
+                {
+                    let mut frames = [0; FRAME_WORD_PAGES];
+                    self.memory.read_ready_pool_frames(base_page + page, &mut frames)?;
+                    vm.record_immutable_source_frame_word(va, &frames)
+                        .map_err(|_| CapabilityError::IllegalOperation)?;
+                    mapping.mapped += FRAME_WORD_PAGES;
+                    continue;
+                }
                 let frame = self
                     .memory
                     .physical_frame_descriptor_from_index(base_page + page)
                     .ok_or(CapabilityError::InvalidArgument)?;
-                let va = mapping.reservation.base_va + page * PAGE_SIZE;
                 // A fixed-address mapping can be ahead of the heap watermark.
                 // Reject overlap before marking the page as ours for rollback.
-                if vm.find_frame(va).is_some() {
+                if vm.find_frame(va).is_some()
+                    || (mapping.reservation.immutable_source() && vm.mapping_is_uncertain(va))
+                {
                     return Err(CapabilityError::IllegalOperation);
                 }
                 // A failed map may have installed its PTE before failing a TLB
                 // update; rollback must attempt to unmap this page as well.
                 mapping.mapped += 1;
                 if page == 0 || (va >> 12) & 63 == 0 { vm.prepare_frame_word(va, pages - page); }
-                if let Err(error) = self.memory.map_frame_strict(mapping.entry.address_space, frame, va, vm) {
+                if mapping.reservation.immutable_source() {
+                    // This VA is a backing identity, not a native pointer.
+                    // Record ownership/absence for ordinary release and make
+                    // privileged writes fail even before a guest alias exists.
+                    vm.record_frame(va, frame).map_err(|_| CapabilityError::Fatal)?;
+                    vm.set_permissions(va, 0);
+                    vm.mark_private_page_shared(va, true);
+                    // Frame metadata alone must not imply a leaf table exists.
+                    vm.invalidate_page_table_region(va);
+                    continue;
+                }
+                if let Err(error) = self.memory.map_frame_strict_with_attribute(mapping.entry.address_space, frame, va, attributes, vm) {
                     vm.mark_mapping_uncertain(va);
                     return Err(error);
                 }
+                // Memory records Frame identity; this transaction owns logical
+                // rights. Cache admission must see the same readonly contract
+                // as the successfully installed leaf, before returning RAM.
+                if initializer.is_some() { vm.set_permissions(va, 1); }
             }
         }
         Ok(())
@@ -593,17 +668,18 @@ impl Alpha {
         while mapping.mapped != 0 {
             let page = mapping.mapped - 1;
             let va = r.base_va + page * PAGE_SIZE;
-            let frame = if r.owns_frame_caps() {
-                process_frame_descriptor(entry.root_node, r.start_slot + page)
-            } else {
-                let physical = if let Some((pages, _)) = &canonical_pages { pages[page].base_page }
-                    else { pool_extent.ok_or(CapabilityError::Fatal)?.base_page + page };
-                self.memory.physical_frame_descriptor_from_index(physical).ok_or(CapabilityError::Fatal)?
-            };
             if vm
                 .as_ref()
                 .is_none_or(|vm| vm.frame_may_be_present(va))
             {
+                let frame = if r.owns_frame_caps() {
+                    process_frame_descriptor(entry.root_node, r.start_slot + page)
+                } else {
+                    let physical = if let Some((pages, _)) = &canonical_pages { pages[page].base_page }
+                        else { pool_extent.ok_or(CapabilityError::Fatal)?.base_page + page };
+                    self.memory.physical_frame_descriptor_from_index(physical)
+                        .ok_or(CapabilityError::Fatal)?
+                };
                 if let Err(error) = arch::address_space::unmap(entry.address_space, frame, va) {
                     if let Some(vm) = vm.as_mut() {
                         vm.mark_mapping_uncertain(va);

@@ -3,6 +3,309 @@
 extern crate alloc;
 
 #[test]
+fn snapshot_page_cursor_replaces_repeated_dense_queries_without_allocating() {
+    let base = 0x800000;
+    let mut vm = VmSpace::new();
+    for page in 0..1024 {
+        let va = base + page * 4096;
+        vm.record_frame(va, page + 5).unwrap();
+        vm.mark_private_page_shared(va, true);
+    }
+    VmSpace::take_snapshot_point_queries();
+    for page in 0..1024 {
+        let va = base + page * 4096;
+        assert!(vm.private_page_shared(va));
+        assert_eq!(vm.find_frame(va), Some(page + 5));
+    }
+    assert_eq!(VmSpace::take_snapshot_point_queries(), (1024, 1024));
+    for references in [1, 2] {
+        VmSpace::take_snapshot_shared_word_queries();
+        DENIED.with(|count| count.set(0));
+        DENY_AT_OR_ABOVE.with(|limit| limit.set(0));
+        let mut cursor = vm.snapshot_page_cursor();
+        for page in (0..1024).rev() {
+            assert!(cursor.page_matches(base + page * 4096, page + 5, usize::MAX, references));
+        }
+        DENY_AT_OR_ABOVE.with(|limit| limit.set(usize::MAX));
+        assert_eq!(cursor.diagnostics(), (16, 16, 0));
+        assert_eq!(VmSpace::take_snapshot_point_queries(), (0, 0));
+        assert_eq!(VmSpace::take_snapshot_shared_word_queries(), if references == 1 { 0 } else { 16 });
+        assert_eq!(DENIED.with(Cell::get), 0);
+    }
+    println!("SNAPSHOT-VM-CURSOR pages=1024 frame+sharing-points=2048->0 selected-words=16 allocations=0");
+}
+
+#[test]
+fn snapshot_page_cursor_matches_sparse_dense_holes_and_fresh_views_after_mutation() {
+    let base = 0x800000;
+    let top = usize::MAX & !4095;
+    let mut vm = VmSpace::new();
+    for page in 0..130 {
+        if page < 64 || page % 17 == 0 {
+            vm.record_frame(base + page * 4096, page).unwrap();
+            vm.mark_private_page_shared(base + page * 4096, page % 3 != 0);
+        }
+    }
+    vm.record_frame(base + 3, 77).unwrap();
+    vm.mark_private_page_shared(base + 3, true);
+    vm.record_frame(top, usize::MAX).unwrap();
+    vm.mark_private_page_shared(top, true);
+    for phase in 0..3 {
+        let mut cursor = vm.snapshot_page_cursor();
+        for page in (0..130).rev().chain(0..130) {
+            for va in [base + page * 4096, base + 3, top, top - 4096] {
+                for references in [0, 1, 2, 7] {
+                    for (pool, child) in [(page, 999), (999, page), (0, 0), (usize::MAX, 999)] {
+                        let expected = references != 0 && (references == 1 || vm.private_page_shared(va))
+                            && vm.find_frame(va).is_some_and(|frame| frame == pool || frame == child);
+                        assert_eq!(cursor.page_matches(va, pool, child, references), expected,
+                            "phase={phase} va={va:x} references={references} pool={pool} child={child}");
+                    }
+                }
+            }
+        }
+        drop(cursor);
+        vm.forget_frame(base + (phase + 5) * 4096);
+        vm.record_frame(base + 17 * 4096, 999).unwrap();
+        vm.mark_private_page_shared(base + 17 * 4096, phase % 2 == 0);
+        vm.mark_private_page_shared(base + 3, phase % 2 != 0);
+        vm.forget_frame(top);
+    }
+}
+
+fn scalar_immutable_source(vm: &VmSpace, start: usize, end: usize) -> bool {
+    vm.fully_backed_aligned_range(start, end)
+        && !vm.has_uncertain_mappings(start, end)
+        && (start..end).step_by(4096).all(|va| matches!(vm.permissions(va), 0 | 1))
+}
+
+#[test]
+fn immutable_source_words_match_scalar_rights_backing_and_uncertainty_at_boundaries() {
+    const PAGE: usize = 4096;
+    let base = 3 * PAGE;
+    let mut vm = VmSpace::new();
+    for i in 0..160 {
+        vm.record_frame(base + i * PAGE, i + 17).unwrap();
+        vm.set_permissions(base + i * PAGE, usize::from(i % 7 == 0));
+    }
+    // Unaligned metadata is not queried by the legacy page-key walk.
+    vm.record_frame(base + 1, 77).unwrap();
+    vm.set_permissions(base + 1, usize::MAX);
+    for rights in [0, 1, 2, 3, 4, 5, 6, 7, 8, 17, usize::MAX] {
+        for i in [0, 1, 60, 61, 62, 125, 159] {
+            let va = base + i * PAGE;
+            vm.set_permissions(va, rights);
+            for (first, last) in [(0, 1), (0, 60), (1, 61), (60, 62), (61, 64), (64, 128), (125, 160), (0, 160)] {
+                let start = base + first * PAGE; let end = base + last * PAGE;
+                assert_eq!(vm.immutable_source_backed_range(start, end), scalar_immutable_source(&vm, start, end),
+                    "rights={rights} page={i} range={first}..{last}");
+            }
+            vm.set_permissions(va, usize::from(i % 7 == 0));
+        }
+    }
+    for key in [base + 1, base + 61 * PAGE, base + 159 * PAGE] {
+        vm.mark_mapping_uncertain(key);
+        assert!(!vm.immutable_source_backed_range(base, base + 160 * PAGE));
+        assert!(!scalar_immutable_source(&vm, base, base + 160 * PAGE));
+        vm.confirm_unmapped(key);
+        vm.set_permissions(key, if key & 4095 == 0 { 0 } else { usize::MAX });
+    }
+    let frame = vm.forget_frame(base + 61 * PAGE).unwrap();
+    assert!(!vm.immutable_source_backed_range(base, base + 160 * PAGE));
+    vm.record_frame(base + 61 * PAGE, frame).unwrap();
+    vm.set_permissions(base + 61 * PAGE, 0);
+    assert!(vm.immutable_source_backed_range(base, base + 160 * PAGE));
+    for (start, end) in [(0, 0), (base + PAGE, base), (base + 1, base + PAGE), (base, base + PAGE + 1), (base, base + 161 * PAGE)] {
+        assert!(!vm.immutable_source_backed_range(start, end));
+    }
+    // Sparse permission entries and a top-of-address-space partial word.
+    let top = usize::MAX & !4095;
+    let mut edge = VmSpace::new();
+    for i in 1..=3 {
+        edge.record_frame(top - i * PAGE, i).unwrap();
+        edge.set_permissions(top - i * PAGE, i & 1);
+    }
+    assert!(edge.immutable_source_backed_range(top - 3 * PAGE, top));
+    assert!(!edge.immutable_source_backed_range(top - 4 * PAGE, top));
+}
+
+#[test]
+fn immutable_source_permission_words_replace_point_queries_without_allocating() {
+    let base = 0x800000;
+    let end = base + 1024 * 4096;
+    let mut vm = VmSpace::new();
+    for i in 0..1024 {
+        vm.record_frame(base + i * 4096, i + 1).unwrap();
+        vm.set_permissions(base + i * 4096, i & 1);
+    }
+    VmSpace::take_immutable_permission_counts();
+    assert!(scalar_immutable_source(&vm, base, end));
+    assert_eq!(VmSpace::take_immutable_permission_counts(), (1024, 0));
+    DENIED.with(|count| count.set(0));
+    DENY_AT_OR_ABOVE.with(|limit| limit.set(0));
+    let valid = vm.immutable_source_backed_range(base, end);
+    DENY_AT_OR_ABOVE.with(|limit| limit.set(usize::MAX));
+    assert!(valid);
+    assert_eq!(DENIED.with(Cell::get), 0);
+    assert_eq!(VmSpace::take_immutable_permission_counts(), (0, 16));
+    println!("IMMUTABLE-SOURCE-WORDS pages=1024 point_before=1024 point_after=0 permission_words=16 allocations=0");
+}
+
+#[test]
+fn unmapped_frame_words_keep_slice_identity_and_flags_without_claiming_a_leaf_table() {
+    use vm_space::{FRAME_WORD_BYTES,FRAME_WORD_PAGES};
+    let base=0x800000;
+    let frames=core::array::from_fn::<_,FRAME_WORD_PAGES,_>(|page| 0x80000000+page*17);
+    let mut vm=VmSpace::new();
+    vm.record_frame(base+1,77).unwrap();
+    vm.mark_private_page_shared(base+4096,true);
+    vm.mark_private_page_cow_write(base+4096,true);
+    vm.record_unmapped_frame_word(base,&frames).unwrap();
+    assert!(!vm.page_tables_ready(base));
+    assert_eq!(vm.find_frame(base+1),Some(77));
+    for (page,&frame) in frames.iter().enumerate() {
+        let va=base+page*4096;
+        assert_eq!(vm.find_frame(va),Some(frame));assert_eq!(vm.permissions(va),0);
+        assert_eq!(vm.hardware_permissions(va),0);assert!(!vm.mapping_deferred(va));
+        assert!(!vm.mapping_is_uncertain(va));assert!(!vm.readonly_backed_range(va,va+4096));
+    }
+    assert!(vm.private_page_shared(base+4096));assert!(vm.private_page_cow_write(base+4096));
+    assert!(vm.record_unmapped_frame_word(base,&frames).is_err());
+    assert!(vm.record_unmapped_frame_word(base+4096,&frames).is_err());
+    assert!(vm.record_unmapped_frame_word(usize::MAX&!(FRAME_WORD_BYTES-1),&frames).is_err());
+    let mut uncertain=VmSpace::new();uncertain.mark_mapping_uncertain(base+7*4096);
+    assert!(uncertain.record_unmapped_frame_word(base,&frames).is_err());
+    assert_eq!(uncertain.find_frame(base),None);
+    assert!(uncertain.mapping_is_uncertain(base+7*4096));
+}
+
+#[test]
+fn aligned_frame_walk_stops_at_a_hole_and_ignores_unaligned_records() {
+    let mut vm = VmSpace::new();
+    let base = 0x240000;
+    for index in 0..130 {
+        let address = base + index * 4096;
+        vm.record_frame(address + 1, 100 + index).unwrap();
+        if index != 99 {
+            vm.record_frame(address, 1000 + index).unwrap();
+        }
+    }
+    let mut seen = Vec::new();
+    assert!(vm.visit_aligned_frame_run(base, base + 99 * 4096, |frame| seen.push(frame)));
+    assert_eq!(seen, (1000..1099).collect::<Vec<_>>());
+    seen.clear();
+    assert!(!vm.visit_aligned_frame_run(base, base + 130 * 4096, |frame| seen.push(frame)));
+    assert_eq!(seen, (1000..1099).collect::<Vec<_>>());
+    assert!(!vm.visit_aligned_frame_run(base + 1, base + 4096, |_| panic!("unaligned source")));
+}
+
+#[test]
+fn deferred_frame_words_match_point_records_and_keep_hardware_absent() {
+    use vm_space::{FRAME_WORD_BYTES, FRAME_WORD_PAGES};
+    const PAGE: usize = 4096;
+    let base = 0x240000;
+    let end = base + FRAME_WORD_BYTES;
+    let frames = core::array::from_fn::<_, FRAME_WORD_PAGES, _>(|page| 1000 + 3 * page);
+    for (shared, uncertain) in [(false, false), (true, false), (true, true)] {
+        let mut scalar = VmSpace::new();
+        let mut bulk = VmSpace::new();
+        for vm in [&mut scalar, &mut bulk] {
+            vm.record_frame(base - PAGE, 99).unwrap();
+            vm.mark_private_page_cow_write(base - PAGE, true);
+            vm.set_permissions(base + 7 * PAGE, 17);
+            if uncertain { vm.mark_mapping_uncertain(base + 22 * PAGE); }
+        }
+        scalar.prepare_frame_word(base, frames.len());
+        for (index, &frame) in frames.iter().enumerate() {
+            let va = base + index * PAGE;
+            if shared { scalar.mark_private_page_shared(va, true); }
+            scalar.mark_mapping_deferred(va);
+            scalar.record_frame(va, frame).unwrap();
+            scalar.set_permissions(va, 1);
+        }
+        bulk.record_deferred_frame_word(base, &frames, shared).unwrap();
+        assert!(bulk.record_deferred_frame_word(base, &frames, false).is_err());
+        assert!(bulk.record_deferred_frame_word(base + PAGE, &frames, false).is_err());
+        assert!(bulk.readonly_backed_range(base, end) == !uncertain);
+        assert_eq!(bulk.page_tables_ready(base), scalar.page_tables_ready(base));
+        for va in (base - PAGE..end + PAGE).step_by(PAGE) {
+            assert_eq!(bulk.find_frame(va), scalar.find_frame(va));
+            assert_eq!(bulk.permissions(va), scalar.permissions(va));
+            assert_eq!(bulk.hardware_permissions(va), scalar.hardware_permissions(va));
+            assert_eq!(bulk.private_page_shared(va), scalar.private_page_shared(va));
+            assert_eq!(bulk.private_page_cow_write(va), scalar.private_page_cow_write(va));
+            assert_eq!(bulk.mapping_deferred(va), scalar.mapping_deferred(va));
+            assert_eq!(bulk.snapshot_page_managed(va), scalar.snapshot_page_managed(va));
+            assert_eq!(bulk.frame_may_be_present(va), scalar.frame_may_be_present(va));
+            assert_eq!(bulk.readonly_backed_range(va, va + PAGE), scalar.readonly_backed_range(va, va + PAGE));
+        }
+        bulk.complete_deferred_mapping(base + PAGE);
+        assert_eq!(bulk.hardware_permissions(base + PAGE), 1);
+        assert_eq!(bulk.hardware_permissions(base + 2 * PAGE), 0);
+        assert_eq!(bulk.forget_frame(base + 2 * PAGE), Some(frames[2]));
+        assert!(!bulk.snapshot_page_managed(base + 2 * PAGE));
+    }
+}
+
+#[test]
+fn whole_permission_words_match_point_updates_for_packed_sparse_and_uncertain_backing() {
+    const WORD: usize = 64 * 4096;
+    fn fixture() -> VmSpace {
+        let mut vm = VmSpace::new();
+        for word in [0, 1, 3] { vm.prepare_frame_word(word * WORD, 64); }
+        for page in 0..256 {
+            let va = page * 4096;
+            if page < 64 || (page < 128 && page % 2 == 0) || page >= 192 {
+                vm.record_frame(va, page + 1000).unwrap();
+            }
+        }
+        vm.record_frame(2 * WORD, 777).unwrap();
+        vm.mark_mapping_uncertain(64 * 4096);
+        vm.mark_mapping_deferred(2 * WORD);
+        vm.mark_mapping_deferred(4096);
+        vm.mark_private_page_cow_write(4 * 4096, true);
+        vm.set_permissions(3 * WORD, 17);
+        vm.record_frame(4097, 555).unwrap();
+        vm.set_permissions(4097, 19);
+        vm
+    }
+    let mut bulk = fixture();
+    let mut scalar = fixture();
+    for permissions in [1, 0, 3, 5, 7, 1, 2, 4, 6] {
+        bulk.set_permission_words(0, 4 * WORD, permissions);
+        for va in (0..4 * WORD).step_by(4096) { scalar.set_permissions(va, permissions); }
+        for va in (0..4 * WORD).step_by(4096).chain([4097]) {
+            assert_eq!(bulk.permissions(va), scalar.permissions(va));
+            assert_eq!(bulk.hardware_permissions(va), scalar.hardware_permissions(va));
+            assert_eq!(bulk.find_frame(va), scalar.find_frame(va));
+            assert_eq!(bulk.frame_may_be_present(va), scalar.frame_may_be_present(va));
+            assert_eq!(bulk.snapshot_page_managed(va), scalar.snapshot_page_managed(va));
+            assert_eq!(bulk.mapping_deferred(va), scalar.mapping_deferred(va));
+            assert_eq!(bulk.readonly_backed_range(va, va + 4096), scalar.readonly_backed_range(va, va + 4096));
+        }
+        for base in (0..4 * WORD).step_by(WORD) {
+            assert_eq!(bulk.readonly_backed_range(base, base + WORD), scalar.readonly_backed_range(base, base + WORD));
+        }
+    }
+}
+
+#[test]
+fn bootstrap_large_leaf_never_claims_a_four_kib_leaf_table_or_process_leaf() {
+    std::thread::Builder::new().stack_size(8*1024*1024).spawn(|| {
+    let mut boot=BootstrapVmSpace::new();
+    assert!(boot.record_bootstrap_frame(0x58000000,123,21).is_ok());
+    assert_eq!(boot.find_frame(0x58000000),Some(123));
+    assert_eq!(boot.find_frame(0x58001000),None);
+    assert!(!boot.page_tables_ready(0x58000000));
+    assert!(boot.record_bootstrap_frame(0x58201000,124,21).is_err());
+    assert!(boot.record_bootstrap_frame(0x58200000,124,30).is_err());
+    let mut process=VmSpace::new();
+    assert!(process.record_bootstrap_frame(0x58000000,123,21).is_err());
+    assert_eq!(process.find_frame(0x58000000),None);
+    }).unwrap().join().unwrap();
+}
+
+#[test]
 fn aligned_collision_range_matches_point_walk_with_scalar_and_packed_frames() {
     let mut vm = VmSpace::new();
     for page in 0..192 {
@@ -263,7 +566,7 @@ mod vm_space {
         (frames == (end - start) / 4096, frames)
     }
 }
-use vm_space::{VmSpace, VmTracker};
+use vm_space::{BootstrapVmSpace, VmSpace, VmTracker};
 
 #[test]
 fn packed_frame_snapshot_reserves_once_without_changing_collected_metadata() {
@@ -1955,4 +2258,22 @@ fn avl_node_churn_and_sparse_retention_cost() {
     TRACK.with(|track| track.set(false));
     assert_eq!(total.live, 0);
     println!("AVL-CHURN full-calls={} full-bytes={} sparse-bytes={} total-calls={} peak-bytes={} ns={elapsed}", full.calls, full.live, sparse.live, total.calls, total.peak);
+}
+
+#[test]
+fn deferred_snapshot_keeps_logical_backing_but_never_invents_a_pte_or_table() {
+    let mut vm=VmSpace::new();let base=0x800000;
+    for page in 0..130 {let va=base+page*4096;vm.mark_mapping_deferred(va);vm.record_frame(va,1000+page).unwrap();vm.set_permissions(va,1);}
+    assert!(vm.readonly_backed_range(base,base+130*4096));
+    assert!(!vm.page_tables_ready(base));
+    for page in 0..130 {let va=base+page*4096;assert_eq!(vm.permissions(va),1);assert_eq!(vm.hardware_permissions(va),0);assert!(!vm.frame_may_be_present(va));}
+    let mut present=Vec::new();vm.try_for_each_present_frame(base,base+130*4096,|va,_|{present.push(va);Ok::<_,()>(())}).unwrap();assert!(present.is_empty());
+    vm.mark_mapping_uncertain(base+4096);assert!(vm.frame_may_be_present(base+4096));
+    vm.complete_deferred_mapping(base+64*4096);assert_eq!(vm.hardware_permissions(base+64*4096),1);
+    assert!(vm.snapshot_page_managed(base+64*4096));assert!(vm.page_tables_ready(base+64*4096));
+    vm.set_permissions(base+65*4096,0);assert!(!vm.mapping_deferred(base+65*4096));assert!(vm.snapshot_page_managed(base+65*4096));
+    vm.forget_frame(base+66*4096);assert!(!vm.mapping_deferred(base+66*4096));assert!(!vm.snapshot_page_managed(base+66*4096));
+    for first in [0,1,63,64,65,66,67,129,130] {for last in [0,1,63,64,65,66,67,129,130] {
+        let a=base+first*4096;let b=base+last*4096;
+        assert_eq!(vm.has_deferred_mappings(a,b),a<b && (a..b).step_by(4096).any(|va|vm.mapping_deferred(va)));}}
 }

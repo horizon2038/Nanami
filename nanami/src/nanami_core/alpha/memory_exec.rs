@@ -1,4 +1,4 @@
-//! Sealed private exec retirement: unmap leaves, bulk-clear Frame slots, then RAM.
+//! Sealed private exec: switch the sole PCB, retire old tables/caps, then RAM.
 use super::*;
 
 impl Alpha {
@@ -17,26 +17,21 @@ impl Alpha {
         // The supervisor has already trapped/stopped this sole VM user. Do not
         // Suspend an accepted fault: exec's reply must still reach its resolver.
         self.invalidate_process_copy_mappings(pid)?;
-        let unmapped = self
-            .processes
-            .vm_space_mut(pid)
-            .ok_or(CapabilityError::InvalidArgument)?
-            .try_for_each_present_frame(0, usize::MAX, |va, frame| {
-                arch::address_space::unmap(target.address_space, frame, va)
-            });
-        if let Err((va, error)) = unmapped {
-            if let Some(vm) = self.processes.vm_space_mut(pid) {
-                vm.mark_mapping_uncertain(va);
-            }
-            return Err(error);
-        }
+        self.processes.vm_space(pid).ok_or(CapabilityError::InvalidArgument)?;
+        // Removing the root's AS capability alone is insufficient: the stopped
+        // PCB still holds its old AS. Recreate/configure drops that last alias,
+        // then successfully retires every old page-table owner. No runnable task
+        // or privileged copy window can use the old leaves after this fence.
+        // A failed switch/table retirement stops here with all RAM still owned.
+        // Thus even an uncertain old PTE needs no individual UNMAP at exec.
+        self.recreate_process_address_space_for_exec(target)?;
         // REVOKE clears each Node's contents but retains that Node itself.
         // Existing chunk descriptors/arena reservations remain reusable.
         let directory = process_frame_directory_descriptor(target.root_node);
         for chunk in self.processes.frame_chunk_indices(pid) {
             arch::node::revoke(directory, chunk)?;
         }
-        // No RAM may be freed before all leaves and Frame aliases are gone.
+        // No RAM may be freed before the old AS/tables and Frame aliases retire.
         // Move records, do not decrement then re-register their references.
         self.processes
             .defer_all_active_physical_allocations_for_pid(pid);

@@ -101,13 +101,23 @@ pub(super) fn write_poll_set(
             }
         }
         if wait.context.args[0] != 0 {
-            for (set, ptr) in sets.iter().zip(&wait.context.args[1..4]) {
+            let bytes = sets.map(|set| (set as u64).to_ne_bytes());
+            let mut fields: [(Word, &[u8]); 3] = [(0, &[]); 3];
+            let mut count = 0;
+            for (set, ptr) in bytes.iter().zip(&wait.context.args[1..4]) {
                 if *ptr != 0 {
-                    unsafe {
-                        write_u64(runtime.posix_shm, *set);
-                    }
-                    write_target_memory(runtime, pid, *ptr, 8)?;
+                    fields[count] = (*ptr, set);
+                    count += 1;
                 }
+            }
+            // Keep read/write/except ordering, including overlapping sets and
+            // the successful prefix before a later copy fault. The existing
+            // owned-vector path retains leases or falls back to checked IPC.
+            match count {
+                0 => {},
+                1 => super::copyout_owned(runtime, pid, fields[0].0, fields[0].1)?,
+                2 => super::guest_memory::copyout_owned_many(runtime, pid, &[fields[0], fields[1]])?,
+                _ => super::guest_memory::copyout_owned_many(runtime, pid, &fields)?,
             }
         }
         Ok(sets.iter().map(|set| set.count_ones() as Word).sum())

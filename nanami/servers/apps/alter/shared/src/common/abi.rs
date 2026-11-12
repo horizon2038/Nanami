@@ -9,6 +9,7 @@ pub const SLOT_HONOKA_SERVICE: Word = 26;
 pub const SLOT_HONOKA_PRESENT_NOTIFICATION_BASE: Word = 27;
 pub const SLOT_TIMER_SERVICE: Word = 31;
 pub const SLOT_RTC_SERVICE: Word = 32;
+pub const SLOT_VFS_SERVICE: Word = 33;
 
 pub const ALTER_REQUEST_CONTROL: Word = 0xb101;
 pub const ALTER_REQUEST_LOAD_ELF: Word = 0xb102;
@@ -25,6 +26,12 @@ pub const ALTER_LAUNCH_FLAG_GRAPHICS: Word = 1 << 2;
 pub const ALTER_LAUNCH_FLAG_OS_FREEBSD: Word = 1 << 8;
 
 pub const ALTER_DEFAULT_SHM_BYTES: Word = 0x10000;
+// Dedicated file-population window. Control traffic and ordinary Linux I/O
+// keep their existing 64-KiB quantum; large snapshots/mmap fill in fewer RPCs.
+pub const ALTER_FILE_IO_BYTES: Word = 2 * 1024 * 1024;
+// Linux readonly mmap admits larger DSO snapshots than the exec-cache limit.
+// Keep libFOX/libstdc++ in one window so they use the sealed constructor too.
+pub const ALTER_LINUX_FILE_IO_BYTES: Word = 4 * 1024 * 1024;
 pub const ALTER_PATH_MAX: usize = 256;
 pub const ALTER_IO_OFFSET: usize = 512;
 pub const ALTER_MANAGED_PROCESS_MAX: usize = 16;

@@ -28,8 +28,21 @@ pub(super) fn sys_sendfile(
     if input.resource & LINUX_O_ACCMODE == LINUX_O_WRONLY {
         return Err(EBADF);
     }
+    runtime.with_file_reader_operation(input, pid, "sendfile", |runtime| {
+        transfer(runtime, pid, output, input, offset_ptr, count)
+    })
+}
+
+fn transfer(
+    runtime: &mut Runtime,
+    pid: Word,
+    output: LinuxFile,
+    input: LinuxFile,
+    offset_ptr: Word,
+    count: Word,
+) -> Result<Word, i32> {
     let (_, _, kind, _, _) =
-        posix::posix_fstat(runtime.posix_port, input.posix_fd).map_err(map_request_error)?;
+        runtime.file_reader.fstat(runtime.posix_port, input.posix_fd, 0).map_err(map_request_error)?;
     if kind != posix::POSIX_FILE_TYPE_REGULAR {
         return Err(EINVAL);
     }
@@ -82,7 +95,7 @@ pub(super) fn sys_sendfile(
         _ => return Err(EINVAL),
     };
     let offset = if offset_ptr == 0 {
-        posix::posix_seek(runtime.posix_port, input.posix_fd, 0, posix::POSIX_SEEK_CUR)
+        runtime.seek_posix(input.posix_fd, 0, posix::POSIX_SEEK_CUR)
             .map_err(map_request_error)?
     } else {
         read_target_memory(runtime, pid, offset_ptr, 8).map_err(|_| EFAULT)?;
@@ -104,6 +117,9 @@ pub(super) fn sys_sendfile(
     let (bytes, source) = runtime
         .pread_posix(input.posix_fd, 0, count, offset)
         .map_err(map_request_error)?;
+    if bytes > count {
+        return Err(EIO);
+    }
     if bytes == 0 {
         return Ok(0);
     }
@@ -151,8 +167,7 @@ pub(super) fn sys_sendfile(
         return Err(EIO);
     }
     if offset_ptr == 0 {
-        posix::posix_seek(
-            runtime.posix_port,
+        runtime.seek_posix(
             input.posix_fd,
             offset + written,
             posix::POSIX_SEEK_SET,

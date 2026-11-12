@@ -64,6 +64,7 @@ impl Runtime {
         target.mappings = source.mappings;
         target.vm_group = source.vm_group;
         target.vm_private_shared = source.vm_private_shared;
+        target.vm_writable_private_shared = source.vm_writable_private_shared;
         if files {
             // CLONE_FILES may already have installed this borrowed handle.
             // Releasing it here would free the parent's live table.
@@ -95,5 +96,22 @@ impl Runtime {
                 process.mapped_break = source.mapped_break;
             }
         }
+    }
+
+    /// EXEC_MEMORY has already detached Alpha's VM. MappingTable is a borrowed
+    /// handle, so clearing it before unsharing would erase the parent's VMAs.
+    pub fn detach_exec_mappings(&mut self, pid: Word) -> bool {
+        let Some(process) = self.managed_process(pid) else { return false; };
+        let group = process.vm_group;
+        let borrowed = self.managed.iter().any(|other| {
+            other.pid != 0 && other.pid != pid && other.vm_group == group
+        });
+        let Some(process) = self.managed_process_mut(pid) else { return false; };
+        if borrowed {
+            process.mappings = MappingTable::EMPTY;
+        }
+        process.vm_group = pid;
+        process.fs_group = pid;
+        true
     }
 }

@@ -107,3 +107,17 @@ pub fn present(surface: &Surface, rect: Rect) -> Result<(), RequestError> {
     )?;
     Ok(())
 }
+
+pub fn present_batch(surface: &Surface, rects: &[Rect]) -> Result<(), RequestError> {
+    if rects.is_empty() || rects.len() > MAX_PRESENT_BATCH {
+        return Err(RequestError::InvalidArgument);
+    }
+    let mut args = [surface.id, 0, 0, 0];
+    for (word, rect) in args[1..].iter_mut().zip(rects) {
+        *word = rect
+            .packed(surface.layout)
+            .ok_or(RequestError::InvalidArgument)?;
+    }
+    request(surface.port, PRESENT_BATCH, args, 5)?;
+    Ok(())
+}

@@ -5,6 +5,15 @@ use super::{io::map_request_error_to_status, process::session_for_pid, state::Ru
 
 pub(crate) fn handle_control(runtime: &mut Runtime, request: ServiceRequest) -> (Word, Word, Word) {
     match request.arg0 {
+        POSIX_CONTROL_VFS_PROVIDER => {
+            if super::process::find_session(runtime, request.identifier).is_some()
+                && runtime.vfs_provider_pid != 0
+            {
+                (nanami_runtime::OS_RESPONSE_OK, runtime.vfs_provider_pid, 0)
+            } else {
+                (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0)
+            }
+        }
         POSIX_CONTROL_ATTACH_SHARED_MEMORY => {
             let size = if request.arg1 == 0 {
                 POSIX_DEFAULT_SHM_BYTES

@@ -106,6 +106,8 @@ impl FileDescriptor {
 #[derive(Clone, Copy)]
 pub(crate) struct OpenFile {
     pub(crate) active: bool,
+    /// Negotiated readonly description: VFS owns its sole shared position.
+    pub(crate) vfs_cursor: bool,
     pub(crate) kind: FdKind,
     pub(crate) offset: Word,
     pub(crate) status_flags: Word,
@@ -118,6 +120,7 @@ pub(crate) struct OpenFile {
 impl OpenFile {
     pub(crate) const EMPTY: Self = Self {
         active: false,
+        vfs_cursor: false,
         kind: FdKind::Empty,
         offset: 0,
         status_flags: 0,
@@ -139,6 +142,7 @@ pub(crate) enum FdKind {
 
 pub(crate) struct Runtime {
     pub(crate) vfs_port: Word,
+    pub(crate) vfs_provider_pid: Word,
     pub(crate) vfs_shm: Word,
     pub(crate) vfs_shm_size: Word,
     pub(crate) sessions: [Session; MAX_SESSIONS],

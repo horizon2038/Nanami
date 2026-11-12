@@ -16,6 +16,8 @@ const FIRST: usize = 32;
 const COUNT: usize = 96;
 const MAX_GLYPH_W: usize = 20;
 const MAX_GLYPH_H: usize = 20;
+#[cfg(test)]
+static GLYPH_SAMPLES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 pub const DEFAULT_TEXT_COLOR: u32 = 0x00e8_e0cf;
 
 #[derive(Clone, Copy)]
@@ -84,6 +86,53 @@ const SHELL_INK_BOUNDS: (i32, i32) = shell_ink_bounds();
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipped_glyphs_match_legacy_pixels_for_all_slots_and_bands() {
+        let mut renderer = TextRenderer::new();
+        for (width, height) in [(1, 1), (7, 9), (23, 25)] {
+            for x in [0, 1, width - 1, width, width + 9] {
+                for y in [0, 1, height - 1, height, height + 9] {
+                    for band in [(0, height), (0, 1), (1, height), (height / 2, height / 2 + 1), (height, height), (height + 1, usize::MAX), (height, 0)] {
+                        for (index, glyph) in SHELL_GLYPHS.iter().enumerate() {
+                            let mut pixels: Vec<u32> = (0..width * height + 4).map(|i| (i as u32).wrapping_mul(0x9e3779b9)).collect();
+                            let mut expected = pixels.clone();
+                            let color = 0x12abef;
+                            let bx = x as i32 + glyph.x_offset;
+                            let by = y as i32 + glyph.y_offset;
+                            for gy in 0..glyph.height {
+                                for gx in 0..glyph.width {
+                                    let alpha = glyph.bitmap[gy * MAX_GLYPH_W + gx];
+                                    let px = bx + gx as i32; let py = by + gy as i32;
+                                    if alpha != 0 && px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height && (py as usize) >= band.0 && (py as usize) < band.1 {
+                                        let p = py as usize * width + px as usize;
+                                        expected[p] = blend_over(expected[p], color, alpha);
+                                    }
+                                }
+                            }
+                            renderer.draw_cached_glyph(pixels.as_mut_ptr() as Word, width, height, x, y, (FIRST + index) as u8, color, band);
+                            assert_eq!(pixels, expected, "slot={index} size={width}x{height} x={x} y={y} band={band:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_glyph_only_samples_visible_band() {
+        let mut renderer = TextRenderer::new();
+        let mut pixels = [0x123456u32; 80 * 40];
+        let glyph = &SHELL_GLYPHS[b'W' as usize - FIRST];
+        let y = 10;
+        let row = (y as i32 + glyph.y_offset) as usize;
+        GLYPH_SAMPLES.store(0, core::sync::atomic::Ordering::Relaxed);
+        renderer.draw_cached_glyph(pixels.as_mut_ptr() as Word, 80, 40, 10, y, b'W', 0xabcdef, (row, row + 1));
+        assert_eq!(GLYPH_SAMPLES.swap(0, core::sync::atomic::Ordering::Relaxed), glyph.width);
+        renderer.draw_cached_glyph(pixels.as_mut_ptr() as Word, 80, 40, 80, y, b'W', 0xabcdef, (0, 40));
+        assert_eq!(GLYPH_SAMPLES.swap(0, core::sync::atomic::Ordering::Relaxed), 0);
+        std::println!("SHELL-GLYPH-CLIP old_samples={} band_samples={} offscreen_samples=0", glyph.width * glyph.height, glyph.width);
+    }
 
     #[test]
     fn static_glyphs_match_live_fontdue_all_metrics_and_bitmap_bytes() {
@@ -180,25 +229,29 @@ impl TextRenderer {
         }
         let base_x = x as i32 + glyph.x_offset;
         let base_y = y as i32 + glyph.y_offset;
-        let mut gy = 0usize;
-        while gy < glyph.height {
-            let mut gx = 0usize;
-            while gx < glyph.width {
+        // Only nonnegative, representable i32 pixel coordinates can pass the
+        // old bounds checks. Wide differences also handle offscreen origins
+        // and usize-sized framebuffer/band limits without narrowing overflow.
+        let span = |base: i32, length: usize, start: usize, end: usize| {
+            let limit = i32::MAX as usize + 1;
+            ((start.min(limit) as i64 - base as i64).clamp(0, length as i64) as usize,
+             (end.min(limit) as i64 - base as i64).clamp(0, length as i64) as usize)
+        };
+        let (left, right) = span(base_x, glyph.width, 0, fb_width);
+        let (top, bottom) = span(base_y, glyph.height, band.0, fb_height.min(band.1));
+        let mut gy = top;
+        while gy < bottom {
+            let py = (base_y as i64 + gy as i64) as usize;
+            let mut gx = left;
+            while gx < right {
                 let alpha = glyph.bitmap[gy * MAX_GLYPH_W + gx];
+                #[cfg(test)]
+                GLYPH_SAMPLES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 if alpha != 0 {
-                    let px = base_x + gx as i32;
-                    let py = base_y + gy as i32;
-                    if px >= 0
-                        && py >= 0
-                        && (px as usize) < fb_width
-                        && (py as usize) < fb_height
-                        && (py as usize) >= band.0
-                        && (py as usize) < band.1
-                    {
-                        let background = get_pixel(vaddr, fb_width, px as usize, py as usize);
-                        let color = blend_over(background, text_color, alpha);
-                        put_pixel(vaddr, fb_width, px as usize, py as usize, color);
-                    }
+                    let px = (base_x as i64 + gx as i64) as usize;
+                    let background = get_pixel(vaddr, fb_width, px, py);
+                    let color = blend_over(background, text_color, alpha);
+                    put_pixel(vaddr, fb_width, px, py, color);
                 }
                 gx += 1;
             }
@@ -221,6 +274,12 @@ impl TextRenderer {
 
     pub fn row_ink_bounds(&self) -> (i32, i32) {
         self.row_ink_bounds
+    }
+
+    pub fn space_is_blank(&self) -> bool {
+        if !self.use_fontdue { return true; } // Bitmap fallback has no space ink.
+        let space = &self.glyphs[b' ' as usize - FIRST];
+        !space.cached || space.width == 0 || space.height == 0
     }
 
     pub fn draw_cell_in_band(

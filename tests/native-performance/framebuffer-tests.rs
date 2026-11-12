@@ -86,6 +86,114 @@ fn pack(a: usize, b: usize) -> usize {
 }
 
 #[test]
+fn clean_prefix_skips_fine_scan_and_duplicate_frame_stays_clean() {
+    let bytes = 1920 * 1080 * 4;
+    let mut shadow = damage::Shadow::new(bytes).unwrap();
+    let mut source = vec![0xff; bytes]; source[bytes - 1] = 0;
+    damage::take_scan_counts();
+    let mut ranges = Vec::new();
+    assert_eq!(shadow.copy(0, &source, |start, pixels| ranges.push((start, pixels.len()))), 64);
+    let scans = damage::take_scan_counts();
+    assert_eq!(scans, (127, 576));
+    assert_eq!(ranges, [(bytes - 64, 64)]);
+    assert_eq!(shadow.copy(0, &source, |_, _| panic!("duplicate")), 0);
+    assert_eq!(damage::take_scan_counts(), (127, 0));
+    println!("SHADOW-PREFIX fine_checks_before={} after={} coarse_checks={}", bytes / 64, scans.1, scans.0);
+}
+
+#[test]
+fn clean_gaps_and_suffix_skip_fine_checks_without_changing_published_spans() {
+    const BLOCK: usize = 65536;
+    let bytes = 1920 * 1080 * 4;
+    for offset in [0, 13] {
+        let mut shadow = damage::Shadow::new(offset + bytes + 9).unwrap();
+        let mut source = vec![0xff; bytes];
+        for at in [0, 2 * BLOCK + 7, bytes - 1] { source[at] = 0; }
+        let mut hardware = vec![0xff; offset + bytes + 9];
+        let mut ranges = Vec::new();
+        damage::take_scan_counts();
+        assert_eq!(shadow.copy(offset, &source, |at, pixels| {
+            ranges.push((at, pixels.len()));
+            hardware[offset + at..offset + at + pixels.len()].copy_from_slice(pixels);
+        }), 192);
+        let scans = damage::take_scan_counts();
+        assert_eq!(scans, (127, 2624));
+        assert_eq!(ranges, [(0, 64), (2 * BLOCK, 64), (bytes - 64, 64)]);
+        assert_eq!(&hardware[offset..offset + bytes], source);
+        assert!(hardware[..offset].iter().chain(&hardware[offset + bytes..]).all(|b| *b == 0xff));
+        assert_eq!(shadow.copy(offset, &source, |_, _| panic!("duplicate")), 0);
+        assert_eq!(damage::take_scan_counts(), (127, 0));
+        println!("SHADOW-CLEAN-BLOCKS bytes={bytes} fine_before={} fine_after={} bulk_after={} written=192",
+            bytes / 64, scans.1, scans.0);
+    }
+}
+
+#[test]
+fn block_scan_preserves_dense_cross_boundary_runs_partial_rows_and_frame_changes() {
+    const BLOCK: usize = 65536;
+    let bytes = 4 * BLOCK + 17;
+    let mut source = vec![0xff; bytes];
+    let mut shadow = damage::Shadow::new(bytes).unwrap();
+    let mut hardware = vec![0xff; bytes];
+    for frame in 0..6 {
+        let color = frame as u8;
+        source.fill(0xff);
+        match frame {
+            0 => source.fill(color),
+            1 => source[BLOCK - 64..3 * BLOCK + 64].fill(color),
+            2 => { source[..64].fill(color); source[3 * BLOCK..].fill(color); }
+            3 => source[bytes - 17..].fill(color),
+            4 => (),
+            _ => { for at in (0..bytes).step_by(128) { source[at] = color; } }
+        }
+        // Independent published-span oracle: compare the previously visible
+        // hardware, then merge adjacent changed 64B cells, including the tail.
+        let mut expected = Vec::new();
+        for (i, (old, new)) in hardware.chunks(64).zip(source.chunks(64)).enumerate() {
+            if old == new { continue; }
+            let at = i * 64;
+            if let Some((start, length)) = expected.last_mut() {
+                if *start + *length == at { *length += new.len(); continue; }
+            }
+            expected.push((at, new.len()));
+        }
+        let mut actual = Vec::new();
+        let copied = shadow.copy(0, &source, |at, pixels| {
+            actual.push((at, pixels.len()));
+            hardware[at..at + pixels.len()].copy_from_slice(pixels);
+        });
+        assert_eq!(actual, expected, "frame {frame}");
+        assert_eq!(copied, expected.iter().map(|(_, n)| n).sum::<usize>());
+        assert_eq!(hardware, source);
+    }
+}
+
+#[test]
+fn clean_prefix_preserves_relative_offsets_cross_block_runs_and_partial_tail() {
+    const BLOCK: usize = 65536;
+    for offset in [0, 3, 13] {
+        for first in [0, BLOCK] {
+            let bytes = 2 * BLOCK + 17;
+            let mut shadow = damage::Shadow::new(offset + bytes + 9).unwrap();
+            let mut source = vec![0xff; bytes];
+            let start = first + BLOCK - 64;
+            let end = (first + BLOCK + 64).min(bytes);
+            source[start..end].fill(0x12);
+            let mut hardware = vec![0xff; offset + bytes + 9];
+            let mut ranges = Vec::new();
+            assert_eq!(shadow.copy(offset, &source, |at, pixels| {
+                ranges.push((at, pixels.len()));
+                hardware[offset + at..offset + at + pixels.len()].copy_from_slice(pixels);
+            }), end - start);
+            assert_eq!(ranges, [(start, end - start)]);
+            assert_eq!(&hardware[offset..offset + bytes], source);
+            assert!(hardware[..offset].iter().chain(hardware[offset + bytes..].iter()).all(|p| *p == 0xff));
+            assert_eq!(shadow.copy(offset, &source, |_, _| panic!("duplicate")), 0);
+        }
+    }
+}
+
+#[test]
 fn duplicate_frames_write_no_hardware_but_still_acknowledge_all_pixels() {
     let mut display = Display::new(640, 400, 0, true);
     display.source.fill(0x12);
@@ -120,6 +228,27 @@ fn sparse_changes_copy_only_changed_spans_without_touching_other_pixels() {
     assert_eq!(display.pixels(), display.source);
     assert_eq!(display.publish(0, 0, 640, 400), (256_000, 0));
     display.assert_canaries();
+}
+
+#[test]
+fn batched_rectangles_match_sequential_presents_and_leave_gaps_untouched() {
+    let rects = [(pack(1, 0), pack(2, 2)), (pack(20, 3), pack(3, 2)), (pack(31, 7), pack(1, 1))];
+    for cached in [false, true] {
+        let mut reference = Display::new(32, 8, 16, cached);
+        let mut batch = Display::new(32, 8, 16, cached);
+        reference.source.fill(0x19);
+        batch.source.fill(0x19);
+        for (position, size) in rects {
+            present(&mut reference.state, 11, position, size).unwrap();
+        }
+        assert_eq!(
+            presentation::present_shared_framebuffers(&mut batch.state, 11, rects.into_iter()),
+            Ok((11, 44))
+        );
+        assert_eq!(batch.pixels(), reference.pixels());
+        assert_eq!(&batch.pixels()[12..80], &[0xff; 68]);
+        batch.assert_canaries();
+    }
 }
 
 #[test]

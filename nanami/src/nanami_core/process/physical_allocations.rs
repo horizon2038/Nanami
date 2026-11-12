@@ -316,19 +316,33 @@ impl PhysicalAllocations {
         pid: usize,
         allocation: ProcessPhysicalAllocation,
     ) {
-        let key = Self::key(allocation);
-        self.references.increment(key);
+        self.insert_many(state, pid, core::iter::once(allocation));
+    }
+
+    pub(super) fn insert_many(
+        &mut self,
+        state: AllocationState,
+        pid: usize,
+        mut allocations: impl Iterator<Item = ProcessPhysicalAllocation>,
+    ) {
+        let Some(first) = allocations.next() else { return; };
         let heads = match state {
             AllocationState::Active => &mut self.active,
             AllocationState::Deferred => &mut self.deferred,
         };
+        let references = &mut self.references;
         let nodes = &mut self.nodes;
         let free = &mut self.free;
-        // The head remains borrowed while the disjoint node storage changes.
-        // update executes this once before any head-table resize, preserving
-        // node allocation/reuse order without searching the PID again.
+        // The head remains borrowed while the disjoint references and nodes
+        // change. Preserve per-page reference counts and prepend order.
         heads.update(pid, |previous| {
-            Self::push_node(nodes, free, state, allocation, previous)
+            references.increment(Self::key(first));
+            let mut head = Self::push_node(nodes, free, state, first, previous);
+            for allocation in allocations {
+                references.increment(Self::key(allocation));
+                head = Self::push_node(nodes, free, state, allocation, Some(head));
+            }
+            head
         });
     }
 

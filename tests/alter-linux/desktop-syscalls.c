@@ -198,8 +198,8 @@ int test_main(void) {
     CHECK(child > 0);
     CHECK(call(61, child, (word)&status, 0, 0) == child && status == 0 && shared == 0x1234);
     CHECK(call(11, guarded, STACK_BYTES + 4096, 0, 0) == 0);
-    /* No shared address space is silently replaced by a private vfork copy. */
-    args.flags |= 0x4000;
+    /* vfork with shared file tables is still outside the supported subset. */
+    args.flags |= 0x4000 | 0x400;
     CHECK(call(435, (word)&args, 88, 0, 0) == -38);
     static const char pass[] = "DESKTOP-SYSCALLS-PASS\n";
     call(1, 1, (word)pass, sizeof(pass) - 1, 0);

@@ -17,5 +17,9 @@ jobs:
         run: rustup toolchain install nightly-2026-03-25 --profile minimal --component rust-src
       - name: Test filesystem builder, UAPI and xtask
         run: cargo test --locked -p ext2-image -p nanami-uapi -p nanami-xtask
+      - name: Test Tiny Core profile and portable cache builders
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s thirdparty/tinycore -p test_build.py
       - name: Check QEMU argv without launching
         run: cargo xtask run --print-command --net none --accel tcg

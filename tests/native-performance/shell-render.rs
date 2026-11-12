@@ -264,3 +264,56 @@ fn background_fill_work_for_full_and_partial_bands() {
         assert_eq!(stores, 712 * (bottom - top));
     }
 }
+
+#[test]
+fn blank_rows_use_one_background_span_per_row_and_no_cell_draws() {
+    let mut terminal = terminal::Terminal::new(89, 33);
+    terminal.cursor_visible = false;
+    let mut text = font::TextRenderer::new();
+    assert!(text.space_is_blank());
+    let mut pixels = vec![0xdeadbeefu32; 712 * 396];
+    render::take_paint_calls();
+    render::take_fill_stores();
+    render::paint(&terminal,&mut text,pixels.as_mut_ptr() as Word,712,396,0,396);
+    assert_eq!(render::take_paint_calls(),(33,0));
+    assert_eq!(render::take_fill_stores(),712*396);
+    assert!(pixels.iter().all(|pixel| *pixel==0x0010_1418));
+}
+
+#[test]
+fn blank_spans_keep_background_changes_cursor_scrollback_overhang_and_band_guards() {
+    let mut terminal = terminal::Terminal::new(20, 5);
+    let mut text = font::TextRenderer::new();
+    for _ in 0..8 { for &byte in b"g  \x1b[41m   \x1b[42;4m  \x1b[0mW  \r\n" { terminal.process_byte(byte); } }
+    for &byte in b"\x1b[2;7H" { terminal.process_byte(byte); }
+    let (width,height)=(163,62);
+    for cursor in [false,true] { for scroll in [0,2] {
+        terminal.cursor_visible=cursor;
+        terminal.scroll(scroll);
+        for (top,bottom) in [(0,height),(1,11),(12,13),(15,31),(height-1,height),(8,8)] {
+            let mut expected=vec![0x3210_7654;width*height];
+            let mut actual=vec![0xdead_beef;width*height+2];
+            actual[1..1+width*height].copy_from_slice(&expected);
+            reference_band(&terminal,&mut text,&mut expected,width,height,top,bottom);
+            render::paint(&terminal,&mut text,actual[1..].as_mut_ptr() as Word,width,height,top,bottom);
+            assert!(actual[1..1+width*height]==expected,"cursor={cursor} scroll={scroll} band={top}..{bottom}");
+            assert_eq!(actual[0],0xdead_beef);
+            assert_eq!(actual[width*height+1],0xdead_beef);
+        }
+    }}
+}
+
+#[test]
+fn underlined_spaces_keep_the_original_background_glyph_and_line_order() {
+    let mut terminal=terminal::Terminal::new(10,2);
+    terminal.cursor_visible=false;
+    for &byte in b"\x1b[4m        " { terminal.process_byte(byte); }
+    let mut text=font::TextRenderer::new();
+    let mut pixels=vec![0;80*24];
+    render::take_paint_calls();
+    render::paint(&terminal,&mut text,pixels.as_mut_ptr() as Word,80,24,0,24);
+    assert_eq!(render::take_paint_calls(),(18,8));
+    let mut expected=vec![0;80*24];
+    reference_band(&terminal,&mut text,&mut expected,80,24,0,24);
+    assert!(pixels==expected);
+}

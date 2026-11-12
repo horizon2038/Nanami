@@ -285,13 +285,7 @@ pub(super) fn sys_socket_recv(
         _ => return Err(ENOTSOCK),
     };
     if received != 0 {
-        nanami_runtime::request_process_memory_write_checked(
-            pid,
-            buffer,
-            runtime.network_shm + source_offset,
-            received,
-        )
-        .map_err(|_| EFAULT)?;
+        super::copyout_from(runtime, pid, buffer, runtime.network_shm + source_offset, received)?;
     }
     write_sockaddr_result(runtime, pid, address, address_len, peer_ip, peer_port)?;
     Ok(received)
@@ -365,13 +359,7 @@ pub(super) fn sys_recvmsg(
     while index < iov_count as usize && copied < response_len {
         let chunk = lens[index].min(response_len - copied);
         if chunk != 0 {
-            nanami_runtime::request_process_memory_write_checked(
-                pid,
-                bases[index],
-                runtime.posix_shm + copied,
-                chunk,
-            )
-            .map_err(|_| EFAULT)?;
+            super::copyout_from(runtime, pid, bases[index], runtime.posix_shm + copied, chunk)?;
             copied += chunk;
         }
         index += 1;

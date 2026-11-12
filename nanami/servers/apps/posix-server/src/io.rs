@@ -59,12 +59,29 @@ pub(crate) fn handle_read_with_mode(
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = &runtime.open_files[open_index];
+    if request.code == POSIX_REQUEST_PREAD_VERSIONED {
+        if !direct || out_offset != 0 || len == 0 || request.arg3 >> 32 == 0 {
+            return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        }
+        if entry.kind != FdKind::Regular {
+            return (nanami_runtime::OS_RESPONSE_OK, 0, 0);
+        }
+        return match nanami_client::vfs::vfs_read_versioned(
+            runtime.vfs_port, entry.vfs_handle, request.arg3, len as Word,
+            runtime.sessions[index].direct_vfs_delegate,
+        ) {
+            Ok((bytes, identity)) => (nanami_runtime::OS_RESPONSE_OK, bytes, identity),
+            Err(error) => (map_request_error_to_status(error), 0, 0),
+        };
+    }
     let positioned = matches!(
         request.code,
         POSIX_REQUEST_PREAD | POSIX_REQUEST_PREAD_DIRECT
     );
     let file_offset = if positioned {
         request.arg3
+    } else if entry.vfs_cursor {
+        0 // The only authoritative sequential position is at VFS.
     } else {
         entry.offset
     };
@@ -92,7 +109,13 @@ pub(crate) fn handle_read_with_mode(
             if chunk == 0 {
                 return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
             }
-            let read = if direct {
+            let read = if entry.vfs_cursor && !positioned {
+                nanami_client::vfs::vfs_read_cursor(
+                    runtime.vfs_port, entry.vfs_handle, chunk,
+                    if direct { runtime.sessions[index].direct_vfs_delegate } else { 0 },
+                    if direct { out_offset } else { VFS_IO_OFFSET },
+                )
+            } else if direct {
                 nanami_client::vfs::vfs_read_delegated(
                     runtime.vfs_port,
                     entry.vfs_handle,
@@ -122,7 +145,7 @@ pub(crate) fn handle_read_with_mode(
                             );
                         }
                     }
-                    if !positioned {
+                    if !positioned && !entry.vfs_cursor {
                         runtime.open_files[open_index].offset = file_offset.saturating_add(bytes);
                     }
                     (nanami_runtime::OS_RESPONSE_OK, bytes, 0)
@@ -207,6 +230,11 @@ fn handle_write_with_mode(
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = &runtime.open_files[open_index];
+    if entry.vfs_cursor {
+        // This new open operation creates a readonly description. Legacy
+        // descriptors retain their existing write behavior.
+        return (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0);
+    }
     let positioned = matches!(
         request.code,
         POSIX_REQUEST_PWRITE | POSIX_REQUEST_PWRITE_DIRECT
@@ -382,6 +410,15 @@ pub(crate) fn handle_seek(runtime: &mut Runtime, request: ServiceRequest) -> (Wo
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let entry = runtime.open_files[open_index];
+    if entry.vfs_cursor {
+        if entry.kind != FdKind::Regular {
+            return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
+        }
+        return match nanami_client::vfs::vfs_seek_cursor(runtime.vfs_port, entry.vfs_handle, request.arg1, request.arg2) {
+            Ok(position) => (nanami_runtime::OS_RESPONSE_OK, position, 0),
+            Err(error) => (map_request_error_to_status(error), 0, 0),
+        };
+    }
     let base = match request.arg2 {
         POSIX_SEEK_SET => 0,
         POSIX_SEEK_CUR => entry.offset,

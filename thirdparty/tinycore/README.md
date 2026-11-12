@@ -205,6 +205,20 @@ installs defaults again. Console-only assembly does not install these links.
   headers or additional TCZ packages are needed. Its checksum is recorded in
   `manifest.json` under `profile_helpers`. The helper's C policy and x86-64
   libc entry code live under `tools/`; upstream programs are not patched.
+  The same Python ELF reader on macOS and Linux indexes the locked guest
+  libraries into `etc/ld.so.cache`, recorded under `loader_caches`. Startup uses
+  this cache instead of forcing `LD_LIBRARY_PATH`; explicit environment
+  overrides and the fallback for older bundles without a cache are preserved.
+  Font caches use the same standard-library Python serializer on every host.
+  `font-cache.lock.json` records reviewed properties of the 97 pinned fonts,
+  including character coverage and language maps. A digest covers every font
+  and configuration input before these facts are compiled into the guest's
+  `le64.cache-9` format with zero directory timestamps. This step is inherently
+  offline and needs no host Fontconfig, Meson, gperf, FreeType development files,
+  or guest ELF execution. When updating the locked fonts/configuration, review
+  and refresh the facts with `tools/import-font-cache.py ROOT` using caches
+  from the pinned guest Fontconfig; changed inputs cannot silently reuse stale
+  facts. This serializer targets this fixed desktop profile, not arbitrary fonts.
   Its `io.nanami.graphics="true"` annotation explicitly grants a window-local
   graphics session. Other bundles do not gain raw keyboard/mouse access.
   `/dev/tty0`/`tty1` are a virtual console, not host VT switching; keyboard

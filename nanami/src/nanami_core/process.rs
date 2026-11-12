@@ -501,6 +501,40 @@ impl ProcessManager {
         self.register_physical_allocation_with_cap(pid, base_va, slot, physical, pages, false)
     }
 
+    /// Register a contiguous pool run as individual page references so later
+    /// partial release, demotion and COW retain their existing granularity.
+    pub fn register_pool_page_run(
+        &mut self, pid: usize, base_va: usize, slot: usize, physical: usize, pages: usize,
+    ) -> Result<(), CapabilityError> {
+        let end = physical.checked_add(pages).ok_or(CapabilityError::InvalidArgument)?;
+        self.register_pool_aliases(pid, base_va, slot, physical..end)
+    }
+
+    /// Register independently releasable 4KiB aliases in ascending VA order.
+    pub fn register_pool_aliases(
+        &mut self, pid: usize, base_va: usize, slot: usize,
+        physical_pages: impl ExactSizeIterator<Item = usize>,
+    ) -> Result<(), CapabilityError> {
+        let pages = physical_pages.len();
+        let pid = self.memory_owner_pid(pid);
+        if pid == 0 || pages == 0 || base_va & (USER_PAGE_SIZE - 1) != 0
+            || pages.checked_mul(USER_PAGE_SIZE).and_then(|bytes| base_va.checked_add(bytes)).is_none()
+            || slot.checked_add(pages).is_none()
+        {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        self.physical_allocations.insert_many(AllocationState::Active, pid, physical_pages.enumerate().map(|(page, physical)| {
+            ProcessPhysicalAllocation {
+                base_va: base_va + page * USER_PAGE_SIZE,
+                start_slot: slot + page,
+                base_page: physical,
+                page_count: 1,
+                owns_frame_cap: false,
+            }
+        }));
+        Ok(())
+    }
+
     fn register_physical_allocation_with_cap(
         &mut self, pid: usize, base_va: usize, start_slot: usize, base_page: usize,
         page_count: usize, owns_frame_cap: bool,
@@ -1275,6 +1309,34 @@ impl ProcessManager {
         Ok(())
     }
 
+    /// Commit only after a stopped shared task's PCB uses its new private AS.
+    /// Allocate the empty tracker before that irreversible kernel operation.
+    pub fn prepare_private_exec(&mut self, pid: usize) -> Result<(), CapabilityError> {
+        let entry = self.entry_by_pid(pid).ok_or(CapabilityError::InvalidArgument)?;
+        if entry.memory_owner == pid || !entry.capabilities_sealed || entry.next_frame_slot != 0
+            || self.lazy_mappings.iter().any(|mapping| mapping.pid == pid)
+            || self.shared_memory.contains_key(&pid)
+            || self.physical_allocations.for_pid(AllocationState::Active, pid).next().is_some()
+            || self.physical_allocations.for_pid(AllocationState::Deferred, pid).next().is_some()
+            || self.vm_spaces.iter().any(|vm| vm.pid == pid
+                && (vm.space.has_backed_pages(0, usize::MAX)
+                    || vm.space.has_uncertain_mappings(0, usize::MAX)))
+        {
+            return Err(CapabilityError::IllegalOperation);
+        }
+        self.ensure_vm_space_for_pid(pid)
+    }
+
+    pub fn commit_private_exec(&mut self, pid: usize) -> Result<(), CapabilityError> {
+        // The caller has completed prepare_private_exec and PCB configuration.
+        // Never redirect a task to an unallocated tracker.
+        if !self.vm_spaces.iter().any(|vm| vm.pid == pid) {
+            return Err(CapabilityError::IllegalOperation);
+        }
+        self.entry_mut_by_pid(pid).ok_or(CapabilityError::InvalidArgument)?.memory_owner = pid;
+        Ok(())
+    }
+
     pub fn has_memory_peers(&self, pid: usize) -> bool {
         let owner = self.memory_owner_pid(pid);
         self.entries
@@ -1464,8 +1526,22 @@ impl ProcessManager {
         page_size: usize,
         max_frame_slots: usize,
     ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize, usize), CapabilityError> {
+        self.reserve_process_heap_preferred_alignment(pid, page_count, page_size, max_frame_slots, 1)
+    }
+
+    /// Prefer a larger virtual alignment without consuming backing or slots
+    /// for padding. If it cannot fit, preserve the ordinary reservation rather
+    /// than rejecting a request that still fits at the current heap cursor.
+    pub(crate) fn reserve_process_heap_preferred_alignment(
+        &mut self,
+        pid: usize,
+        page_count: usize,
+        page_size: usize,
+        max_frame_slots: usize,
+        alignment: usize,
+    ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize, usize), CapabilityError> {
         let pid = self.memory_owner_pid(pid);
-        if page_count == 0 || page_size == 0 {
+        if page_count == 0 || page_size == 0 || !alignment.is_power_of_two() {
             return Err(CapabilityError::InvalidArgument);
         }
         let bytes = page_count
@@ -1473,14 +1549,18 @@ impl ProcessManager {
             .ok_or(CapabilityError::InvalidArgument)?;
 
         if let Some(entry) = self.entry_mut_by_pid(pid) {
-            if entry.next_frame_slot + page_count > max_frame_slots {
-                return Err(CapabilityError::InvalidArgument);
-            }
+            let next_slot = entry.next_frame_slot.checked_add(page_count)
+                .filter(|end| *end <= max_frame_slots)
+                .ok_or(CapabilityError::InvalidArgument)?;
             if entry.user_heap_next_va == 0 || entry.user_heap_limit_va <= entry.user_heap_next_va {
                 return Err(CapabilityError::InvalidArgument);
             }
 
-            let heap_base = entry.user_heap_next_va;
+            let heap_base = entry.user_heap_next_va.checked_add(alignment - 1)
+                .map(|base| base & !(alignment - 1))
+                .filter(|base| base.checked_add(bytes)
+                    .is_some_and(|end| end <= entry.user_heap_limit_va))
+                .unwrap_or(entry.user_heap_next_va);
             let heap_end = heap_base
                 .checked_add(bytes)
                 .ok_or(CapabilityError::InvalidArgument)?;
@@ -1489,7 +1569,7 @@ impl ProcessManager {
             }
 
             let start_slot = entry.next_frame_slot;
-            entry.next_frame_slot += page_count;
+            entry.next_frame_slot = next_slot;
             entry.user_heap_next_va = heap_end;
             return Ok((entry.root_node, entry.address_space, heap_base, start_slot));
         }

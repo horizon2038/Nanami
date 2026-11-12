@@ -21,12 +21,12 @@ pub mod page_window;
 mod state {
     pub use super::{page_window, OsPersonality};
 }
-struct Mappings;
+struct Mappings { generation: Cell<Word> }
 impl Mappings {
     fn generation(&self) -> Word {
-        1
+        self.generation.get()
     }
-    fn invalidate_views(&self) {}
+    fn invalidate_views(&self) { self.generation.set(self.generation.get() + 1); }
 }
 struct Process {
     personality: OsPersonality,
@@ -35,6 +35,7 @@ struct Process {
     mappings: Mappings,
 }
 struct Runtime {
+    fail_metadata: bool,
     posix_shm: Word,
     posix_shm_size: Word,
     posix_direct_shm: Word,
@@ -47,7 +48,61 @@ impl Runtime {
     fn managed_process(&self, pid: Word) -> Option<&Process> {
         (pid == 7).then_some(&self.process)
     }
+    fn mapping_protection_needed(&self, pid: Word, _: Word, _: Word, _: Word) -> Option<bool> {
+        self.managed_process(pid).map(|_| true)
+    }
+    fn protect_mapping(&mut self, _: Word, _: Word, _: Word, _: Word) -> bool {
+        if self.fail_metadata { return false; }
+        self.process.mappings.invalidate_views();
+        true
+    }
 }
+const LINUX_PAGE_SIZE: Word = 4096;
+const LINUX_PROT_ALL: Word = 7;
+const LINUX_PROT_WRITE: Word = 2;
+const EINVAL: i32 = 22;
+const ENOMEM: i32 = 12;
+mod guest_views {
+    pub(super) use super::production::{BeforeMmap, invalidate_range};
+}
+mod file_remap {
+    use super::*;
+    pub(super) fn snapshot_write(_: &Runtime, _: Word, _: Word, _: Word, _: Word) -> bool { false }
+    pub(super) fn before_protect(_: &Runtime, _: Word, _: Word) {}
+    pub(super) fn after_protect(_: &Runtime, _: Word, _: ()) {}
+}
+thread_local! {
+    static PROTECT_FAIL: Cell<bool> = const { Cell::new(false) };
+    static PROTECT_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+mod memfd {
+    use super::*;
+    pub(super) fn protect(_: &Runtime, _: Word, _: Word, _: Word, _: Word) -> Result<(), i32> {
+        PROTECT_CALLS.with(|n| n.set(n.get() + 1));
+        if PROTECT_FAIL.with(Cell::get) { Err(5) } else { Ok(()) }
+    }
+}
+mod private_memory {
+    use super::*;
+    pub(super) fn with_mapping_mutation<T>(r: &Runtime, pid: Word, base: Word, bytes: Word, _: bool,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> {
+        // Model the mutation boundary; the separate quiescence harness uses
+        // the real guard and checks stop ACKs before this range invalidation.
+        production::invalidate_range(r, pid, base, bytes);
+        operation()
+    }
+    pub(super) fn with_private_protect<T>(r: &Runtime, pid: Word, _: Word, _: Word,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> {
+        production::invalidate(r, pid);
+        operation()
+    }
+    pub(super) fn with_snapshot_write<T>(r: &Runtime, pid: Word, base: Word, bytes: Word,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> {
+        with_private_protect(r, pid, base, bytes, operation)
+    }
+}
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/memory_protection.rs"]
+mod protection;
 thread_local! { static REQUESTS: Cell<usize> = const { Cell::new(0) }; }
 #[cfg(target_os = "linux")]
 thread_local! {
@@ -271,7 +326,10 @@ fn long_native_copies_stop_exactly_at_an_inaccessible_page() {
 
 fn runtime(scratch: &[u8], personality: OsPersonality) -> Runtime {
     REQUESTS.with(|count| count.set(0));
+    PROTECT_FAIL.with(|fail| fail.set(false));
+    PROTECT_CALLS.with(|n| n.set(0));
     Runtime {
+        fail_metadata: false,
         posix_shm: scratch.as_ptr() as Word,
         posix_shm_size: scratch.len(),
         posix_direct_shm: 0,
@@ -282,8 +340,136 @@ fn runtime(scratch: &[u8], personality: OsPersonality) -> Runtime {
             personality,
             exited: false,
             vm_group: 7,
-            mappings: Mappings,
+            mappings: Mappings { generation: Cell::new(1) },
         },
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn protection_preflight_errors_leave_current_native_views_and_generation_untouched() {
+    let mut r = runtime(&[0u8; 32], OsPersonality::Linux);
+    INSTALL_VIEWS.with(|n| n.set(true));
+    assert!(production::copy_from_owned(&r, 7, 8192, &[19; 8]));
+    let generation = r.process.mappings.generation();
+    for (pid, base, bytes, prot, error) in [(7, 0, 1, 1, EINVAL), (7, 1, 1, 1, EINVAL),
+        (7, 4096, 0, 1, EINVAL), (7, 4096, 4096, 8, EINVAL),
+        (7, 4096, Word::MAX, 1, ENOMEM), (99, 4096, 4096, 1, ENOMEM)] {
+        assert_eq!(protection::protect(&mut r, pid, base, bytes, prot), Err(error));
+        assert_eq!(r.process.mappings.generation(), generation);
+        assert!(production::copy_from_owned_cached(&r, 7, 8192, &[21; 8]));
+    }
+    assert_eq!(PROTECT_CALLS.with(Cell::get), 0);
+    assert_eq!(REQUESTS.with(Cell::get), 1);
+    production::invalidate(&r, 7);
+    INSTALL_VIEWS.with(|n| n.set(false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn readonly_protection_commits_keep_disjoint_native_aliases_and_withdraw_touched_pages() {
+    let mut r = runtime(&[0u8; 32], OsPersonality::Linux);
+    INSTALL_READ_VIEWS.with(|n| n.set(true));
+    INSTALL_VIEWS.with(|n| n.set(true));
+    let mut output = [core::mem::MaybeUninit::uninit(); 8];
+    assert!(production::copy_into_owned(&r, 7, 4096, &mut output));
+    assert!(production::copy_from_owned(&r, 7, 8192, &[19; 8]));
+    assert!(production::copy_into_owned(&r, 7, 0x401000, &mut output));
+    assert!(production::copy_from_owned(&r, 7, 0x401000, &[21; 8]));
+    let grants = REQUESTS.with(Cell::get);
+    for round in 0..128 {
+        assert_eq!(protection::protect(&mut r, 7, 0x401000, 4096, round & 1), Ok(0));
+        assert!(production::copy_into_owned(&r, 7, 4096, &mut output));
+        assert!(production::copy_from_owned_cached(&r, 7, 8192, &[round as u8; 8]));
+        assert!(!production::copy_from_owned_cached(&r, 7, 0x401000, &[99; 8]));
+    }
+    assert_eq!(REQUESTS.with(Cell::get), grants);
+    VIEWS.with(|v| assert_eq!(v.borrow().len(), 2));
+    production::invalidate(&r, 7);
+    INSTALL_READ_VIEWS.with(|n| n.set(false));
+    INSTALL_VIEWS.with(|n| n.set(false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn failed_protection_and_write_upgrades_never_reactivate_retained_aliases() {
+    for failure in 0..3 {
+        let mut r = runtime(&[0u8; 32], OsPersonality::Linux);
+        INSTALL_VIEWS.with(|n| n.set(true));
+        assert!(production::copy_from_owned(&r, 7, 8192, &[19; 8]));
+        PROTECT_FAIL.with(|fail| fail.set(failure == 0));
+        r.fail_metadata = failure == 1;
+        let (prot, expected) = match failure { 0 => (1, Err(5)), 1 => (1, Err(ENOMEM)), _ => (3, Ok(0)) };
+        assert_eq!(protection::protect(&mut r, 7, 0x401000, 4096, prot), expected);
+        assert!(!production::copy_from_owned_cached(&r, 7, 8192, &[99; 8]));
+        let before = production::BeforeMmap::capture(&r, 7).unwrap();
+        r.process.mappings.invalidate_views();
+        before.completed(&r, 7, 0x800000, 4096);
+        assert!(!production::copy_from_owned_cached(&r, 7, 8192, &[99; 8]));
+        assert_eq!(REQUESTS.with(Cell::get), 1);
+        production::invalidate(&r, 7);
+        VIEWS.with(|v| assert!(v.borrow().is_empty()));
+        INSTALL_VIEWS.with(|n| n.set(false));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn completed_private_mmap_preserves_disjoint_native_views_and_replacement_revalidates() {
+    let mut runtime=runtime(&[0u8;32],OsPersonality::Linux);
+    INSTALL_READ_VIEWS.with(|mode|mode.set(true));
+    INSTALL_VIEWS.with(|mode|mode.set(true));
+    let mut output=[core::mem::MaybeUninit::uninit();8];
+    assert!(production::copy_into_owned(&runtime,7,4096,&mut output));
+    assert!(production::copy_from_owned(&runtime,7,8192,&[19;8]));
+    let first=REQUESTS.with(Cell::get);
+    for next in 2..130 {
+        let before=production::BeforeMmap::capture(&runtime,7).unwrap();
+        runtime.process.mappings.generation.set(next);
+        before.completed(&runtime,7,0x100000,8192);
+        assert!(production::copy_into_owned(&runtime,7,4096,&mut output));
+        assert!(production::copy_from_owned_cached(&runtime,7,8192,&[next as u8;8]));
+    }
+    assert_eq!(REQUESTS.with(Cell::get),first);
+    let before=production::BeforeMmap::capture(&runtime,7).unwrap();
+    runtime.process.mappings.generation.set(130);
+    before.completed(&runtime,7,8192,4096);
+    assert!(!production::copy_from_owned_cached(&runtime,7,8192,&[88;8]));
+    assert_eq!(REQUESTS.with(Cell::get),first);
+    assert!(production::copy_from_owned(&runtime,7,8192,&[88;8]));
+    assert_eq!(REQUESTS.with(Cell::get),first+1);
+    // A full COW/fork/exec invalidation releases aliases and cannot be undone
+    // by the older saved generation, even for a disjoint completion range.
+    let before=production::BeforeMmap::capture(&runtime,7).unwrap();
+    production::invalidate(&runtime,7);
+    before.completed(&runtime,7,0x100000,8192);
+    assert!(!production::copy_from_owned_cached(&runtime,7,8192,&[99;8]));
+    assert!(production::copy_into_owned(&runtime,7,4096,&mut output));
+    assert_eq!(REQUESTS.with(Cell::get),first+2);
+    production::invalidate(&runtime,7);
+    INSTALL_READ_VIEWS.with(|mode|mode.set(false));
+    INSTALL_VIEWS.with(|mode|mode.set(false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn mmap_view_snapshot_cannot_rebase_exited_changed_owner_or_personality() {
+    for case in 0..3 {
+        let mut runtime=runtime(&[0u8;32],OsPersonality::Linux);
+        INSTALL_VIEWS.with(|mode|mode.set(true));
+        assert!(production::copy_from_owned(&runtime,7,4096,&[19;8]));
+        let before=production::BeforeMmap::capture(&runtime,7).unwrap();
+        runtime.process.mappings.generation.set(2);
+        match case {
+            0=>runtime.process.exited=true,
+            1=>runtime.process.vm_group=8,
+            _=>runtime.process.personality=OsPersonality::FreeBsd,
+        }
+        before.completed(&runtime,7,0x100000,8192);
+        runtime.process.exited=false;runtime.process.vm_group=7;runtime.process.personality=OsPersonality::Linux;
+        assert!(!production::copy_from_owned_cached(&runtime,7,4096,&[99;8]));
+        production::invalidate(&runtime,7);
+        INSTALL_VIEWS.with(|mode|mode.set(false));
     }
 }
 
@@ -346,7 +532,7 @@ fn bounds_exited_and_unknown_tasks_are_rejected_before_any_native_request() {
         8
     ));
     assert!(!production::copy_from_owned(&runtime, 99, 4096, &[1; 8]));
-    assert!(!production::copy_from_owned(&runtime, 7, 4096, &[1; 16385]));
+    assert!(!production::copy_from_owned(&runtime, 7, 4096, &[1; page_window::MAX_CONTIGUOUS_WRITE_BYTES + 1]));
     runtime.process.exited = true;
     assert!(!production::copy_from_owned(&runtime, 7, 4096, &[1; 8]));
     REQUESTS.with(|count| assert_eq!(count.get(), 0));
@@ -383,6 +569,39 @@ fn direct_read_source_bounds_and_disabled_buffers_reject_before_grant() {
     assert!(!production::copy_from_scratch(&runtime, 7, 4096, source, 8));
     REQUESTS.with(|count| assert_eq!(count.get(), 0));
     assert_eq!(direct, vec![0x39; 128]);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn cached_copyout_adapter_never_installs_and_rejects_unowned_scratch() {
+    let control = [37u8; 32];
+    let unowned = [99u8; 32];
+    let runtime = runtime(&control, OsPersonality::Linux);
+    assert!(!production::copy_from_owned_cached(&runtime, 7, 0x5013, &control));
+    REQUESTS.with(|n| assert_eq!(n.get(), 0));
+    let enabled = option_env!("NANAMI_GUEST_WRITE_VIEWS").map_or(cfg!(target_arch="x86_64"), |v| v == "1");
+    if !enabled { return; }
+    INSTALL_VIEWS.with(|mode| mode.set(true));
+    assert!(production::copy_from_owned(&runtime, 7, 0x5013, &control));
+    assert!(!production::copy_from_owned_many_cached(&runtime, 7,
+        &[(0x5013, &unowned), (0x6000, &unowned)]));
+    for _ in 0..2048 {
+        assert!(production::copy_from_owned_many_cached(&runtime, 7,
+            &[(0x5013, &control), (0x5017, &control[..8])]));
+    }
+    assert!(!production::copy_from_scratch_cached(&runtime, 7, 0x5013, unowned.as_ptr() as Word, 32));
+    for _ in 0..2048 {
+        assert!(production::copy_from_scratch_cached(&runtime, 7, 0x5013, runtime.posix_shm, 32));
+    }
+    REQUESTS.with(|n| assert_eq!(n.get(), 1));
+    VIEWS.with(|views| {
+        let views = views.borrow();
+        assert_eq!(unsafe { core::slice::from_raw_parts((views[0].1 + 19) as *const u8, 32) }, &control);
+    });
+    production::invalidate(&runtime, 7);
+    assert!(!production::copy_from_owned_cached(&runtime, 7, 0x5013, &control));
+    REQUESTS.with(|n| assert_eq!(n.get(), 1));
+    INSTALL_VIEWS.with(|mode| mode.set(false));
 }
 
 #[test]
@@ -451,6 +670,47 @@ fn repeated_direct_read_copyouts_use_two_cross_page_leases_without_more_requests
         });
         assert_eq!(direct, before);
         REQUESTS.with(|count| assert_eq!(count.get(), 2));
+    }
+    production::invalidate(&runtime, 7);
+    VIEWS.with(|views| assert!(views.borrow().is_empty()));
+    INSTALL_VIEWS.with(|mode| mode.set(false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn full_io_quantum_copyouts_use_seventeen_native_aliases_and_cached_only_reuse() {
+    let control = [0u8; 32];
+    let mut direct = vec![0u8; 64 * 1024 + 7];
+    let mut runtime = runtime(&control, OsPersonality::Linux);
+    runtime.posix_direct_shm = direct.as_ptr() as Word;
+    runtime.posix_direct_shm_size = direct.len();
+    let enabled = option_env!("NANAMI_GUEST_WRITE_VIEWS").map_or(cfg!(target_arch = "x86_64"), |v| v == "1");
+    if !enabled { return; }
+    INSTALL_VIEWS.with(|mode| mode.set(true));
+    let mut expected = vec![0u8; 17 * 4096];
+    assert!(!production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_direct_shm + 7, 65536));
+    REQUESTS.with(|count| assert_eq!(count.get(), 0));
+    for epoch in 0..32 {
+        let len = [65536, 32769, 16385, 65535][epoch % 4];
+        for (i, byte) in direct.iter_mut().enumerate() { *byte = (i * 37 + epoch * 11) as u8; }
+        let before = direct.clone();
+        let copied = if epoch == 0 {
+            production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_direct_shm + 7, len)
+        } else {
+            production::copy_from_scratch_cached(&runtime, 7, 0x5013, runtime.posix_direct_shm + 7, len)
+        };
+        assert!(copied);
+        expected[19..19 + len].copy_from_slice(&direct[7..7 + len]);
+        VIEWS.with(|views| {
+            let views = views.borrow();
+            assert_eq!(views.len(), 17);
+            for &(page, local) in views.iter() {
+                let offset = page - 0x5000;
+                assert_eq!(unsafe { core::slice::from_raw_parts(local as *const u8, 4096) }, &expected[offset..offset + 4096]);
+            }
+        });
+        assert_eq!(direct, before);
+        REQUESTS.with(|count| assert_eq!(count.get(), 17));
     }
     production::invalidate(&runtime, 7);
     VIEWS.with(|views| assert!(views.borrow().is_empty()));

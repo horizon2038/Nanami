@@ -14,11 +14,11 @@ pub(super) fn sys_execve(
     envp_ptr: Word,
 ) -> Result<(), ExecError> {
     let process = runtime.managed_process(pid).ok_or(ESRCH)?;
-    if process.pid != process.vm_group
-        || runtime
+    if runtime.has_live_threads(pid) || runtime.files_shared_with_live_task(pid)
+        || (process.pid == process.vm_group && runtime
             .managed
             .iter()
-            .any(|other| other.pid != 0 && other.pid != pid && other.vm_group == process.vm_group)
+            .any(|other| other.pid != 0 && other.pid != pid && other.vm_group == process.vm_group))
     {
         return Err(ExecError::Errno(super::EOPNOTSUPP));
     }
@@ -84,41 +84,47 @@ pub(super) fn sys_execve(
     let main_may_share = personality == OsPersonality::Linux
         && runtime.image_cache.immutable_range(loaded.address, loaded.size);
     super::guest_views::invalidate(runtime, pid);
-    if let Err(error) =
-        nanami_runtime::request_process_exec_memory(pid, loaded.address, loaded.size, 4)
+    let initial_permissions = match
+        nanami_runtime::request_process_exec_memory_with_permissions(pid, loaded.address, loaded.size, 4)
     {
-        let error = ExecError::from(error);
-        let ExecError::Errno(errno) = error else {
-            return Err(error);
-        };
-        nanami_runtime::println!(
-            "[alter/linux] execve exec-memory failed pid={} image_base={:#x} bytes={:#x} errno={}",
-            pid,
-            preferred_image_base,
-            loaded.size,
-            errno
-        );
-        return Err(ExecError::Errno(errno));
-    }
+        Ok((_, installed)) => installed,
+        Err(error) => {
+            let error = ExecError::from(error);
+            let ExecError::Errno(errno) = error else {
+                return Err(error);
+            };
+            nanami_runtime::println!(
+                "[alter/linux] execve exec-memory failed pid={} image_base={:#x} bytes={:#x} errno={}",
+                pid,
+                preferred_image_base,
+                loaded.size,
+                errno
+            );
+            return Err(ExecError::Errno(errno));
+        }
+    };
     close_cloexec_files(runtime, pid);
     runtime.tasks.remove(pid);
     super::sysv_shm::leaving_vm(runtime, pid);
     super::memfd::forget_process(runtime, pid);
+    if !runtime.detach_exec_mappings(pid) {
+        return Err(ExecError::ImageReplaced);
+    }
     if !runtime.reset_process_runtime_for_exec(pid) {
         return Err(ExecError::ImageReplaced);
     }
     if main_may_share {
         // Alpha may alias complete readonly main pages from this immutable
-        // cache entry. Keep every later private write on the existing COW path,
-        // including a protection change before any library mmap has run.
-        super::private_memory::mark_shared(runtime, pid);
+        // cache entry. Keep unchecked writes and protection changes on the COW
+        // path. Permission-checked copyout into writable pages is independent.
+        super::private_memory::mark_readonly_shared(runtime, pid);
     }
     if let Some(interpreter) = interpreter.as_ref() {
         if crate::common::dynamic::install(pid, interpreter).is_err() {
             return Err(ExecError::ImageReplaced);
         }
     }
-    if !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref()) {
+    if !crate::common::dynamic::track(runtime, pid, &loaded.metadata, interpreter.as_ref(), initial_permissions) {
         return Err(ExecError::ImageReplaced);
     }
     let (base, base_len) = basename_in_bytes(&exec_path, path_len);
@@ -154,6 +160,7 @@ pub(super) fn sys_execve(
         );
         return Err(ExecError::ImageReplaced);
     }
+    super::wake_waiter_for_child(runtime, pid);
     Ok(())
 }
 

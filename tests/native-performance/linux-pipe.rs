@@ -57,9 +57,11 @@ struct Runtime {
     posix_shm: Word,
     readiness_changes: Word,
     fail_copy: bool,
+    partial_copy: usize,
     releases: usize,
 }
 impl Runtime {
+    fn pipe(&self, id: Word) -> Option<Pipe> { if id == 0 { self.pipe } else { None } }
     fn new() -> Self {
         let mut scratch = Box::new([0; 8192]);
         let posix_shm = scratch.as_mut_ptr() as Word;
@@ -71,6 +73,7 @@ impl Runtime {
             posix_shm,
             readiness_changes: 0,
             fail_copy: false,
+            partial_copy: 0,
             releases: 0,
         }
     }
@@ -155,8 +158,57 @@ fn write_target_memory(
 unsafe fn write_u32(address: Word, value: u32) {
     (address as *mut u32).write_unaligned(value);
 }
+mod guest_memory {
+    use super::*;
+    pub(super) fn copyout_owned(runtime: &Runtime, _: Word, address: Word, source: &[u8]) -> Result<(), i32> {
+        if runtime.fail_copy { return Err(EFAULT); }
+        unsafe { core::ptr::copy_nonoverlapping(source.as_ptr(), address as *mut u8, source.len()); }
+        Ok(())
+    }
+    pub(super) fn copyin_owned(runtime: &Runtime, _: Word, address: Word, output: &mut [core::mem::MaybeUninit<u8>]) -> Result<(), i32> {
+        if runtime.fail_copy {
+            let prefix = runtime.partial_copy.min(output.len());
+            unsafe { core::ptr::copy_nonoverlapping(address as *const u8, output.as_mut_ptr().cast::<u8>(), prefix); }
+            return Err(EFAULT);
+        }
+        unsafe { core::ptr::copy_nonoverlapping(address as *const u8, output.as_mut_ptr().cast::<u8>(), output.len()); }
+        Ok(())
+    }
+}
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/pipe.rs"]
 mod pipe;
+
+#[test]
+fn contiguous_pipe_io_avoids_scratch_and_wrap_keeps_original_staging() {
+    for start in [0, 31, LINUX_PIPE_BYTES - 32, LINUX_PIPE_BYTES - 7] {
+        let mut r = Runtime::new(); r.allocate_pipe().unwrap(); r.scratch.fill(0xdd);
+        let p = r.pipe.as_mut().unwrap(); p.read = start; p.write = start;
+        let source = [0x37u8; 32]; let mut output = [0xa5; 32];
+        assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, source.as_ptr() as Word, source.len()), Ok(32));
+        assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, output.as_mut_ptr() as Word, output.len()), Ok(32));
+        assert_eq!(output, source); assert_eq!(r.pipe.unwrap().len, 0);
+        assert_eq!(r.pipe.unwrap().read, (start + 32) % LINUX_PIPE_BYTES);
+        if start <= LINUX_PIPE_BYTES - 32 { assert!(r.scratch.iter().all(|b| *b == 0xdd)); }
+        else { assert_eq!(&r.scratch[..32], &source); assert!(r.scratch[32..].iter().all(|b| *b == 0xdd)); }
+    }
+}
+
+#[test]
+fn failed_direct_copyin_never_publishes_free_prefix_or_changes_live_bytes() {
+    let mut r = Runtime::new(); r.allocate_pipe().unwrap();
+    let queued = [0x22u8; 4];
+    assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, queued.as_ptr() as Word, 4), Ok(4));
+    let before = r.pipe.unwrap(); r.readiness_changes = 0; r.fail_copy = true; r.partial_copy = 5;
+    let rejected = [0x7au8; 32];
+    assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, rejected.as_ptr() as Word, 32), Err(EFAULT));
+    let after = r.pipe.unwrap(); assert_eq!((after.read, after.write, after.len), (before.read, before.write, before.len));
+    assert_eq!(r.readiness_changes, 0); r.fail_copy = false;
+    let mut actual = [0; 4];
+    assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, actual.as_mut_ptr() as Word, 4), Ok(4)); assert_eq!(actual, queued);
+    let replacement = [0x19u8; 8]; let mut output = [0; 8];
+    assert_eq!(pipe::sys_pipe_write(&mut r, 1, 0, replacement.as_ptr() as Word, 8), Ok(8));
+    assert_eq!(pipe::sys_pipe_read(&mut r, 1, 0, output.as_mut_ptr() as Word, 8), Ok(8)); assert_eq!(output, replacement);
+}
 
 #[test]
 fn pipe_write_burst_preserves_bytes_and_counts_readable_notifications() {

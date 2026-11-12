@@ -14,11 +14,16 @@ struct Alpha {
     allocations: Vec<(usize, usize, usize, PageSource)>,
     copies: Vec<(usize, usize)>,
     protections: Vec<(usize, usize)>,
+    split_calls: usize,
     fail_allocate: bool,
     fail_protect: Option<usize>,
     next_frame: usize,
 }
 impl Alpha {
+    fn split_private_large_mappings(&mut self, _: usize, _: usize, _: usize, _: bool) -> Result<(), CapabilityError> {
+        self.split_calls += 1;
+        Ok(())
+    }
     fn new() -> Self {
         let mut processes = manager();
         for pid in 1..=3 {
@@ -31,6 +36,7 @@ impl Alpha {
             allocations: Vec::new(),
             copies: Vec::new(),
             protections: Vec::new(),
+            split_calls: 0,
             fail_allocate: false,
             fail_protect: None,
             next_frame: 100,
@@ -81,12 +87,14 @@ impl Alpha {
         target: usize,
         bytes: usize,
     ) -> Result<(), CapabilityError> {
-        assert_eq!(bytes, PAGE_SIZE);
         self.copies.push((address, target));
         let owner = self.processes.memory_owner_pid(source);
-        let value = self.data[&(owner, address)].clone();
+        let values: Vec<_> = (0..bytes).step_by(PAGE_SIZE)
+            .map(|offset| self.data[&(owner, address + offset)].clone()).collect();
         let owner = self.processes.memory_owner_pid(destination);
-        self.data.insert((owner, target), value);
+        for (index, value) in values.into_iter().enumerate() {
+            self.data.insert((owner, target + index * PAGE_SIZE), value);
+        }
         Ok(())
     }
     fn process_frame_for_page(&mut self, pid: usize, va: usize) -> Result<usize, CapabilityError> {
@@ -116,6 +124,57 @@ impl Alpha {
 }
 #[path = "../../nanami/src/nanami_core/alpha/memory_clone.rs"]
 mod production;
+
+#[test]
+fn large_copy_with_identical_current_rights_needs_no_shape_or_protection_changes() {
+    for permissions in 0..=7 {
+        let mut a = Alpha::new();
+        for i in 0..512 {
+            a.page(1, 0x400000 + i * PAGE_SIZE, (i % 239) as u8, permissions);
+            a.page(2, 0x800000 + i * PAGE_SIZE, 0, permissions);
+        }
+        a.clone_backed_memory(1, 0x400000, 2, 0x800000, 1 << 21).unwrap();
+        assert_eq!(a.split_calls, 0);
+        assert_eq!(a.copies, [(0x400000, 0x800000)]);
+        assert!(a.allocations.is_empty());
+        assert!(a.protections.is_empty());
+        for i in 0..512 {
+            assert_eq!(a.data[&(1, 0x400000 + i * PAGE_SIZE)], a.data[&(2, 0x800000 + i * PAGE_SIZE)]);
+        }
+    }
+}
+
+#[test]
+fn large_copy_still_applies_different_destination_rights() {
+    let mut a = Alpha::new();
+    for i in 0..512 {
+        a.page(1, 0x400000 + i * PAGE_SIZE, (i % 239) as u8, 5);
+        a.page(2, 0x800000 + i * PAGE_SIZE, 0, if i == 511 { 3 } else { 5 });
+    }
+    a.clone_backed_memory(1, 0x400000, 2, 0x800000, 1 << 21).unwrap();
+    assert_eq!(a.split_calls, 1);
+    assert_eq!(a.copies.len(), 512);
+    assert_eq!(a.protections.len(), 512);
+    assert_eq!(a.processes.vm_space(2).unwrap().permissions(0x9ff000), 5);
+    for i in 0..512 {
+        assert_eq!(a.data[&(1, 0x400000 + i * PAGE_SIZE)], a.data[&(2, 0x800000 + i * PAGE_SIZE)]);
+    }
+}
+
+#[test]
+fn large_overlapping_copy_through_shared_vm_pids_keeps_owner_aware_order() {
+    let mut a = Alpha::new();
+    for i in 0..513 {
+        a.page(1, 0x400000 + i * PAGE_SIZE, (i % 239) as u8, 3);
+    }
+    a.processes.share_address_space(3, 1).unwrap();
+    a.clone_backed_memory(1, 0x400000, 3, 0x401000, 1 << 21).unwrap();
+    assert_eq!(a.split_calls, 1);
+    assert_eq!(a.copies.len(), 512);
+    for i in 0..512 {
+        assert_eq!(a.data[&(1, 0x401000 + i * PAGE_SIZE)][0], (i % 239) as u8);
+    }
+}
 
 #[test]
 fn cloning_an_uncertain_source_fails_before_copying_or_allocating() {

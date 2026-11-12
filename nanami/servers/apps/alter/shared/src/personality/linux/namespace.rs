@@ -156,9 +156,23 @@ fn request_path_reply(
         _ => {},
     }
     let details = if operation == VFS_PATH_OPEN_READONLY {
-        posix_rooted_open_request(runtime.posix_port, DESCRIPTOR)
+        loop {
+            let result = match runtime.rooted_grants {
+                2 => posix_rooted_open_cursor_granted_request(runtime.posix_port, DESCRIPTOR),
+                1 => posix_rooted_open_granted_request(runtime.posix_port, DESCRIPTOR),
+                _ => break posix_rooted_open_request(runtime.posix_port, DESCRIPTOR),
+            };
+            match result {
+                Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)) => {
+                    runtime.rooted_grants -= 1;
+                }
+                result => break result,
+            }
+        }
     } else {
-        posix_path_request(runtime.posix_port, DESCRIPTOR)
+        runtime.rooted_channel.request(runtime.posix_port, runtime.posix_shm,
+            runtime.posix_shm_size, DESCRIPTOR, request)
+            .unwrap_or_else(|| posix_path_request(runtime.posix_port, DESCRIPTOR))
     }.map_err(path_error)?;
     if matches!(operation, VFS_PATH_RESOLVE | VFS_PATH_READLINK | VFS_PATH_OPEN_READONLY) {
         if details.0 > output_bytes
@@ -208,6 +222,8 @@ pub(super) struct ResolvedPath {
     pub metadata: Option<PathMetadata>,
     pub file_type: Word,
     pub opened: Option<Word>,
+    pub read_grant: Word,
+    pub read_cursor: bool,
 }
 
 pub(super) fn resolve_for_readlink(
@@ -346,6 +362,8 @@ fn resolve_inner(
                 metadata: None,
                 file_type: VFS_FILE_TYPE_UNKNOWN,
                 opened: None,
+                read_grant: 0,
+                read_cursor: false,
             });
         }
         return resolve_inner(
@@ -385,7 +403,7 @@ fn resolve_inner(
         flags,
         metadata_bytes + LINUX_CWD_MAX - 1,
     );
-    let (output_bytes, file_type) = match result {
+    let (output_bytes, wire_type) = match result {
         // Unsupported means the older service did not acquire a descriptor.
         // Reuse our owned path bytes; never repeat after a transport/other error.
         Err(EOPNOTSUPP) if open.is_some() => {
@@ -396,6 +414,9 @@ fn resolve_inner(
         }
         other => other?,
     };
+    let read_cursor = open.is_some() && wire_type & VFS_OPEN_CURSOR_TYPE_FLAG != 0;
+    let file_type = if open.is_some() { wire_type & VFS_OPEN_GRANT_TYPE_MASK & !VFS_OPEN_CURSOR_TYPE_FLAG } else { wire_type };
+    let read_grant = if open.is_some() { wire_type >> VFS_OPEN_GRANT_TYPE_BITS } else { 0 };
     let opened = if open.is_some() && output_bytes >= metadata_bytes {
         let descriptor = unsafe {
             core::ptr::read_unaligned((runtime.posix_shm + OUTPUT) as *const PathOpenResult).descriptor
@@ -404,6 +425,10 @@ fn resolve_inner(
     } else {
         None
     };
+    if read_cursor && (runtime.rooted_grants != 2 || opened.is_none() || read_grant == 0 || file_type != VFS_FILE_TYPE_REGULAR) {
+        if let Some(fd) = opened { let _ = posix::posix_close(runtime.posix_port, fd); }
+        return Err(EIO);
+    }
     if output_bytes <= metadata_bytes {
         copy_reply_to_shm(runtime, output_bytes);
         if let Some(fd) = opened { let _ = posix::posix_close(runtime.posix_port, fd); }
@@ -442,7 +467,7 @@ fn resolve_inner(
         );
         *((runtime.posix_shm + bytes) as *mut u8) = 0;
     }
-    Ok(ResolvedPath { bytes, metadata, file_type, opened })
+    Ok(ResolvedPath { bytes, metadata, file_type, opened, read_grant: if opened.is_some() { read_grant } else { 0 }, read_cursor })
 }
 
 pub(super) fn fchdir(runtime: &mut Runtime, pid: Word, fd: Word) -> Result<Word, i32> {

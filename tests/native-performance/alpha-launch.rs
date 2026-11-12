@@ -97,7 +97,7 @@ enum Object {
         end: usize,
         device: bool,
     },
-    Frame(usize),
+    Frame(usize, usize),
     Table(usize),
     Other(CapabilityType),
 }
@@ -112,6 +112,15 @@ struct Kernel {
     operations: usize,
     fail_at: Option<usize>,
     allocations: usize,
+    unsupported_large: bool,
+    partial_large_failure: bool,
+    fail_revoke: bool,
+    fail_large_map: bool,
+    fail_large_target_map: bool,
+    fail_large_unmap: bool,
+    fatal_large_conversion: bool,
+    revoked: usize,
+    large_attempts: usize,
 }
 impl Kernel {
     fn operation(&mut self) -> Result<(), CapabilityError> {
@@ -170,22 +179,28 @@ impl Kernel {
         (0..size)
             .map(|i| {
                 let va = address + i;
-                let frame = self.maps[&(address_space, va & !4095)];
-                let Object::Frame(physical) = self.objects[frame] else {
-                    panic!("not a frame");
-                };
-                self.ram[&physical][va & 4095]
+                let physical = self.physical(address_space, va);
+                self.ram[&(physical & !4095)][physical & 4095]
             })
             .collect()
     }
     fn write(&mut self, address: usize, data: &[u8]) {
-        let frame = self.maps[&(2, address & !4095)];
-        let Object::Frame(physical) = self.objects[frame] else {
-            panic!("not a frame");
-        };
-        let offset = address & 4095;
-        assert!(offset + data.len() <= 4096);
-        self.ram.get_mut(&physical).unwrap()[offset..offset + data.len()].copy_from_slice(data);
+        let mut offset = 0;
+        while offset < data.len() {
+            let physical = self.physical(2, address + offset);
+            let in_page = physical & 4095;
+            let count = (4096 - in_page).min(data.len() - offset);
+            self.ram.get_mut(&(physical & !4095)).unwrap()[in_page..in_page + count]
+                .copy_from_slice(&data[offset..offset + count]);
+            offset += count;
+        }
+    }
+    fn physical(&self, space: usize, address: usize) -> usize {
+        let (&(owner, va), &frame) = self.maps.range(..=(space, address)).next_back().unwrap();
+        assert_eq!(owner, space);
+        let Object::Frame(physical, bits) = self.objects[frame] else { panic!("not a frame"); };
+        assert!(address - va < 1 << bits);
+        physical + address - va
     }
 }
 fn descriptor_depth(descriptor: usize) -> usize {
@@ -223,14 +238,19 @@ pub mod arch {
                 let radix = match kind {
                     CapabilityType::Node => kernel_object::node_memory_size_bits(bits),
                     CapabilityType::ProcessControlBlock => 12,
-                    CapabilityType::AddressSpace
-                    | CapabilityType::PageTable
-                    | CapabilityType::Frame => 12,
+                    CapabilityType::AddressSpace | CapabilityType::PageTable => 12,
+                    CapabilityType::Frame => bits,
                     CapabilityType::Generic => bits,
                     _ => panic!("unexpected object"),
                 };
                 let bytes = 1 << radix;
                 let address = (cursor + bytes - 1) & !(bytes - 1);
+                if matches!(kind, CapabilityType::Frame) && bits == 21 {
+                    k.large_attempts += 1;
+                    if k.unsupported_large && !k.partial_large_failure {
+                        return Err(CapabilityError::InvalidArgument);
+                    }
+                }
                 assert!(
                     address + bytes <= end,
                     "allocation exceeded actual Generic authority"
@@ -245,8 +265,11 @@ pub mod arch {
                     },
                     CapabilityType::PageTable => Object::Table(bits),
                     CapabilityType::Frame => {
-                        assert!(k.ram.insert(address, Box::new([0xa5; 4096])).is_none());
-                        Object::Frame(address)
+                        for page in (address..address + bytes).step_by(4096) {
+                            // Retyping a revoked Frame preserves its RAM.
+                            k.ram.entry(page).or_insert_with(|| Box::new([0xa5; 4096]));
+                        }
+                        Object::Frame(address, bits)
                     }
                     _ => Object::Other(kind),
                 };
@@ -256,12 +279,41 @@ pub mod arch {
                     *cursor = address + bytes;
                 }
                 k.allocations += 1;
+                if matches!(kind, CapabilityType::Frame) && bits == 21 && k.fatal_large_conversion {
+                    return Err(CapabilityError::Fatal);
+                }
+                if matches!(kind, CapabilityType::Frame) && bits == 21 && k.unsupported_large {
+                    return Err(CapabilityError::IllegalOperation);
+                }
                 Ok(())
             })
         }
     }
     pub mod node {
         use super::super::*;
+        pub fn revoke(node: Word, index: Word) -> Result<(), CapabilityError> {
+            KERNEL.with(|kernel| {
+                let mut k = kernel.borrow_mut();
+                k.operation()?;
+                if k.fail_revoke { return Err(CapabilityError::Fatal); }
+                let node = k.resolve(node);
+                let Object::Node(_, slots) = &k.objects[node] else { unreachable!() };
+                let owner = slots[&index];
+                let Object::Generic { address, end, .. } = k.objects[owner] else { unreachable!() };
+                let remove: BTreeSet<usize> = k.objects.iter().enumerate()
+                    .filter_map(|(i, object)| match object {
+                        Object::Frame(p, _) if (address..end).contains(p) => Some(i),
+                        _ => None,
+                    }).collect();
+                assert!(k.maps.values().all(|id| !remove.contains(id)), "revoke after publication");
+                for object in &mut k.objects {
+                    if let Object::Node(_, slots) = object { slots.retain(|_, id| !remove.contains(id)); }
+                }
+                if let Object::Generic { cursor, .. } = &mut k.objects[owner] { *cursor = address; }
+                k.revoked += 1;
+                Ok(())
+            })
+        }
         pub fn mint(
             destination: Word,
             index: Word,
@@ -308,13 +360,14 @@ pub mod arch {
         pub fn get_unset_depth(
             address_space: Word,
             address: Word,
-            _: Word,
+            bits: Word,
         ) -> Result<usize, CapabilityError> {
             KERNEL.with(|kernel| {
                 let mut k = kernel.borrow_mut();
                 k.operation()?;
                 let space = k.resolve(address_space);
-                Ok((1..=3)
+                assert!(matches!(bits, 12 | 21));
+                Ok((1 + (bits - 12) / 9..=3)
                     .rev()
                     .find(|&depth| !k.tables.contains(&table_key(space, address, depth)))
                     .unwrap_or(0))
@@ -332,9 +385,27 @@ pub mod arch {
                 let space = k.resolve(address_space);
                 let object = k.resolve(frame);
                 if let Object::Table(depth) = k.objects[object] {
+                    assert!(!k.maps.iter().any(|(&(owner, va), &id)| {
+                        matches!(k.objects[id], Object::Frame(_, 21)) && owner == space
+                            && va >> 21 == address >> 21 && depth == 1
+                    }), "4K table conflicts with large leaf");
                     assert!(k.tables.insert(table_key(space, address, depth)));
                 } else {
-                    assert!(matches!(k.objects[object], Object::Frame(_)));
+                    let Object::Frame(_, bits) = k.objects[object] else { unreachable!() };
+                    assert_eq!(address & ((1 << bits) - 1), 0);
+                    for depth in 1 + (bits - 12) / 9..=3 {
+                        assert!(k.tables.contains(&table_key(space, address, depth)), "missing table");
+                    }
+                    if bits == 21 {
+                        if k.fail_large_map && k.fail_large_target_map == (space != 2) {
+                            return Err(CapabilityError::Fatal);
+                        }
+                        assert!(!k.tables.contains(&table_key(space, address, 1)), "large leaf conflicts with 4K table");
+                    }
+                    assert!(!k.maps.iter().any(|(&(owner, va), &id)| {
+                        let Object::Frame(_, previous_bits) = k.objects[id] else { unreachable!() };
+                        owner == space && va < address + (1 << bits) && address < va + (1 << previous_bits)
+                    }), "overlapping leaf");
                     assert!(
                         k.maps.insert((space, address), object).is_none(),
                         "mapping overwritten"
@@ -353,6 +424,9 @@ pub mod arch {
                 k.operation()?;
                 let space = k.resolve(address_space);
                 let object = k.resolve(frame);
+                if matches!(k.objects[object], Object::Frame(_, 21)) && k.fail_large_unmap {
+                    return Err(CapabilityError::Fatal);
+                }
                 assert_eq!(k.maps.remove(&(space, address)), Some(object));
                 Ok(())
             })
@@ -392,8 +466,10 @@ pub mod arch {
 }
 struct Writer;
 impl launch::PageWriter for Writer {
-    fn zero(&mut self, address: usize) {
-        KERNEL.with(|kernel| kernel.borrow_mut().write(address, &[0; 4096]));
+    fn zero(&mut self, address: usize, bytes: usize) {
+        for offset in (0..bytes).step_by(4096) {
+            KERNEL.with(|kernel| kernel.borrow_mut().write(address + offset, &[0; 4096]));
+        }
     }
     fn copy(&mut self, address: usize, bytes: &[u8]) {
         KERNEL.with(|kernel| kernel.borrow_mut().write(address, bytes));
@@ -745,6 +821,189 @@ fn injected_failures_do_not_roll_back_successful_reservations_or_start_a_child()
                 };
                 assert_eq!(cursor - address, source.resources[i].consumed_bytes);
             }
+        });
+    }
+}
+
+fn large_elf() -> Vec<u8> {
+    let mut image = elf();
+    // File bytes cross both large-leaf boundaries; the remainder is BSS.
+    image.resize(0x401037, 0x69);
+    word(&mut image, 96, 0x400037, 8);
+    word(&mut image, 104, 0x604000, 8);
+    image
+}
+
+fn assert_final_reservations(source: &AlphaEnvironment, k: &Kernel) {
+    for (i, &object) in k.originals.iter().enumerate() {
+        let Object::Generic { address, cursor, .. } = k.objects[object] else { unreachable!() };
+        assert_eq!(cursor - address, source.resources[i].consumed_bytes);
+    }
+}
+
+#[test]
+fn large_image_and_archive_keep_exact_bytes_zero_tails_header_and_ipc_small() {
+    let mut source = source();
+    let image = large_elf();
+    let archive: Vec<u8> = (0..0x201019).map(|i| (i ^ (i >> 12)) as u8).collect();
+    let prepared = launch::prepare(&mut source, slots(600), launch::Inputs {
+        image: &image, archive: &archive, configuration: b"role\n", retire_launcher: true,
+    }, &mut Writer).unwrap();
+    KERNEL.with(|kernel| {
+        let k = kernel.borrow();
+        let (_, space, root, _, _) = k.configured[0];
+        let large: Vec<usize> = k.maps.iter().filter_map(|(&(owner, va), &id)| {
+            (owner == space && matches!(k.objects[id], Object::Frame(_, 21))).then_some(va)
+        }).collect();
+        assert_eq!(large, vec![0x200000, 0x400000, 0x20000000]);
+        for &va in &large {
+            assert!(!k.tables.contains(&(space, va >> 21, 1)));
+            let slot_index = if va < 0x20000000 { (va - 0x1000) / 4096 } else { 0x604000 / 4096 };
+            let frames = k.resolve_from(root, slot(12, 5));
+            let Object::Node(_, slots) = &k.objects[frames] else { unreachable!() };
+            assert_eq!(slots[&slot_index], k.maps[&(space, va)]);
+            assert!(!slots.contains_key(&(slot_index + 1)), "large-leaf logical slot was materialized");
+        }
+        // The header is rewritten only after all resource reservations finish.
+        let bytes = k.bytes(space, 0x4000, core::mem::size_of::<AlphaEnvironment>());
+        let header = unsafe { core::ptr::read_unaligned(bytes.as_ptr().cast::<AlphaEnvironment>()) };
+        assert_eq!(header.validate(), Ok(()));
+        assert_eq!(header.resources[1].consumed_bytes, source.resources[1].consumed_bytes);
+        assert!(matches!(k.objects[k.maps[&(space, 0x4000)]], Object::Frame(_, 12)));
+        let ipc = k.resolve_from(root, slot(12, 6));
+        assert!(matches!(k.objects[ipc], Object::Frame(_, 12)));
+        assert_eq!(ipc, k.maps[&(space, 0x15000)]);
+        let tls = 0x15000 + TLS_BASE_OFFSET as usize * BYTE_BITS;
+        assert_eq!(k.bytes(space, tls, 8), 0x15000usize.to_ne_bytes());
+        for (va, count) in [(0x1000, 64), (0x1ffff0, 32), (0x3ffff0, 32), (0x400ff0, 71)] {
+            assert_eq!(k.bytes(space, va, count), image[va..va + count]);
+        }
+        assert_eq!(k.bytes(space, 0x401037, 0x605000 - 0x401037), vec![0; 0x605000 - 0x401037]);
+        assert_eq!(k.bytes(space, prepared.environment.boot_archive.address, archive.len()), archive);
+        assert_eq!(k.bytes(space, 0x20201019, 4096 - 0x19), vec![0; 4096 - 0x19]);
+        assert!(k.maps.keys().all(|&(owner, _)| owner != 2));
+        assert!(!k.tables.contains(&(2, launch::LARGE_TEMP >> 21, 1)));
+        assert_final_reservations(&source, &k);
+        assert_eq!(k.large_attempts, 3);
+        assert_eq!(k.revoked, 0);
+    });
+}
+
+#[test]
+fn large_leaf_candidates_covering_header_or_ipc_stay_small() {
+    let mut source = source();
+    let mut image = large_elf();
+    word(&mut image, 0x408, 0x200000, 8);
+    word(&mut image, 0x420, 0x210000, 8);
+    word(&mut image, 0x438, 0x400000, 8);
+    prepare(&mut source, &image, false).unwrap();
+    KERNEL.with(|kernel| {
+        let k = kernel.borrow();
+        assert_eq!(k.large_attempts, 0);
+        let (_, space, _, _, _) = k.configured[0];
+        assert!(matches!(k.objects[k.maps[&(space, 0x200000)]], Object::Frame(_, 12)));
+        assert!(matches!(k.objects[k.maps[&(space, 0x400000)]], Object::Frame(_, 12)));
+        assert_final_reservations(&source, &k);
+    });
+}
+
+#[test]
+fn unsupported_large_conversion_requires_revoke_ack_before_same_ram_small_fallback() {
+    for partial in [false, true] {
+        let mut source = source();
+        KERNEL.with(|kernel| {
+            let mut k = kernel.borrow_mut();
+            k.unsupported_large = true;
+            k.partial_large_failure = partial;
+        });
+        let image = large_elf();
+        prepare(&mut source, &image, false).unwrap();
+        KERNEL.with(|kernel| {
+            let k = kernel.borrow();
+            assert_eq!(k.large_attempts, 1, "unsupported conversion was retried");
+            assert_eq!(k.revoked, 1);
+            let (_, space, _, _, _) = k.configured[0];
+            let Object::Frame(base, 12) = k.objects[k.maps[&(space, 0x200000)]] else { unreachable!() };
+            assert_eq!(base & ((1 << 21) - 1), 0);
+            for page in 0..512 {
+                let Object::Frame(physical, 12) = k.objects[k.maps[&(space, 0x200000 + page * 4096)]] else { unreachable!() };
+                assert_eq!(physical, base + page * 4096, "fallback abandoned its reserved 2M unit");
+            }
+            assert_eq!(k.bytes(space, 0x1ffff0, 32), image[0x1ffff0..0x200010]);
+            assert_eq!(k.bytes(space, 0x401037, 4096), vec![0; 4096]);
+            assert!(k.maps.keys().all(|&(owner, _)| owner != 2));
+            assert_final_reservations(&source, &k);
+        });
+    }
+}
+
+#[test]
+fn fragmented_authority_without_a_free_2m_unit_keeps_the_small_page_path() {
+    let mut source = source();
+    source.resource_count = 18;
+    source.bootstrap_resource = 17;
+    source.resources[1..].fill(MemoryResource::EMPTY);
+    source.resources[0].size_radix = 23;
+    source.resources[0].consumed_bytes = 1 << 22;
+    KERNEL.with(|kernel| {
+        let mut k = kernel.borrow_mut();
+        let original = k.originals[0];
+        k.objects[original] = Object::Generic {
+            address: 0x40000000, cursor: 0x40400000, end: 0x40800000, device: false,
+        };
+        k.originals.truncate(1);
+        let resources = k.resolve(slot(12, 7));
+        let Object::Node(_, slots) = &mut k.objects[resources] else { unreachable!() };
+        slots.retain(|&index, _| index == 0);
+        for i in 1..18 {
+            let address = 0x80000000 + i * (1 << 20);
+            let object = k.add(Object::Generic { address, cursor: address, end: address + (1 << 20), device: false });
+            k.install(resources, i, object);
+            k.originals.push(object);
+            source.resources[i] = MemoryResource {
+                capability: child(slot(12, 7), 7, i), address, size_radix: 20,
+                flags: 0, consumed_bytes: 0,
+            };
+        }
+    });
+    let image = large_elf();
+    prepare(&mut source, &image, false).unwrap();
+    KERNEL.with(|kernel| {
+        let k = kernel.borrow();
+        assert_eq!(k.large_attempts, 0);
+        assert_eq!(k.revoked, 0);
+        let (_, space, _, _, _) = k.configured[0];
+        assert_eq!(k.bytes(space, 0x1ffff0, 32), image[0x1ffff0..0x200010]);
+        assert_final_reservations(&source, &k);
+    });
+}
+
+#[test]
+fn failed_large_revoke_map_or_unmap_stops_without_fallback_or_ram_reuse() {
+    for stage in 0..5 {
+        let mut source = source();
+        KERNEL.with(|kernel| {
+            let mut k = kernel.borrow_mut();
+            k.unsupported_large = stage == 0;
+            k.partial_large_failure = stage == 0;
+            k.fail_revoke = stage == 0;
+            k.fail_large_map = matches!(stage, 1 | 3);
+            k.fail_large_target_map = stage == 3;
+            k.fail_large_unmap = stage == 2;
+            k.fatal_large_conversion = stage == 4;
+        });
+        assert!(prepare(&mut source, &large_elf(), false).is_err());
+        KERNEL.with(|kernel| {
+            let k = kernel.borrow();
+            assert!(k.configured.is_empty());
+            assert_eq!(k.large_attempts, 1);
+            assert_eq!(k.revoked, 0);
+            assert_final_reservations(&source, &k);
+            assert!(matches!(k.objects.last().unwrap(), Object::Frame(_, 21) | Object::Table(_)));
+            let large = k.objects.iter().filter(|object| matches!(object, Object::Frame(_, 21))).count();
+            assert_eq!(large, 1, "failed huge reservation was abandoned or retried");
+            let mapped = k.maps.contains_key(&(2, launch::LARGE_TEMP));
+            assert_eq!(mapped, stage == 2, "unacknowledged mapping must be retained");
         });
     }
 }

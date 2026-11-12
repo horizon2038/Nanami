@@ -57,7 +57,7 @@ impl MonotonicReader {
             // never the older pre-discovery reference as the current time.
             return self.rpc(provider);
         }
-        if let Some(counter) = &self.counter {
+        if let Some(counter) = &mut self.counter {
             if let Some(now) = counter.nanoseconds().filter(|now| *now >= self.last) {
                 self.last = now;
                 return Ok((now, 1_000_000_000));
@@ -88,6 +88,7 @@ struct Counter {
     mapping: Word,
     base: Word,
     period_fs: u64,
+    high: Option<u32>,
 }
 
 impl Counter {
@@ -112,10 +113,11 @@ impl Counter {
             let _ = nanami_runtime::request_mapping_release(mapping, 4096);
             return Err(RequestError::Protocol);
         }
-        let counter = Self {
+        let mut counter = Self {
             mapping,
             base: mapping + offset,
             period_fs: period as u64,
+            high: None,
         };
         // The mapping uses existing native Uncached MMIO attributes. This
         // adapter only reads; it does not change comparator/configuration or
@@ -134,13 +136,14 @@ impl Counter {
         Ok((counter, after))
     }
 
-    fn nanoseconds(&self) -> Option<Word> {
+    fn nanoseconds(&mut self) -> Option<Word> {
         if unsafe { core::ptr::read_volatile((self.base + 0x10) as *const u32) } & 1 == 0 {
             return None;
         }
-        let raw = coherent_counter(|offset| unsafe {
+        let raw = coherent_counter(self.high, |offset| unsafe {
             core::ptr::read_volatile((self.base + 0xf0 + offset) as *const u32)
         })?;
+        self.high = Some((raw >> 32) as u32);
         Some(scale_counter(raw, self.period_fs))
     }
 }
@@ -163,13 +166,22 @@ impl Drop for Counter {
     }
 }
 
-pub(super) fn coherent_counter(mut read: impl FnMut(usize) -> u32) -> Option<u64> {
+pub(super) fn coherent_counter(previous_high: Option<u32>, mut read: impl FnMut(usize) -> u32) -> Option<u64> {
+    // HPET 1.0a section2.4.7: even a64-bit access can be split by the chipset.
+    // Keep the last confirmed high read as the leading half of high/low/high.
+    // On a monotonic counter, equal bracketing highs prove the fresh low valid
+    // even when the first high came from the previous sample. Never reuse low
+    // bits or a scaled time. Configuration, epoch and backwards-time checks
+    // remain live, and replacing/dropping the source discards this hint.
+    let mut high = previous_high.unwrap_or_else(|| read(4));
     for _ in 0..8 {
-        let high = read(4);
         let low = read(0);
-        if high == read(4) {
+        let after = read(4);
+        if high == after {
             return Some(u64::from(high) << 32 | u64::from(low));
         }
+        // The failed attempt's trailing high precedes the next low as well.
+        high = after;
     }
     None
 }

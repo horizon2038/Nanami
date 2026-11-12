@@ -19,7 +19,7 @@ pub(super) fn sys_pipe_read(
         return Ok(0);
     }
     let shm = runtime.posix_shm;
-    let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
+    let pipe = runtime.pipe(pipe_id).ok_or(EBADF)?;
     if pipe.len == 0 {
         return if pipe.writers == 0 {
             Ok(0)
@@ -28,9 +28,15 @@ pub(super) fn sys_pipe_read(
         };
     }
     let count = max.min(pipe.len);
-    let target = unsafe { core::slice::from_raw_parts_mut(shm as *mut u8, count) };
-    let cursor = pipe.copy_out(target);
-    write_target_memory(runtime, pid, user_buffer, count as Word)?;
+    let cursor = if let Some(source) = pipe.contiguous_read(count) {
+        super::guest_memory::copyout_owned(runtime, pid, user_buffer, source)?;
+        (pipe.read + count) % LINUX_PIPE_BYTES
+    } else {
+        let target = unsafe { core::slice::from_raw_parts_mut(shm as *mut u8, count) };
+        let cursor = pipe.copy_out(target);
+        write_target_memory(runtime, pid, user_buffer, count as Word)?;
+        cursor
+    };
     let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
     pipe.read = cursor;
     pipe.len -= count;
@@ -54,7 +60,7 @@ pub(super) fn sys_pipe_write(
     if max == 0 {
         return Ok(0);
     }
-    let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
+    let mut pipe = runtime.pipe(pipe_id).ok_or(EBADF)?;
     if pipe.readers == 0 {
         return Err(EPIPE);
     }
@@ -64,15 +70,24 @@ pub(super) fn sys_pipe_write(
         return Err(EAGAIN);
     }
     let accepted = (max as usize).min(available);
-    read_target_memory(runtime, pid, user_buffer, accepted)?;
+    let direct = if let Some(target) = pipe.contiguous_spare(accepted) {
+        super::guest_memory::copyin_owned(runtime, pid, user_buffer, target)?;
+        true
+    } else {
+        read_target_memory(runtime, pid, user_buffer, accepted)?;
+        false
+    };
     let shm = runtime.posix_shm;
     let pipe = runtime.pipe_mut(pipe_id).ok_or(EBADF)?;
     if pipe.readers == 0 {
         return Err(EPIPE);
     }
-    let source = unsafe { core::slice::from_raw_parts(shm as *const u8, accepted) };
     let became_readable = pipe.len == 0;
-    pipe.copy_in(source);
+    if direct { pipe.commit_write(accepted); }
+    else {
+        let source = unsafe { core::slice::from_raw_parts(shm as *const u8, accepted) };
+        pipe.copy_in(source);
+    }
     if became_readable {
         runtime.readiness_changes |= crate::state::readiness::READY_PIPE_READ;
     }

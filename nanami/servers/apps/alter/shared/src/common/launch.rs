@@ -300,13 +300,13 @@ fn spawn_rootfs_linux_image(
             return ReplyAction::Reply(crate::loader::map_load_error_to_status(error), 0, 0)
         }
     };
-    match nanami_runtime::request_process_spawn_memory_fault_handler_suspended(
+    match nanami_runtime::request_process_spawn_memory_fault_handler_suspended_with_permissions(
         loaded.address,
         loaded.size,
         4,
         pcb_slot,
     ) {
-        Ok(pid) => {
+        Ok((pid, initial_permissions)) => {
             if let Err(status) = seal_linux_capabilities(pid, personality) {
                 discard_spawned_process(pid);
                 return ReplyAction::Reply(status, 0, 0);
@@ -374,6 +374,7 @@ fn spawn_rootfs_linux_image(
                     pid,
                     &loaded.metadata,
                     interpreter.as_ref(),
+                    initial_permissions,
                 )
             {
                 nanami_runtime::println!(

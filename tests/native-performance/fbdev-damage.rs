@@ -26,6 +26,98 @@ mod reference;
 #[path = "fbdev-capture-baseline.rs"]
 mod baseline;
 
+#[test]
+fn clean_screen_halves_compared_groups_without_changing_samples_or_capture() {
+    let source = vec![0x1234_5678_9abc_def0u64; 800 * 600 / 2];
+    let mut captured = source.clone();
+    damage::take_compared_groups();
+    damage::take_row_pixels();
+    unsafe {
+        let input = core::slice::from_raw_parts(source.as_ptr().cast::<u32>(), 800 * 600);
+        let output = core::slice::from_raw_parts_mut(captured.as_mut_ptr().cast::<u32>(), 800 * 600);
+        assert!(capture(input, output, 800, 800, 600).is_empty());
+        assert_eq!(input, output);
+    }
+    let groups = damage::take_compared_groups();
+    let (sampled, compared) = damage::take_row_pixels();
+    assert_eq!(groups, 30000);
+    assert_eq!((sampled, compared), (480000, 480000));
+    assert_eq!(source, captured);
+    println!("FBDEV-CLEAN groups_before=60000 groups_after={groups} sampled={sampled} compared={compared} bytes_and_damage_equal=true");
+}
+
+#[test]
+fn adjacent_known_dirty_tiles_form_one_sampled_span_without_changing_comparisons() {
+    let width = 800;
+    let height = 16;
+    let mut source = vec![0u64; width * height / 2];
+    let mut output = source.clone();
+    unsafe {
+        let input = core::slice::from_raw_parts_mut(source.as_mut_ptr().cast::<u32>(), width * height);
+        let captured = core::slice::from_raw_parts_mut(output.as_mut_ptr().cast::<u32>(), width * height);
+        for row in input.chunks_mut(width) { row[32..768].fill(0x1234_5678); }
+        damage::take_known_spans();
+        damage::take_row_pixels();
+        assert_eq!(capture(input, captured, width, width, height), [Rect::new(32, 0, 736, 16)]);
+        let (sampled, compared) = damage::take_row_pixels();
+        let spans = damage::take_known_spans();
+        assert_eq!((sampled, compared), (12800, 1760));
+        assert_eq!(spans, 15);
+        assert_eq!(captured, input);
+        println!("FBDEV-DIRTY-SPANS known_spans_before=345 known_spans_after={spans} sampled={sampled} compared={compared}");
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn joined_sampled_spans_stop_at_readonly_and_protected_page_edges() {
+    use core::ffi::c_void;
+    unsafe extern "C" {
+        fn mmap(address: *mut c_void, bytes: usize, prot: i32, flags: i32, fd: i32, offset: isize) -> *mut c_void;
+        fn mprotect(address: *mut c_void, bytes: usize, prot: i32) -> i32;
+        fn munmap(address: *mut c_void, bytes: usize) -> i32;
+    }
+    struct Guarded { allocation: *mut c_void, bytes: usize, payload: *mut u32, pages: usize }
+    impl Guarded {
+        unsafe fn new(pixels: usize) -> Self {
+            let payload_bytes = pixels * 4;
+            let pages = payload_bytes.next_multiple_of(4096);
+            let bytes = pages + 8192;
+            let allocation = mmap(core::ptr::null_mut(), bytes, 0, 0x22, -1, 0);
+            assert_ne!(allocation as isize, -1);
+            let first = allocation.cast::<u8>().add(4096);
+            assert_eq!(mprotect(first.cast(), pages, 3), 0);
+            first.write_bytes(0xa5, pages);
+            let payload = first.add(pages - payload_bytes).cast();
+            Self { allocation, bytes, payload, pages }
+        }
+    }
+    impl Drop for Guarded {
+        fn drop(&mut self) { assert_eq!(unsafe { munmap(self.allocation, self.bytes) }, 0); }
+    }
+    for width in [511, 512, 513, 799, 800, 801, 1023] {
+        unsafe {
+            let source = Guarded::new(width * 2);
+            let captured = Guarded::new(width * 2);
+            for index in 0..width * 2 {
+                source.payload.add(index).write(index as u32 + 1);
+                captured.payload.add(index).write(0);
+            }
+            assert_eq!(mprotect(source.allocation.cast::<u8>().add(4096).cast(), source.pages, 1), 0);
+            let mut dirty = Vec::new();
+            damage::capture(source.payload as usize, captured.payload as usize,
+                width, width, 2, |rect| dirty.push(rect));
+            assert_eq!(dirty, [Rect::new(0, 0, width as i32, 2)]);
+            for index in 0..width * 2 {
+                assert_eq!(captured.payload.add(index).read(), index as u32 + 1);
+            }
+            let prefix = captured.pages - width * 2 * 4;
+            assert!(core::slice::from_raw_parts(captured.allocation.cast::<u8>().add(4096), prefix)
+                .iter().all(|&byte| byte == 0xa5));
+        }
+    }
+}
+
 fn capture(
     source: &[u32],
     captured: &mut [u32],

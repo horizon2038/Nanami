@@ -20,6 +20,7 @@ pub(super) fn read_file(
         return Ok(0);
     }
     let mut remaining = min(len, file_size - file_offset);
+    let streaming = remaining > runtime.block_cache.capacity_bytes();
     let mut copied = 0usize;
     // Device geometry is fixed after mount; block/cache I/O cannot change it.
     let block_size = runtime.block_size;
@@ -51,8 +52,6 @@ pub(super) fn read_file(
         if block_capacity == 0 {
             return Err(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT);
         }
-        validate_run(runtime, physical_block as usize, run_blocks)
-            .map_err(map_request_error_to_status)?;
         let n = min(remaining, run_blocks * block_size - block_offset);
         let output = unsafe {
             core::slice::from_raw_parts_mut(
@@ -60,17 +59,8 @@ pub(super) fn read_file(
                 n,
             )
         };
-        if !runtime.block_cache.load_range(physical_block as usize, block_offset, output) {
-            read_blocks(runtime, physical_block as usize, run_blocks)
-                .map_err(map_request_error_to_status)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    (runtime.block_shm as usize + block_offset) as *const u8,
-                    output.as_mut_ptr(),
-                    n,
-                );
-            }
-        }
+        read_blocks_into(runtime, physical_block as usize, run_blocks, block_offset, output, streaming)
+            .map_err(map_request_error_to_status)?;
         copied += n;
         remaining -= n;
     }

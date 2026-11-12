@@ -71,6 +71,17 @@ impl CopyWindow {
 }
 
 impl Alpha {
+    /// Read-only lookup of an already mapped permanent pool Frame. No PID
+    /// inference, miss mapping, eviction or use of an uncertain copy slot.
+    pub(super) fn cached_pool_copy_frame(&self, frame: CapabilityDescriptor) -> Option<usize> {
+        if !self.memory.is_pool_frame_descriptor(frame) { return None; }
+        let first = CopyWindow::set(POOL_OWNER, frame) * COPY_WINDOW_WAYS;
+        self.copy_window.mappings[first..first + COPY_WINDOW_WAYS].iter()
+            .position(|entry| entry.is_some_and(|mapping|
+                mapping.ready && mapping.pid == POOL_OWNER && mapping.frame == frame))
+            .map(|way| COPY_WINDOW_BASE + (first + way) * PAGE_SIZE)
+    }
+
     // Resolve both transfer Frames before calling. Consume the returned alias
     // before any operation that can change the initialization window. Mapping
     // another transfer alias below changes only CopyWindow on a miss.
@@ -94,6 +105,9 @@ impl Alpha {
         frame: CapabilityDescriptor,
         pinned_va: Option<usize>,
     ) -> Result<usize, CapabilityError> {
+        if let Some((address, _)) = self.memory.map_private_large_alias(frame, pinned_va)? {
+            return Ok(address);
+        }
         // Owned/shared RAM buffers may retain permanent Alpha pool Frames.
         // Ordinary private RAM, MMIO and framebuffer mappings retain child
         // aliases and the existing PID-scoped cleanup behavior.

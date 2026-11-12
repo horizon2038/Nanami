@@ -39,6 +39,39 @@ pub fn posix_rooted_open_request(
     }
 }
 
+pub fn posix_rooted_open_granted_request(
+    port: CapabilityDescriptor, descriptor_offset: Word,
+) -> Result<(Word, Word), PathError> {
+    granted_open(port, crate::uapi::posix::POSIX_REQUEST_OPEN_ROOTED_GRANTED, descriptor_offset)
+}
+
+pub fn posix_rooted_open_cursor_granted_request(
+    port: CapabilityDescriptor, descriptor_offset: Word,
+) -> Result<(Word, Word), PathError> {
+    granted_open(port, crate::uapi::posix::POSIX_REQUEST_OPEN_ROOTED_CURSOR_GRANTED, descriptor_offset)
+}
+
+pub fn vfs_rooted_open_cursor_granted_request(
+    port: CapabilityDescriptor, descriptor_offset: Word,
+) -> Result<(Word, Word), PathError> {
+    granted_open(port, VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED, descriptor_offset)
+}
+
+pub fn vfs_rooted_open_granted_request(
+    port: CapabilityDescriptor, descriptor_offset: Word,
+) -> Result<(Word, Word), PathError> {
+    granted_open(port, VFS_REQUEST_OPEN_ROOTED_GRANTED, descriptor_offset)
+}
+
+fn granted_open(port: CapabilityDescriptor, code: Word, offset: Word) -> Result<(Word, Word), PathError> {
+    match path_request(port, code, offset) {
+        // Old dispatchers reject the distinct entry before acquiring a handle.
+        Err(PathError::Transport(RequestError::Status(crate::uapi::os::OS_RESPONSE_INVALID_ARGUMENT))) =>
+            Err(PathError::Filesystem(VFS_PATH_ERROR_UNSUPPORTED)),
+        result => result,
+    }
+}
+
 pub fn vfs_fchmod(port: CapabilityDescriptor, handle: Word, mode: Word) -> Result<(), PathError> {
     fchmod(port, VFS_REQUEST_FCHMOD, handle, mode)
 }

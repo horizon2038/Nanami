@@ -20,6 +20,42 @@ thread_start:
 read_tls_word:
     mov %fs:0, %rax
     ret
+.global vfork_start
+vfork_start:
+    push %rbx
+    mov %rdi, %rbx
+    /* vfork must ignore argument registers, including these invalid pointers. */
+    mov $-1, %rsi
+    mov $-1, %rdx
+    mov $-1, %r10
+    mov $58, %eax
+    syscall
+    test %rax, %rax
+    jnz 3f
+    call *%rbx
+    mov %eax, %edi
+    mov $60, %eax
+    syscall
+    ud2
+3:
+    pop %rbx
+    ret
+.global clone3_start
+clone3_start:
+    push %rbx
+    mov %rdx, %rbx
+    mov $435, %eax
+    syscall
+    test %rax, %rax
+    jnz 2f
+    call *%rbx
+    mov %eax, %edi
+    mov $60, %eax
+    syscall
+    ud2
+2:
+    pop %rbx
+    ret
 .section .note.GNU-stack,"",@progbits
 
 /* Copied into a tiny standalone ELF by the file-mapping fixture. All internal

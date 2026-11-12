@@ -3,14 +3,21 @@ use std::collections::BTreeMap;
 type CapabilityDescriptor = usize;
 const PAGE_SIZE: usize = 4096;
 const PROCESS_COPY_TEMP_BASE: usize = 0x6800_0000;
-const INITIALIZATION_PAGES: usize = 2048;
+const INITIALIZATION_PAGES: usize = memory_init::PAGES;
 #[derive(Debug, PartialEq, Eq)]
 enum CapabilityError {
     InvalidArgument,
     IllegalOperation,
 }
-struct Memory;
+struct Memory { large_alias: bool }
 impl Memory {
+    fn map_private_large_alias(&mut self, frame: usize, _: Option<usize>) -> Result<Option<(usize, usize)>, CapabilityError> {
+        let page = frame - 100_000;
+        if self.large_alias && (512..1024).contains(&page) {
+            return Ok(Some((0x6a00_0000 + (page - 512) * PAGE_SIZE, 1024 - page)));
+        }
+        Ok(None)
+    }
     fn physical_frame_descriptor_from_index(&self, page: usize) -> Option<usize> {
         (page != 0).then_some(page + 100_000)
     }
@@ -27,7 +34,7 @@ struct Alpha {
 impl Alpha {
     fn new() -> Self {
         Self {
-            memory: Memory,
+            memory: Memory { large_alias: false },
             initialization_window: memory_init::InitializationWindow::new(),
             mappings: BTreeMap::new(),
             maps: 0,
@@ -63,17 +70,17 @@ mod memory_init;
 #[test]
 fn ready_slot_index_preserves_zero_slot_and_declines_evicted_or_pending_frames() {
     let mut a = Alpha::new();
-    let old = 2048 + 100_000;
+    let old = INITIALIZATION_PAGES + 100_000;
     assert_eq!(a.cached_initialization_slot(old), None);
-    a.map_initialization_page(2048).unwrap();
+    a.map_initialization_page(INITIALIZATION_PAGES).unwrap();
     assert_eq!(a.cached_initialization_slot(old), Some(0));
-    a.map_initialization_page(4096).unwrap();
+    a.map_initialization_page(2 * INITIALIZATION_PAGES).unwrap();
     assert_eq!(a.cached_initialization_slot(old), None);
-    assert_eq!(a.cached_initialization_slot(4096 + 100_000), Some(0));
+    assert_eq!(a.cached_initialization_slot(2 * INITIALIZATION_PAGES + 100_000), Some(0));
     a.fail_map = true;
-    assert!(a.map_initialization_page(6144).is_err());
-    assert_eq!(a.cached_initialization_slot(4096 + 100_000), None);
-    assert_eq!(a.cached_initialization_slot(6144 + 100_000), None);
+    assert!(a.map_initialization_page(3 * INITIALIZATION_PAGES).is_err());
+    assert_eq!(a.cached_initialization_slot(2 * INITIALIZATION_PAGES + 100_000), None);
+    assert_eq!(a.cached_initialization_slot(3 * INITIALIZATION_PAGES + 100_000), None);
 }
 
 #[test]
@@ -190,12 +197,12 @@ fn resident_span_above_old_capacity_does_not_churn() {
 fn cache_metadata_and_alias_addresses_remain_bounded() {
     assert_eq!(
         core::mem::size_of::<memory_init::InitializationWindow>(),
-        32 * 1024
+        INITIALIZATION_PAGES * 16
     );
     let mut a = Alpha::new();
     for page in 1..=INITIALIZATION_PAGES {
         let va = a.map_initialization_page(page).unwrap();
-        assert!((0x6700_0000..0x6780_0000).contains(&va));
+        assert!((0x6700_0000..PROCESS_COPY_TEMP_BASE).contains(&va));
         assert!(va + PAGE_SIZE <= PROCESS_COPY_TEMP_BASE);
     }
     assert_eq!(a.mappings.len(), INITIALIZATION_PAGES);
@@ -265,7 +272,39 @@ fn frame_hash_collisions_keep_every_ready_alias_without_mapping() {
     assert!(old_misses>0);assert_eq!((a.maps,a.unmaps),(1500,0));
     println!("resident=1500 original_hint_misses={old_misses} indexed_misses=0 maps=1500 unmaps=0");
     a.initialization_window.assert_consistent();
-    assert_eq!(core::mem::size_of::<memory_init::InitializationWindow>(),32*1024);
+    assert_eq!(core::mem::size_of::<memory_init::InitializationWindow>(),INITIALIZATION_PAGES*16);
+}
+
+#[test]
+fn twelve_mib_resident_working_set_avoids_compact_window_remapping() {
+    let mut a = Alpha::new();
+    for _ in 0..3 {
+        for page in 1..=3072 {
+            let address = a.map_initialization_page(page).unwrap();
+            assert_eq!(a.mappings[&address], page + 100_000);
+        }
+    }
+    // The compact layout retains the middle 1024 pages between passes; the
+    // two colliding ends each remap another 1024 pages on each later pass.
+    let expected = if INITIALIZATION_PAGES >= 3072 { (3072, 0) } else { (7168, 5120) };
+    assert_eq!((a.maps, a.unmaps), expected);
+    assert!(core::mem::size_of::<memory_init::InitializationWindow>() <= 64 * 1024);
+    a.initialization_window.assert_consistent();
+}
+
+#[test]
+fn available_huge_alias_precedes_ready_small_alias_and_covers_the_remaining_span() {
+    let mut a = Alpha::new();
+    let small = a.map_initialization_page(519).unwrap();
+    a.memory.large_alias = true;
+    a.fail_map = true;
+    a.fail_unmap = true;
+    assert_eq!(a.map_initialization_page(519).unwrap(), 0x6a00_7000);
+    assert_eq!(a.map_initialization_run(519, 700).unwrap(), (0x6a00_7000, 505));
+    assert_eq!(a.map_initialization_run(512, 2).unwrap(), (0x6a00_0000, 2));
+    assert_eq!((a.maps, a.unmaps), (1, 0));
+    assert_eq!(a.mappings[&small], 519 + 100_000);
+    a.initialization_window.assert_consistent();
 }
 
 fn original_bucket(frame: usize) -> usize {

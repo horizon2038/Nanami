@@ -168,6 +168,31 @@ fn complete_wait(runtime: &mut Runtime, pid: Word, wait: &ReadinessWait) -> Resu
 }
 
 pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
+    wake_readiness_targets(runtime, sources, UnixWakeTargets::default());
+}
+
+fn unix_wait_matches(runtime: &Runtime, pid: Word, wait: &ReadinessWait,
+    sources: Word, targets: UnixWakeTargets) -> bool
+{
+    let relevant = wait.sources & sources;
+    if relevant & !(READY_UNIX_READ | READY_UNIX_WRITE) != 0 { return true; }
+    // Consult current descriptions rather than caching descriptor identities:
+    // another task may replace an FD through CLONE_FILES while this one waits.
+    for entry in &wait.entries[..wait.count] {
+        if entry.fd < 0 { continue; }
+        let Some(file) = runtime.linux_file(pid, entry.fd as Word) else { return true; };
+        // Epoll follows registered open descriptions, and may be changed by
+        // another task. Keep its existing scan and all other provider fallbacks.
+        if file.kind != super::LinuxFileKind::SocketUnix { return true; }
+        if targets.matches(relevant, file.resource,
+            entry.events & (super::LINUX_POLLIN | super::LINUX_POLLRDNORM) != 0,
+            entry.events & (super::LINUX_POLLOUT | super::LINUX_POLLWRNORM) != 0)
+        { return true; }
+    }
+    false
+}
+
+fn wake_readiness_targets(runtime: &mut Runtime, sources: Word, targets: UnixWakeTargets) {
     let timer = sources & READY_TIMER != 0;
     let mut clock_sampled = timer;
     let mut completed = false;
@@ -185,6 +210,22 @@ pub fn wake_readiness_waiters(runtime: &mut Runtime, sources: Word) {
                 .deadline
                 .is_some_and(|deadline| deadline <= runtime.monotonic_ticks);
         if !expired && wait.sources & sources == 0 {
+            continue;
+        }
+        if !expired && targets.qualified(sources)
+            && option_env!("NANAMI_UNIX_ENDPOINT_WAKE") != Some("0")
+            && !unix_wait_matches(runtime, process.pid, wait, sources, targets)
+        {
+            #[cfg(target_os = "none")]
+            if option_env!("NANAMI_UNIX_ENDPOINT_WAKE_DIAG") == Some("1") {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static SKIPPED: AtomicUsize = AtomicUsize::new(0);
+                let count = SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
+                if count <= 8 || count.is_power_of_two() {
+                    nanami_runtime::println!("[unix.wake] unrelated count={} pid={} call={} sources={}",
+                        count, process.pid, wait.context.number, sources);
+                }
+            }
             continue;
         }
         if runtime.is_signal_stopped(process.pid) {
@@ -300,7 +341,8 @@ pub fn handle_readiness_changes(runtime: &mut Runtime) {
         if sources == 0 {
             break;
         }
-        wake_readiness_waiters(runtime, sources);
+        let targets = ::core::mem::take(&mut runtime.unix_wake_targets);
+        wake_readiness_targets(runtime, sources, targets);
     }
 }
 

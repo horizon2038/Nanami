@@ -4,6 +4,8 @@ extern crate alloc;
 extern crate self as nanami_runtime;
 pub type Word = usize;
 pub use nanami_uapi::os::ProcessMemoryTransfer;
+#[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/owned_gather.rs"]
+mod owned_gather;
 const LINUX_FD_MAX: usize = 64;
 const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
 const OS_RESPONSE_INVALID_DESCRIPTOR: Word = 4;
@@ -144,6 +146,7 @@ struct Runtime {
     posix_shm_size: Word,
     posix_port: Word,
     readiness_changes: Word,
+    unix_wake_targets: UnixWakeTargets,
     bad_read: Word,
     bad_write: Word,
     released: Vec<LinuxFile>,
@@ -179,6 +182,7 @@ impl Runtime {
             posix_shm_size: 65536,
             posix_port: address,
             readiness_changes: 0,
+            unix_wake_targets: UnixWakeTargets::default(),
             bad_read: Word::MAX,
             bad_write: Word::MAX,
             released: vec![],
@@ -270,6 +274,19 @@ fn write_u32_to_target(r: &mut Runtime, pid: Word, pointer: Word, value: u32) ->
 }
 mod guest_memory {
     use super::*;
+    pub(super) fn copyin_owned_gather(
+        r: &Runtime, pid: Word, bases: &[Word], lengths: &[Word],
+        destination: &mut [core::mem::MaybeUninit<u8>],
+    ) -> Option<Result<(), i32>> {
+        let plan = owned_gather::plan(bases, lengths, destination, r.posix_shm_size, 16384)?;
+        let before = r.direct_input.get();
+        for entry in plan.entries() {
+            let result = copyin_into(r, pid, entry.target, entry.local, entry.bytes);
+            r.direct_input.set(before + 1);
+            if result.is_err() { return Some(result); }
+        }
+        Some(Ok(()))
+    }
     pub(super) fn copyout_owned(
         r: &Runtime,
         pid: Word,
@@ -871,6 +888,29 @@ fn blocked_unix_reader_subscribes_to_data_and_last_close_state_changes() {
 }
 
 #[test]
+fn unix_payload_notifications_identify_receivers_and_only_stream_capacity_has_one_sender() {
+    for kind in [1, 2, 5] {
+        let mut r = Runtime::new();
+        let [a, b] = pair(&mut r, kind | LINUX_SOCK_NONBLOCK);
+        let sender = r.linux_file(10, a as Word).unwrap().resource;
+        let receiver = r.linux_file(10, b as Word).unwrap().resource;
+        r.unix_sockets.get_mut(receiver).unwrap().receive_limit = 8;
+        r.readiness_changes = 0;
+        assert_eq!(send(&mut r, a, b"12345678"), EmulationAction::Return(8));
+        assert!(r.unix_wake_targets.matches(READY_UNIX_READ, receiver, true, false));
+        assert!(!r.unix_wake_targets.matches(READY_UNIX_READ, receiver + 1, true, false));
+        r.unix_wake_targets = UnixWakeTargets::default();
+        r.readiness_changes = 0;
+        let mut out = [0; 8];
+        assert_eq!(receive(&mut r, b, &mut out), EmulationAction::Return(8));
+        assert_eq!(out, *b"12345678");
+        assert_ne!(r.readiness_changes & READY_UNIX_WRITE, 0);
+        assert!(r.unix_wake_targets.matches(READY_UNIX_WRITE, sender, false, true));
+        assert_eq!(r.unix_wake_targets.matches(READY_UNIX_WRITE, sender + 1, false, true), kind != 1);
+    }
+}
+
+#[test]
 fn queued_stream_sends_coalesce_readable_notifications_without_losing_bytes() {
     let mut r = Runtime::new();
     let [a, b] = pair(&mut r, 1 | LINUX_SOCK_NONBLOCK);
@@ -1120,6 +1160,58 @@ fn short_payload_lengths_and_following_bytes_remain_exact_after_prior_transfers(
         assert!(output[len..].iter().all(|&byte| byte == 0xa5));
         assert_eq!(r.unix_sockets.get(socket).unwrap().queued_bytes, 0);
     }
+}
+
+#[test]
+fn vector_payload_batches_owned_chunks_without_allocation_and_keeps_alias_order() {
+    for count in 2..=5 {
+        for alias in [false, true] {
+            let mut r = Runtime::new(); let [a, b] = pair(&mut r, 1);
+            let payload: Vec<u8> = (1..=count * 3).map(|n| n as u8).collect();
+            assert_eq!(send(&mut r, a, &payload), EmulationAction::Return(payload.len() as isize));
+            let mut output = vec![0xabu8; count * 3 + 16]; let base = output.as_mut_ptr() as Word + 8;
+            let mut iov = vec![Iov { pointer: 0, len: 0 }];
+            for i in 0..count { iov.push(Iov { pointer: base + i * if alias { 2 } else { 3 }, len: 3 }); }
+            let before = r.output_requests.get(); MAX_ALLOCATION.with(|n| n.set(Some(0)));
+            let result = call(&mut r, 10, SYS_READV, [b as Word, iov.as_ptr() as Word, iov.len(), 0, 0, 0]);
+            let largest = MAX_ALLOCATION.with(|n| n.replace(None).unwrap());
+            assert_eq!(result, EmulationAction::Return(payload.len() as isize)); assert_eq!(largest, 0);
+            assert_eq!(r.output_requests.get() - before, if count <= 4 { 1 } else { count });
+            let mut expected = vec![0xabu8; output.len()];
+            for i in 0..count { let start = 8 + i * if alias { 2 } else { 3 }; expected[start..start + 3].copy_from_slice(&payload[i * 3..i * 3 + 3]); }
+            assert_eq!(output, expected);
+        }
+    }
+}
+
+#[test]
+fn vector_payload_fault_at_each_field_keeps_prefix_and_entire_queue_for_retry() {
+    for failed in 0..4 {
+        let mut r = Runtime::new(); let [a, b] = pair(&mut r, 1);
+        let payload = *b"abcdefghijkl";
+        assert_eq!(send(&mut r, a, &payload), EmulationAction::Return(12));
+        let id = r.linux_file(10, b as Word).unwrap().resource;
+        let mut output = [0u8; 12]; let base = output.as_mut_ptr() as Word;
+        let iov = core::array::from_fn::<_, 4, _>(|i| Iov { pointer: base + i * 3, len: 3 });
+        r.bad_write = base + failed * 3 + 1;
+        assert_eq!(call(&mut r, 10, SYS_READV, [b as Word, iov.as_ptr() as Word, 4, 0, 0, 0]), EmulationAction::Return(-(EFAULT as isize)));
+        assert_eq!(&output[..failed * 3], &payload[..failed * 3]); assert!(output[failed * 3..].iter().all(|b| *b == 0));
+        let socket = r.unix_sockets.get(id).unwrap(); assert_eq!(socket.queued_bytes, 12); assert_eq!(socket.packets[0].offset, 0);
+        r.bad_write = Word::MAX;
+        assert_eq!(call(&mut r, 10, SYS_READV, [b as Word, iov.as_ptr() as Word, 4, 0, 0, 0]), EmulationAction::Return(12));
+        assert_eq!(output, payload); assert_eq!(r.unix_sockets.get(id).unwrap().queued_bytes, 0);
+    }
+}
+
+#[test]
+fn vector_payload_retains_large_iovec_chunk_fault_prefix() {
+    let mut r = Runtime::new(); let [a, b] = pair(&mut r, 1);
+    let payload = [7u8; 96]; assert_eq!(send(&mut r, a, &payload), EmulationAction::Return(96));
+    let mut output = [0u8; 96]; let base = output.as_mut_ptr() as Word;
+    let iov = [Iov { pointer: base, len: 80 }, Iov { pointer: base + 80, len: 16 }];
+    r.posix_shm_size = 64; r.bad_write = base + 70;
+    assert_eq!(call(&mut r, 10, SYS_READV, [b as Word, iov.as_ptr() as Word, 2, 0, 0, 0]), EmulationAction::Return(-(EFAULT as isize)));
+    assert_eq!(&output[..64], &[7u8; 64]); assert_eq!(&output[64..], &[0u8; 32]);
 }
 
 #[test]
@@ -2460,6 +2552,97 @@ fn failed_append_restores_existing_payload_and_offset_after_a_late_iovec_fault()
         let mut output = [0; 6];
         assert_eq!(receive(&mut r, b, &mut output), EmulationAction::Return(6));
         assert_eq!(&output, b"efixab");
+    }
+}
+
+#[test]
+fn bulk_vector_sends_gather_once_and_keep_queue_truncation_and_record_bytes() {
+    for kind in [1, 2, 5] {
+        for number in [SYS_WRITEV, SYS_SENDMSG] {
+            for sizes in [vec![20000, 19000], vec![20000, 7, 19000], vec![20000, 7, 19000, 11]] {
+                let mut r = Runtime::new();
+                let [a, b] = pair(&mut r, kind | LINUX_SOCK_NONBLOCK);
+                let sources: Vec<Vec<u8>> = sizes.iter().enumerate()
+                    .map(|(i, &n)| vec![i as u8 + 1; n]).collect();
+                let mut iov = vec![Iov { pointer: 0, len: 0 }];
+                iov.extend(sources.iter().map(|s| Iov { pointer: s.as_ptr() as Word, len: s.len() }));
+                let mut msg = header(&mut iov, &mut []);
+                let args = if number == SYS_WRITEV {
+                    [a as Word, iov.as_ptr() as Word, iov.len(), 0, 0, 0]
+                } else { [a as Word, &mut msg as *mut _ as Word, 0, 0, 0, 0] };
+                let bytes = sizes.iter().sum::<usize>();
+                r.direct_input.set(0);
+                assert_eq!(call(&mut r, 10, number, args), EmulationAction::Return(bytes as isize));
+                assert_eq!(r.direct_input.get(), 1);
+                let mut output = vec![0xcc; bytes + 8];
+                assert_eq!(receive(&mut r, b, &mut output), EmulationAction::Return(bytes as isize));
+                let expected: Vec<u8> = sources.iter().flatten().copied().collect();
+                assert_eq!(&output[..bytes], expected);
+                assert!(output[bytes..].iter().all(|b| *b == 0xcc));
+            }
+        }
+    }
+    // Stream backpressure accepts only part of the final field. An unread
+    // trailing bad pointer must not change that accepted-prefix result.
+    let mut r = Runtime::new(); let [a, b] = pair(&mut r, 1 | LINUX_SOCK_NONBLOCK);
+    let prefix = vec![0x55; 40000];
+    assert_eq!(send(&mut r, a, &prefix), EmulationAction::Return(40000));
+    let first = vec![0x61; 20000]; let second = vec![0x62; 20000];
+    let iov = [Iov { pointer: first.as_ptr() as Word, len: first.len() },
+        Iov { pointer: second.as_ptr() as Word, len: second.len() },
+        Iov { pointer: Word::MAX - 1, len: 1 }];
+    r.direct_input.set(0);
+    assert_eq!(call(&mut r, 10, SYS_WRITEV, [a as Word, iov.as_ptr() as Word, 3, 0, 0, 0]),
+        EmulationAction::Return(25536));
+    assert_eq!(r.direct_input.get(), 1);
+    let mut output = vec![0; 65536];
+    assert_eq!(receive(&mut r, b, &mut output), EmulationAction::Return(65536));
+    assert_eq!(&output[..40000], prefix);
+    assert_eq!(&output[40000..60000], first);
+    assert_eq!(&output[60000..], &second[..5536]);
+}
+
+#[test]
+fn failed_bulk_append_restores_payload_offset_and_rights_before_retry() {
+    for rights in [false, true] {
+        for number in [SYS_WRITEV, SYS_SENDMSG] {
+            if rights && number == SYS_WRITEV { continue; }
+            let mut r = Runtime::new(); let [a, b] = pair(&mut r, 1 | LINUX_SOCK_NONBLOCK);
+            assert_eq!(send(&mut r, a, b"prefix"), EmulationAction::Return(6));
+            assert_eq!(receive(&mut r, b, &mut [0; 2]), EmulationAction::Return(2));
+            let first = vec![0x61; 20000]; let second = vec![0x62; 19000];
+            let mut iov = [Iov { pointer: first.as_ptr() as Word, len: first.len() },
+                Iov { pointer: second.as_ptr() as Word, len: second.len() }];
+            let event = eventfd::create(&mut r, 10, 7, 0).unwrap();
+            let mut control = [0; 24];
+            control[..8].copy_from_slice(&20u64.to_ne_bytes());
+            control[8..12].copy_from_slice(&1u32.to_ne_bytes());
+            control[12..16].copy_from_slice(&1u32.to_ne_bytes());
+            control[16..20].copy_from_slice(&(event as i32).to_ne_bytes());
+            let mut msg = header(&mut iov, if rights { &mut control } else { &mut [] });
+            let args = if number == SYS_WRITEV { [a as Word, iov.as_ptr() as Word, 2, 0, 0, 0] }
+                else { [a as Word, &mut msg as *mut _ as Word, 0, 0, 0, 0] };
+            r.bad_read = iov[1].pointer; r.readiness_changes = 0;
+            let receiver = r.linux_file(10, b as Word).unwrap().resource;
+            assert_eq!(call(&mut r, 10, number, args), EmulationAction::Return(-(EFAULT as isize)));
+            let queue = r.unix_sockets.get(receiver).unwrap();
+            assert_eq!((queue.queued_bytes, queue.queued_rights, queue.packets.len()), (4, 0, 1));
+            assert_eq!(queue.packets[0].offset, 2);
+            assert_eq!(queue.packets[0].data, b"prefix");
+            assert_eq!(r.readiness_changes, 0);
+            r.bad_read = Word::MAX; r.direct_input.set(0);
+            assert_eq!(call(&mut r, 10, number, args), EmulationAction::Return(39000));
+            assert_eq!(r.direct_input.get(), 1);
+            let queue = r.unix_sockets.get(receiver).unwrap();
+            assert_eq!(queue.queued_bytes, 39004);
+            assert_eq!(queue.queued_rights, usize::from(rights));
+            assert_eq!(queue.packets.len(), if rights { 2 } else { 1 });
+            let mut output = vec![0; 39004];
+            assert_eq!(receive(&mut r, b, &mut output), EmulationAction::Return(39004));
+            assert_eq!(&output[..4], b"efix");
+            assert_eq!(&output[4..20004], first);
+            assert_eq!(&output[20004..], second);
+        }
     }
 }
 

@@ -550,6 +550,122 @@ fn hpet_clock_extends_32_bit_wrap_without_time_going_backwards() {
     );
 }
 
+fn scripted_hpet_sample(clock: &mut hpet_clock::Clock, reads: &[(usize, u32)]) -> u64 {
+    let mut reads = reads.iter().copied();
+    let cycles = clock.sample(|offset| {
+        let (expected, value) = reads.next().expect("unexpected MMIO read");
+        assert_eq!(offset, expected);
+        value
+    });
+    assert_eq!(reads.next(), None);
+    assert_eq!(clock.last_cycles(), cycles);
+    cycles
+}
+
+#[test]
+fn hpet_service_samples_fresh_low_and_high_with_no_extra_warm_leading_read() {
+    let mut clock = hpet_clock::Clock::new(10_000_000, true);
+    assert_eq!(
+        scripted_hpet_sample(&mut clock, &[(4, 7), (0, 23), (4, 7)]),
+        (7u64 << 32) | 23
+    );
+    for low in [24, 24, 0x1234_5678, u32::MAX] {
+        assert_eq!(
+            scripted_hpet_sample(&mut clock, &[(0, low), (4, 7)]),
+            (7u64 << 32) | u64::from(low)
+        );
+    }
+}
+
+#[test]
+fn hpet_service_retries_rollover_with_fresh_low_and_already_observed_high() {
+    let mut clock = hpet_clock::Clock::new(10_000_000, true);
+    assert_eq!(
+        scripted_hpet_sample(
+            &mut clock,
+            &[(4, 7), (0, u32::MAX), (4, 8), (0, 12), (4, 8)]
+        ),
+        (8u64 << 32) | 12
+    );
+    assert_eq!(
+        scripted_hpet_sample(&mut clock, &[(0, u32::MAX), (4, 9), (0, 1), (4, 9)]),
+        (9u64 << 32) | 1
+    );
+    // The old hint can be many high-word periods behind an idle wide timer.
+    assert_eq!(
+        scripted_hpet_sample(&mut clock, &[(0, 99), (4, 80), (0, 103), (4, 80)]),
+        (80u64 << 32) | 103
+    );
+}
+
+#[test]
+fn hpet_service_keeps_retrying_until_counter_words_are_coherent() {
+    let mut clock = hpet_clock::Clock::new(10_000_000, true);
+    let mut reads = vec![(4, 1)];
+    for high in 2..=12 {
+        reads.extend([(0, u32::MAX), (4, high)]);
+    }
+    reads.extend([(0, 17), (4, 12)]);
+    assert_eq!(scripted_hpet_sample(&mut clock, &reads), (12u64 << 32) | 17);
+}
+
+#[test]
+fn hpet_service_narrow_samples_read_only_low_and_extend_repeated_wraps() {
+    let mut clock = hpet_clock::Clock::new(10_000_000, false);
+    for raw in [u32::MAX - 1, u32::MAX, 0, 1, u32::MAX, 0, 1] {
+        let before = clock.last_cycles();
+        let expected = before + u64::from(raw.wrapping_sub(before as u32));
+        assert_eq!(scripted_hpet_sample(&mut clock, &[(0, raw)]), expected);
+    }
+    assert_eq!(clock.last_cycles(), (2u64 << 32) | 1);
+}
+
+#[test]
+fn hpet_service_wide_samples_keep_the_hardware_epoch_without_clamping() {
+    let mut clock = hpet_clock::Clock::new(10_000_000, true);
+    scripted_hpet_sample(&mut clock, &[(4, 4), (0, 100), (4, 4)]);
+    assert_eq!(
+        scripted_hpet_sample(&mut clock, &[(0, 0), (4, 0), (0, 2), (4, 0)]),
+        2
+    );
+    assert_eq!(scripted_hpet_sample(&mut clock, &[(0, 1), (4, 0)]), 1);
+}
+
+#[test]
+fn hpet_service_stream_samples_return_a_fresh_coherent_hardware_value() {
+    let mut clock = hpet_clock::Clock::new(41_666_667, true);
+    let mut hardware = (19u64 << 32) | u64::from(u32::MAX - 100);
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..10_000 {
+        let before = hardware;
+        let mut low_samples = Vec::new();
+        let cycles = clock.sample(|offset| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            // Sometimes cross a low-word boundary between individual reads,
+            // while every high-word period still spans many MMIO accesses.
+            hardware += seed % (1 << 24) + 1;
+            match offset {
+                0 => {
+                    low_samples.push(hardware);
+                    hardware as u32
+                }
+                4 => (hardware >> 32) as u32,
+                _ => panic!("counter offset {offset}"),
+            }
+        });
+        assert!(cycles > before && cycles <= hardware);
+        assert_eq!(low_samples.last(), Some(&cycles));
+        assert_eq!(clock.last_cycles(), cycles);
+    }
+}
+
+#[test]
+fn hpet_service_confirmed_high_uses_existing_clock_padding() {
+    assert_eq!(std::mem::size_of::<hpet_clock::Clock>(), 24);
+}
+
 #[test]
 fn hpet_conversion_never_programs_before_requested_nanosecond() {
     let clock = hpet_clock::Clock::new(69_841_279, true);

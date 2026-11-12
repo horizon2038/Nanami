@@ -7,6 +7,7 @@ impl Alpha {
         source_pid: usize,
         destination_pid: usize,
     ) -> Result<(), CapabilityError> {
+        self.split_private_large_mappings(source_pid, 0, usize::MAX, false)?;
         let vm = self
             .processes
             .vm_space_mut(source_pid)
@@ -73,12 +74,51 @@ impl Alpha {
         let end = base_va
             .checked_add(size_bytes)
             .ok_or(CapabilityError::InvalidArgument)?;
-        target_va
+        let target_end = target_va
             .checked_add(size_bytes)
             .ok_or(CapabilityError::InvalidArgument)?;
         if (base_va | target_va | size_bytes) & (PAGE_SIZE - 1) != 0 {
             return Err(CapabilityError::InvalidArgument);
         }
+        // mremap constructs the destination before copying. Splitting that
+        // fresh huge backing only to reapply identical rights destroys its
+        // benefit. Prove current coverage and rights without changing either
+        // VM, then use the existing private-write-checked transfer. It resolves
+        // every Frame live and preserves huge aliases and overlapping memmove.
+        // Different PIDs sharing one VM retain the page path's owner-aware
+        // ordering: the transfer's overlap contract is expressed in PIDs.
+        if size_bytes >= 1 << 21
+            && (source_pid == destination_pid
+                || self.processes.memory_owner_pid(source_pid)
+                    != self.processes.memory_owner_pid(destination_pid))
+        {
+            let source = self.processes.vm_space(source_pid)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            let permissions = source.permissions(base_va);
+            if !source.has_uncertain_mappings(base_va, end)
+                && !source.has_deferred_mappings(base_va, end)
+                && source.backed_range_with_permissions(base_va, end, permissions)
+                && self.processes.vm_space(destination_pid).is_some_and(|target|
+                    !target.has_uncertain_mappings(target_va, target_end)
+                    && !target.has_deferred_mappings(target_va, target_end)
+                    && !target.private_range_shared(target_va, target_end)
+                    && target.backed_range_with_permissions(target_va, target_end, permissions))
+            {
+                self.copy_process_memory(source_pid, base_va,
+                    destination_pid, target_va, size_bytes)?;
+                #[cfg(not(test))]
+                if option_env!("NANAMI_COPY_RETAIN_DIAG") == Some("1") {
+                    use core::sync::atomic::{AtomicUsize, Ordering};
+                    static REPORTS: AtomicUsize = AtomicUsize::new(0);
+                    if REPORTS.fetch_add(1, Ordering::Relaxed) < 8 {
+                        crate::force_info!("[copy.shape-kept] source-pid={} target-pid={} source={:#x} target={:#x} bytes={}",
+                            source_pid, destination_pid, base_va, target_va, size_bytes);
+                    }
+                }
+                return Ok(());
+            }
+        }
+        self.split_private_large_mappings(destination_pid, target_va, target_va + size_bytes, false)?;
         let vm = self
             .processes
             .vm_space_mut(source_pid)

@@ -253,17 +253,45 @@ def build_readiness(root):
     return build_xlib_tool(root, HERE / "tools/wait-for-x.c", "usr/local/bin/nanami-wait-for-x")
 
 
-def build_font_cache(root):
-    """Precompute stock caches for the zero timestamps written by ImageBuilder.
+def build_loader_cache(root):
+    """Index the locked guest libraries using the same writer on every host."""
+    import loader_cache
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("loader cache root must be a real directory")
+    root = root.resolve()
+    directories = ("usr/local/lib", "usr/lib", "lib", "etc")
+    for relative in directories:
+        path = root / relative
+        for directory in (path, *path.parents):
+            if directory == root:
+                break
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError(f"loader cache directory is not real: {relative}")
+    destination = root / "etc/ld.so.cache"
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise ValueError("loader cache destination must be a regular file")
+    data = loader_cache.generate(root)
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".ld-cache-",
+                                     delete=False) as output:
+        pending = Path(output.name)
+        output.write(data)
+    try:
+        pending.chmod(0o644)
+        pending.replace(destination)
+    finally:
+        pending.unlink(missing_ok=True)
+    return {"etc/ld.so.cache": hashlib.sha256(data).hexdigest()}
 
-    Use the locked guest loader, libraries and fc-cache, never the host's
-    fontconfig version. Only the private staging copy receives packed mtimes;
-    runtime directory validation remains entirely upstream's responsibility.
-    """
-    root = Path(root).resolve(strict=True)
-    inputs = ("usr/local/etc/fonts", "usr/local/share/fontconfig",
-              "usr/local/lib/X11/fonts")
-    for relative in inputs:
+
+def build_font_cache(root):
+    """Compile verified font facts for the zero timestamps used by ImageBuilder."""
+    import font_cache
+    root = Path(root)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("font cache root must be a real directory")
+    root = root.resolve(strict=True)
+    for relative in font_cache.INPUTS:
         directory = root / relative
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError(f"font cache input is not a real directory: {relative}")
@@ -276,36 +304,18 @@ def build_font_cache(root):
             raise ValueError("font cache destination traverses a symlink")
     if destination.exists() or destination.is_symlink():
         raise ValueError("font cache destination is not empty")
-    with tempfile.TemporaryDirectory(prefix="tinycore-font-cache-") as temporary:
+    payloads = font_cache.generate(root)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".font-cache-", dir=destination.parent) as temporary:
         staging = Path(temporary)
-        for relative in inputs:
-            shutil.copytree(root / relative, staging / relative, symlinks=True)
-        for path in [staging, *staging.rglob("*")]:
-            if not path.is_symlink():
-                os.utime(path, ns=(0, 0))
-        (staging / "var/cache/fontconfig").mkdir(parents=True)
-        environment = os.environ.copy()
-        for key in list(environment):
-            if key.startswith("FONTCONFIG_") or key == "SOURCE_DATE_EPOCH":
-                del environment[key]
-        environment.update(FONTCONFIG_FILE="/usr/local/etc/fonts/fonts.conf",
-                           FONTCONFIG_PATH="/usr/local/etc/fonts", LC_ALL="C")
-        subprocess.run([str(root / "lib/ld-linux-x86-64.so.2"), "--library-path",
-                        f"{root}/usr/local/lib:{root}/lib",
-                        str(root / "usr/local/bin/fc-cache"), "-s", "-y", str(staging)],
-                       env=environment, check=True)
-        caches = staging / "var/cache/fontconfig"
-        if not list(caches.glob("*-le64.cache-9")):
-            raise ValueError("pinned fontconfig did not produce its cache format")
-        for path in caches.iterdir():
-            if path.is_symlink() or not path.is_file():
-                raise ValueError("unexpected font cache output")
-        shutil.copytree(caches, destination)
-        destination.chmod(0o755)
-        for path in destination.iterdir():
+        staging.chmod(0o755)
+        for name, data in payloads.items():
+            path = staging / name
+            path.write_bytes(data)
             path.chmod(0o644)
-    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in sorted(destination.iterdir())}
+        staging.replace(destination)
+    return {str((destination / name).relative_to(root)): hashlib.sha256(data).hexdigest()
+            for name, data in sorted(payloads.items())}
 
 
 def build_window_observer(root, steady_rtt=False, syscall_scope=False):

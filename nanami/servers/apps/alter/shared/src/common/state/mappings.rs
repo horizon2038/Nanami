@@ -203,16 +203,30 @@ impl Runtime {
     }
 
     pub fn protect_mapping(&mut self, pid: Word, base: Word, size: Word, prot: Word) -> bool {
-        if self.mapping_prot(pid, base, size) == Some(prot) {
-            return true;
-        }
-        if !self.can_protect_mapping(pid, base, size) {
-            return false;
-        }
-        // can_protect_mapping already proves coverage and reserves one more
+        let Some(needed) = self.mapping_protection_needed(pid, base, size, prot) else { return false; };
+        if !needed { return true; }
+        // This preflight proves coverage and reserves one more
         // slot than removal requires. Do not repeat both proofs in remove_mapping.
         self.remove_mapping_validated(pid, base, base + size)
             && self.add_mapping(pid, base, size, prot)
+    }
+
+    /// One coverage walk proves existence and compares the selected rights.
+    /// None rejects the range/capacity; false preserves the no-change fast path.
+    /// No proof survives this call: publication validates current metadata again.
+    pub fn mapping_protection_needed(&self, pid: Word, base: Word, size: Word, prot: Word) -> Option<bool> {
+        if base == 0 || size == 0 { return None; }
+        let end = base.checked_add(size)?;
+        let process = self.managed_process(pid)?;
+        let mut cursor = CoverageCursor::new(&process.mappings, base, end);
+        let mut unchanged = true;
+        while let Some((_, mapping)) = cursor.next_chunk().ok()? {
+            unchanged &= mapping.prot == prot;
+        }
+        // As before, unchanged ranges need no replacement slot and do not
+        // inspect unrelated metadata after the complete coverage proof.
+        if unchanged { return Some(false); }
+        protection_capacity(process, base, end).then_some(true)
     }
 
     pub fn can_remove_mapping(&self, pid: Word, base: Word, size: Word) -> bool {
@@ -248,19 +262,7 @@ impl Runtime {
         let Some(process) = self.managed_process(pid) else {
             return false;
         };
-        let mut required = 1; // The replacement protection interval.
-        for mapping in process.mappings.iter().filter(|mapping| mapping.base != 0) {
-            let Some(mapping_end) = mapping.base.checked_add(mapping.size) else {
-                return false;
-            };
-            if mapping_end <= base || mapping.base >= end {
-                required += 1;
-            } else {
-                required += usize::from(mapping.base < base);
-                required += usize::from(mapping_end > end);
-            }
-        }
-        required <= process.mappings.capacity()
+        protection_capacity(process, base, end)
     }
 
     pub fn has_mapping(&self, pid: Word, base: Word, size: Word) -> bool {
@@ -282,6 +284,19 @@ impl Runtime {
             }
         }
     }
+}
+
+fn protection_capacity(process: &ManagedProcess, base: Word, end: Word) -> bool {
+    let mut required = 1; // The replacement protection interval.
+    for mapping in process.mappings.iter().filter(|mapping| mapping.base != 0) {
+        let Some(mapping_end) = mapping.base.checked_add(mapping.size) else { return false; };
+        if mapping_end <= base || mapping.base >= end { required += 1; }
+        else {
+            required += usize::from(mapping.base < base);
+            required += usize::from(mapping_end > end);
+        }
+    }
+    required <= process.mappings.capacity()
 }
 
 #[cfg(test)]

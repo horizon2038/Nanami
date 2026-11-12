@@ -94,6 +94,53 @@ impl ElfImage {
         }
     }
 
+    /// A LOAD owns every page touched by its memory extent, including BSS and
+    /// partial boundary pages. Callers may omit uncovered pages only after
+    /// initial_permissions_complete certifies a stopped raw image's layout.
+    pub fn is_load_page(&self, page: usize, page_size: usize) -> bool {
+        if !page_size.is_power_of_two() || page & (page_size - 1) != 0 {
+            return false;
+        }
+        let Some(end) = page.checked_add(page_size) else { return false; };
+        let Some(segments) = self.segments.get(..self.segment_count) else { return false; };
+        segments.iter().any(|segment| segment.memory_size != 0
+            && segment.virtual_address < end
+            && segment.virtual_address.checked_add(segment.memory_size)
+                .is_some_and(|limit| page < limit))
+    }
+
+    /// A stopped raw image needs no second LOAD protection pass only when
+    /// every LOAD page gets its final nonzero rights on first installation.
+    /// Shared boundary pages, native IPC fixups and stack overlap keep the
+    /// supervisor's ordered protection pass. This is request-local policy,
+    /// never a certificate for subsequent VM mutations.
+    pub fn initial_permissions_complete(&self, page_size: usize, stack: core::ops::Range<usize>) -> bool {
+        if !page_size.is_power_of_two() || self.ipc_buffer_start.is_some() || stack.start > stack.end {
+            return false;
+        }
+        let Some(segments) = self.segments.get(..self.segment_count) else { return false; };
+        let mut found = false;
+        for (index, segment) in segments.iter().enumerate() {
+            if segment.memory_size == 0 { continue; }
+            if !matches!(self.segment_permissions[index], 1..=7) { return false; }
+            let start = segment.virtual_address & !(page_size - 1);
+            let Some(end) = segment.virtual_address.checked_add(segment.memory_size)
+                .and_then(|end| end.checked_add(page_size - 1)).map(|end| end & !(page_size - 1))
+            else { return false; };
+            if start < stack.end && stack.start < end { return false; }
+            for other in &segments[..index] {
+                if other.memory_size == 0 { continue; }
+                let other_start = other.virtual_address & !(page_size - 1);
+                let Some(other_end) = other.virtual_address.checked_add(other.memory_size)
+                    .and_then(|end| end.checked_add(page_size - 1)).map(|end| end & !(page_size - 1))
+                else { return false; };
+                if start < other_end && other_start < end { return false; }
+            }
+            found = true;
+        }
+        found
+    }
+
     /// Share only a complete file page supplied by exactly one LOAD. The
     /// ordinary fill path owns padding, BSS, overlapping LOADs and native TLS.
     pub fn snapshot_page(&self, page: usize, page_size: usize) -> Option<(usize, usize)> {

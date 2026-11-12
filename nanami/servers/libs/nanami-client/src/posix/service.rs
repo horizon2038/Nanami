@@ -51,6 +51,19 @@ pub fn posix_getpid(service_port: CapabilityDescriptor) -> Result<Word, RequestE
     Ok(pid)
 }
 
+pub fn posix_vfs_provider(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
+    let (status, pid, _) = call_port(
+        service_port, POSIX_REQUEST_CONTROL, POSIX_CONTROL_VFS_PROVIDER, 0, 0, 0, 2,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if pid == 0 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(pid)
+}
+
 pub fn posix_getppid(service_port: CapabilityDescriptor) -> Result<Word, RequestError> {
     let (status, pid, _) = call_port(service_port, POSIX_REQUEST_GETPPID, 0, 0, 0, 0, 1)?;
     if status != OS_RESPONSE_OK {

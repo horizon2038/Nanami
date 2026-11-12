@@ -12,6 +12,76 @@ pub(super) fn read_block(runtime: &mut Ext2Runtime, block: usize) -> Result<(), 
     read_blocks(runtime, block, 1)
 }
 
+/// Mixed cached/cold file payload. Keep cached bytes out of device scratch,
+/// and defer cache fills until every missing run has completed. The server
+/// dispatches no other request here; uncached I/O only borrows runtime.
+pub(super) fn read_blocks_into(
+    runtime: &mut Ext2Runtime, block: usize, count: usize, offset: usize, target: &mut [u8], streaming: bool,
+) -> Result<(), RequestError> {
+    validate_run(runtime, block, count)?;
+    if offset >= runtime.block_size || offset.checked_add(target.len())
+        .is_none_or(|end| end > count * runtime.block_size)
+    { return Err(RequestError::InvalidArgument); }
+    if runtime.block_cache.load_range(block, offset, target) {
+        return Ok(());
+    }
+    if streaming && count * runtime.block_size >= 64 * 1024 {
+        let blocks = block..block + count;
+        // Read only gaps. Until every transfer succeeds, leave both the
+        // client output and cache alone. Then copy each byte from its source.
+        for gap in runtime.block_cache.read_gaps(blocks.clone()) {
+            let missing = gap.len();
+            read_blocks_uncached(runtime, gap.start, missing, (gap.start - block) * runtime.block_size)?;
+            #[cfg(not(test))]
+            if option_env!("NANAMI_STREAMING_READ_DIAG") == Some("1") {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static COMMANDS: AtomicUsize = AtomicUsize::new(0);
+                static BLOCKS: AtomicUsize = AtomicUsize::new(0);
+                let commands = COMMANDS.fetch_add(1, Ordering::Relaxed) + 1;
+                let blocks = BLOCKS.fetch_add(missing, Ordering::Relaxed) + missing;
+                if commands.is_power_of_two() {
+                    nanami_runtime::println!("[ext2.stream] commands={} blocks={} bytes={}", commands, blocks, blocks * runtime.block_size);
+                }
+            }
+        }
+        let scratch = unsafe {
+            core::slice::from_raw_parts(runtime.block_shm as *const u8, count * runtime.block_size)
+        };
+        if !runtime.block_cache.finish_streamed_read(blocks, scratch, offset, target) {
+            return Err(RequestError::Protocol);
+        }
+        return Ok(());
+    }
+    let plan = if count == 1 { None } else { runtime.block_cache.plan_read(block, count) };
+    if let Some(plan) = plan {
+        #[cfg(not(test))]
+        let cached = if option_env!("NANAMI_MIXED_READ_DIAG") == Some("1") { plan.cached_blocks() } else { 0 };
+        for (first, blocks) in plan.missing_runs() {
+            read_blocks_uncached(runtime, block + first, blocks, first * runtime.block_size)?;
+        }
+        let scratch = unsafe { core::slice::from_raw_parts(runtime.block_shm as *const u8, count * runtime.block_size) };
+        if !runtime.block_cache.finish_read(plan, scratch, offset, target) { return Err(RequestError::Protocol); }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_MIXED_READ_DIAG") == Some("1") {
+            use core::sync::atomic::{AtomicUsize, Ordering};
+            static REPORTS: AtomicUsize = AtomicUsize::new(0);
+            if REPORTS.fetch_add(1, Ordering::Relaxed) < 32 {
+                nanami_runtime::println!("[ext2.read] mixed cached-blocks={} blocks={} requested-bytes={}", cached, count, target.len());
+            }
+        }
+    } else {
+        // A miss has no resident blocks in this run. Read once and fill
+        // without repeating the residency scan.
+        read_blocks_uncached(runtime, block, count, 0)?;
+        let scratch = unsafe {
+            core::slice::from_raw_parts(runtime.block_shm as *const u8, count * runtime.block_size)
+        };
+        target.copy_from_slice(&scratch[offset..offset + target.len()]);
+        runtime.block_cache.store_read_misses(block, scratch);
+    }
+    Ok(())
+}
+
 /// Pointer-only lookups need four cached bytes, not a full scratch-block copy.
 /// Cold reads retain the ordinary validation, retry and cache-fill path.
 pub(super) fn read_block_u32(
@@ -56,18 +126,15 @@ pub(super) fn read_blocks(
             offset - first,
             first * runtime.block_size,
         )?;
-        for index in first..offset {
-            let source = unsafe {
-                core::slice::from_raw_parts(
-                    (runtime.block_shm + index * runtime.block_size) as *const u8,
-                    runtime.block_size,
-                )
-            };
-            // The gap scan proved this block absent. The device read borrows
-            // runtime immutably; filling earlier, distinct gap blocks cannot
-            // make this one resident. Keep the same CLOCK/store operation.
-            runtime.block_cache.store_read_miss(block + index, source);
-        }
+        let source = unsafe {
+            core::slice::from_raw_parts(
+                (runtime.block_shm + first * runtime.block_size) as *const u8,
+                (offset - first) * runtime.block_size,
+            )
+        };
+        // The gap scan proved every block absent. Device I/O only borrows
+        // runtime; bulk filling keeps the same scalar CLOCK/identity order.
+        runtime.block_cache.store_read_misses(block + first, source);
     }
     Ok(())
 }

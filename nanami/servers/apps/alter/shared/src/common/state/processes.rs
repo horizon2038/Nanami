@@ -80,6 +80,7 @@ impl Runtime {
         // EXEC_MEMORY has replaced the VM; no old private-fork alias survives.
         // The exec caller marks any potential new immutable main aliases next.
         process.vm_private_shared = false;
+        process.vm_writable_private_shared = false;
         process.program_break = 0;
         process.argument_vector = 0;
         process.argument_count = 0;

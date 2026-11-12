@@ -11,6 +11,9 @@ const LINUX_IOV_MAX: usize = 16;
 const LINUX_MSGHDR_LEN: usize = 56;
 const LINUX_PAGE_SIZE: usize = 4096;
 struct Runtime {
+    private_shared: bool,
+    readonly_only: bool,
+    private_failure: Option<Word>,
     posix_shm: usize,
     posix_shm_size: usize,
     allowed: bool,
@@ -40,6 +43,7 @@ fn map_request_error(_: ()) -> i32 {
     EFAULT
 }
 mod guest_views {
+    pub(super) const MAX_WRITE_BUFFERS: usize = 4;
     pub(super) const MAX_CONTIGUOUS_READ_BYTES: usize = 16384;
     use std::cell::Cell;
     thread_local! {
@@ -47,6 +51,7 @@ mod guest_views {
         pub(super) static COPY_INPUT: Cell<bool> = const { Cell::new(false) };
         pub(super) static CALLS: Cell<usize> = const { Cell::new(0) };
         pub(super) static WRITE_HIT: Cell<bool> = const { Cell::new(false) };
+        pub(super) static CACHED_WRITE_HIT: Cell<bool> = const { Cell::new(false) };
         pub(super) static WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
         pub(super) static BATCH_WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
     }
@@ -118,6 +123,24 @@ mod guest_views {
         let buffer = unsafe { core::slice::from_raw_parts(source as *const u8, bytes) };
         copy_from_owned(runtime, pid, destination, buffer)
     }
+    pub(super) fn copy_from_owned_cached(
+        runtime: &super::Runtime, pid: usize, destination: usize, source: &[u8],
+    ) -> bool {
+        CACHED_WRITE_HIT.with(|hit| hit.get())
+            && copy_from_owned(runtime, pid, destination, source)
+    }
+    pub(super) fn copy_from_scratch_cached(
+        runtime: &super::Runtime, pid: usize, destination: usize, source: usize, bytes: usize,
+    ) -> bool {
+        CACHED_WRITE_HIT.with(|hit| hit.get())
+            && copy_from_scratch(runtime, pid, destination, source, bytes)
+    }
+    pub(super) fn copy_from_owned_many_cached(
+        runtime: &super::Runtime, pid: usize, buffers: &[(usize, &[u8])],
+    ) -> bool {
+        CACHED_WRITE_HIT.with(|hit| hit.get())
+            && copy_from_owned_many(runtime, pid, buffers)
+    }
     pub(super) fn copy_from_owned_many(
         runtime: &super::Runtime,
         pid: usize,
@@ -142,13 +165,36 @@ mod guest_views {
 }
 mod private_memory {
     use super::*;
-    pub(super) fn with_private_write<T>(
-        _: &Runtime,
-        _: Word,
-        _: Word,
-        _: Word,
+    thread_local! { pub(super) static PREPARED: RefCell<Vec<(Word, Word)>> = const { RefCell::new(Vec::new()) }; }
+    thread_local! { pub(super) static INVALIDATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) }; }
+    pub(super) fn invalidate_write_origin(_: &Runtime) {
+        INVALIDATIONS.with(|count| count.set(count.get() + 1));
+    }
+    pub(super) fn invalidate_checked_write_origin(runtime: &Runtime, _: Word, _: Word, _: Word) {
+        invalidate_write_origin(runtime);
+    }
+    pub(super) fn needs_checked_write_preparation(runtime: &Runtime, _: Word) -> bool {
+        runtime.private_shared && !runtime.readonly_only
+    }
+    pub(super) fn with_checked_private_write<T>(
+        runtime: &Runtime, pid: Word, address: Word, bytes: Word,
         operation: impl FnOnce() -> Result<T, i32>,
     ) -> Result<T, i32> {
+        if needs_checked_write_preparation(runtime, pid) {
+            with_private_write(runtime, pid, address, bytes, operation)
+        } else { operation() }
+    }
+    pub(super) fn with_private_write<T>(
+        runtime: &Runtime,
+        _: Word,
+        address: Word,
+        bytes: Word,
+        operation: impl FnOnce() -> Result<T, i32>,
+    ) -> Result<T, i32> {
+        if runtime.private_shared {
+            PREPARED.with(|p| p.borrow_mut().push((address, bytes)));
+            if runtime.private_failure == Some(address) { return Err(EFAULT); }
+        }
         operation()
     }
 }
@@ -178,6 +224,16 @@ pub fn request_process_memory_writev_checked(
     }
     Ok(())
 }
+pub fn request_process_memory_readv_checked(
+    pid: Word,
+    transfers: &[ProcessMemoryTransfer],
+) -> Result<(), ()> {
+    TRANSPORT.with(|transport| transport.borrow_mut().batches += 1);
+    for range in transfers {
+        transfer(false, pid, range.target, range.local, range.bytes)?;
+    }
+    Ok(())
+}
 pub fn request_process_memory_write(_: Word, _: Word, _: Word, _: Word) -> Result<(), ()> {
     panic!("guest copies must never select the privileged unchecked request");
 }
@@ -194,10 +250,11 @@ fn transfer(write: bool, pid: usize, guest: usize, server: usize, bytes: usize) 
         {
             // Model a missing later Frame, not just a permission precheck that
             // rejects the whole range before its first byte can be touched.
-            if transport.partial_fault && write {
+            if transport.partial_fault {
                 let prefix = transport.denied.unwrap() - guest;
+                let (source, destination) = if write { (server, guest) } else { (guest, server) };
                 unsafe {
-                    std::ptr::copy_nonoverlapping(server as *const u8, guest as *mut u8, prefix);
+                    std::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, prefix);
                 }
             }
             return Err(());
@@ -217,18 +274,177 @@ fn transfer(write: bool, pid: usize, guest: usize, server: usize, bytes: usize) 
 mod production;
 use production::*;
 fn runtime(buffer: &mut [u8]) -> Runtime {
+    private_memory::INVALIDATIONS.with(|count| count.set(0));
+    private_memory::PREPARED.with(|p| p.borrow_mut().clear());
     guest_views::COPY_INPUT.with(|copy| copy.set(false));
     guest_views::WRITE_HIT.with(|hit| hit.set(false));
+    guest_views::CACHED_WRITE_HIT.with(|hit| hit.set(false));
     guest_views::WRITE_CALLS.with(|calls| calls.set(0));
     guest_views::BATCH_WRITE_CALLS.with(|calls| calls.set(0));
     guest_views::HIT.with(|hit| hit.set(false));
     guest_views::CALLS.with(|calls| calls.set(0));
     TRANSPORT.with(|transport| *transport.borrow_mut() = Transport::default());
     Runtime {
+        private_shared: false,
+        readonly_only: false,
+        private_failure: None,
         posix_shm: buffer.as_mut_ptr() as Word,
         posix_shm_size: buffer.len(),
         allowed: true,
         denied: None,
+    }
+}
+
+#[test]
+fn bulk_owned_gather_replaces_scalar_requests_and_initializes_only_the_accepted_prefix() {
+    use core::mem::MaybeUninit;
+    for sizes in [vec![20000, 19000], vec![20000, 7, 19000], vec![20000, 7, 19000, 11]] {
+        let sources: Vec<Vec<u8>> = sizes.iter().enumerate()
+            .map(|(i, &n)| vec![i as u8 + 1; n]).collect();
+        let mut bases = vec![0];
+        bases.extend(sources.iter().map(|v| v.as_ptr() as Word));
+        // This unused invalid trailing iovec must never be read or validated.
+        bases.push(Word::MAX);
+        let mut lengths = vec![0]; lengths.extend(&sizes); lengths.push(10);
+        let bytes = sizes.iter().sum::<usize>() - 3;
+        let mut destination = vec![MaybeUninit::new(0xcc); bytes + 16];
+        let r = runtime(&mut [0; 65536]);
+        let mut offset = 0;
+        for (&base, &length) in bases.iter().zip(&lengths) {
+            let count = length.min(bytes - offset);
+            copyin_owned(&r, 10, base, &mut destination[8 + offset..8 + offset + count]).unwrap();
+            offset += count;
+            if offset == bytes { break; }
+        }
+        let scalar = TRANSPORT.with(|t| t.borrow().calls.len());
+        assert_eq!(scalar, sizes.len());
+        TRANSPORT.with(|t| *t.borrow_mut() = Transport::default());
+        destination.fill(MaybeUninit::new(0xcc));
+        assert_eq!(copyin_owned_gather(&r, 10, &bases, &lengths,
+            &mut destination[8..8 + bytes]), Some(Ok(())));
+        TRANSPORT.with(|t| {
+            let t = t.borrow(); assert_eq!(t.batches, 1); assert_eq!(t.calls.len(), sizes.len());
+            let mut offset = 0;
+            for (i, call) in t.calls.iter().enumerate() {
+                assert_eq!(call.0, false); assert_eq!(call.1, 10);
+                assert_eq!(call.2, bases[i + 1]);
+                assert_eq!(call.3, destination[8 + offset..].as_ptr() as Word);
+                offset += call.4;
+            }
+            assert_eq!(offset, bytes);
+        });
+        let expected: Vec<u8> = sources.iter().flatten().copied().take(bytes).collect();
+        let actual: Vec<u8> = destination.iter().map(|b| unsafe { b.assume_init() }).collect();
+        assert_eq!(&actual[8..8 + bytes], expected);
+        assert!(actual[..8].iter().chain(&actual[8 + bytes..]).all(|b| *b == 0xcc));
+        assert_eq!(guest_views::CALLS.with(|n| n.get()), sizes.len());
+        eprintln!("bulk {} bytes/{} fields: scalar requests={} vector requests=1", bytes, sizes.len(), scalar);
+    }
+}
+
+#[test]
+fn bulk_owned_gather_keeps_leases_and_scalar_fallback_for_ineligible_shapes() {
+    use core::mem::MaybeUninit;
+    let mut storage = vec![MaybeUninit::new(0xa5); 65537];
+    let r = runtime(&mut [0; 65536]);
+    for (bases, lengths, bytes) in [
+        (vec![1, 2], vec![16384, 16384], 32768),
+        (vec![1], vec![40000], 40000),
+        (vec![1, 2, 3, 4, 5], vec![20000, 1, 1, 1, 1], 20004),
+        (vec![1, 2], vec![40000, 40000], 65537),
+        (vec![1, Word::MAX - 3], vec![20000, 10], 20010),
+        (vec![1, 0], vec![20000, 10], 20010),
+        (vec![1, 2], vec![20000], 20000),
+        (vec![1, 2], vec![20000, 1], 20002),
+        (vec![1, 2], vec![20000, 1], 0),
+    ] {
+        assert_eq!(copyin_owned_gather(&r, 10, &bases, &lengths, &mut storage[..bytes]), None);
+    }
+    TRANSPORT.with(|t| { assert!(t.borrow().calls.is_empty()); assert_eq!(t.borrow().batches, 0); });
+    assert!(storage.iter().all(|b| unsafe { b.assume_init() } == 0xa5));
+    assert_eq!(guest_views::CALLS.with(|n| n.get()), 0);
+}
+
+#[test]
+fn bulk_owned_gather_checks_all_logical_sources_and_keeps_failed_input_private() {
+    let sources = [vec![0x31u8; 20000], vec![0x42u8; 19000]];
+    let bases = sources.each_ref().map(|s| s.as_ptr() as Word);
+    let lengths = [20000, 19000];
+    for logical in [true, false] {
+        let mut r = runtime(&mut [0; 65536]);
+        let mut owned: Vec<u8> = Vec::with_capacity(39000);
+        if logical { r.denied = Some(bases[1]); }
+        else { TRANSPORT.with(|t| {
+            let mut t = t.borrow_mut(); t.denied = Some(bases[1] + 7); t.partial_fault = true;
+        }); }
+        assert_eq!(copyin_owned_gather(&r, 10, &bases, &lengths,
+            &mut owned.spare_capacity_mut()[..39000]), Some(Err(EFAULT)));
+        assert!(owned.is_empty());
+        TRANSPORT.with(|t| {
+            let t = t.borrow(); assert_eq!(t.batches, usize::from(!logical));
+            assert_eq!(t.calls.len(), if logical { 0 } else { 2 });
+        });
+        // Only the transport case initialized this first field, but neither
+        // failure changes the owner's public length or private-write state.
+        if !logical {
+            let spare = owned.spare_capacity_mut();
+            assert!(spare[..20000].iter().all(|b| unsafe { b.assume_init() } == 0x31));
+            assert!(spare[20000..20007].iter().all(|b| unsafe { b.assume_init() } == 0x42));
+        }
+        assert!(private_memory::PREPARED.with(|p| p.borrow().is_empty()));
+    }
+}
+
+#[test]
+fn cached_owned_vectors_skip_preparation_and_keep_fault_prefix_on_misses() {
+    for cached in [false, true] {
+        for denied in [false, true] {
+            let mut scratch = [0u8; 32];
+            let mut output = [0u8; 32];
+            let target = output.as_mut_ptr() as Word;
+            let mut r = runtime(&mut scratch);
+            r.private_shared = true;
+            r.private_failure = Some(target);
+            r.denied = denied.then_some(target + 8);
+            guest_views::WRITE_HIT.with(|hit| hit.set(true));
+            guest_views::CACHED_WRITE_HIT.with(|hit| hit.set(cached));
+            let buffers = [(target, &[1u8; 8][..]), (target + 8, &[2u8; 8][..])];
+            let result = copyout_owned_many(&r, 7, &buffers);
+            assert_eq!(result, if cached && !denied { Ok(()) } else { Err(EFAULT) });
+            if cached {
+                assert_eq!(&output[..8], &[1; 8]);
+                assert_eq!(&output[8..16], &[if denied {0} else {2}; 8]);
+                private_memory::PREPARED.with(|p| assert!(p.borrow().is_empty()));
+                private_memory::INVALIDATIONS.with(|n| assert!(n.get() > 0));
+            } else { assert_eq!(output, [0; 32]); }
+            TRANSPORT.with(|t| assert!(t.borrow().calls.is_empty()));
+        }
+    }
+}
+
+#[test]
+fn cached_writable_copy_skips_preparation_but_misses_and_permissions_do_not() {
+    for scratch in [false, true] {
+        for cached in [false, true] {
+            let mut source = [37u8; 32];
+            let mut output = [0u8; 32];
+            let target = output.as_mut_ptr() as Word;
+            let mut r = runtime(&mut source);
+            r.private_shared = true;
+            r.private_failure = Some(target);
+            guest_views::WRITE_HIT.with(|hit| hit.set(true));
+            guest_views::CACHED_WRITE_HIT.with(|hit| hit.set(cached));
+            let result = if scratch {
+                copyout_from(&r, 7, target, r.posix_shm, 32)
+            } else { copyout_owned(&r, 7, target, &source) };
+            assert_eq!(result, if cached { Ok(()) } else { Err(EFAULT) });
+            assert_eq!(output, [if cached {37} else {0}; 32]);
+            private_memory::PREPARED.with(|p| assert_eq!(p.borrow().len(), usize::from(!cached)));
+            private_memory::INVALIDATIONS.with(|n| assert!(n.get() > 0));
+            r.allowed = false;
+            assert_eq!(copyout_owned(&r, 7, target, &[99; 32]), Err(EFAULT));
+            assert_eq!(output, [if cached {37} else {0}; 32]);
+        }
     }
 }
 
@@ -556,6 +772,22 @@ fn ordered_copyout_empty_and_zero_length_inputs_retain_scalar_semantics() {
 }
 
 #[test]
+fn three_select_words_use_one_checked_batch_and_keep_overlapping_write_order() {
+    for overlap in [false, true] {
+        let mut scratch = [0xabu8; 32];
+        let runtime = runtime(&mut scratch);
+        let mut output = [0x99u8; 32]; let base = output.as_mut_ptr() as Word;
+        let values = [1u64.to_ne_bytes(), 2u64.to_ne_bytes(), 4u64.to_ne_bytes()];
+        let fields = core::array::from_fn::<_, 3, _>(|i| (base + if overlap { i * 3 } else { i * 8 }, &values[i][..]));
+        assert_eq!(copyout_owned_many(&runtime, 2, &fields), Ok(()));
+        let mut expected = [0x99u8; 32];
+        for i in 0..3 { let start = if overlap { i * 3 } else { i * 8 }; expected[start..start + 8].copy_from_slice(&values[i]); }
+        assert_eq!(output, expected); assert_eq!(scratch, [0xab; 32]);
+        TRANSPORT.with(|t| { let t = t.borrow(); assert_eq!(t.batches, 1); assert_eq!(t.calls.len(), 3); });
+    }
+}
+
+#[test]
 fn owned_vector_hit_avoids_transport_and_scratch_without_writing_gaps() {
     let mut scratch = [0xabu8; 32];
     let runtime = runtime(&mut scratch);
@@ -829,4 +1061,100 @@ fn scalar_output_fallback_rejects_null_and_overflow_without_later_stores() {
     );
     assert_eq!(guest, [7, 99, 99]);
     write_guest_u32s(&mut runtime, 2, [], []).unwrap();
+}
+
+#[test]
+fn cow_copyout_prepares_scalar_owned_and_scratch_destinations_before_stores() {
+    for owned in [false, true] {
+        let mut scratch = [0x42u8; 32];
+        let mut r = runtime(&mut scratch);
+        r.private_shared = true;
+        let mut output = [0x99u8; 16];
+        let target = output.as_mut_ptr() as Word;
+        if owned { copyout_owned(&r, 1, target, &scratch[..16]).unwrap(); }
+        else { copyout_from(&r, 1, target, r.posix_shm, 16).unwrap(); }
+        assert_eq!(output, [0x42; 16]);
+        private_memory::PREPARED.with(|p| assert_eq!(*p.borrow(), [(target, 16)]));
+        output.fill(0x99);
+        r.private_failure = Some(target);
+        assert_eq!(copyout_owned(&r, 1, target, &[0x55; 16]), Err(EFAULT));
+        assert_eq!(output, [0x99; 16]);
+    }
+}
+
+#[test]
+fn readonly_alias_copyout_uses_the_checked_guard_and_keeps_permission_fault_prefixes() {
+    for hit in [false, true] {
+        let mut scratch = [0x42u8; 32]; let mut r = runtime(&mut scratch);
+        r.private_shared = true; r.readonly_only = true;
+        let mut output = [0x99u8; 32]; let base = output.as_mut_ptr() as Word;
+        r.private_failure = Some(base);
+        guest_views::WRITE_HIT.with(|value| value.set(hit));
+        copyout_owned(&r, 1, base, &scratch[..8]).unwrap();
+        copyout_from(&r, 1, base + 8, r.posix_shm, 8).unwrap();
+        assert_eq!(&output[..16], &[0x42; 16]);
+        copyout_owned_many(&r, 1, &[(base, &[7; 8]), (base + 8, &[8; 8])]).unwrap();
+        private_memory::INVALIDATIONS.with(|count| assert!(count.get() > 0));
+        output.fill(0x99); r.denied = Some(base + 8);
+        assert_eq!(copyout_owned_many(&r, 1, &[(base, &[7; 8]), (base + 8, &[8; 8])]), Err(EFAULT));
+        assert_eq!(&output[..8], &[7; 8]); assert_eq!(&output[8..], &[0x99; 24]);
+        private_memory::PREPARED.with(|p| assert!(p.borrow().is_empty()));
+    }
+}
+
+#[test]
+fn cow_vector_copyout_keeps_committed_prefix_when_a_later_detach_fails() {
+    for owned in [false, true] {
+        let mut scratch = [0u8; 32];
+        let mut r = runtime(&mut scratch);
+        r.private_shared = true;
+        let mut output = [99u32; 2049];
+        let base = output.as_mut_ptr() as Word;
+        r.private_failure = Some(base + 4096);
+        let bytes = [7u32.to_ne_bytes(), 8u32.to_ne_bytes(), 9u32.to_ne_bytes()];
+        let fields = core::array::from_fn::<_, 3, _>(|i| (base + i * 4096, bytes[i].as_slice()));
+        let transfers = fields.map(|(target, source)| ProcessMemoryTransfer {
+            target, local: source.as_ptr() as Word, bytes: source.len(),
+        });
+        let result = if owned { copyout_owned_many(&r, 1, &fields) }
+            else { copyout_many(&r, 1, &transfers) };
+        assert_eq!(result, Err(EFAULT));
+        assert_eq!((output[0], output[1024], output[2048]), (7, 99, 99));
+        private_memory::PREPARED.with(|p| assert_eq!(*p.borrow(), [(base, 4), (base + 4096, 4)]));
+        TRANSPORT.with(|t| assert_eq!(t.borrow().batches, 0));
+    }
+}
+
+#[test]
+fn cow_owned_fields_on_one_page_prepare_once_and_keep_overlapping_store_order() {
+    #[repr(align(4096))]
+    struct Page([u32; 1024]);
+    for hit in [false, true] {
+        let mut scratch=[0u8;32]; let mut r=runtime(&mut scratch); r.private_shared=true;
+        let mut output=Box::new(Page([99;1024])); let base=output.0.as_mut_ptr() as Word;
+        guest_views::WRITE_HIT.with(|v| v.set(hit));
+        let values=[7u32.to_ne_bytes(),8u32.to_ne_bytes(),9u32.to_ne_bytes()];
+        let fields=[(base+12,values[0].as_slice()),(base+4,values[1].as_slice()),(base+12,values[2].as_slice())];
+        copyout_owned_many(&r,1,&fields).unwrap();
+        assert_eq!((output.0[0],output.0[1],output.0[3]),(99,8,9));
+        private_memory::PREPARED.with(|p| { std::println!("COW-OWNED-PAGE hit={hit} preparations={}",p.borrow().len());assert_eq!(*p.borrow(),[(base+4,12)]); });
+        TRANSPORT.with(|t| assert_eq!(t.borrow().batches,usize::from(!hit)));
+    }
+}
+
+#[test]
+fn same_page_cow_preparation_failure_and_denied_field_preserve_store_prefix() {
+    #[repr(align(4096))]
+    struct Page([u32;1024]);
+    for denied in [false,true] {
+        let mut scratch=[0u8;32];let mut r=runtime(&mut scratch);r.private_shared=true;
+        let mut output=Box::new(Page([99;1024]));let base=output.0.as_mut_ptr() as Word;
+        let bytes=[7u32.to_ne_bytes(),8u32.to_ne_bytes(),9u32.to_ne_bytes()];
+        let fields=[(base+4,bytes[0].as_slice()),(base+8,bytes[1].as_slice()),(base+12,bytes[2].as_slice())];
+        if denied {r.denied=Some(base+8);} else {r.private_failure=Some(base+4);}
+        assert_eq!(copyout_owned_many(&r,1,&fields),Err(EFAULT));
+        assert_eq!((output.0[1],output.0[2],output.0[3]),(if denied {7} else {99},99,99));
+        private_memory::PREPARED.with(|p| assert_eq!(*p.borrow(),[(base+4,if denied {4} else {12})]));
+        TRANSPORT.with(|t| assert_eq!(t.borrow().batches,0));
+    }
 }

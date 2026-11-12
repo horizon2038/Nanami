@@ -64,6 +64,89 @@ mod mapping_table;
 use mapping_table::MappingTable;
 
 #[test]
+fn reservation_history_is_shared_monotonic_and_independent_after_fork() {
+    let mut table = MappingTable::EMPTY;
+    assert_eq!(table.reservation_cursor(), 0);
+    table.advance_reservation_cursor(0x1000);
+    assert_eq!(table.reservation_cursor(), 0);
+    assert!(table.push(ProcessMapping { base: 0x1000, size: 0x1000, prot: 1 }));
+    let generation = table.generation();
+    table.advance_reservation_cursor(0x400000);
+    assert_eq!(table.generation(), generation);
+    let alias = table;
+    alias.advance_reservation_cursor(0x600000);
+    table.advance_reservation_cursor(0x200000);
+    assert_eq!(table.reservation_cursor(), 0x600000);
+    let mut fork = MappingTable::EMPTY;
+    assert!(fork.initialize_from(table));
+    assert_eq!(fork.reservation_cursor(), 0x600000);
+    fork.advance_reservation_cursor(0x800000);
+    assert_eq!(table.reservation_cursor(), 0x600000);
+    table.remove(0);
+    table.clear();
+    assert_eq!(alias.reservation_cursor(), 0x600000);
+    table.release();
+    assert_eq!(table.reservation_cursor(), 0);
+    assert!(table.ensure());
+    assert_eq!(table.reservation_cursor(), 0);
+    table.release();
+    fork.release();
+}
+
+#[test]
+fn permission_interval_proofs_skip_scans_and_stop_at_denied_neighbors() {
+    let mut table = MappingTable::EMPTY;
+    for index in 0..256 {
+        assert!(table.push(ProcessMapping { base: 0x1000 + index * 0x1000, size: 0x1000, prot: 1 }));
+    }
+    assert!(table.push(ProcessMapping { base: 0xa00000, size: 0x1000, prot: 0 }));
+    MappingTable::take_access_entry_visits();
+    assert!(table.access_allowed(0x800000, 0x800010, 2));
+    assert_eq!(MappingTable::take_access_entry_visits(), 257);
+    for offset in 0..10_000 {
+        let base = 0x700000 + offset;
+        assert!(table.access_allowed(base, base + 64, 2));
+    }
+    assert_eq!(MappingTable::take_access_entry_visits(), 0);
+    assert!(!table.access_allowed(0x100fff, 0x101001, 2));
+    assert!(!table.access_allowed(0x9fffff, 0xa00001, 2));
+    // Independent R/W proofs also serve combined requests. Acquiring a tighter
+    // combined proof may reduce cache coverage, never widen permission.
+    assert!(table.access_allowed(0x800000, 0x800008, 1));
+    MappingTable::take_access_entry_visits();
+    assert!(table.access_allowed(0x800000, 0x800008, 3));
+    assert_eq!(MappingTable::take_access_entry_visits(), 0);
+    assert!(!table.access_allowed(0x1000, 0x1008, 3));
+    table.release();
+}
+
+#[test]
+fn shared_permission_proofs_expire_on_mutation_and_do_not_cross_fork_or_reuse() {
+    let mut table = MappingTable::EMPTY;
+    assert!(table.push(ProcessMapping { base: 0x1000, size: 0x1000, prot: 3 }));
+    assert!(table.push(ProcessMapping { base: 0x8000, size: 0x1000, prot: 0 }));
+    let alias = table;
+    assert!(alias.access_allowed(0x1000, 0x1008, 2));
+    let mut fork = MappingTable::EMPTY;
+    assert!(fork.initialize_from(table));
+    table.remove(0);
+    assert!(table.push(ProcessMapping { base: 0x1000, size: 0x1000, prot: 1 }));
+    assert!(!alias.access_allowed(0x1000, 0x1008, 2));
+    assert!(fork.access_allowed(0x1000, 0x1008, 2));
+    table.clear();
+    // Untracked holes retain their ordinary Alpha checked-copy validation.
+    assert!(alias.access_allowed(0x8000, 0x8008, 7));
+    assert!(table.push(ProcessMapping { base: 0x8000, size: 0x1000, prot: 0 }));
+    assert!(!alias.access_allowed(0x8000, 0x8008, 7));
+    table.release();
+    assert!(table.push(ProcessMapping { base: 0x1000, size: 0x1000, prot: 0 }));
+    assert!(!table.access_allowed(0x1000, 0x1008, 2));
+    assert!(fork.access_allowed(0x1000, 0x1008, 2));
+    table.release();
+    fork.release();
+}
+
+#[test]
 fn permission_index_matches_full_scan_through_shared_mutations_and_fork() {
     let mut table = MappingTable::EMPTY;
     let alias = table;
@@ -1022,6 +1105,77 @@ fn reference_coverage(r: &Runtime, base: Word, size: Word, uniform: bool) -> (Op
         Some(if uniform { prot? } else { 0 })
     })();
     (result, visits)
+}
+
+#[test]
+fn protection_preflight_walks_coverage_once_without_allocation_or_mutation() {
+    for count in [1, 8, 64, 128, ALTER_PROCESS_MAPPING_MAX] {
+        let mut r = Runtime::new();
+        for index in 0..count { assert!(r.process.mappings.push(ProcessMapping { base: 0x1000 + index * 4096, size: 4096, prot: 3 })); }
+        for prot in [1, 3] {
+            mappings::take_coverage_visits();
+            assert!(r.has_mapping(1, 0x1000, count * 4096));
+            let old = if r.mapping_prot(1, 0x1000, count * 4096) == Some(prot) { Some(false) }
+                else { r.can_protect_mapping(1, 0x1000, count * 4096).then_some(true) };
+            let old_visits = mappings::take_coverage_visits();
+            let generation = r.process.mappings.generation(); let allocations = ALLOCATION_CALLS.with(Cell::get);
+            assert_eq!(r.mapping_protection_needed(1, 0x1000, count * 4096, prot), old);
+            assert_eq!(ALLOCATION_CALLS.with(Cell::get), allocations);
+            assert_eq!(r.process.mappings.generation(), generation);
+            assert_eq!(mappings::take_coverage_visits(), count);
+            assert_eq!(old_visits, count * if prot == 3 { 2 } else { 3 });
+            println!("PROTECT-PREFLIGHT pages={count} prot={prot} visits={old_visits}->{count}");
+        }
+    }
+}
+
+#[test]
+fn protection_preflight_matches_separate_queries_through_unsorted_overlaps_and_overflow() {
+    let mut r = Runtime::new(); let mut random = 0x5fd92817u64;
+    for step in 0..1000 {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        if step % 3 == 0 && !r.process.mappings.is_empty() { r.process.mappings.remove((random >> 32) as usize % r.process.mappings.len()); }
+        if step % 71 == 0 { r.process.mappings.clear(); }
+        if r.process.mappings.len() < 64 {
+            let overflow = step % 37 == 0;
+            assert!(r.process.mappings.push(ProcessMapping {
+                base: if overflow { Word::MAX - 2 } else { 0x1000 + ((random >> 32) as usize % 32) * 4096 },
+                size: if overflow { 4 } else { ((random >> 24) as usize % 8) * 4096 },
+                prot: (random >> 16) as usize & 7,
+            }));
+        }
+        for offset in 0..40 {
+            let base = offset * 4096 + step % 3; let size = step % 9 * 4096 + step % 2;
+            for prot in [0, 1, 3, 7] {
+                let old = if !r.has_mapping(1, base, size) { None }
+                    else if r.mapping_prot(1, base, size) == Some(prot) { Some(false) }
+                    else { r.can_protect_mapping(1, base, size).then_some(true) };
+                assert_eq!(r.mapping_protection_needed(1, base, size, prot), old);
+            }
+        }
+    }
+}
+
+#[test]
+fn protected_publication_matches_legacy_remove_add_and_keeps_noop_capacity_rules() {
+    for sample in 0..160 {
+        let mut actual = Runtime::new(); let mut expected = Runtime::new();
+        for i in 0..12 {
+            let mapping = ProcessMapping { base: 0x1000 + ((i * 7 + sample) % 13) * 4096, size: (i % 4 + 1) * 4096, prot: (i + sample) & 7 };
+            assert!(actual.process.mappings.push(mapping)); assert!(expected.process.mappings.push(mapping));
+        }
+        let base = 0x1000 + sample % 14 * 4096; let size = (sample % 7 + 1) * 4096; let prot = sample & 7;
+        let old = if expected.mapping_prot(1, base, size) == Some(prot) { true }
+            else if !expected.can_protect_mapping(1, base, size) { false }
+            else { expected.remove_mapping(1, base, size) && expected.add_mapping(1, base, size, prot) };
+        assert_eq!(actual.protect_mapping(1, base, size, prot), old);
+        assert_eq!(&*actual.process.mappings, &*expected.process.mappings);
+    }
+    let mut r = Runtime::new();
+    assert!(r.process.mappings.push(ProcessMapping { base: 4096, size: 4096, prot: 3 }));
+    assert!(r.process.mappings.push(ProcessMapping { base: Word::MAX - 2, size: 4, prot: 1 }));
+    assert_eq!(r.mapping_protection_needed(1, 4096, 4096, 3), Some(false));
+    assert_eq!(r.mapping_protection_needed(1, 4096, 4096, 1), None);
 }
 
 #[test]

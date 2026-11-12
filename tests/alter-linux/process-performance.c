@@ -91,6 +91,30 @@ static int fragmented_fork_performance(void) {
     }
     return 0;
 }
+static int private_heap_fork_performance(void) {
+    const word pages = 256, bytes = pages * 4096;
+    long base = linux_call(9, 0, bytes, 3, 0x22, -1UL, 0);
+    if (base < 0) { return 50; }
+    volatile unsigned char *p = (void *)base;
+    for (word i = 0; i < pages; ++i) { p[i * 4096] = (unsigned char)i; }
+    for (word sample = 0; sample < 3; ++sample) {
+        word begin = now();
+        for (word i = 0; i < 8; ++i) {
+            long child = call(57, 0, 0, 0, 0);
+            if (child < 0) { return 51; }
+            if (child == 0) { call(60, 0, 0, 0, 0); return 52; }
+            int status = -1;
+            if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 53; }
+        }
+        report("PROCESS-PERF fork-private-1m-8-ns=", now() - begin);
+        for (word i = 0; i < pages; ++i) {
+            if (p[i * 4096] != (unsigned char)i) { return 54; }
+        }
+    }
+    if (call(11, base, bytes, 0, 0) != 0) { return 55; }
+    return 0;
+}
+
 int test_main(void) {
     /* Isolate syscall/copyout work before fork/exec changes the process tree. */
     int controls = syscall_controls();
@@ -120,6 +144,8 @@ int test_main(void) {
     }
     int fragmented = fragmented_fork_performance();
     if (fragmented != 0) { return fragmented; }
+    int private_heap = private_heap_fork_performance();
+    if (private_heap != 0) { return private_heap; }
     static const char pass[] = "PROCESS-PERFORMANCE-PASS\n";
     call(1, 1, (word)pass, sizeof(pass) - 1, 0);
     return 0;

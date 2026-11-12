@@ -21,13 +21,40 @@ pub(super) fn present_shared_framebuffer(
     position: Word,
     size: Word,
 ) -> Result<(Word, usize), RequestError> {
+    present_shared_framebuffers(display, owner_pid, core::iter::once((position, size)))
+}
+
+pub(super) fn present_shared_framebuffers(
+    display: &mut DisplayState,
+    owner_pid: Word,
+    mut rects: impl Iterator<Item = (Word, Word)>,
+) -> Result<(Word, usize), RequestError> {
     let shared = display.shared;
     if owner_pid == 0 || shared.owner_pid != owner_pid || shared.local_vaddr == 0 {
         return Err(RequestError::Status(
             nanami_runtime::OS_RESPONSE_PERMISSION_DENIED,
         ));
     }
+    fence(Ordering::Acquire);
+    let mut written = 0;
+    let pixels = rects.try_fold(0, |pixels, (position, size)| {
+        let (area, copied) = copy_shared_framebuffer(display, position, size)?;
+        written += copied;
+        Ok(pixels + area)
+    });
+    // Complete writes from earlier rectangles even if a later copy failed.
+    if written != 0 {
+        complete_framebuffer_writes();
+    }
+    fence(Ordering::Release);
+    pixels.map(|pixels| (pixels, written))
+}
 
+fn copy_shared_framebuffer(
+    display: &mut DisplayState,
+    position: Word,
+    size: Word,
+) -> Result<(Word, usize), RequestError> {
     let x = (position & 0xffff_ffff) as usize;
     let y = ((position >> 32) & 0xffff_ffff) as usize;
     let width = (size & 0xffff_ffff) as usize;
@@ -45,13 +72,12 @@ pub(super) fn present_shared_framebuffer(
         .checked_add((height - 1).saturating_mul(stride))
         .and_then(|last| last.checked_add(row_bytes))
         .ok_or(RequestError::InvalidArgument)?;
-    if end > shared.bytes
+    if end > display.shared.bytes
         || end > display.screen.framebuffer_bytes
         || end > stride.saturating_mul(display.screen.height)
     {
         return Err(RequestError::InvalidArgument);
     }
-    fence(Ordering::Acquire);
     let mut written = 0;
     if x == 0 && row_bytes == stride {
         written = copy_to_hardware(display, first, row_bytes * height);
@@ -60,10 +86,6 @@ pub(super) fn present_shared_framebuffer(
             written += copy_to_hardware(display, first + row * stride, row_bytes);
         }
     }
-    if written != 0 {
-        complete_framebuffer_writes();
-    }
-    fence(Ordering::Release);
     // Preserve PRESENT's pixel count: it acknowledges the requested region,
     // even if that region was already on screen.
     Ok((width * height, written))

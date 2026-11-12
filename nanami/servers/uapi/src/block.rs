@@ -10,6 +10,10 @@ pub const BLOCK_DEVICE_REQUEST_FLUSH: Word = 0x9004;
 
 pub const BLOCK_DEVICE_CONTROL_ATTACH_SHARED_MEMORY: Word = 1;
 pub const BLOCK_DEVICE_CONTROL_GET_INFO: Word = 2;
+/// Optional, provider-owned DMA read window. The caller must ignore the
+/// affected bytes after a failed read, including partially transferred data.
+/// Successful reads and ordinary writes keep their existing completion rules.
+pub const BLOCK_DEVICE_CONTROL_ATTACH_DMA_READ_MEMORY: Word = 3;
 
 pub const BLOCK_DEVICE_DEFAULT_SHM_BYTES: Word = 0x10000;
 pub const BLOCK_DEVICE_BLOCK_SIZE: Word = 1024;

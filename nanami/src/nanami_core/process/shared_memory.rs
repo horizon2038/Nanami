@@ -16,15 +16,21 @@ enum ReferenceUnit {
     Page,
     PoolExtent,
     PoolPage,
+    SourceExtent,
+    SourcePage,
 }
 
 impl SharedMemoryReservation {
     pub fn has_page_references(self) -> bool {
-        matches!(self.references, ReferenceUnit::Page | ReferenceUnit::PoolPage)
+        matches!(self.references, ReferenceUnit::Page | ReferenceUnit::PoolPage | ReferenceUnit::SourcePage)
     }
 
     pub fn owns_frame_caps(self) -> bool {
         matches!(self.references, ReferenceUnit::Extent | ReferenceUnit::Page)
+    }
+
+    pub fn immutable_source(self) -> bool {
+        matches!(self.references, ReferenceUnit::SourceExtent | ReferenceUnit::SourcePage)
     }
 }
 
@@ -154,12 +160,38 @@ impl ProcessManager {
     pub fn reserve_owned_pool_memory(
         &mut self, pid: usize, pages: usize, max_slots: usize,
     ) -> Result<SharedMemoryReservation, CapabilityError> {
-        let reservation = self.reserve_shared_memory(pid, pages, max_slots)?;
+        self.reserve_owned_pool_memory_at(pid, pages, max_slots, 0)
+    }
+
+    pub fn reserve_owned_pool_memory_at(
+        &mut self, pid: usize, pages: usize, max_slots: usize, address: usize,
+    ) -> Result<SharedMemoryReservation, CapabilityError> {
+        let reservation = self.reserve_shared_memory_at(pid, pages, max_slots, address)?;
         let owner = self.memory_owner_pid(pid);
         let stored = self.shared_memory.get_mut(&owner).unwrap().active
             .get_mut(&reservation.base_va).unwrap();
         stored.references = ReferenceUnit::PoolExtent;
         Ok(*stored)
+    }
+
+    pub fn mark_immutable_memory_source(&mut self, pid: usize,
+        reservation: SharedMemoryReservation) -> Result<SharedMemoryReservation, CapabilityError> {
+        let owner = self.memory_owner_pid(pid);
+        let stored = self.shared_memory.get_mut(&owner)
+            .and_then(|space| space.active.get_mut(&reservation.base_va))
+            .filter(|stored| **stored == reservation && stored.references == ReferenceUnit::PoolExtent)
+            .ok_or(CapabilityError::IllegalOperation)?;
+        stored.references = ReferenceUnit::SourceExtent;
+        Ok(*stored)
+    }
+
+    pub fn immutable_source_overlapping_range(&self, pid: usize, base: usize, bytes: usize) -> bool {
+        let Some(end) = base.checked_add(bytes) else { return false; };
+        if bytes == 0 { return false; }
+        let Some(space) = self.shared_memory.get(&self.memory_owner_pid(pid)) else { return false; };
+        space.active.range(..end).rev()
+            .take_while(|(_, r)| r.base_va + r.page_count * USER_PAGE_SIZE > base)
+            .any(|(_, r)| r.immutable_source())
     }
 
     pub fn reserve_shared_memory_at(
@@ -341,7 +373,8 @@ impl ProcessManager {
             .active
             .get_mut(&reservation.base_va)
             .unwrap()
-            .references = if reservation.owns_frame_caps() { ReferenceUnit::Page } else { ReferenceUnit::PoolPage };
+            .references = if reservation.immutable_source() { ReferenceUnit::SourcePage }
+                else if reservation.owns_frame_caps() { ReferenceUnit::Page } else { ReferenceUnit::PoolPage };
         Ok(())
     }
 

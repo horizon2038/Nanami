@@ -9,6 +9,10 @@ pub const DESTROY: Word = 0x6003;
 pub const FILL: Word = 0x6004;
 pub const COPY: Word = 0x6005;
 pub const PRESENT: Word = 0x6006;
+/// Surface ID followed by one to three packed rectangles. Unused trailing
+/// words are zero. Advertised via DISPLAY_CAP_GPU_PRESENT_BATCH.
+pub const PRESENT_BATCH: Word = 0x6007;
+pub const MAX_PRESENT_BATCH: usize = 3;
 pub const CAP_FILL: Word = 1;
 pub const CAP_COPY: Word = 2;
 pub const CAP_PRESENT: Word = 4;
@@ -50,7 +54,7 @@ impl Layout {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
     pub x: Word,
     pub y: Word,
@@ -80,6 +84,19 @@ impl Rect {
     }
     pub fn size(self) -> Word {
         self.width | (self.height << 32)
+    }
+    pub fn packed(self, layout: Layout) -> Option<Word> {
+        (self.inside(layout) && (self.x | self.y | self.width | self.height) <= u16::MAX as Word)
+            .then(|| self.x | (self.y << 16) | (self.width << 32) | (self.height << 48))
+    }
+    pub fn decode_packed(layout: Layout, word: Word) -> Option<Self> {
+        let rect = Self {
+            x: word & 0xffff,
+            y: (word >> 16) & 0xffff,
+            width: (word >> 32) & 0xffff,
+            height: word >> 48,
+        };
+        rect.inside(layout).then_some(rect)
     }
     pub fn overlaps(self, other: Self) -> bool {
         self.x < other.x + other.width

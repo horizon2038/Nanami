@@ -69,12 +69,14 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         nanami_client::posix::posix_attach_shared_memory(posix_port, ALTER_DEFAULT_SHM_BYTES)
             .map_err(|e| log_error("[alter] posix shm attach failed: ", e))?;
     let (posix_direct_shm, posix_direct_shm_size) =
-        nanami_client::posix::posix_attach_direct_io(posix_port, ALTER_DEFAULT_SHM_BYTES)
+        nanami_client::posix::posix_attach_direct_io(posix_port, ALTER_LINUX_FILE_IO_BYTES)
             .unwrap_or((0, 0));
 
     nanami_client::registry::register_service(SERVICE_NAME)
         .map_err(|e| log_error("[alter] service register failed: ", e))?;
     nanami_runtime::print!("[alter] service registered: alter-linux\n");
+    nanami_runtime::println!("[alter] file-window-bytes={} io-quantum={}",
+        posix_direct_shm_size, ALTER_DEFAULT_SHM_BYTES);
 
     let service_port = nanami_runtime::ipc::process_slot_descriptor(SLOT_SERVICE_PORT);
     let mut runtime = Runtime::new(

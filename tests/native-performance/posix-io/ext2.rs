@@ -34,6 +34,8 @@ struct FileHandle {
     inode: u32,
     size: u32,
     mode: u16,
+    read_grant: read_grants::Grant,
+    cursor: Option<Word>,
 }
 impl FileHandle {
     const EMPTY: Self = Self {
@@ -43,13 +45,20 @@ impl FileHandle {
         inode: 0,
         size: 0,
         mode: 0,
+        read_grant: read_grants::Grant::EMPTY,
+        cursor: None,
     };
 }
 struct Inode {
     size: u32,
 }
+struct MappedPages(bool);
+impl MappedPages {
+    fn pins(&self, _: u32) -> bool { self.0 }
+}
 struct Ext2Runtime {
-    handles: [FileHandle; 1],
+    next_read_grant: Word,
+    handles: [FileHandle; 2],
     delegated_sessions: [DelegatedSession; 1],
     session: Option<ClientSession>,
     written: Vec<u8>,
@@ -58,10 +67,29 @@ struct Ext2Runtime {
     error: Option<Word>,
     frozen_by: Option<Word>,
     socket_reclaims: usize,
+    file_versions: file_versions::Versions,
+    mapped_pages: MappedPages,
+    snapshot_bytes: Option<Vec<u8>>,
+    snapshot_reads: usize,
 }
 
+#[path = "../../../nanami/servers/core-services/ext2-server/src/file_versions.rs"]
+mod file_versions;
 #[path = "../../../nanami/servers/core-services/ext2-server/src/file_io.rs"]
 mod file_io;
+#[path = "../../../nanami/servers/core-services/ext2-server/src/read_grants.rs"]
+mod read_grants;
+#[path = "../../../nanami/servers/core-services/ext2-server/src/file_cursor.rs"]
+mod file_cursor;
+#[path = "ext2_cursor.rs"]
+mod cursor_tests;
+
+fn file_stat(runtime: &mut Ext2Runtime, file: FileHandle, flags: Word) -> (Word, Word, Word) {
+    let identity = if flags == vfs::VFS_STAT_INCLUDE_VERSION {
+        file_io::versioned_file_identity(runtime, file)
+    } else { file.inode as Word };
+    (OS_RESPONSE_OK, identity, (file.size as Word) | (vfs::VFS_FILE_TYPE_REGULAR << vfs::VFS_STAT_TYPE_SHIFT))
+}
 
 fn map_request_error_to_status(error: RequestError) -> Word {
     match error {
@@ -125,7 +153,7 @@ fn find_session(runtime: &Ext2Runtime, pid: Word) -> Option<ClientSession> {
 fn read_inode(runtime: &mut Ext2Runtime, inode: u32) -> Result<Inode, RequestError> {
     assert_eq!(inode, 7);
     runtime.inode_reads += 1;
-    Ok(Inode { size: 0 })
+    Ok(Inode { size: runtime.snapshot_bytes.as_ref().map_or(0, |bytes| bytes.len() as u32) })
 }
 
 fn write_file(
@@ -153,14 +181,21 @@ fn write_file(
 }
 
 fn read_file(
-    _runtime: &mut Ext2Runtime,
-    _session: ClientSession,
-    _inode: Inode,
-    _offset: usize,
-    _len: usize,
-    _out: usize,
+    runtime: &mut Ext2Runtime,
+    session: ClientSession,
+    inode: Inode,
+    offset: usize,
+    len: usize,
+    out: usize,
 ) -> Result<usize, Word> {
-    panic!("unexpected read")
+    let bytes = runtime.snapshot_bytes.as_ref().expect("snapshot read");
+    runtime.snapshot_reads += 1;
+    assert_eq!(inode.size as usize, bytes.len());
+    let len = len.min(bytes.len().saturating_sub(offset));
+    if out.checked_add(len).is_none_or(|end| end > session.shm_size) { return Err(OS_RESPONSE_INVALID_ARGUMENT); }
+    if let Some(error) = runtime.error { return Err(error); }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), (session.shm_local + out) as *mut u8, len); }
+    Ok(len)
 }
 
 fn read_directory(
@@ -177,6 +212,7 @@ fn read_directory(
 
 fn runtime(input: &[u8]) -> Ext2Runtime {
     Ext2Runtime {
+        next_read_grant: 1,
         handles: [FileHandle {
             active: true,
             close_pending: false,
@@ -184,7 +220,9 @@ fn runtime(input: &[u8]) -> Ext2Runtime {
             inode: 7,
             size: 0,
             mode: EXT2_S_IFREG,
-        }],
+            read_grant: read_grants::Grant::EMPTY,
+            cursor: None,
+        }, FileHandle::EMPTY],
         delegated_sessions: [DelegatedSession {
             active: true,
             owner_pid: 10,
@@ -200,6 +238,10 @@ fn runtime(input: &[u8]) -> Ext2Runtime {
         error: None,
         frozen_by: None,
         socket_reclaims: 0,
+        file_versions: file_versions::Versions::new(),
+        mapped_pages: MappedPages(false),
+        snapshot_bytes: None,
+        snapshot_reads: 0,
     }
 }
 
@@ -256,6 +298,110 @@ fn request(delegate: Word, input: Word, len: Word) -> ServiceRequest {
         arg2: len,
         arg3: (delegate << vfs::VFS_DELEGATE_ID_SHIFT) | input,
     }
+}
+
+#[test]
+fn versioned_read_checks_identity_size_and_delegate_before_publishing_bytes() {
+    let mut output = [0xaa; 32];
+    let mut runtime = runtime(&output);
+    runtime.delegated_sessions[0].shm_local = output.as_mut_ptr() as Word;
+    runtime.handles[0].size = 24;
+    runtime.snapshot_bytes = Some((0..24).collect());
+    let file = runtime.handles[0];
+    let identity = file_io::versioned_file_identity(&mut runtime, file);
+    let req = ServiceRequest { code: vfs::VFS_REQUEST_READ_VERSIONED, arg1: identity, ..request(1, 2, 24) };
+    assert_eq!(file_io::handle_read_versioned(ServiceRequest {identifier: 11, ..req}, &mut runtime),
+        (OS_RESPONSE_INVALID_ARGUMENT, 0, 0));
+    runtime.handles[0].owner_pid = 11;
+    assert_eq!(file_io::handle_read_versioned(req, &mut runtime), (OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0));
+    runtime.handles[0].owner_pid = 10;
+    assert_eq!(file_io::handle_read_versioned(ServiceRequest {arg2: 23, ..req}, &mut runtime),
+        (OS_RESPONSE_OK, 0, 0));
+    runtime.mapped_pages.0 = true;
+    assert_eq!(file_io::handle_read_versioned(req, &mut runtime), (OS_RESPONSE_OK, 0, 0));
+    runtime.mapped_pages.0 = false;
+    assert_eq!(runtime.inode_reads, 0);
+    assert_eq!(output, [0xaa; 32]);
+    assert_eq!(file_io::handle_read_versioned(req, &mut runtime), (OS_RESPONSE_OK, 24, identity));
+    assert_eq!(&output[2..26], runtime.snapshot_bytes.as_deref().unwrap());
+    assert_eq!(output[..2], [0xaa; 2]);
+    assert_eq!(output[26..], [0xaa; 6]);
+    runtime.file_versions.invalidate(7);
+    assert_eq!(file_io::handle_read_versioned(req, &mut runtime), (OS_RESPONSE_OK, 0, 0));
+    assert_eq!((runtime.inode_reads, runtime.snapshot_reads), (1, 1));
+}
+
+#[test]
+fn read_grants_bind_owner_peer_delegate_and_never_reuse_a_closed_handle_token() {
+    let mut output = [0xaa; 32];
+    let mut r = runtime(&output);
+    r.delegated_sessions[0].shm_local = output.as_mut_ptr() as Word;
+    assert_eq!(read_grants::issue(&mut r, 0, 11, 1), 0);
+    assert_eq!(read_grants::issue(&mut r, 0, 10, 0), 0);
+    assert_eq!(read_grants::issue(&mut r, 0, 10, 2), 0);
+    let token = read_grants::issue(&mut r, 0, 10, 1);
+    assert_ne!(token, 0);
+    assert_eq!(read_grants::issue(&mut r, 0, 10, 1), token);
+    assert!(read_grants::resolve(&r, 16, token).is_some());
+    for peer in [0, 10, 17] { assert!(read_grants::resolve(&r, peer, token).is_none()); }
+    for case in 0..4 {
+        match case { 0 => r.delegated_sessions[0].active = false,
+            1 => r.delegated_sessions[0].owner_pid = 99,
+            2 => r.delegated_sessions[0].peer_pid = 99,
+            _ => r.handles[0].active = false }
+        assert!(read_grants::resolve(&r, 16, token).is_none());
+        r.delegated_sessions[0].active = true; r.delegated_sessions[0].owner_pid = 10;
+        r.delegated_sessions[0].peer_pid = 16; r.handles[0].active = true;
+    }
+    let mut reopened = r.handles[0]; reopened.read_grant = read_grants::Grant::EMPTY;
+    let req = ServiceRequest { identifier: 10, arg0: 0, ..ServiceRequest::default() };
+    assert_eq!(file_io::handle_close(req, &mut r).0, OS_RESPONSE_OK);
+    assert!(read_grants::resolve(&r, 16, token).is_none());
+    r.handles[0] = reopened;
+    let next = read_grants::issue(&mut r, 0, 10, 1);
+    assert_ne!(next, token); assert!(read_grants::resolve(&r, 16, token).is_none());
+    assert!(read_grants::resolve(&r, 16, next).is_some());
+    r.handles[0].read_grant = read_grants::Grant::EMPTY;
+    r.next_read_grant = Word::MAX;
+    assert_eq!(read_grants::issue(&mut r, 0, 10, 1), 0);
+    assert!(r.handles[0].active);
+}
+
+#[test]
+fn granted_positioned_reads_check_authority_and_bounds_without_changing_an_offset() {
+    let mut output = [0xaa; 32]; let mut r = runtime(&output);
+    r.delegated_sessions[0].shm_local = output.as_mut_ptr() as Word;
+    r.snapshot_bytes = Some((0..24).collect()); r.handles[0].size = 24;
+    let token = read_grants::issue(&mut r, 0, 10, 1);
+    let req = ServiceRequest { identifier: 16, code: vfs::VFS_REQUEST_READ_GRANTED,
+        arg0: token, arg1: 3, arg2: 7, arg3: 5 };
+    assert_eq!(file_io::handle_read_granted(ServiceRequest { identifier: 17, ..req }, &mut r).0, OS_RESPONSE_INVALID_DESCRIPTOR);
+    assert_eq!(r.inode_reads, 0); assert_eq!(output, [0xaa; 32]);
+    assert_eq!(file_io::handle_read_granted(req, &mut r), (OS_RESPONSE_OK, 7, 0));
+    assert_eq!(&output[5..12], &[3,4,5,6,7,8,9]);
+    assert_eq!(&output[..5], &[0xaa; 5]); assert_eq!(&output[12..], &[0xaa; 20]);
+    assert_eq!(file_io::handle_read_granted(ServiceRequest { arg3: Word::MAX, ..req }, &mut r).0, OS_RESPONSE_INVALID_ARGUMENT);
+    assert_eq!(r.writes, 0);
+}
+
+#[test]
+fn granted_versions_remain_fresh_and_frozen_close_revokes_read_authority() {
+    let mut output = [0xaa; 32]; let mut r = runtime(&output);
+    r.delegated_sessions[0].shm_local = output.as_mut_ptr() as Word;
+    r.snapshot_bytes = Some((0..24).collect()); r.handles[0].size = 24;
+    let token = read_grants::issue(&mut r, 0, 10, 1);
+    let stat = ServiceRequest { identifier: 16, arg0: token, arg1: vfs::VFS_STAT_INCLUDE_VERSION, ..ServiceRequest::default() };
+    let identity = file_io::handle_fstat_granted(stat, &mut r).1;
+    let read = ServiceRequest { identifier: 16, arg0: token, arg1: identity, arg2: 24, arg3: 2, ..ServiceRequest::default() };
+    assert_eq!(file_io::handle_read_versioned_granted(read, &mut r), (OS_RESPONSE_OK, 24, identity));
+    output.fill(0xaa); r.file_versions.invalidate(7);
+    assert_ne!(file_io::handle_fstat_granted(stat, &mut r).1, identity);
+    assert_eq!(file_io::handle_read_versioned_granted(read, &mut r), (OS_RESPONSE_OK, 0, 0));
+    assert_eq!(output, [0xaa; 32]);
+    r.frozen_by = Some(10);
+    assert_eq!(file_io::handle_close(ServiceRequest { identifier: 10, arg0: 0, ..ServiceRequest::default() }, &mut r).0, OS_RESPONSE_OK);
+    assert_eq!(file_io::handle_fstat_granted(stat, &mut r).0, OS_RESPONSE_INVALID_DESCRIPTOR);
+    assert_eq!(file_io::handle_read_versioned_granted(read, &mut r).0, OS_RESPONSE_INVALID_DESCRIPTOR);
 }
 
 #[test]

@@ -186,7 +186,11 @@ fn prefix_radix(start: usize, end: usize) -> Option<usize> {
 }
 
 pub(super) fn containing_block(start: usize, end: usize, address: usize) -> Option<(usize, usize)> {
-    for radix in (PAGE_BITS..=PHYSICAL_CHUNK_RADIX).rev() {
+    containing_block_with_ceiling(start, end, address, PHYSICAL_CHUNK_RADIX)
+}
+
+pub(super) fn containing_block_with_ceiling(start: usize, end: usize, address: usize, maximum: usize) -> Option<(usize, usize)> {
+    for radix in (PAGE_BITS..=maximum.min(PHYSICAL_CHUNK_RADIX)).rev() {
         let bytes = 1usize << radix;
         let base = address & !(bytes - 1);
         if base >= start && base.checked_add(bytes).is_some_and(|limit| limit <= end) {

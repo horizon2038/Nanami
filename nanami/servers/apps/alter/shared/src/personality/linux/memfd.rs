@@ -11,11 +11,56 @@ const SEAL_GROW: Word = 4;
 const SEAL_WRITE: Word = 8;
 const SEALS: Word = SEAL_SEAL | SEAL_SHRINK | SEAL_GROW | SEAL_WRITE;
 
-#[cfg(test)]
-static COLLECT_RING_INSPECTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+// Short metadata snapshots must remain stable across mutation/IPC, but need
+// not allocate. The fifth entry spills in order to the usual growing Vec.
+// Copy-only entries keep replacement/drop simple without uninitialized RAM.
+enum Snapshot<T: Copy> {
+    Empty,
+    Inline { rows: [T; 4], len: usize },
+    Heap(Vec<T>),
+}
+
+impl<T: Copy> Snapshot<T> {
+    fn push(&mut self, value: T) {
+        match self {
+            Self::Empty => *self = Self::Inline { rows: [value; 4], len: 1 },
+            Self::Inline { rows, len } if *len < rows.len() => {
+                rows[*len] = value;
+                *len += 1;
+            }
+            Self::Inline { rows, .. } => {
+                let mut heap = Vec::with_capacity(8);
+                heap.extend_from_slice(rows);
+                heap.push(value);
+                *self = Self::Heap(heap);
+            }
+            Self::Heap(rows) => rows.push(value),
+        }
+    }
+}
+
+impl<T: Copy> core::iter::FromIterator<T> for Snapshot<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut result = Self::Empty;
+        for value in iter { result.push(value); }
+        result
+    }
+}
+
+impl<T: Copy> core::ops::Deref for Snapshot<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Self::Empty => &[],
+            Self::Inline { rows, len } => &rows[..*len],
+            Self::Heap(rows) => rows,
+        }
+    }
+}
+
 #[cfg(test)]
 pub fn take_collect_ring_inspections() -> usize {
-    COLLECT_RING_INSPECTIONS.swap(0, core::sync::atomic::Ordering::Relaxed)
+    crate::state::poll_objects::take_ring_inspections()
 }
 
 fn object(runtime: &Runtime, id: Word) -> Result<&MemoryFile, i32> {
@@ -318,21 +363,33 @@ pub(super) fn map(
             if shared {
                 alias_page(runtime, file.resource, mapping, page_offset)?;
             } else {
+                let source = object(runtime, file.resource)?.pages
+                    .get(&((offset + page_offset) / LINUX_PAGE_SIZE)).copied();
+                // This destination is still an unbacked reservation. Copy
+                // through Alpha's initializer and publish final rights once;
+                // do not alias mutable memfd backing as an immutable snapshot.
+                // Keep PROT_NONE/unsupported rights and invalid zero backing
+                // on the original path. Constructor failure owns whole-range
+                // cleanup below and must never retry through that path.
+                if prot != 0 && prot & !7 == 0 && source != Some(0) {
+                    nanami_runtime::request_process_map_initialized_protected_at(
+                        pid, base + page_offset, LINUX_PAGE_SIZE,
+                        source.unwrap_or(0), if source.is_some() { LINUX_PAGE_SIZE } else { 0 }, prot,
+                    ).map_err(map_request_error)?;
+                    continue;
+                }
                 nanami_runtime::request_process_map_anonymous_at(
                     pid,
                     base + page_offset,
                     LINUX_PAGE_SIZE,
                 )
                 .map_err(map_request_error)?;
-                if let Some(source) = object(runtime, file.resource)?
-                    .pages
-                    .get(&((offset + page_offset) / LINUX_PAGE_SIZE))
-                {
+                if let Some(source) = source {
                     write_target_memory_from(
                         runtime,
                         pid,
                         base + page_offset,
-                        *source,
+                        source,
                         LINUX_PAGE_SIZE,
                     )?;
                 }
@@ -556,8 +613,8 @@ pub(crate) fn bus_fault(runtime: &Runtime, pid: Word, address: Word) -> bool {
 }
 
 pub(super) fn inherit(runtime: &mut Runtime, parent: Word, child: Word) -> Result<(), i32> {
-    let maps: Vec<_> = mappings(runtime, parent).collect();
-    for (id, mapping) in maps {
+    let maps: Snapshot<_> = mappings(runtime, parent).collect();
+    for &(id, mapping) in maps.iter() {
         object_mut(runtime, id)?
             .maps
             .try_reserve(1)
@@ -571,7 +628,27 @@ pub(super) fn inherit(runtime: &mut Runtime, parent: Word, child: Word) -> Resul
             object(runtime, id)?.size.saturating_sub(mapping.offset),
             LINUX_PAGE_SIZE,
         ));
-        for offset in (0..mapping.bytes).step_by(LINUX_PAGE_SIZE) {
+        // The only caller constructs a suspended, unpublished fork child and
+        // discards it on any failure. Equal desired rights can therefore use
+        // one Alpha transaction without exposing a different failure prefix.
+        // Parent metadata is stable throughout this synchronous constructor.
+        let mut first = 0;
+        if !mapping.shared {
+            while first < valid {
+                let target = mapping.base + first;
+                let prot = runtime.mapping_at(parent, target).map_or(mapping.prot, |vma| vma.prot);
+                let mut bytes = LINUX_PAGE_SIZE;
+                while first + bytes < valid
+                    && runtime.mapping_at(parent, target + bytes).map_or(mapping.prot, |vma| vma.prot) == prot
+                {
+                    bytes += LINUX_PAGE_SIZE;
+                }
+                nanami_runtime::request_process_mapping_protect(child, target, bytes, prot)
+                    .map_err(map_request_error)?;
+                first += bytes;
+            }
+        }
+        for offset in (first..mapping.bytes).step_by(LINUX_PAGE_SIZE) {
             let target = mapping.base + offset;
             if mapping.shared || offset >= valid {
                 nanami_runtime::request_process_mapping_release_sparse(
@@ -586,17 +663,6 @@ pub(super) fn inherit(runtime: &mut Runtime, parent: Word, child: Word) -> Resul
             }
             if mapping.shared {
                 alias_page(runtime, id, child_mapping, offset)?;
-            } else {
-                let prot = runtime
-                    .mapping_at(parent, target)
-                    .map_or(mapping.prot, |vma| vma.prot);
-                nanami_runtime::request_process_mapping_protect(
-                    child,
-                    target,
-                    LINUX_PAGE_SIZE,
-                    prot,
-                )
-                .map_err(map_request_error)?;
             }
         }
     }
@@ -613,7 +679,7 @@ pub(super) fn protect(
     let end = base.checked_add(bytes).ok_or(ENOMEM)?;
     // Out-of-range mappings cannot contain cursor or shorten a chunk ending
     // at/before end. Preserve relative order among every relevant mapping.
-    let maps: Vec<_> = mappings(runtime, pid).filter(|(_, mapping)| {
+    let maps: Snapshot<_> = mappings(runtime, pid).filter(|(_, mapping)| {
         mapping.base < end && mapping.base + mapping.bytes > base
     }).collect();
     // Ordinary private VMAs have no memfd EOF holes or seals to preserve.
@@ -629,7 +695,7 @@ pub(super) fn protect(
             .map_err(map_request_error);
     }
     // Reject a sealed shared mapping before touching any permission.
-    for (id, mapping) in &maps {
+    for (id, mapping) in maps.iter() {
         if mapping.base < end
             && mapping.base + mapping.bytes > base
             && mapping.readonly_attachment
@@ -646,7 +712,7 @@ pub(super) fn protect(
             return Err(EACCES);
         }
     }
-    let mut updates = Vec::new();
+    let mut updates = Snapshot::Empty;
     let mut cursor = base;
     while cursor < end {
         let vma = runtime.mapping_at(pid, cursor).ok_or(ENOMEM)?;
@@ -692,8 +758,12 @@ pub(super) fn protect(
 
 pub(super) fn unmap(runtime: &mut Runtime, pid: Word, base: Word, bytes: Word) -> Result<(), i32> {
     let end = base.checked_add(bytes).ok_or(EINVAL)?;
-    let maps: Vec<_> = mappings(runtime, pid).collect();
-    for (id, mapping) in maps {
+    // Keep the original snapshot/order across splits and collection, but do
+    // not allocate/copy records that the unmap loop would skip unchanged.
+    let maps: Snapshot<_> = mappings(runtime, pid).filter(|(_, mapping)| {
+        base.max(mapping.base) < end.min(mapping.base + mapping.bytes)
+    }).collect();
+    for &(id, mapping) in maps.iter() {
         let start = base.max(mapping.base);
         let stop = end.min(mapping.base + mapping.bytes);
         if start >= stop {
@@ -829,11 +899,7 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
     }
     // These local retention gates cannot reclaim anything. Search all ring
     // pins only once the memory is otherwise eligible for collection.
-    if runtime.poll_objects.iter().any(|(_, object)| {
-        #[cfg(test)]
-        COLLECT_RING_INSPECTIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        matches!(object, Object::Ring(ring) if ring.memory == id || ring.sqes == id)
-    }) {
+    if runtime.poll_objects.ring_references_memory(id) {
         return;
     }
     let file = LinuxFile {
@@ -892,7 +958,7 @@ pub(super) fn collect(runtime: &mut Runtime, id: Word) {
 
 pub(super) fn forget_process(runtime: &mut Runtime, pid: Word) {
     // Alpha tears down the address space at exec/exit. Drop only the bookkeeping here.
-    let ids: Vec<_> = runtime
+    let ids: Snapshot<_> = runtime
         .poll_objects
         .iter()
         .filter_map(|(id, object)| {
@@ -919,7 +985,7 @@ pub(super) fn forget_process(runtime: &mut Runtime, pid: Word) {
                 && process.vm_group == *group.get_or_insert_with(|| runtime.vm_group(pid))
         })
         .map(|process| process.pid);
-    for id in ids {
+    for id in ids.iter().copied() {
         if let Ok(memory) = object_mut(runtime, id) {
             if let Some(replacement) = replacement {
                 for mapping in &mut memory.maps {

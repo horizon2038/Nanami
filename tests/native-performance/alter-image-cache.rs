@@ -43,12 +43,21 @@ struct Backend {
     change_during_read: bool,
     fail_read: bool,
     fail_stat: bool,
+    fail_recheck: bool,
+    stat_calls: usize,
+    versioned_read: bool,
     fail_release: bool,
+    fail_release_after: Option<usize>,
     fail_create: bool,
     fail_protect: bool,
     fail_self_pid: bool,
     self_pid_calls: usize,
     reclaimable_creates: usize,
+    readonly_creates: usize,
+    readonly_create_attempts: usize,
+    source_creates: usize,
+    poison_source: bool,
+    source_addresses: Vec<(Word, Word)>,
     protection_attempts: Vec<(Word, Word, Word, Word)>,
     release_attempts: Vec<(Word, Word)>,
     peak_live_bytes: usize,
@@ -117,13 +126,34 @@ pub fn request_memory_create(bytes: Word) -> Result<Word, RequestError> {
         Ok(address)
     })
 }
+pub fn request_memory_create_readonly(bytes: Word, source: Word, copied: Word) -> Result<Word, RequestError> {
+    assert!(source != 0 && copied != 0 && copied <= bytes);
+    BACKEND.with(|b| b.borrow_mut().readonly_create_attempts += 1);
+    let address = request_memory_create(bytes)?;
+    unsafe { std::ptr::copy_nonoverlapping(source as *const u8, address as *mut u8, copied); }
+    BACKEND.with(|b| b.borrow_mut().readonly_creates += 1);
+    Ok(address)
+}
+pub fn request_memory_create_source(bytes:Word,source:Word,copied:Word)->Result<Word,RequestError> {
+    let address=request_memory_create_readonly(bytes,source,copied)?;
+    BACKEND.with_borrow_mut(|b| {
+        b.source_creates+=1;
+        if b.poison_source {
+            let opaque=0x5000_0000_0000+b.source_creates*0x1000_0000;
+            b.source_addresses.push((opaque,address));
+            Ok(opaque)
+        } else {Ok(address)}
+    })
+}
 pub fn request_mapping_release(address: Word, size: Word) -> Result<(), RequestError> {
     BACKEND.with(|b| {
         let mut b = b.borrow_mut();
         b.release_attempts.push((address, size));
-        if b.fail_release {
+        if b.fail_release || b.fail_release_after.is_some_and(|count| b.release_attempts.len() > count) {
             return Err(RequestError::Transport);
         }
+        let address=b.source_addresses.iter().find(|&&(opaque,_)|opaque==address)
+            .map_or(address,|&(_,actual)|actual);
         let (buffer, released) = b
             .allocations
             .iter_mut()
@@ -156,8 +186,9 @@ pub mod posix {
         assert_eq!(fd, 7);
         assert_eq!(flags, POSIX_STAT_INCLUDE_VERSION);
         BACKEND.with(|b| {
-            let b = b.borrow();
-            if b.fail_stat {
+            let mut b = b.borrow_mut();
+            b.stat_calls += 1;
+            if b.fail_stat || (b.fail_recheck && b.reads != 0) {
                 return Err(RequestError::Transport);
             }
             Ok((b.identity, b.bytes.len(), POSIX_FILE_TYPE_REGULAR, 0, 0))
@@ -180,7 +211,22 @@ mod state {
     }
     impl Runtime {
         pub fn posix_read_buffer_size(&self) -> Word {
-            self.posix_shm_size
+            self.posix_shm_size.min(65536)
+        }
+        pub fn posix_image_read_buffer_size(&self) -> Word { self.posix_shm_size }
+        pub fn pread_versioned_image(
+            &self, fd: Word, size: Word, identity: Word,
+        ) -> Result<Option<Word>, RequestError> {
+            if !BACKEND.with(|b| b.borrow().versioned_read) || size > self.posix_shm_size {
+                return Ok(None);
+            }
+            if !BACKEND.with(|b| {
+                let b = b.borrow();
+                b.identity == identity && b.bytes.len() == size
+            }) {
+                return Err(RequestError::Protocol);
+            }
+            self.pread_posix(fd, 0, size, 0).map(|(_, source)| Some(source))
         }
         pub fn pread_posix(
             &self,
@@ -324,6 +370,67 @@ fn load(runtime: &mut state::Runtime) -> loader::LoadedElfImage {
 }
 
 #[test]
+fn readonly_mmap_cache_uses_opaque_unmapped_source_without_native_dereference_or_mapping() {
+    if !image_cache::IMMUTABLE_STORAGE || !image_cache::UNMAPPED_SOURCES {return;}
+    let size=8193;let mut shm=vec![0;16384];let mut r=fixture(&mut shm);
+    BACKEND.with_borrow_mut(|b| {b.bytes=elf_bytes(size);b.poison_source=true;});
+    let identity=1<<32|7;
+    let source=loader::readonly_file_mapping_source(&mut r,7,identity,size,0,size).ok().unwrap().unwrap();
+    assert!(source>=0x5000_0000_0000);
+    let cached=r.image_cache.get(identity,size).unwrap();
+    assert!(cached.source_only);assert!(cached.metadata.is_some());
+    assert!(r.image_cache.immutable_range(source,3*4096));
+    for readonly in [false,true] {
+        let get=if readonly {loader::readonly_file_mapping_source} else {loader::file_mapping_source};
+        assert_eq!(get(&mut r,7,identity,size,4096,4096).ok().unwrap(),Some(source+4096));
+    }
+    BACKEND.with_borrow(|b| {assert_eq!(b.source_creates,1);assert_eq!(b.reads,1);
+        assert!(b.protection_attempts.is_empty());assert_eq!(b.self_pid_calls,0);});
+    // A failed replacement retains this exact source identity for retirement.
+    BACKEND.with_borrow_mut(|b| {b.identity+=1<<32;b.fail_recheck=true;});
+    assert!(loader::readonly_file_mapping_source(&mut r,7,2<<32|7,size,0,size).is_err());
+    assert!(r.image_cache.get(2<<32|7,size).is_none());
+}
+
+#[test]
+fn exec_hit_maps_an_unmapped_source_once_before_cpu_use_and_retries_failed_mapping() {
+    if !image_cache::IMMUTABLE_STORAGE || !image_cache::UNMAPPED_SOURCES {return;}
+    for failure in [false,true] {
+        let size=8193;let mut shm=vec![0;16384];let mut r=fixture(&mut shm);
+        BACKEND.with_borrow_mut(|b|b.bytes=elf_bytes(size));
+        let address=loader::readonly_file_mapping_source(&mut r,7,1<<32|7,size,0,size).ok().unwrap().unwrap();
+        BACKEND.with_borrow_mut(|b|b.fail_protect=failure);
+        if failure {
+            assert!(loader::load_linux_elf_image(&mut r,0,4).is_err());
+            assert!(r.image_cache.get(1<<32|7,size).unwrap().source_only);
+            BACKEND.with_borrow_mut(|b|b.fail_protect=false);
+        }
+        let loaded=load(&mut r);assert_eq!(loaded.address,address);
+        assert!(!r.image_cache.get(1<<32|7,size).unwrap().source_only);
+        assert_eq!(unsafe {core::slice::from_raw_parts(loaded.address as *const u8,size)},elf_bytes(size));
+        assert_eq!(load(&mut r).address,address);
+        BACKEND.with_borrow(|b| {
+            assert_eq!(b.source_creates,1);assert_eq!(b.reads,1);assert_eq!(b.self_pid_calls,1);
+            assert_eq!(b.protection_attempts.len(),if failure {2} else {1});
+        });
+    }
+}
+
+#[test]
+fn short_reads_and_nonreadonly_cold_fills_keep_native_storage() {
+    if !image_cache::IMMUTABLE_STORAGE || !image_cache::UNMAPPED_SOURCES {return;}
+    for readonly in [false,true] {
+        let size=8193;let mut shm=vec![0;16384];let mut r=fixture(&mut shm);
+        BACKEND.with_borrow_mut(|b| {b.bytes=elf_bytes(size);if readonly {b.short_read=Some(4096);}});
+        let get=if readonly {loader::readonly_file_mapping_source} else {loader::file_mapping_source};
+        let address=get(&mut r,7,1<<32|7,size,0,size).ok().unwrap().unwrap();
+        assert!(!r.image_cache.get(1<<32|7,size).unwrap().source_only);
+        assert_eq!(unsafe {core::slice::from_raw_parts(address as *const u8,size)},elf_bytes(size));
+        BACKEND.with_borrow(|b|assert_eq!(b.source_creates,0));
+    }
+}
+
+#[test]
 fn cold_snapshot_fills_use_the_whole_transfer_window_and_resume_short_reads() {
     for capacity in [256, 4096, 65536] {
         for size in [capacity - 1, capacity, capacity + 1, 2 * capacity, 16 * capacity] {
@@ -357,6 +464,19 @@ fn cold_snapshot_fills_use_the_whole_transfer_window_and_resume_short_reads() {
                 });
             }
         }
+    }
+}
+
+#[test]
+fn large_snapshot_window_reduces_reads_and_preserves_payload_and_zero_padding() {
+    for size in [1024*1024,1024*1024+17] {
+        let mut shm=vec![0xa5;1024*1024];let mut r=fixture(&mut shm);let expected=elf_bytes(size);
+        BACKEND.with(|b| b.borrow_mut().bytes=expected.clone());
+        let loaded=load(&mut r);
+        assert_eq!(unsafe { core::slice::from_raw_parts(loaded.address as *const u8,size) },expected);
+        let padding=size.next_multiple_of(4096)-size;
+        assert!(unsafe { core::slice::from_raw_parts((loaded.address+size) as *const u8,padding) }.iter().all(|v|*v==0));
+        BACKEND.with(|b| {let b=b.borrow();assert_eq!(b.reads,size.div_ceil(1024*1024));assert_eq!(b.closes,1);std::println!("IMAGE-WINDOW bytes={size} reads={}",b.reads);});
     }
 }
 #[test]
@@ -450,12 +570,128 @@ fn generation_victims_keep_empty_capacity_protected_main_and_lru_within_the_grou
 #[test]
 fn generation_preference_never_overrides_rounded_byte_budget() {
     let mut cache = image_cache::ImageCache::new();
-    for index in 0..8 {
+    for index in 0..image_cache::MAX_RETAINED_BYTES / image_cache::MAX_IMAGE_BYTES {
         cache.insert(index, 1 << 32 | (index + 7), 0x1000000 + index * 0x200000,
             image_cache::MAX_IMAGE_BYTES, image_cache::MAX_IMAGE_BYTES, None);
     }
     assert_eq!(cache.replacement_mapping(3514168, true, 2 << 32 | 7), None);
     assert_eq!(cache.retained_bytes(), image_cache::MAX_RETAINED_BYTES);
+}
+
+#[test]
+fn mapping_plan_retires_multiple_cold_owners_instead_of_the_hot_large_library() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    let mut cache = image_cache::ImageCache::new();
+    let mb = 1024 * 1024;
+    let owners = image_cache::MAX_RETAINED_BYTES / mb - 2;
+    for index in 0..owners {
+        let size = if index == owners - 1 { 3 * mb } else { mb };
+        cache.insert(index, 1 << 32 | (100 + index), 0x1000000 + index * 4 * mb, size, size, None);
+    }
+    assert_eq!(cache.retained_bytes(), image_cache::MAX_RETAINED_BYTES);
+    assert!(cache.replacement_mapping(7 * mb / 2, true, 1 << 32 | 7).is_none());
+    let plan = cache.mapping_replacement(7 * mb / 2, true, 1 << 32 | 7).unwrap();
+    assert_eq!((plan.slot, plan.victims), (owners, 0b1111));
+    assert_eq!(cache.retained_bytes(), image_cache::MAX_RETAINED_BYTES); // Planning never mutates ownership.
+    for index in 0..owners { assert!(cache.entry(index).is_some()); }
+    assert!(cache.mapping_replacement(7 * mb / 2, false, 1 << 32 | 7).is_none());
+    for size in [0, image_cache::MAX_RETAINED_BYTES + 1, usize::MAX] {
+        assert!(cache.mapping_replacement(size, true, 1 << 32 | 7).is_none());
+    }
+}
+
+#[test]
+fn mapping_plan_uses_empty_room_then_lru_and_prioritizes_superseded_generations() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    let mut cache = image_cache::ImageCache::new();
+    let plan = cache.mapping_replacement(4097, true, 1 << 32 | 7).unwrap();
+    assert_eq!((plan.slot, plan.victims), (0, 0));
+    for index in 0..image_cache::ENTRIES {
+        cache.insert(index, 1 << 32 | (100 + index), 0x100000 + index * 4096, 4096, 4096, None);
+    }
+    let plan = cache.mapping_replacement(4097, true, 1 << 32 | 7).unwrap();
+    assert_eq!((plan.slot, plan.victims), (0, 1)); // Slot pressure alone.
+    let last = image_cache::ENTRIES - 1;
+    cache.insert(last, 1 << 32 | 7, 0x100000 + last * 4096, 4096, 4096, None);
+    cache.invalidate(last - 1);
+    let plan = cache.mapping_replacement(image_cache::MAX_RETAINED_BYTES - 4096, true, 2 << 32 | 7).unwrap();
+    assert_eq!(plan.slot, last - 1);
+    assert_eq!(plan.victims.count_ones(), last as u32);
+    assert_eq!(plan.victims & (3u64 << (last - 1)), 3u64 << (last - 1));
+    assert_eq!(plan.victims & (1u64 << (last - 2)), 0); // Newest unrelated owner survives.
+    let rounded = cache.mapping_replacement(image_cache::MAX_RETAINED_BYTES - 1, true, 2 << 32 | 7).unwrap();
+    assert_eq!(rounded.victims.count_ones(), image_cache::ENTRIES as u32);
+    cache.insert(0, 1 << 32 | 100, 0x100000, 4096, image_cache::MAX_RETAINED_BYTES, None);
+    assert!(cache.mapping_replacement(4096, true, 1 << 32 | 8).is_none());
+}
+
+fn fragmented_mapping_cache(runtime: &mut state::Runtime) -> Vec<(Word, Word)> {
+    let mb = 1024 * 1024;
+    let owners = image_cache::MAX_RETAINED_BYTES / mb - 2;
+    (0..owners).map(|index| {
+        let bytes = if index == owners - 1 { 3 * mb } else { mb };
+        let address = request_memory_create(bytes).unwrap();
+        runtime.image_cache.insert(index, 1 << 32 | (100 + index), address, bytes, bytes, None);
+        (address, bytes)
+    }).collect()
+}
+
+#[test]
+fn mapping_fill_acknowledges_all_cold_owners_and_reuses_the_sealed_large_snapshot() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    let mut window = vec![0xa5; 4 * 1024 * 1024];
+    let mut runtime = fixture(&mut window);
+    let owners = fragmented_mapping_cache(&mut runtime);
+    let size = 3514168usize;
+    BACKEND.with_borrow_mut(|b| b.bytes = elf_bytes(size));
+    let identity = 1 << 32 | 7;
+    let source = loader::readonly_file_mapping_source(&mut runtime, 7, identity, size, 0, size)
+        .ok().unwrap().unwrap();
+    assert_eq!(runtime.image_cache.retained_bytes(), image_cache::MAX_RETAINED_BYTES - 4 * 1024 * 1024 + size.next_multiple_of(4096));
+    assert_eq!(runtime.image_cache.entry(owners.len() - 1).unwrap().address, owners.last().unwrap().0);
+    assert_eq!(runtime.image_cache.entry(owners.len()).unwrap().address, source);
+    assert!(runtime.image_cache.immutable_range(source, size.next_multiple_of(4096)));
+    assert_eq!(unsafe { core::slice::from_raw_parts(source as *const u8, size) }, elf_bytes(size));
+    BACKEND.with_borrow(|b| {
+        assert_eq!(b.release_attempts, owners[..4]);
+        assert_eq!((b.reads, b.reclaimable_creates, b.source_creates), (1, owners.len() + 1, 1));
+        assert!(b.peak_live_bytes <= image_cache::MAX_RETAINED_BYTES);
+    });
+    assert_eq!(loader::readonly_file_mapping_source(&mut runtime, 7, identity, size, 4096, 65536)
+        .ok().unwrap(), Some(source + 4096));
+    BACKEND.with_borrow(|b| assert_eq!((b.reads, b.reclaimable_creates, b.release_attempts.len()), (1, owners.len() + 1, 4)));
+}
+
+#[test]
+fn partial_mapping_retirement_keeps_the_failed_owner_and_stops_before_allocating() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    let mut window = vec![0xa5; 4 * 1024 * 1024];
+    let mut runtime = fixture(&mut window);
+    let owners = fragmented_mapping_cache(&mut runtime);
+    let size = 3514168usize;
+    BACKEND.with_borrow_mut(|b| { b.bytes = elf_bytes(size); b.fail_release_after = Some(1); });
+    let identity = 1 << 32 | 7;
+    for attempt in 0..2 {
+        assert!(loader::readonly_file_mapping_source(&mut runtime, 7, identity, size, 0, size).is_err());
+        assert!(runtime.image_cache.entry(0).is_none());
+        let failed = runtime.image_cache.entry(1).unwrap();
+        assert_eq!((failed.identity, failed.size, failed.address, failed.capacity), (0, 0, owners[1].0, owners[1].1));
+        assert!(!runtime.image_cache.immutable_range(owners[1].0, 4096));
+        for index in 2..owners.len() { assert_eq!(runtime.image_cache.entry(index).unwrap().address, owners[index].0); }
+        assert_eq!(runtime.image_cache.retained_bytes(), image_cache::MAX_RETAINED_BYTES - 1024 * 1024);
+        BACKEND.with_borrow(|b| {
+            assert_eq!((b.reads, b.reclaimable_creates, b.release_attempts.len()), (0, owners.len(), attempt + 2));
+            assert!(b.allocations[0].1);
+            assert!(b.allocations[1..].iter().all(|(_, released)| !released));
+        });
+    }
+    BACKEND.with_borrow_mut(|b| b.fail_release_after = None);
+    assert!(loader::readonly_file_mapping_source(&mut runtime, 7, identity, size, 0, size).ok().unwrap().is_some());
+    BACKEND.with_borrow(|b| {
+        assert_eq!(&b.release_attempts[3..], &owners[1..4]);
+        assert_eq!((b.reads, b.reclaimable_creates), (1, owners.len() + 1));
+        assert!(b.peak_live_bytes <= image_cache::MAX_RETAINED_BYTES);
+    });
 }
 #[test]
 fn lru_eviction_keeps_the_current_main_image_alive() {
@@ -793,19 +1029,97 @@ fn whole_mapping_uses_one_lookup_and_one_selection_and_warm_ranges_only_one_look
 
 #[test]
 fn a_preselected_mapping_fill_failure_retains_ownership_without_closing_the_callers_fd() {
-    let mut shm = [0; 65536]; let mut runtime = fixture(&mut shm);
+    for capacity in [4096, 65536] {
+    let mut shm = vec![0; capacity]; let mut runtime = fixture(&mut shm);
     let bytes = 8193; let identity = 1 << 32 | 7;
     BACKEND.with(|b| { let mut b = b.borrow_mut(); b.bytes = elf_bytes(bytes); b.fail_read = true; });
     image_cache::take_query_counts();
     assert!(loader::readonly_file_mapping_source(&mut runtime, 7, identity, bytes, 0, bytes).is_err());
     assert_eq!(image_cache::take_query_counts(), (1, 1));
-    let owner = runtime.image_cache.entry(0).expect("failed fill remains owned");
-    assert_eq!((owner.identity, owner.size), (0, 0));
-    assert_eq!(owner.capacity, bytes.next_multiple_of(4096));
-    let address = owner.address;
+    let address = if image_cache::IMMUTABLE_STORAGE && capacity >= bytes {
+        assert!(runtime.image_cache.entry(0).is_none());
+        None // The failed first read precedes owned-RAM construction.
+    } else {
+        let owner = runtime.image_cache.entry(0).expect("failed legacy fill remains owned");
+        assert_eq!((owner.identity, owner.size), (0, 0));
+        assert_eq!(owner.capacity, bytes.next_multiple_of(4096));
+        Some(owner.address)
+    };
     assert!(runtime.image_cache.get(identity, bytes).is_none());
     BACKEND.with(|b| { let b = b.borrow(); assert_eq!(b.opens, 0); assert_eq!(b.closes, 0);
-        assert!(b.allocations.iter().any(|(buffer, released)| !released && buffer.as_ptr() as Word == address)); });
+        if let Some(address) = address { assert!(b.allocations.iter().any(|(buffer, released)| !released && buffer.as_ptr() as Word == address)); }
+        else { assert!(b.allocations.is_empty()); }
+    });
+    }
+}
+
+#[test]
+fn full_window_snapshot_is_constructed_readonly_with_exact_bytes_and_zero_tail() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    for size in [256usize,4095,4096,4097,1547968,2*1024*1024] {
+        let mut window=vec![0xa5;2*1024*1024];let mut r=fixture(&mut window);
+        let mut expected=elf_bytes(size);for (i,b) in expected[128..].iter_mut().enumerate(){*b=(i%239) as u8;}
+        BACKEND.with(|b|b.borrow_mut().bytes=expected.clone());
+        let image=load(&mut r);let capacity=size.next_multiple_of(4096);
+        assert_eq!(unsafe{core::slice::from_raw_parts(image.address as *const u8,size)},expected);
+        assert!(unsafe{core::slice::from_raw_parts((image.address+size) as *const u8,capacity-size)}.iter().all(|&b|b==0));
+        assert_eq!(load(&mut r).address,image.address);
+        BACKEND.with(|b|{let b=b.borrow();assert_eq!((b.reads,b.readonly_creates,b.reclaimable_creates),(1,1,1));assert!(b.protection_attempts.is_empty());assert_eq!(b.self_pid_calls,0);assert_eq!(b.opens,b.closes);});
+    }
+}
+
+#[test]
+fn short_first_window_read_keeps_prefix_and_resumes_without_readonly_constructor() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    for limit in [1,73,4095,4096,65536] {
+        let size=65537usize;let mut window=vec![0xa5;2*1024*1024];let mut r=fixture(&mut window);
+        let expected=elf_bytes(size);BACKEND.with(|b|{let mut b=b.borrow_mut();b.bytes=expected.clone();b.short_read=Some(limit);});
+        let image=load(&mut r);assert_eq!(unsafe{core::slice::from_raw_parts(image.address as *const u8,size)},expected);
+        BACKEND.with(|b|{let b=b.borrow();assert_eq!(b.reads,size.div_ceil(limit));assert_eq!((b.readonly_creates,b.reclaimable_creates),(0,1));assert_eq!(b.protection_attempts.len(),1);assert_eq!(b.read_ranges[1].2,limit);});
+    }
+}
+
+#[test]
+fn readonly_constructor_failure_and_version_errors_never_publish_or_retry() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    for failure in 0..3 {
+        let mut window=vec![0;65536];let mut r=fixture(&mut window);
+        BACKEND.with(|b|{let mut b=b.borrow_mut();b.fail_create=failure==0;b.change_during_read=failure==1;b.fail_recheck=failure==2;});
+        assert!(loader::load_interpreter_elf_image(&mut r,b"/elf",0).is_err());
+        assert!(r.image_cache.get(1<<32|7,8193).is_none());
+        BACKEND.with(|b|{let b=b.borrow();assert!(b.protection_attempts.is_empty());assert_eq!(b.reads,1);assert_eq!(b.opens,b.closes);
+            if failure==0 {assert_eq!(b.readonly_create_attempts,1);assert!(b.allocations.is_empty());}
+        });
+        if failure!=0 {let owner=r.image_cache.entry(0).unwrap();assert_eq!(owner.identity,0);assert_eq!(owner.capacity,12288);}
+    }
+}
+
+#[test]
+fn versioned_whole_image_read_saves_the_recheck_and_rejects_a_stale_identity() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    for versioned in [false, true] {
+        let mut shm = [0; 65536];
+        let mut runtime = fixture(&mut shm);
+        BACKEND.with(|b| b.borrow_mut().versioned_read = versioned);
+        let image = load(&mut runtime);
+        let actual = unsafe { core::slice::from_raw_parts(image.address as *const u8, image.size) };
+        BACKEND.with(|b| {
+            let b = b.borrow();
+            assert_eq!(actual, b.bytes);
+            assert_eq!((b.reads, b.stat_calls, b.opens, b.closes), (1, if versioned { 1 } else { 2 }, 1, 1));
+        });
+    }
+    let mut shm = [0; 65536];
+    let mut runtime = fixture(&mut shm);
+    BACKEND.with(|b| b.borrow_mut().versioned_read = true);
+    let stale = 2 << 32 | 7;
+    assert!(loader::readonly_file_mapping_source(&mut runtime, 7, stale, 8193, 0, 8193).is_err());
+    assert!(runtime.image_cache.get(stale, 8193).is_none());
+    BACKEND.with(|b| {
+        let b = b.borrow();
+        assert_eq!(b.reads, 0);
+        assert!(b.allocations.is_empty());
+    });
 }
 
 #[test]
@@ -914,7 +1228,34 @@ fn large_readonly_whole_mapping_uses_immutable_budget_without_prefetching_partia
 }
 
 #[test]
-fn readonly_mapping_admission_never_exceeds_the_original_total_budget() {
+fn large_dso_window_uses_sealed_construction_instead_of_mutable_fill_and_protect() {
+    if !image_cache::IMMUTABLE_STORAGE { return; }
+    for size in [3171128usize,3514168] {
+        let mut expected=elf_bytes(size);
+        for (i,b) in expected[128..].iter_mut().enumerate(){*b=(i%239) as u8;}
+        for window_bytes in [2*1024*1024,4*1024*1024] {
+            let mut window=vec![0xa5;window_bytes];let mut r=fixture(&mut window);
+            BACKEND.with(|b|b.borrow_mut().bytes=expected.clone());
+            let source=loader::readonly_file_mapping_source(&mut r,7,1<<32|7,size,0,size)
+                .unwrap_or_else(|_|panic!("large DSO fill failed")).unwrap();
+            assert_eq!(unsafe{core::slice::from_raw_parts(source as *const u8,size)},expected);
+            let capacity=size.next_multiple_of(4096);
+            assert!(unsafe{core::slice::from_raw_parts((source+size) as *const u8,capacity-size)}.iter().all(|&b|b==0));
+            assert_eq!(loader::readonly_file_mapping_source(&mut r,7,1<<32|7,size,4096,4096).ok().unwrap(),Some(source+4096));
+            BACKEND.with(|b|{let b=b.borrow();assert_eq!(b.reads,size.div_ceil(window_bytes));
+                assert_eq!(b.readonly_creates,usize::from(window_bytes>=size));
+                assert_eq!(b.protection_attempts.len(),usize::from(window_bytes<size));
+                assert_eq!(b.reclaimable_creates,1);
+                assert_eq!((b.opens,b.closes),(0,0));
+            });
+            assert_eq!(r.image_cache.retained_bytes(),capacity);
+            assert!(r.image_cache.immutable_range(source,capacity));
+        }
+    }
+}
+
+#[test]
+fn readonly_mapping_admission_never_exceeds_the_configured_total_budget() {
     let mut shm = [0; 65536];
     let mut runtime = fixture(&mut shm);
     let bytes = image_cache::MAX_RETAINED_BYTES + 1;
@@ -922,7 +1263,7 @@ fn readonly_mapping_admission_never_exceeds_the_original_total_budget() {
         .unwrap_or_else(|_| panic!("budget rejection failed")), None);
     BACKEND.with(|b| { let b = b.borrow(); assert_eq!(b.reads, 0); assert!(b.allocations.is_empty()); });
     let mut cache = image_cache::ImageCache::new();
-    for index in 0..8 {
+    for index in 0..image_cache::MAX_RETAINED_BYTES / image_cache::MAX_IMAGE_BYTES {
         cache.insert(index, ((index + 1) << 32) | 7, 0x10000 + index * 0x200000,
             image_cache::MAX_IMAGE_BYTES, image_cache::MAX_IMAGE_BYTES, None);
     }
@@ -1218,4 +1559,77 @@ fn immutable_mapping_admission_requires_a_live_complete_owned_range() {
     assert!(!cache.immutable_range(0x10000, 4096));
     cache.remove(0);
     assert!(!cache.immutable_range(0x10000, 4096));
+}
+
+#[test]
+fn deferred_elf_policy_requires_valid_dynamic_executable_whole_file_and_bounded_headers() {
+    for (kind,flags,size,identity,expected) in [(3,5,524288,(1<<32)|7,true),(2,5,524288,(1<<32)|7,false),
+        (3,4,524288,(1<<32)|7,false),(3,5,131072,(1<<32)|7,false),(3,5,524288,7,false)] {
+        let mut shm=vec![0;1024*1024];let mut r=fixture(&mut shm);
+        BACKEND.with_borrow_mut(|b| {b.bytes=elf_bytes(size);b.bytes[16..18].copy_from_slice(&(kind as u16).to_le_bytes());
+            b.bytes[68..72].copy_from_slice(&(flags as u32).to_le_bytes());b.identity=identity;});
+        let source=loader::readonly_file_mapping_source(&mut r,7,identity,size,0,size).ok().unwrap();
+        if identity >> 32 == 0 {assert!(source.is_none());continue;}
+        let source=source.unwrap();
+        assert_eq!(r.image_cache.elf_snapshot_prefix(source,size),expected.then_some(65536));
+        assert_eq!(r.image_cache.elf_snapshot_prefix(source+4096,size-4096),None);
+        assert_eq!(r.image_cache.elf_snapshot_prefix(source,size-8192),None);
+        if expected {assert_eq!(r.image_cache.elf_snapshot_prefix(source,size-37),Some(65536));}
+    }
+}
+
+#[test]
+fn deferred_cached_dso_accepts_load_complete_prefix_before_nonloaded_footer() {
+    let size=512*1024;let loaded=256*1024;let mut shm=vec![0;1024*1024];let mut r=fixture(&mut shm);
+    BACKEND.with_borrow_mut(|b| {b.bytes=elf_bytes(size);b.bytes[16..18].copy_from_slice(&3u16.to_le_bytes());
+        b.bytes[96..104].copy_from_slice(&(loaded as u64).to_le_bytes());});
+    let source=loader::readonly_file_mapping_source(&mut r,7,1<<32|7,size,0,size).ok().unwrap().unwrap();
+    assert_eq!(r.image_cache.elf_snapshot_prefix(source,loaded),Some(65536));
+    assert_eq!(r.image_cache.elf_snapshot_prefix(source,loaded-4096),None);
+    assert_eq!(r.image_cache.elf_snapshot_prefix(source+4096,loaded),None);
+}
+
+#[test]
+fn deferred_dso_maps_the_complete_leading_readonly_load_without_mapping_the_code_suffix() {
+    for header_bytes in [4096, 65536, 65537, 144736, 1101656] {
+        let size = 2 * 1024 * 1024;
+        let mut metadata = elf::parse_elf64_image(&elf_bytes(size)).unwrap();
+        metadata.elf_type = 3;
+        metadata.load_segment_count = 2;
+        metadata.segments[0].flags = 4;
+        metadata.segments[0].file_size = header_bytes;
+        metadata.segments[0].memory_size = header_bytes;
+        let code = header_bytes.next_multiple_of(4096);
+        metadata.segments[1] = elf::LoadSegment { offset: code, virtual_address: 0x400000 + code,
+            file_size: size - code, memory_size: size - code, flags: 5 };
+        let expected = 65536.max(code);
+        assert_eq!(image_cache::deferred_elf_prefix(&metadata, size), Some(expected));
+        assert!(expected < size);
+        let mut cache = image_cache::ImageCache::new();
+        cache.insert(0, 1 << 32 | 7, 0x2000000, size, size, Some(metadata));
+        assert_eq!(cache.elf_snapshot_prefix(0x2000000, size), Some(expected));
+    }
+}
+
+#[test]
+fn deferred_metadata_prefix_never_expands_from_writable_executable_or_nonleading_loads() {
+    for (flags, offset) in [(5, 0), (6, 0), (7, 0), (4, 4096)] {
+        let mut metadata = elf::parse_elf64_image(&elf_bytes(1024 * 1024)).unwrap();
+        metadata.elf_type = 3;
+        metadata.load_segment_count = 2;
+        metadata.segments[1] = metadata.segments[0];
+        metadata.segments[0].flags = flags;
+        metadata.segments[0].offset = offset;
+        metadata.segments[0].file_size = 256 * 1024;
+        assert_eq!(image_cache::deferred_elf_prefix(&metadata, 1024 * 1024), Some(65536));
+    }
+    let mut metadata = elf::parse_elf64_image(&elf_bytes(1024 * 1024)).unwrap();
+    metadata.elf_type = 3;
+    metadata.load_segment_count = 2;
+    metadata.segments[1] = metadata.segments[0];
+    metadata.segments[0].flags = 4;
+    metadata.segments[0].file_size = 2 * 1024 * 1024;
+    assert_eq!(image_cache::deferred_elf_prefix(&metadata, 1024 * 1024), None);
+    metadata.segments[0].file_size = usize::MAX;
+    assert_eq!(image_cache::deferred_elf_prefix(&metadata, usize::MAX), None);
 }

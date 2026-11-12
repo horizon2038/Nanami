@@ -5,7 +5,7 @@ use super::{
     sys_terminal_read, sys_terminal_read_now, sys_terminal_write, sys_virtual_read,
     sys_virtual_write, terminal_bounded_len, terminal_id_for_pid, vectored, EmulationAction,
     LinuxFileKind, LinuxSyscallContext, Runtime, Word, ALTER_IO_OFFSET, EAGAIN, EBADF, EFAULT,
-    EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESPIPE, ESRCH, LINUX_IOV_MAX, LINUX_O_ACCMODE,
+    EINVAL, EIO, EISDIR, ENOTCONN, EOPNOTSUPP, ESRCH, LINUX_IOV_MAX, LINUX_O_ACCMODE,
     LINUX_O_NONBLOCK, LINUX_O_RDONLY, LINUX_O_WRONLY, LINUX_SOCK_NONBLOCK,
 };
 
@@ -71,12 +71,15 @@ pub(super) fn sys_read(
         }
         LinuxFileKind::Empty => return Err(EBADF),
     }
-    super::file_read::read(
-        len,
-        runtime.posix_read_buffer_size(),
-        |chunk| runtime.read_posix(file.posix_fd, 0, chunk).map_err(map_request_error),
-        |done, source, bytes| super::copyout_from(runtime, pid, user_buffer + done, source, bytes),
-    )
+    if len == 0 { return Ok(0); }
+    runtime.with_cursor_file_reader(file, pid, "read", |runtime| {
+        super::file_read::read(
+            len,
+            runtime.posix_read_buffer_size(),
+            |chunk| runtime.read_posix(file.posix_fd, 0, chunk).map_err(map_request_error),
+            |done, source, bytes| super::copyout_from(runtime, pid, user_buffer + done, source, bytes),
+        )
+    })
 }
 
 pub(super) fn sys_positioned_io(
@@ -88,82 +91,7 @@ pub(super) fn sys_positioned_io(
     offset: Word,
     write: bool,
 ) -> Result<Word, i32> {
-    let file = runtime.linux_file(pid, fd).ok_or(EBADF)?;
-    if file.kind == LinuxFileKind::VirtualDirectory {
-        return Err(EISDIR);
-    }
-    if file.kind == LinuxFileKind::MemoryFile {
-        return super::memfd::io(runtime, pid, file, buffer, len, Some(offset), write);
-    }
-    if file.kind != LinuxFileKind::Posix {
-        return Err(ESPIPE);
-    }
-    let access = file.resource & LINUX_O_ACCMODE;
-    if (write && access == LINUX_O_RDONLY) || (!write && access == LINUX_O_WRONLY) {
-        return Err(EBADF);
-    }
-    if offset > isize::MAX as Word {
-        return Err(EINVAL);
-    }
-    if buffer == 0 && len != 0 {
-        return Err(EFAULT);
-    }
-    let len = len.min(isize::MAX as Word);
-    buffer.checked_add(len).ok_or(EFAULT)?;
-    offset
-        .checked_add(len)
-        .filter(|end| *end <= isize::MAX as Word)
-        .ok_or(EINVAL)?;
-    let mut done = 0;
-    while done < len {
-        let chunk = (len - done).min(if write {
-            runtime.posix_write_buffer().1
-        } else {
-            runtime.posix_read_buffer_size()
-        });
-        if chunk == 0 {
-            return if done != 0 { Ok(done) } else { Err(EIO) };
-        }
-        let result = if write {
-            super::guest_memory::copyin_posix_write(
-                runtime,
-                pid,
-                buffer + done,
-                runtime.posix_write_buffer().0,
-                chunk,
-            )
-            .and_then(|_| {
-                runtime
-                    .write_posix(file.posix_fd, 0, chunk, Some(offset + done))
-                    .map_err(map_request_error)
-            })
-        } else {
-            runtime
-                .pread_posix(file.posix_fd, 0, chunk, offset + done)
-                .map_err(map_request_error)
-                .and_then(|(bytes, source)| {
-                    if bytes > chunk {
-                        return Err(EIO);
-                    }
-                    if bytes != 0 {
-                        super::copyout_from(runtime, pid, buffer + done, source, bytes)?;
-                    }
-                    Ok(bytes)
-                })
-        };
-        match result {
-            Ok(bytes) if bytes <= chunk => {
-                done += bytes;
-                if bytes < chunk {
-                    break;
-                }
-            }
-            Ok(_) => return if done != 0 { Ok(done) } else { Err(EIO) },
-            Err(_) if done != 0 => break,
-            Err(errno) => return Err(errno),
-        }
-    }
-    Ok(done)
+    super::positioned_io::sys_positioned_io(runtime, pid, fd, buffer, len, offset, write)
 }
 
 pub(super) fn sys_read_action(

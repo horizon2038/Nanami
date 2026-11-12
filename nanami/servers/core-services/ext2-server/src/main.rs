@@ -3,6 +3,7 @@
 
 extern crate alloc;
 mod block_cache;
+mod file_cursor;
 mod dentry_cache;
 mod writeback;
 
@@ -29,6 +30,7 @@ use bitmap_alloc::alloc_bitmap_bit;
 
 mod file_io;
 use file_io::*;
+mod read_grants;
 mod directory;
 use directory::{parse_directory_entry, read_directory};
 mod directory_lookup;
@@ -36,6 +38,8 @@ mod name_compare;
 use name_compare::bytes_eq;
 use directory_lookup::lookup_in_directory;
 mod directory_parent;
+mod canonical_path;
+mod resolved_path;
 mod namespace;
 mod path_input;
 mod link_target;
@@ -57,7 +61,9 @@ use block_connection::connect_block_device;
 const SLOT_SERVICE_PORT: Word = 20;
 const SLOT_BLOCK_DEVICE: Word = 23;
 const SLOT_TIMER_SERVICE: Word = 24;
-const BLOCK_SHM_BYTES: Word = nanami_client::block::BLOCK_DEVICE_DEFAULT_SHM_BYTES;
+// Ask the provider for its default; geometry validation and every transfer
+// use the returned capacity. USB/virtio keep their existing 64-KiB windows.
+const BLOCK_SHM_BYTES: Word = 0;
 const BLOCK_READ_RETRY_LIMIT: usize = 4;
 const MAX_SESSIONS: usize = 16;
 const MAX_DELEGATED_SESSIONS: usize = 16;
@@ -80,7 +86,9 @@ const EXT2_INODE_BLOCK_POINTERS: usize = 15;
 // Payload budget, independent of filesystem block size; allocated on the heap.
 const EXT2_BLOCK_CACHE_BUDGET: usize = 1024 * 1024;
 const EXT2_INODE_CACHE_ENTRIES: usize = 64;
-const EXT2_DENTRY_CACHE_ENTRIES: usize = 128;
+// Compact names permit four times the previous short-name working set with
+// less than 24KiB additional metadata. Keep block I/O/cache and heap limits.
+const EXT2_DENTRY_CACHE_ENTRIES: usize = 512;
 const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
 const EXT2_FT_SOCK: u8 = 6;
@@ -132,6 +140,9 @@ struct FileHandle {
     inode: u32,
     size: u32,
     mode: u16,
+    read_grant: read_grants::Grant,
+    /// Present only for a negotiated cursor open; never a per-client mirror.
+    cursor: Option<Word>,
 }
 
 impl FileHandle {
@@ -142,6 +153,8 @@ impl FileHandle {
         inode: 0,
         size: 0,
         mode: 0,
+        read_grant: read_grants::Grant::EMPTY,
+        cursor: None,
     };
 }
 
@@ -228,12 +241,15 @@ struct Ext2Runtime {
     sessions: [ClientSession; MAX_SESSIONS],
     delegated_sessions: [DelegatedSession; MAX_DELEGATED_SESSIONS],
     handles: [FileHandle; MAX_HANDLES],
+    next_read_grant: Word,
     block_cache: block_cache::BlockCache,
     writeback: writeback::Writeback,
     frozen_by: Option<Word>,
     inode_cache: inode_cache::Cache,
     dentry_cache: dentry_cache::Cache,
     directory_cursors: directory::Cursors,
+    root_path: canonical_path::RootCache,
+    resolved_paths: resolved_path::Cache,
     mapped_pages: mapped_pages::Pages,
     file_versions: file_versions::Versions,
 }
@@ -249,7 +265,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let (block_port, timer_port) = connect_block_device()
         .map_err(|e| log_error("[ext2-server] block-device unavailable: ", e))?;
     let (block_shm, block_shm_size) =
-        nanami_client::block::block_device_attach_shared_memory(block_port, BLOCK_SHM_BYTES)
+        nanami_client::block::block_device_attach_dma_read_memory(block_port, BLOCK_SHM_BYTES)
             .map_err(|e| log_error("[ext2-server] block shm attach failed: ", e))?;
     let (block_size, block_count) = nanami_client::block::block_device_info(block_port)
         .map_err(|e| log_error("[ext2-server] block info failed: ", e))?;
@@ -278,6 +294,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         sessions: [ClientSession::EMPTY; MAX_SESSIONS],
         delegated_sessions: [DelegatedSession::EMPTY; MAX_DELEGATED_SESSIONS],
         handles: [FileHandle::EMPTY; MAX_HANDLES],
+        next_read_grant: 1,
         block_cache: block_cache::BlockCache::new(
             block_size,
             EXT2_BLOCK_CACHE_BUDGET,
@@ -288,6 +305,8 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         inode_cache: inode_cache::Cache::new(),
         dentry_cache: dentry_cache::Cache::new(),
         directory_cursors: directory::Cursors::new(),
+        root_path: canonical_path::RootCache::new(),
+        resolved_paths: resolved_path::Cache::new(),
         mapped_pages: mapped_pages::Pages::new(),
         file_versions: file_versions::Versions::new(),
     };
@@ -378,6 +397,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                             request.code,
                             nanami_client::vfs::VFS_REQUEST_READ
                                 | nanami_client::vfs::VFS_REQUEST_READ_DELEGATED
+                                | nanami_client::vfs::VFS_REQUEST_READ_VERSIONED
                         ) {
                             pending.1
                         } else {
@@ -425,7 +445,15 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         }
     }
     match request.code {
-        nanami_client::vfs::VFS_REQUEST_PATH => namespace::handle(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_PATH | nanami_client::vfs::VFS_REQUEST_OPEN_ROOTED_GRANTED
+            | nanami_client::vfs::VFS_REQUEST_OPEN_ROOTED_CURSOR_GRANTED => namespace::handle(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_CURSOR => file_cursor::read_owned(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_CURSOR_GRANTED => file_cursor::read_granted(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_SEEK_CURSOR => file_cursor::seek_owned(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_SEEK_CURSOR_GRANTED => file_cursor::seek_granted(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_FSTAT_GRANTED => handle_fstat_granted(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_GRANTED => handle_read_granted(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_VERSIONED_GRANTED => handle_read_versioned_granted(request, runtime),
         nanami_client::vfs::VFS_REQUEST_MAP_READ_PAGE | nanami_client::vfs::VFS_REQUEST_UNMAP_READ_PAGE => mapped_pages::handle(request, runtime),
         nanami_client::vfs::VFS_REQUEST_FREEZE | nanami_client::vfs::VFS_REQUEST_THAW => {
             writeback::handle_freeze(request, runtime)
@@ -438,6 +466,7 @@ fn handle_request(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, 
         nanami_client::vfs::VFS_REQUEST_OPEN_COMPOUND => handle_open_compound(request, runtime),
         nanami_client::vfs::VFS_REQUEST_READ => handle_read(request, runtime),
         nanami_client::vfs::VFS_REQUEST_READ_DELEGATED => handle_read_delegated(request, runtime),
+        nanami_client::vfs::VFS_REQUEST_READ_VERSIONED => handle_read_versioned(request, runtime),
         nanami_client::vfs::VFS_REQUEST_STAT => handle_stat(request, runtime),
         nanami_client::vfs::VFS_REQUEST_CLOSE => handle_close(request, runtime),
         nanami_client::vfs::VFS_REQUEST_READ_DIR => handle_read_dir(request, runtime),
@@ -657,26 +686,23 @@ fn handle_fstat(request: ServiceRequest, runtime: &mut Ext2Runtime) -> (Word, Wo
         return (nanami_runtime::OS_RESPONSE_INVALID_DESCRIPTOR, 0, 0);
     }
     let file = runtime.handles[handle];
-    if request.arg1 & nanami_client::vfs::VFS_STAT_INCLUDE_VERSION != 0 {
-        if request.arg1 != nanami_client::vfs::VFS_STAT_INCLUDE_VERSION {
+    file_stat(runtime, file, request.arg1)
+}
+
+fn file_stat(runtime: &mut Ext2Runtime, file: FileHandle, flags: Word) -> (Word, Word, Word) {
+    if flags & nanami_client::vfs::VFS_STAT_INCLUDE_VERSION != 0 {
+        if flags != nanami_client::vfs::VFS_STAT_INCLUDE_VERSION {
             return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
         }
-        let version = if file.mode & EXT2_S_IFMT == EXT2_S_IFREG
-            && !runtime.mapped_pages.pins(file.inode)
-        {
-            runtime.file_versions.get(file.inode)
-        } else {
-            0
-        };
         return (
             nanami_runtime::OS_RESPONSE_OK,
-            file.inode as Word | ((version as Word) << 32),
+            versioned_file_identity(runtime, file),
             pack_stat(file.size as Word, file_kind(file.mode)),
         );
     }
     (
         nanami_runtime::OS_RESPONSE_OK,
-        stat_inode(file.inode, file.mode, request.arg1),
+        stat_inode(file.inode, file.mode, flags),
         pack_stat(file.size as Word, file_kind(file.mode)),
     )
 }
@@ -928,7 +954,7 @@ fn mount_ext2(runtime: &mut Ext2Runtime) -> Result<(), RequestError> {
     Ok(())
 }
 
-fn load_cached_inode(runtime: &Ext2Runtime, inode_no: u32) -> Option<Ext2Inode> {
+fn load_cached_inode(runtime: &mut Ext2Runtime, inode_no: u32) -> Option<Ext2Inode> {
     runtime.inode_cache.load(inode_no)
 }
 
@@ -993,47 +1019,11 @@ fn lookup_path(
     path_offset: usize,
     path_len: usize,
 ) -> Option<u32> {
-    if path_len == 0 || path_offset + path_len > session.shm_size as usize {
+    if path_offset.checked_add(path_len).is_none_or(|end| end > session.shm_size) {
         return None;
     }
     let path = (session.shm_local as usize + path_offset) as *const u8;
-    unsafe {
-        if *path != b'/' {
-            return None;
-        }
-        if path_len == 1 {
-            return Some(EXT2_ROOT_INODE);
-        }
-        let mut current = EXT2_ROOT_INODE;
-        let mut component_start = 1usize;
-        while component_start < path_len {
-            while component_start < path_len && *path.add(component_start) == b'/' {
-                component_start += 1;
-            }
-            if component_start >= path_len {
-                break;
-            }
-            let mut component_end = component_start;
-            while component_end < path_len && *path.add(component_end) != b'/' {
-                component_end += 1;
-            }
-            let component_len = component_end - component_start;
-            if component_len == 0 || component_len > EXT2_NAME_LEN_MAX {
-                return None;
-            }
-            current =
-                lookup_in_directory(runtime, current, path.add(component_start), component_len)?;
-            // Only namespace-rooted PATH requests follow links. This keeps
-            // legacy/canonical RPCs from following a concurrently replaced link.
-            if component_end < path_len
-                && read_inode(runtime, current).ok()?.mode & EXT2_S_IFMT == EXT2_S_IFLNK
-            {
-                return None;
-            }
-            component_start = component_end;
-        }
-        Some(current)
-    }
+    unsafe { canonical_path::lookup(runtime, path, path_len) }
 }
 
 fn lookup_parent_path(
@@ -1735,6 +1725,8 @@ fn alloc_handle(
                 inode: inode_no,
                 size: inode.size,
                 mode: inode.mode,
+                read_grant: read_grants::Grant::EMPTY,
+                cursor: None,
             };
             return Some(i);
         }

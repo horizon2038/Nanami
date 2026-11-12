@@ -7,7 +7,29 @@ static long call(long n, word a, word b, word c, word d) {
 _Alignas(4096) static volatile unsigned char protected_state[4096];
 _Alignas(4096) static volatile unsigned char readlink_state[4096];
 extern long thread_start(word, word, word, word, word, word);
+extern long clone3_start(void *, word, word);
+extern long vfork_start(word);
 extern const unsigned char exec_stack_probe_start[], exec_stack_probe_end[];
+static volatile word spawn_marker;
+static word spawn_clear_handlers;
+static word spawn_altstack;
+static const char *spawn_path;
+static int shared_exec_worker(void) {
+    const char *argv[] = {spawn_path, 0}; const char *env[] = {0};
+    word action[4], mask, altstack[3];
+    if (call(13, 10, 0, (word)action, 8) != 0
+        || action[0] != (spawn_clear_handlers ? 0 : (word)shared_exec_worker)
+        || call(13, 12, 0, (word)action, 8) != 0 || action[0] != 1
+        || call(14, 2, 0, (word)&mask, 8) != 0 || mask != (1ul << 9)
+        || call(131, 0, (word)altstack, 0, 0) != 0
+        || altstack[0] != spawn_altstack || altstack[1] != 0 || altstack[2] != 16384) {
+        spawn_marker = 0xbad; return 229;
+    }
+    spawn_marker = 0x1234;
+    long result = call(59, (word)spawn_path, (word)argv, (word)env, 0);
+    spawn_marker = result == -2 ? 0xface : 0xbad;
+    return result == -2 ? 0 : 229;
+}
 
 static void elf_word(unsigned char *p, word value, word bytes) {
     for (word i = 0; i < bytes; ++i) { p[i] = value >> (i * 8); }
@@ -59,8 +81,45 @@ static int exec_demand_stack_cases(void) {
         call(60, 229, 0, 0, 0); for (;;) {}
     }
     status = -1;
-    if (call(61, child, (word)&status, 0, 0) != child || status != 0
-        || call(87, (word)path, 0, 0, 0) != 0) { return 230; }
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 230; }
+    long stack = linux_call(9, 0, 65536, 3, 0x22, -1ul, 0);
+    if (stack < 0) { return 230; }
+    word old_caught[4], old_ignored[4], old_mask, old_altstack[3];
+    word caught[4] = {(word)shared_exec_worker, 0, 0, 0}, ignored[4] = {1, 0, 0, 0};
+    word mask = 1ul << 9;
+    spawn_altstack = stack + 16384;
+    word altstack[3] = {spawn_altstack, 0, 16384};
+    if (call(13, 10, (word)caught, (word)old_caught, 8) != 0
+        || call(13, 12, (word)ignored, (word)old_ignored, 8) != 0
+        || call(14, 2, (word)&mask, (word)&old_mask, 8) != 0
+        || call(131, (word)altstack, (word)old_altstack, 0, 0) != 0) { return 230; }
+    for (word attempt = 0; attempt < 18; ++attempt) {
+        spawn_marker = 0;
+        word mode = (attempt / 2) % 3;
+        spawn_clear_handlers = mode == 1;
+        spawn_path = attempt & 1 ? path : "/nonexistent-vfork-exec";
+        if (mode == 1) {
+            word args[11] = {0x4100 | (1ul << 32), 0, 0, 0, 17, (word)stack, 65536, 0, 0, 0, 0};
+            child = clone3_start(args, sizeof(args), (word)shared_exec_worker);
+        } else if (mode == 0) {
+            child = thread_start(0x4100 | 17, stack + 65536, 0, 0, 0, (word)shared_exec_worker);
+        } else {
+            child = vfork_start((word)shared_exec_worker);
+        }
+        if (child < 0 || spawn_marker != ((attempt & 1) ? 0x1234ul : 0xfaceul)) { return 230; }
+        status = -1;
+        if (call(61, child, (word)&status, 0, 0) != child || status != 0
+            || *a != 0x6a || *b != 0x7b) { return 230; }
+        word action[4];
+        if (call(13, 10, 0, (word)action, 8) != 0 || action[0] != caught[0]) { return 230; }
+    }
+    if (call(13, 10, (word)old_caught, 0, 8) != 0
+        || call(13, 12, (word)old_ignored, 0, 8) != 0
+        || call(14, 2, (word)&old_mask, 0, 8) != 0
+        || call(131, (word)old_altstack, 0, 0, 0) != 0) { return 230; }
+    if (call(11, stack, 65536, 0, 0) != 0 || call(87, (word)path, 0, 0, 0) != 0) { return 230; }
+    static const char spawn_pass[] = "SHARED-VFORK-EXEC-PASS cases=18\n";
+    call(1, 1, (word)spawn_pass, sizeof(spawn_pass) - 1, 0);
     *a = 0; *b = 0;
     static const char pass[] = "EXEC-STACK-DEMAND-PASS\n";
     call(1, 1, (word)pass, sizeof(pass) - 1, 0);
@@ -549,6 +608,78 @@ static int syscall_read_backing(void) {
     return 0;
 }
 
+static int writable_private_fork(void) {
+    const word bytes = 64 * 4096;
+    long base = linux_call(9, 0, bytes, 3, 0x22, -1UL, 0);
+    if (base < 0) { return 160; }
+    volatile unsigned char *p = (void *)base;
+    for (word page = 0; page < 64; ++page) { p[page * 4096] = (unsigned char)(page + 32); }
+    volatile word stack_value = 0x12345678;
+    long child = call(57, 0, 0, 0, 0);
+    if (child < 0) { return 161; }
+    if (child == 0) {
+        stack_value = 0xabcdef;
+        p[0] = 0xee;
+        /* Alpha copyout must detach COW even though logical rights are RW. */
+        if (call(118, base + 2 * 4096, base + 3 * 4096, base + 4 * 4096, 0) != 0
+            || p[2 * 4096] != 0 || p[3 * 4096] != 0 || p[4 * 4096] != 0) {
+            call(60, 162, 0, 0, 0); return 162;
+        }
+        long grandchild = call(57, 0, 0, 0, 0);
+        if (grandchild < 0) { call(60, 163, 0, 0, 0); return 163; }
+        if (grandchild == 0) {
+            p[5 * 4096] = 0xdd;
+            call(60, p[0] == 0xee && stack_value == 0xabcdef ? 0 : 164, 0, 0, 0);
+            return 164;
+        }
+        int status = -1;
+        if (call(61, grandchild, (word)&status, 0, 0) != grandchild || status != 0
+            || p[5 * 4096] != 37) { call(60, 165, 0, 0, 0); return 165; }
+        call(60, 0, 0, 0, 0); return 166;
+    }
+    int status = -1;
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0
+        || stack_value != 0x12345678) { return 167; }
+    for (word page = 0; page < 64; ++page) {
+        if (p[page * 4096] != (unsigned char)(page + 32)) { return 168; }
+    }
+    /* Last-owner write must restore WRITE without copying stale peer data. */
+    p[0] = 0xcc;
+    if (p[0] != 0xcc || call(11, base, bytes, 0, 0) != 0) { return 169; }
+    return 0;
+}
+
+static int memfd_private_fork_runs(void) {
+    static unsigned char data[12 * 4096 + 17];
+    for (word i = 0; i < sizeof(data); ++i) { data[i] = (unsigned char)(i % 239); }
+    long fd = call(319, (word)"fork-runs", 0, 0, 0);
+    if (fd < 0 || call(1, fd, (word)data, sizeof(data), 0) != sizeof(data)) { return 150; }
+    long base = linux_call(9, 0, 16 * 4096, 3, 2, fd, 0);
+    if (base < 0 || call(10, base, 4 * 4096, 1, 0) != 0
+        || call(10, base + 4 * 4096, 4 * 4096, 0, 0) != 0) { return 151; }
+    long child = call(57, 0, 0, 0, 0);
+    if (child < 0) { return 152; }
+    if (child == 0) {
+        if (call(10, base, 13 * 4096, 3, 0) != 0) { call(60, 153, 0, 0, 0); return 153; }
+        volatile unsigned char *p = (void *)base;
+        for (word i = 0; i < 13 * 4096; ++i) {
+            if (p[i] != (i < sizeof(data) ? data[i] : 0)) { call(60, 154, 0, 0, 0); return 154; }
+        }
+        p[0] = 0x7f;
+        call(60, 0, 0, 0, 0);
+        return 155;
+    }
+    int status = -1;
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0
+        || call(10, base, 13 * 4096, 3, 0) != 0) { return 156; }
+    volatile unsigned char *p = (void *)base;
+    for (word i = 0; i < 13 * 4096; ++i) {
+        if (p[i] != (i < sizeof(data) ? data[i] : 0)) { return 157; }
+    }
+    if (call(11, base, 16 * 4096, 0, 0) != 0 || call(3, fd, 0, 0, 0) != 0) { return 158; }
+    return 0;
+}
+
 static int private_mapping_and_fork(void) {
     static unsigned char data[5003];
     for (word i = 0; i < sizeof(data); ++i) { data[i] = (unsigned char)(i % 239); }
@@ -726,6 +857,48 @@ static int snapshot_write_prepare_and_fixed_reload(void) {
     return 0;
 }
 
+static int fixed_writable_reuse_and_reload(void) {
+    static unsigned char data[5003];
+    for (word i = 0; i < sizeof(data); ++i) { data[i] = (unsigned char)(i % 181 + 1); }
+    for (word copied = 0; copied < 2; ++copied) {
+        for (word executable = 0; executable < 2; ++executable) {
+            const char *name = "/tmp/fixed-writable-reuse";
+            long fd = call(2, (word)name, 01102, 0600, 0);
+            if (fd < 0 || call(1, fd, (word)data, sizeof(data), 0) != sizeof(data)) { return 239; }
+            /* A cold nonzero offset bypasses whole-file cache admission,
+             * exercising copied private backing as well as snapshot aliases. */
+            word offset = copied ? 4096 : 0;
+            long peer = linux_call(9, 0, 8192, 1, 2, fd, offset);
+            long address = linux_call(9, 0, 12288, 1, 2, fd, offset);
+            if (peer < 0 || address < 0
+                || linux_call(9, address, 8192, executable ? 7 : 3, 18, fd, offset) != address) { return 240; }
+            volatile unsigned char *p = (void *)address;
+            volatile unsigned char *q = (void *)peer;
+            for (word i = 0; i < 12288; ++i) {
+                if (p[i] != (offset + i < sizeof(data) ? data[offset + i] : 0)) { return 241; }
+            }
+            p[0] = 0x91; p[4095] = 0x82; p[8191] = 0x73;
+            unsigned char disk = 0;
+            if (q[0] != data[offset]
+                || q[4095] != (offset + 4095 < sizeof(data) ? data[offset + 4095] : 0)
+                || q[8191] != 0
+                || call(17, fd, (word)&disk, 1, offset) != 1 || disk != data[offset]) { return 242; }
+            /* Writable reuse consumes the immutable proof. Returning to READ
+             * cannot certify those dirty bytes for a later fixed file mmap. */
+            if (call(10, address, 8192, 1, 0) != 0
+                || linux_call(9, address, 8192, 1, 18, fd, offset) != address) { return 243; }
+            for (word i = 0; i < 12288; ++i) {
+                if (p[i] != (offset + i < sizeof(data) ? data[offset + i] : 0)) { return 244; }
+            }
+            if (call(11, address, 12288, 0, 0) != 0 || call(11, peer, 8192, 0, 0) != 0
+                || call(3, fd, 0, 0, 0) != 0 || call(87, (word)name, 0, 0, 0) != 0) { return 245; }
+        }
+    }
+    static const char pass[] = "TINYCORE-FIXED-WRITABLE-REUSE-PASS cases=4\n";
+    call(1, 1, (word)pass, sizeof(pass) - 1, 0);
+    return 0;
+}
+
 static int readonly_snapshot_tail_and_retirement(void) {
     static unsigned char data[5003];
     static unsigned char churn[4096];
@@ -821,7 +994,7 @@ static int uncached_private_mapping(void) {
     }
     word bytes = 2 * 1024 * 1024;
     long address = linux_call(9, 0, bytes + 4096, 1, 2, fd, 0);
-    if (address < 0) { return 54; }
+    if (address < 0 || ((word)address & ((1ul<<21)-1)) != 0) { return 54; }
     volatile unsigned char *a = (void *)address;
     for (word i = 0; i < bytes + 4096; ++i) {
         unsigned char expected = 0;
@@ -835,7 +1008,7 @@ static int uncached_private_mapping(void) {
     }
     if (call(11, address, bytes + 4096, 0, 0) != 0) { return 56; }
     address = linux_call(9, 0, bytes + 4096, 3, 2, fd, 0);
-    if (address < 0) { return 58; }
+    if (address < 0 || ((word)address & ((1ul<<21)-1)) != 0) { return 58; }
     a = (void *)address;
     if (a[0] != 0x4d || a[bytes + 122] != 0x4d || a[bytes + 123] != 0) { return 58; }
     a[0] = 0x71;
@@ -850,7 +1023,351 @@ static int uncached_private_mapping(void) {
     call(1, 1, (word)pass, sizeof(pass) - 1, 0);
     return 0;
 }
+static int disjoint_mmap_view_cases(void) {
+    long base = linux_call(9, 0, 8192, 3, 0x22, -1, 0);
+    int pipefd[2];
+    if (base < 0 || call(22, (word)pipefd, 0, 0, 0) != 0) { return 160; }
+    volatile unsigned char *source = (void *)base;
+    volatile unsigned char *output = (void *)(base + 4096);
+    long mappings[8];
+    for (word index = 0; index < 8; ++index) {
+        /* Keep unrelated mappings live: unmap deliberately retains its old
+         * conservative generation invalidation. Both pipe transfers exercise
+         * ordinary checked read/write views into the original two pages. */
+        for (word byte = 0; byte < 64; ++byte) { source[byte] = (unsigned char)(index + byte); }
+        if (call(1, pipefd[1], base, 64, 0) != 64
+            || call(0, pipefd[0], base + 4096, 64, 0) != 64) { return 161; }
+        for (word byte = 0; byte < 64; ++byte) {
+            if (output[byte] != (unsigned char)(index + byte)) { return 162; }
+        }
+        mappings[index] = linux_call(9, 0, 4096, 3, 0x22, -1, 0);
+        if (mappings[index] < 0) { return 163; }
+    }
+    if (linux_call(9, base, 4096, 3, 0x32, -1, 0) != base) { return 164; }
+    for (word byte = 0; byte < 64; ++byte) { source[byte] = (unsigned char)(0x90 + byte); }
+    if (linux_call(9, base + 4096, 4096, 3, 0x32, -1, 0) != base + 4096) { return 165; }
+    if (call(1, pipefd[1], base, 64, 0) != 64
+        || call(0, pipefd[0], base + 4096, 64, 0) != 64) { return 166; }
+    for (word byte = 0; byte < 64; ++byte) {
+        if (output[byte] != (unsigned char)(0x90 + byte)) { return 167; }
+    }
+    call(3, pipefd[0], 0, 0, 0); call(3, pipefd[1], 0, 0, 0);
+    for (word index = 0; index < 8; ++index) {
+        if (call(11, mappings[index], 4096, 0, 0) != 0) { return 168; }
+    }
+    if (call(11, base, 8192, 0, 0) != 0) { return 169; }
+    return 0;
+}
+
+static int large_copyout_view_cases(void) {
+    static unsigned char data[65536];
+    const char *name = "/tmp/large-copyout-view-test";
+    const word mapping_bytes = 64 * 4096;
+    long address = linux_call(9, 0, mapping_bytes, 3, 0x22, -1, 0);
+    long fd = call(2, (word)name, 0102, 0600, 0);
+    if (address < 0 || fd < 0) { return 233; }
+    volatile unsigned char *mapping = (void *)address;
+    const word start = 2 * 4096 + 19;
+    for (word i = 0; i < mapping_bytes; ++i) { mapping[i] = 0x55; }
+    for (word epoch = 0; epoch < 3; ++epoch) {
+        for (word i = 0; i < sizeof(data); ++i) { data[i] = (unsigned char)(i * 37 + epoch * 11); }
+        if (call(18, fd, (word)data, sizeof(data), 0) != sizeof(data)
+            || call(17, fd, address + start, sizeof(data), 0) != sizeof(data)) { return 234; }
+        for (word i = 0; i < mapping_bytes; ++i) {
+            unsigned char expected = i >= start && i < start + sizeof(data) ? data[i - start] : 0x55;
+            if (mapping[i] != expected) { return 235; }
+        }
+    }
+    /* The parent keeps epoch2. A private child replaces a middle page and
+     * reads epoch3 across17 pages, including the remaining COW pages. */
+    for (word i = 0; i < sizeof(data); ++i) { data[i] = (unsigned char)(i * 37 + 33); }
+    if (call(18, fd, (word)data, sizeof(data), 0) != sizeof(data)) { return 236; }
+    long child = call(57, 0, 0, 0, 0);
+    if (child < 0) { return 237; }
+    if (child == 0) {
+        if (linux_call(9, address + 10 * 4096, 4096, 3, 0x32, -1, 0) != address + 10 * 4096
+            || call(17, fd, address + start, sizeof(data), 0) != sizeof(data)) {
+            call(60, 238, 0, 0, 0); for (;;) {}
+        }
+        for (word i = 0; i < mapping_bytes; ++i) {
+            unsigned char expected = i >= start && i < start + sizeof(data) ? data[i - start] : 0x55;
+            if (mapping[i] != expected) { call(60, 239, 0, 0, 0); for (;;) {} }
+        }
+        call(60, 0, 0, 0, 0); for (;;) {}
+    }
+    int status = 0;
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 240; }
+    for (word i = 0; i < mapping_bytes; ++i) {
+        unsigned char expected = i >= start && i < start + sizeof(data)
+            ? (unsigned char)((i - start) * 37 + 22) : 0x55;
+        if (mapping[i] != expected) { return 241; }
+    }
+    if (call(3, fd, 0, 0, 0) != 0 || call(87, (word)name, 0, 0, 0) != 0
+        || call(11, address, mapping_bytes, 0, 0) != 0) { return 242; }
+    return 0;
+}
+
+static volatile word huge_running, huge_stop;
+static unsigned char huge_pattern(word i) {return (unsigned char)(i*17+(i>>12)*31+0x37);}
+static int huge_mremap_copy_cases(void) {
+    const word source=0x30000000, target=0x30800000, bytes=4*1024*1024;
+    if (linux_call(9,source,bytes,3,0x32,-1ul,0)!=(long)source) {return 243;}
+    volatile unsigned char *p=(void *)source;
+    for (word i=0;i<bytes;++i) {p[i]=huge_pattern(i);}
+    if (linux_call(25,source,bytes,bytes,3,target,0)!=(long)target) {return 243;}
+    p=(void *)target;
+    for (word i=0;i<bytes;++i) {if (p[i]!=huge_pattern(i)) {return 243;}}
+    /* Reusing the released source must not alias or overwrite the result. */
+    if (linux_call(9,source,bytes,3,0x32,-1ul,0)!=(long)source) {return 243;}
+    volatile unsigned char *q=(void *)source;
+    for (word i=0;i<bytes;++i) {if (q[i]!=0) {return 243;} q[i]=0xa5;}
+    if (call(10,target+4096,4096,1,0)!=0
+        || call(10,target+4096,4096,3,0)!=0) {return 243;}
+    for (word i=0;i<bytes;++i) {if (p[i]!=huge_pattern(i)) {return 243;}}
+    if (call(11,source,bytes,0,0)!=0 || call(11,target,bytes,0,0)!=0) {return 243;}
+    static const char pass[]="TINYCORE-HUGE-COPY-PASS\n";
+    call(1,1,(word)pass,sizeof(pass)-1,0);
+    return 0;
+}
+static int huge_neighbor_worker(void) {
+    volatile unsigned char *neighbor=(void *)0x28008000;
+    __atomic_store_n(&huge_running,1,__ATOMIC_RELEASE);
+    while (!__atomic_load_n(&huge_stop,__ATOMIC_ACQUIRE)) {
+        if (*neighbor != huge_pattern(0x8000)) {return 243;}
+        call(24,0,0,0,0);
+    }
+    return *neighbor == huge_pattern(0x8000) ? 0 : 243;
+}
+
+static int huge_after_small_table_cases(void) {
+    const word base=0x2c000000, large=2*1024*1024, bytes=4*large;
+    /* Leave empty 4K tables in the first and third intervals. The second
+       and fourth still have room for real huge leaves. */
+    for (word offset=0;offset<bytes;offset+=2*large) {
+        if (linux_call(9,base+offset,4096,3,0x32,-1ul,0)!=(long)(base+offset)
+            || call(11,base+offset,4096,0,0)!=0) {return 253;}
+    }
+    if (linux_call(9,base,bytes,3,0x32,-1ul,0)!=base) {return 253;}
+    volatile unsigned char *p=(void *)base;
+    for (word i=0;i<bytes;++i) {
+        if (p[i]!=0) {return 254;}
+        p[i]=huge_pattern(i);
+    }
+    int pipefd[2];
+    if (call(22,(word)pipefd,0,0,0)!=0
+        || call(1,pipefd[1],base+large-16,32,0)!=32
+        || call(0,pipefd[0],base+3*large-16,32,0)!=32) {return 254;}
+    call(3,pipefd[0],0,0,0);
+    call(3,pipefd[1],0,0,0);
+    if (call(10,base+3*large+4096,4096,1,0)!=0
+        || call(10,base+3*large+4096,4096,3,0)!=0) {return 254;}
+    for (word i=0;i<bytes;++i) {
+        word source=(i>=3*large-16 && i<3*large+16)?i-2*large:i;
+        if (p[i]!=huge_pattern(source)) {return 254;}
+    }
+    if (call(11,base,bytes,0,0)!=0) {return 254;}
+    static const char pass[]="GUEST-HUGE-AFTER-SMALL-TABLE-PASS\n";
+    call(1,1,(word)pass,sizeof(pass)-1,0);
+    return 0;
+}
+
+static int private_copied_fork_cases(void) {
+    const word bases[]={0x34001000,0x34400000,0x35001000,0x34800000,0x35401000,0x34c00000};
+    const word sizes[]={4*4096,2*1024*1024,4*4096,2*1024*1024,4*4096,2*1024*1024};
+    const word rights[]={0,0,2,2,6,6};
+    for (word run=0;run<6;++run) {
+        word base=bases[run],bytes=sizes[run];
+        if (linux_call(9,base,bytes,3,0x32,-1ul,0)!=(long)base) {return 255;}
+        volatile unsigned char *p=(void *)base;
+        for (word i=0;i<bytes;++i) {p[i]=huge_pattern(i);}
+        if (call(10,base,bytes,rights[run],0)!=0) {return 255;}
+        long child=call(57,0,0,0,0);
+        if (child<0) {return 255;}
+        if (child==0) {
+            /* This inaccessible huge copy had no guest page tables. */
+            if (run==1 && (call(10,base+4096,4096,3,0)!=0 || p[4096]!=huge_pattern(4096))) {
+                call(60,255,0,0,0);for (;;) {}
+            }
+            int bad=call(10,base,bytes,3,0)!=0;
+            if (!bad) {
+                for (word i=0;i<bytes;++i) {if (p[i]!=huge_pattern(i)) {bad=1;break;}}
+                p[0]^=0xff;
+            }
+            call(60,bad?255:0,0,0,0);for (;;) {}
+        }
+        int status=-1;
+        if (call(61,child,(word)&status,0,0)!=child || status!=0
+            || call(10,base,bytes,3,0)!=0) {return 255;}
+        for (word i=0;i<bytes;++i) {if (p[i]!=huge_pattern(i)) {return 255;}}
+        if (call(11,base,bytes,0,0)!=0) {return 255;}
+    }
+    static const char pass[]="COPIED-PRIVATE-FORK-PASS\n";
+    call(1,1,(word)pass,sizeof(pass)-1,0);
+    return 0;
+}
+
+static int huge_private_cases(void) {
+    const word mixed_base=0x35c00000;
+    const word mixed_boundary=2*1024*1024;
+    const word mixed_bytes=2*mixed_boundary+4096;
+    if (linux_call(9,mixed_base,mixed_bytes,3,0x32,-1ul,0)!=(long)mixed_base) {return 255;}
+    volatile unsigned char *mixed=(void *)mixed_base;
+    mixed[0]=0x35;
+    mixed[mixed_boundary]=0x29;
+    mixed[mixed_bytes-1]=0x67;
+    if (call(10,mixed_base,mixed_boundary,1,0)!=0
+        || call(10,mixed_base,mixed_bytes,0,0)!=0
+        || call(10,mixed_base,mixed_bytes,3,0)!=0
+        || call(10,mixed_base+4096,mixed_bytes-4096,1,0)!=0
+        || mixed[0]!=0x35 || mixed[mixed_boundary]!=0x29 || mixed[mixed_bytes-1]!=0x67) {return 255;}
+    mixed[0]=0x53;
+    if (call(10,mixed_base+4096,mixed_bytes-4096,0,0)!=0
+        || call(10,mixed_base+4096,mixed_bytes-4096,3,0)!=0
+        || mixed[0]!=0x53 || mixed[mixed_boundary]!=0x29 || mixed[mixed_bytes-1]!=0x67
+        || call(11,mixed_base,mixed_bytes,0,0)!=0) {return 255;}
+    /* An automatic large request after a small one must still have a complete
+       huge interval. Padding reserves neither physical RAM nor guest leaves. */
+    long small=linux_call(9,0,4096,3,0x22,-1ul,0);
+    long automatic=linux_call(9,0,2*1024*1024,3,0x22,-1ul,0);
+    if (small<0 || automatic<0 || ((word)automatic&((1ul<<21)-1))!=0) {return 255;}
+    volatile unsigned char *auto_page=(void *)automatic;
+    for (word i=0;i<2*1024*1024;++i) {
+        if (auto_page[i]!=0) {return 255;}
+        auto_page[i]=huge_pattern(i);
+    }
+    for (word i=0;i<2*1024*1024;++i) {
+        if (auto_page[i]!=huge_pattern(i)) {return 255;}
+    }
+    if (call(10,automatic,2*1024*1024,1,0)!=0
+        || call(10,automatic,2*1024*1024,0,0)!=0
+        || call(10,automatic,2*1024*1024,3,0)!=0) {return 255;}
+    for (word i=0;i<2*1024*1024;++i) {
+        if (auto_page[i]!=huge_pattern(i)) {return 255;}
+    }
+    if (call(11,automatic,2*1024*1024,0,0)!=0 || call(11,small,4096,0,0)!=0) {return 255;}
+    const word base=0x28000000, bytes=4*1024*1024;
+    if (linux_call(9,base,bytes,3,0x32,-1ul,0) != base) {return 243;}
+    volatile unsigned char *p=(void *)base;
+    for (word i=0;i<bytes;++i) {if (p[i]!=0) {return 244;} p[i]=huge_pattern(i);}
+    if (call(10,base,bytes,1,0)!=0 || call(10,base,bytes,3,0)!=0) {return 244;}
+    /* Copyout must address a 4K slice inside the huge Frame, including a
+       boundary crossing, without exporting a whole huge capability as 4K. */
+    int pipefd[2];
+    if (call(22,(word)pipefd,0,0,0)!=0
+        || call(1,pipefd[1],base+0x1ffff0,32,0)!=32
+        || call(0,pipefd[0],base+0x200ff0,32,0)!=32) {return 245;}
+    for (word i=0;i<32;++i) {if (p[0x200ff0+i]!=huge_pattern(0x1ffff0+i)) {return 245;}}
+    call(3,pipefd[0],0,0,0);call(3,pipefd[1],0,0,0);
+    long stack=linux_call(9,0,65536,3,0x22,-1ul,0);
+    if (stack<0) {return 246;}
+    huge_running=huge_stop=0;
+    long peer=thread_start(0x100|17,stack+65536,0,0,0,(word)huge_neighbor_worker);
+    if (peer<0) {return 246;}
+    while (!__atomic_load_n(&huge_running,__ATOMIC_ACQUIRE)) {call(24,0,0,0,0);}
+    int bad=call(10,base+4096,4096,1,0)!=0 || p[4096]!=huge_pattern(4096)
+        || call(10,base+4096,4096,3,0)!=0;
+    __atomic_store_n(&huge_stop,1,__ATOMIC_RELEASE);
+    int status=-1;
+    if (call(61,peer,(word)&status,0,0)!=peer || status!=0 || bad
+        || call(11,stack,65536,0,0)!=0) {return 247;}
+    if (call(11,base+0x100000,4096,0,0)!=0
+        || linux_call(9,base+0x100000,4096,3,0x32,-1ul,0)!=base+0x100000) {return 248;}
+    for (word i=0;i<4096;++i) {if (p[0x100000+i]!=0) {return 248;}}
+    /* The second huge leaf remains intact until private fork. */
+    long child=call(57,0,0,0,0);
+    if (child<0) {return 249;}
+    if (child==0) {
+        p[0x300003]=0xa4;
+        call(60,p[0x300004]==huge_pattern(0x300004)?0:250,0,0,0);
+        for (;;) {}
+    }
+    status=-1;
+    if (call(61,child,(word)&status,0,0)!=child || status!=0
+        || p[0x300003]!=huge_pattern(0x300003)) {return 250;}
+    for (word i=0;i<bytes;++i) {
+        unsigned char expected=(i>=0x100000 && i<0x101000)?0:huge_pattern(i);
+        if (i>=0x200ff0 && i<0x201010) {expected=huge_pattern(i-0x200ff0+0x1ffff0);}
+        if (p[i]!=expected) {return 251;}
+    }
+    if (call(11,base,bytes,0,0)!=0) {return 252;}
+    /* Whole-leaf release must not build 512 replacement PTEs. */
+    if (linux_call(9,base+bytes,2*1024*1024,3,0x32,-1ul,0)!=base+bytes
+        || call(11,base+bytes,2*1024*1024,0,0)!=0) {return 252;}
+    static const char pass[]="GUEST-HUGE-LIFECYCLE-PASS\n";
+    call(1,1,(word)pass,sizeof(pass)-1,0);
+    return huge_after_small_table_cases();
+}
+
+
+/* A valid DSO exercises the deferred header/LOAD/fault path, including an
+ * untouched suffix in the parent while fork maps the child's aliases. */
+static int deferred_elf_snapshot_cases(void) {
+    static unsigned char image[512*1024];
+    word bytes=sizeof(image);
+    /* A nonloaded footer makes this partial-file mapping bypass cache fill. */
+    word mapped_bytes=256*1024;
+    for (word i=0;i<bytes;++i) {image[i]=(unsigned char)(i/4096+0x30);}
+    for (word i=0;i<120;++i) {image[i]=0;}
+    image[0]=127;image[1]='E';image[2]='L';image[3]='F';image[4]=2;image[5]=1;image[6]=1;
+    elf_word(image+16,3,2);elf_word(image+18,62,2);elf_word(image+20,1,4);
+    elf_word(image+24,120,8);elf_word(image+32,64,8);
+    elf_word(image+52,64,2);elf_word(image+54,56,2);elf_word(image+56,1,2);
+    elf_word(image+64,1,4);elf_word(image+68,5,4);
+    elf_word(image+96,mapped_bytes,8);elf_word(image+104,mapped_bytes,8);elf_word(image+112,4096,8);
+    const char *path="/tmp/deferred-dso";
+    long fd=call(2,(word)path,01102,0600,0);
+    if (fd<0) {return 253;}
+    for (word i=0;i<bytes;i+=65536) {
+        if (call(1,fd,(word)image+i,65536,0)!=65536) {return 253;}
+    }
+    long base=linux_call(9,0,mapped_bytes,1,2,fd,0);
+    if (base<0) {return 253;}
+    volatile unsigned char *p=(void *)base;
+    if (p[0]!=127) {return 253;}
+    /* Reusing a segment with unchanged R rights must still populate it. */
+    if (linux_call(9,base+32*4096,8*4096,1,18,fd,32*4096)!=base+32*4096
+        || p[35*4096]!=0x53) {return 253;}
+    /* A directly initialized absent page already has unique private backing;
+     * mprotect must install its final rights without a source owner or copy. */
+    if (call(10,base+60*4096,4096,3,0)!=0) {return 253;}
+    p[60*4096]=0xee;
+    long child=call(57,0,0,0,0);int status=-1;
+    if (child<0) {return 253;}
+    if (child==0) {
+        if (p[40*4096]!=0x58 || call(10,base+40*4096,4096,3,0)!=0) {return 253;}
+        p[40*4096]=0xee;call(60,0,0,0,0);for (;;) {}
+    }
+    if (call(61,child,(word)&status,0,0)!=child || status!=0 || p[40*4096]!=0x58 || p[60*4096]!=0xee) {return 253;}
+    if (call(10,base+48*4096,4096,0,0)!=0) {return 253;}
+    child=call(57,0,0,0,0);status=-1;
+    if (child<0) {return 253;}
+    if (child==0) {volatile unsigned char ignored=p[48*4096];(void)ignored;call(60,1,0,0,0);for (;;) {}}
+    if (call(61,child,(word)&status,0,0)!=child || (status&127)!=11
+        || call(10,base+48*4096,4096,1,0)!=0 || p[48*4096]!=0x60) {return 253;}
+    if (call(11,base+56*4096,4096,0,0)!=0
+        || linux_call(9,base+56*4096,4096,3,0x32,-1ul,0)!=base+56*4096
+        || p[56*4096]!=0 || p[55*4096]!=0x67 || p[57*4096]!=0x69) {return 253;}
+    if (call(11,base,mapped_bytes,0,0)!=0) {return 253;}
+    base=linux_call(9,0,mapped_bytes,1,2,fd,0);
+    if (base<0 || call(11,base,mapped_bytes,0,0)!=0 || call(3,fd,0,0,0)!=0
+        || call(87,(word)path,0,0,0)!=0) {return 253;}
+    static const char pass[]="DEFERRED-ELF-SNAPSHOT-PASS\n";
+    call(1,1,(word)pass,sizeof(pass)-1,0);return 0;
+}
+
 int test_main(void) {
+    int huge_copy_result=huge_mremap_copy_cases();
+    if (huge_copy_result!=0) {return huge_copy_result;}
+    int deferred_result=deferred_elf_snapshot_cases();
+    if (deferred_result!=0) {return deferred_result;}
+    int huge_result=huge_private_cases();
+    if (huge_result!=0) {return huge_result;}
+    int copied_fork_result=private_copied_fork_cases();
+    if (copied_fork_result!=0) {return copied_fork_result;}
+    int large_views_result = large_copyout_view_cases();
+    if (large_views_result != 0) { return large_views_result; }
+    int views_result = disjoint_mmap_view_cases();
+    if (views_result != 0) { return views_result; }
     int stack_result = exec_demand_stack_cases();
     if (stack_result != 0) { return stack_result; }
     stack_result = brk_collision_cases();
@@ -910,7 +1427,13 @@ int test_main(void) {
     if (result != 0) { return result; }
     result = snapshot_write_prepare_and_fixed_reload();
     if (result != 0) { return result; }
+    result = fixed_writable_reuse_and_reload();
+    if (result != 0) { return result; }
     result = readonly_snapshot_tail_and_retirement();
+    if (result != 0) { return result; }
+    result = writable_private_fork();
+    if (result != 0) { return result; }
+    result = memfd_private_fork_runs();
     if (result != 0) { return result; }
     result = private_mapping_and_fork();
     if (result != 0) { return result; }

@@ -4,6 +4,14 @@ use std::cell::RefCell;
 type Word = usize;
 const LINUX_PAGE_SIZE: usize = 4096;
 const EIO: i32 = 5;
+mod private_memory {
+    pub(super) fn with_mapping_mutation<T>(_: &super::Runtime, _: usize, _: usize, _: usize, _: bool,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> { operation() }
+}
+mod file_snapshot {
+    pub(super) fn map_uncached_readonly(_: &mut super::Runtime, _: usize, _: usize,
+        _: usize, _: usize, _: usize, _: usize, _: Option<usize>) -> Result<bool, i32> { Ok(false) }
+}
 #[derive(Clone, Copy)]
 struct LinuxFile {
     posix_fd: usize,
@@ -66,12 +74,14 @@ fn publish(
     })
 }
 struct Runtime {
+    image_read_capacity: usize,
     data: Vec<u8>,
     short_reads: Vec<usize>,
     reads: usize,
     fail_after: Option<usize>,
 }
 impl Runtime {
+    fn posix_image_read_buffer_size(&self) -> usize { self.image_read_capacity }
     fn posix_read_buffer_size(&self) -> usize {
         65536
     }
@@ -85,7 +95,7 @@ impl Runtime {
         if self.fail_after == Some(self.reads) {
             return Err(RequestError);
         }
-        let limit = self.short_reads.get(self.reads).copied().unwrap_or(65536);
+        let limit = self.short_reads.get(self.reads).copied().unwrap_or(self.image_read_capacity);
         self.reads += 1;
         let count = bytes.min(limit).min(self.data.len().saturating_sub(offset));
         Ok((count, self.data.as_ptr() as usize + offset))
@@ -96,6 +106,7 @@ mod file_mapping;
 fn run(data_len: usize, bytes: usize, mapped: usize, short_reads: Vec<usize>, permissions: Option<Word>) {
     DESTINATION.with(|state| *state.borrow_mut() = Destination::default());
     let mut r = Runtime {
+        image_read_capacity: 65536,
         data: (0..data_len).map(|i| (i % 239) as u8).collect(),
         short_reads,
         reads: 0,
@@ -162,6 +173,7 @@ fn every_partial_tail_length_after_a_reused_full_buffer_keeps_zero_suffix() {
 fn nonzero_file_offset_is_not_lost_when_buffering_partial_pages() {
     DESTINATION.with(|state| *state.borrow_mut() = Destination::default());
     let mut r = Runtime {
+        image_read_capacity: 65536,
         data: (0..20000).map(|i| (i % 239) as u8).collect(),
         short_reads: vec![7, 4096, 100],
         reads: 0,
@@ -199,6 +211,7 @@ fn read_or_mapping_failure_stops_without_a_zero_fill_fallback() {
             }
         });
         let mut r = Runtime {
+            image_read_capacity: 65536,
             data: vec![0x77; 131072],
             short_reads: vec![],
             reads: 0,
@@ -231,7 +244,7 @@ fn final_read_keeps_full_bytes_permissions_and_zero_suffix_across_read_shapes() 
             (4133, 12288, vec![1, 4096, 36], "buffer-retained"),
         ] {
             DESTINATION.with(|s| *s.borrow_mut() = Destination::default());
-            let mut r = Runtime { data: (0..length).map(|i| (i % 239) as u8).collect(),
+            let mut r = Runtime { image_read_capacity:65536, data: (0..length).map(|i| (i % 239) as u8).collect(),
                 short_reads, reads: 0, fail_after: None };
             file_mapping::initialize(&mut r, 1, 0x10000, mapped,
                 LinuxFile { posix_fd: 7 }, 0, length, permissions).unwrap();
@@ -259,7 +272,7 @@ fn final_read_partial_constructor_fault_keeps_prefix_and_never_retries() {
     DESTINATION.with(|s| *s.borrow_mut() = Destination {
         fail_after: Some(2), ..Destination::default()
     });
-    let mut r = Runtime { data: (0..4133).map(|i| (i % 239) as u8).collect(),
+    let mut r = Runtime { image_read_capacity:65536, data: (0..4133).map(|i| (i % 239) as u8).collect(),
         short_reads: vec![], reads: 0, fail_after: None };
     assert_eq!(file_mapping::initialize(&mut r, 1, 0x10000, 12288,
         LinuxFile { posix_fd: 7 }, 0, 4133, Some(5)), Err(EIO));
@@ -288,12 +301,13 @@ fn buffered_tail_and_eof_keep_data_zero_suffix_and_each_partial_failure_prefix()
                 let mapped = 20480;
                 let requested = if eof { 16384 } else { available };
                 let mut r = Runtime {
+                    image_read_capacity: 65536,
                     data: (0..offset + available).map(|i| (i % 239) as u8).collect(),
                     short_reads: vec![1, 4096, 4096, 37], reads: 0, fail_after: None,
                 };
                 let result = file_mapping::initialize(&mut r, 1, 0x10000, mapped,
                     LinuxFile { posix_fd: 7 }, offset, requested, permissions);
-                assert_eq!(result, if failure.is_some() { Err(EIO) } else { Ok(()) });
+                assert_eq!(result, if failure.is_some() { Err(EIO) } else { Ok(false) });
                 DESTINATION.with(|s| {
                     let s = s.borrow();
                     let pages = failure.unwrap_or(mapped / 4096);
@@ -310,5 +324,33 @@ fn buffered_tail_and_eof_keep_data_zero_suffix_and_each_partial_failure_prefix()
                 });
             }
         }
+    }
+}
+
+#[test]
+fn large_file_window_combines_constructor_requests_without_changing_bytes_or_rights() {
+    for permissions in [None,Some(1),Some(3),Some(5)] {
+        for length in [1024usize*1024,1024*1024+17] {
+            DESTINATION.with(|s| *s.borrow_mut()=Destination::default());
+            let mut r=Runtime {image_read_capacity:1024*1024,data:(0..length).map(|i|(i%239) as u8).collect(),short_reads:vec![],reads:0,fail_after:None};
+            let mapped=length.next_multiple_of(4096);
+            file_mapping::initialize(&mut r,1,0x10000,mapped,LinuxFile{posix_fd:7},0,length,permissions).unwrap();
+            assert_eq!(r.reads,length.div_ceil(1024*1024));
+            DESTINATION.with(|s| {let s=s.borrow();let actual:Vec<_>=s.pages.iter().flat_map(|(_,p)|p.iter().copied()).collect();
+                assert_eq!(&actual[..length],&r.data);assert!(actual[length..].iter().all(|v|*v==0));assert!(s.permissions.iter().all(|p|*p==permissions));
+                assert_eq!(s.requests.len(),length.div_ceil(1024*1024));std::println!("MMAP-WINDOW bytes={length} reads={} constructors={}",r.reads,s.requests.len());});
+        }
+    }
+}
+
+#[test]
+fn large_window_stops_after_read_or_partial_constructor_failure_without_replay() {
+    for read_failure in [false,true] {
+        DESTINATION.with(|s|*s.borrow_mut()=Destination{fail_after:(!read_failure).then_some(17),..Destination::default()});
+        let mut r=Runtime{image_read_capacity:1024*1024,data:vec![0x73;1024*1024+17],short_reads:vec![],reads:0,fail_after:read_failure.then_some(1)};
+        assert_eq!(file_mapping::initialize(&mut r,1,0x10000,1024*1024+4096,LinuxFile{posix_fd:7},0,1024*1024+17,Some(5)),Err(EIO));
+        DESTINATION.with(|s|{let s=s.borrow();assert_eq!(s.requests.len(),1);assert_eq!(s.pages.len(),if read_failure {256} else {17});
+            assert!(s.pages.iter().all(|(_,p)|p.iter().all(|v|*v==0x73)));});
+        assert_eq!(r.reads,1);
     }
 }

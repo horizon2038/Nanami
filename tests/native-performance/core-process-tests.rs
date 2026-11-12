@@ -98,11 +98,108 @@ mod capability_sealing_tests;
 mod memory_retirement_tests;
 #[path = "alpha-exec-retirement.rs"]
 mod exec_retirement_tests;
+#[path = "alpha-exec-space.rs"]
+mod exec_space_tests;
 #[path = "shared-memory-lifecycle.rs"]
 mod shared_memory_lifecycle;
 
 fn manager() -> ProcessManager {
     ProcessManager::new_alpha(1, 2, 99, 3, 4096, &[], 4).unwrap()
+}
+
+#[test]
+fn preferred_heap_alignment_keeps_exact_slots_shared_cursor_and_space_fallback() {
+    let mut m = manager();
+    install(&mut m, 1, 201);
+    install(&mut m, 2, 202);
+    m.share_address_space(2, 1).unwrap();
+    let (_, _, small, first) = m.reserve_process_heap(1, 1, 4096, 4096).unwrap();
+    assert_eq!(small, 0x200000);
+    let (_, _, base, slot) = m.reserve_process_heap_preferred_alignment(2, 511, 4096, 4096, 1 << 21).unwrap();
+    // The aligned location would exceed this fixture's four-MiB heap limit.
+    assert_eq!(base, small + 4096);
+    assert_eq!(slot, first + 1);
+    let owner = m.find_entry_by_pid(1).unwrap();
+    assert_eq!(owner.user_heap_next_va, base + 511 * 4096);
+    assert_eq!(owner.next_frame_slot, first + 512);
+    let before = (owner.user_heap_next_va, owner.next_frame_slot);
+    for alignment in [0, 3] {
+        assert!(m.reserve_process_heap_preferred_alignment(2, 1, 4096, 4096, alignment).is_err());
+    }
+    assert!(m.reserve_process_heap_preferred_alignment(2, usize::MAX, 1, usize::MAX, 1 << 21).is_err());
+    let after = m.find_entry_by_pid(1).unwrap();
+    assert_eq!((after.user_heap_next_va, after.next_frame_slot), before);
+}
+
+#[test]
+fn preferred_heap_alignment_uses_no_slots_for_padding_and_falls_back_on_rounding_overflow() {
+    let mut m = manager();
+    install(&mut m, 1, 201);
+    m.reserve_process_heap(1, 1, 4096, 4096).unwrap();
+    let (_, _, base, slot) = m.reserve_process_heap_preferred_alignment(1, 1, 4096, 4096, 1 << 20).unwrap();
+    assert_eq!(base, 0x300000);
+    assert_eq!(slot, 1);
+    let next = m.find_entry_by_pid(1).unwrap();
+    assert_eq!(next.user_heap_next_va, base + 4096);
+    assert_eq!(next.next_frame_slot, 2);
+    m.install_process(3, 0, 203, 204, 205, 206, 207, 3, 0, 0,
+        usize::MAX - 4095, usize::MAX).unwrap();
+    let (_, _, base, slot) = m.reserve_process_heap_preferred_alignment(3, 1, 1, 4096, 1 << 21).unwrap();
+    assert_eq!(base, usize::MAX - 4095);
+    assert_eq!(slot, 0);
+}
+
+#[test]
+fn batch_pool_registration_matches_individual_references_through_partial_retirement() {
+    let base = 0x400000;
+    let pages = 512;
+    let first = 8192;
+    let mut batch = manager();
+    let mut scalar = manager();
+    for m in [&mut batch, &mut scalar] {
+        install(m, 1, 201);
+        install(m, 2, 202);
+        install(m, 3, 203);
+        m.share_address_space(2, 1).unwrap();
+        m.register_pool_alias(1, base + 7 * 4096, 800, 900).unwrap();
+        m.register_pool_alias(3, 0x800000, 0, first + 8).unwrap();
+    }
+    for (pid, address, slot, physical, count) in [
+        (0, base, 32, first, pages),
+        (2, base + 1, 32, first, pages),
+        (2, base, usize::MAX, first, pages),
+        (2, base, 32, usize::MAX, pages),
+        (2, base, 32, first, usize::MAX),
+        (2, usize::MAX - 4095, 32, first, 1),
+        (2, base, 32, first, 0),
+    ] {
+        assert!(batch.register_pool_page_run(pid, address, slot, physical, count).is_err());
+    }
+    assert!(batch.physical_pages_in_range(2, base, base + pages * 4096)
+        == scalar.physical_pages_in_range(2, base, base + pages * 4096));
+    batch.register_pool_page_run(2, base, 32, first, pages).unwrap();
+    for offset in 0..pages {
+        scalar.register_pool_alias(2, base + offset * 4096, 32 + offset, first + offset).unwrap();
+    }
+    for offset in 0..pages {
+        let va = base + offset * 4096;
+        let actual = batch.find_active_physical_allocation_reference(1, va, 1).unwrap();
+        let expected = scalar.find_active_physical_allocation_reference(1, va, 1).unwrap();
+        assert!(actual == expected);
+        assert_eq!(batch.physical_reference_count(actual), 1 + usize::from(offset == 8));
+    }
+    for offset in [0, 8, 511] {
+        let va = base + offset * 4096;
+        for m in [&mut batch, &mut scalar] {
+            m.defer_active_physical_allocation(2, va, 1).unwrap();
+        }
+    }
+    assert!(batch.physical_pages_in_range(2, base, base + pages * 4096)
+        == scalar.physical_pages_in_range(2, base, base + pages * 4096));
+    assert!(batch.deferred_physical_allocations_for_pid(1)
+        .eq(scalar.deferred_physical_allocations_for_pid(1)));
+    assert!(batch.releasable_deferred_physical_allocations_for_pid(1)
+        == scalar.releasable_deferred_physical_allocations_for_pid(1));
 }
 
 #[test]

@@ -48,16 +48,17 @@ fn open_current_path(
         }
         (result, _) => result.map_err(map_path_request_error)?,
     };
-    allocate_posix_file(runtime, pid, fd, linux_flags)
+    allocate_posix_file(runtime, pid, fd, linux_flags, 0, false)
 }
 
-fn allocate_posix_file(runtime: &mut Runtime, pid: Word, fd: Word, linux_flags: Word) -> Result<Word, i32> {
+fn allocate_posix_file(runtime: &mut Runtime, pid: Word, fd: Word, linux_flags: Word, grant: Word, cursor: bool) -> Result<Word, i32> {
     let fd_flags = if (linux_flags & LINUX_O_CLOEXEC) != 0 {
         LINUX_FD_CLOEXEC
     } else {
         0
     };
-    match runtime.allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags, linux_flags), 0) {
+    match runtime.allocate_linux_file(pid, LinuxFile::posix(fd, fd_flags, linux_flags)
+        .with_posix_read_grant(grant).with_posix_read_cursor(cursor), 0) {
         Some(local) => Ok(local),
         None => {
             let _ = posix::posix_close(runtime.posix_port, fd);
@@ -111,7 +112,7 @@ pub(super) fn sys_openat(
                     nanami_runtime::println!("[linux.open] rooted-readonly-files pid={}", pid);
                 }
             }
-            return allocate_posix_file(runtime, pid, fd, linux_flags);
+            return allocate_posix_file(runtime, pid, fd, linux_flags, resolved.read_grant, resolved.read_cursor);
         }
         resolved.bytes
     } else {

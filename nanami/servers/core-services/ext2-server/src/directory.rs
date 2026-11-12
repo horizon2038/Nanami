@@ -41,6 +41,8 @@ impl Cursors {
 }
 
 pub(super) fn invalidate(runtime: &mut Ext2Runtime) {
+    runtime.root_path.invalidate();
+    runtime.resolved_paths.invalidate();
     let cursors = &mut runtime.directory_cursors;
     if let Some(next) = cursors.generation.checked_add(1) {
         cursors.generation = next;

@@ -19,6 +19,34 @@ impl LinuxPipe {
         active: false, readers: 0, writers: 0, buffer: 0, read: 0, write: 0, len: 0,
     };
 
+    /// Only the published queue prefix is initialized. The runtime keeps the
+    /// allocation alive throughout this synchronous, non-reentrant copy.
+    pub fn contiguous_read(&self, count: usize) -> Option<&[u8]> {
+        if !self.active || self.buffer == 0 || count > self.len
+            || self.read >= LINUX_PIPE_BYTES || count > LINUX_PIPE_BYTES - self.read
+        { return None; }
+        Some(unsafe { core::slice::from_raw_parts((self.buffer + self.read) as *const u8, count) })
+    }
+
+    /// Free capacity is not readable bytes. Copyin must succeed before the
+    /// caller publishes this prefix through commit_write.
+    pub fn contiguous_spare(&mut self, count: usize) -> Option<&mut [core::mem::MaybeUninit<u8>]> {
+        if !self.active || self.buffer == 0 || self.len > LINUX_PIPE_BYTES
+            || count > LINUX_PIPE_BYTES - self.len || self.write >= LINUX_PIPE_BYTES
+            || count > LINUX_PIPE_BYTES - self.write
+        { return None; }
+        Some(unsafe { core::slice::from_raw_parts_mut(
+            (self.buffer + self.write) as *mut core::mem::MaybeUninit<u8>, count,
+        ) })
+    }
+
+    /// Called only after all accepted bytes have been initialized.
+    pub fn commit_write(&mut self, count: usize) {
+        debug_assert!(count <= LINUX_PIPE_BYTES - self.len);
+        self.write = (self.write + count) % LINUX_PIPE_BYTES;
+        self.len += count;
+    }
+
     /// Stage current bytes without consuming them: guest copyout can still fail.
     pub fn copy_out(&self, target: &mut [u8]) -> usize {
         debug_assert!(self.active && self.buffer != 0 && self.read < LINUX_PIPE_BYTES);
@@ -48,7 +76,6 @@ impl LinuxPipe {
                     self.buffer as *mut u8, source.len() - first);
             }
         }
-        self.write = (self.write + source.len()) % LINUX_PIPE_BYTES;
-        self.len += source.len();
+        self.commit_write(source.len());
     }
 }

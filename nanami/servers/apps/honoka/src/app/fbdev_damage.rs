@@ -13,6 +13,19 @@ static SAMPLED_PIXELS: core::sync::atomic::AtomicUsize = core::sync::atomic::Ato
 #[cfg(test)]
 static COMPARED_PIXELS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
+static KNOWN_SPANS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static COMPARED_GROUPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+pub fn take_compared_groups() -> usize {
+    COMPARED_GROUPS.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
+#[cfg(test)]
+pub fn take_known_spans() -> usize {
+    use core::sync::atomic::Ordering::Relaxed;
+    KNOWN_SPANS.swap(0, Relaxed)
+}
+#[cfg(test)]
 pub fn take_row_pixels() -> (usize, usize) {
     use core::sync::atomic::Ordering::Relaxed;
     (SAMPLED_PIXELS.swap(0, Relaxed), COMPARED_PIXELS.swap(0, Relaxed))
@@ -40,7 +53,9 @@ unsafe fn capture_scalar_row<const KNOWN_DIRTY: bool>(source: usize, captured: u
 /// All writes use the sampled values, not another read of the live producer.
 unsafe fn capture_row<const KNOWN_DIRTY: bool>(source: usize, captured: usize, pixels: usize) -> bool {
     #[cfg(test)]
+
     {
+        if KNOWN_DIRTY { KNOWN_SPANS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
         SAMPLED_PIXELS.fetch_add(pixels, core::sync::atomic::Ordering::Relaxed);
         if !KNOWN_DIRTY {
             COMPARED_PIXELS.fetch_add(pixels, core::sync::atomic::Ordering::Relaxed);
@@ -57,6 +72,48 @@ unsafe fn capture_row<const KNOWN_DIRTY: bool>(source: usize, captured: usize, p
         dirty = capture_scalar_row::<KNOWN_DIRTY>(source, captured, 1);
         index = 1;
     }
+    if !KNOWN_DIRTY {
+        while index + 16 <= pixels {
+            let input = (source + index * 4) as *const u64;
+            let output = (captured + index * 4) as *mut u64;
+            // Sample once in forward word order, then compare this complete
+            // owned sample. One decision covers two former quad groups.
+            let sample = [
+                core::ptr::read_volatile(input),
+                core::ptr::read_volatile(input.add(1)),
+                core::ptr::read_volatile(input.add(2)),
+                core::ptr::read_volatile(input.add(3)),
+                core::ptr::read_volatile(input.add(4)),
+                core::ptr::read_volatile(input.add(5)),
+                core::ptr::read_volatile(input.add(6)),
+                core::ptr::read_volatile(input.add(7)),
+            ];
+            #[cfg(not(test))]
+            if option_env!("NANAMI_FBDEV_CLEAN_DIAG") == Some("1") {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static REPORTS: AtomicUsize = AtomicUsize::new(0);
+                if REPORTS.load(Ordering::Relaxed) < 8 {
+                    let report = REPORTS.fetch_add(1, Ordering::Relaxed) + 1;
+                    nanami_runtime::println!("[honoka.clean] report={} sample-bytes=64", report);
+                }
+            }
+            #[cfg(test)]
+            COMPARED_GROUPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let difference = (core::ptr::read(output) ^ sample[0])
+                | (core::ptr::read(output.add(1)) ^ sample[1])
+                | (core::ptr::read(output.add(2)) ^ sample[2])
+                | (core::ptr::read(output.add(3)) ^ sample[3])
+                | (core::ptr::read(output.add(4)) ^ sample[4])
+                | (core::ptr::read(output.add(5)) ^ sample[5])
+                | (core::ptr::read(output.add(6)) ^ sample[6])
+                | (core::ptr::read(output.add(7)) ^ sample[7]);
+            if difference != 0 {
+                core::ptr::write(output as *mut [u64; 8], sample);
+                dirty = true;
+            }
+            index += 16;
+        }
+    }
     {
         while index + 8 <= pixels {
             let input = (source + index * 4) as *const u64;
@@ -71,6 +128,8 @@ unsafe fn capture_row<const KNOWN_DIRTY: bool>(source: usize, captured: usize, p
                 | (core::ptr::read(output.add(1)) ^ sample[1])
                 | (core::ptr::read(output.add(2)) ^ sample[2])
                 | (core::ptr::read(output.add(3)) ^ sample[3])) != 0;
+            #[cfg(test)]
+            if !KNOWN_DIRTY { COMPARED_GROUPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
             if changed {
                 core::ptr::write(output as *mut [u64; 4], sample);
                 dirty = true;
@@ -85,16 +144,31 @@ unsafe fn capture_row<const KNOWN_DIRTY: bool>(source: usize, captured: usize, p
 unsafe fn capture_tile_row<const PARTIAL: bool>(
     source: usize, captured: usize, pixels: usize, tiles: usize, mut dirty: u64,
 ) -> u64 {
-    for tile in 0..tiles {
+    let mut tile = 0;
+    while tile < tiles {
         let left = tile * TILE_WIDTH;
-        let width = (pixels - left).min(TILE_WIDTH);
         let offset = left * 4;
         if PARTIAL && dirty & (1u64 << tile) != 0 {
-            // This tile already contributes the same damage rectangle. Keep
-            // all live samples, without comparing its previously captured row.
+            // A consecutive run already contributes the same damage. Sample
+            // it once in address order without per-tile copy-loop setup.
+            // tile < tiles <=64 makes the shift valid, including bit63.
+            let run = ((dirty >> tile).trailing_ones() as usize).min(tiles - tile);
+            let width = (pixels - left).min(run * TILE_WIDTH);
             capture_row::<true>(source + offset, captured + offset, width);
+            #[cfg(not(test))]
+            if run > 1 && option_env!("NANAMI_FBDEV_DIRTY_SPANS_DIAG") == Some("1") {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static SPANS: AtomicUsize = AtomicUsize::new(0);
+                let spans = SPANS.fetch_add(1, Ordering::Relaxed) + 1;
+                if spans <= 8 || spans.is_power_of_two() {
+                    nanami_runtime::println!("[honoka.capture] known-span count={} tiles={} pixels={}", spans, run, width);
+                }
+            }
+            tile += run;
         } else {
+            let width = (pixels - left).min(TILE_WIDTH);
             dirty |= (capture_row::<false>(source + offset, captured + offset, width) as u64) << tile;
+            tile += 1;
         }
     }
     dirty

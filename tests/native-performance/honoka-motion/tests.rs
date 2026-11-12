@@ -3,6 +3,61 @@ use compositor::Compositor;
 use input::InputEvent;
 
 #[test]
+fn rgb24_rows_match_pixel_oracle_across_formats_padding_and_truncation() {
+    let source: Vec<u8> = (0..51).map(|i| (i * 97 + 13) as u8).collect();
+    for format in [(16, 8, 8, 8, 0, 8), (0, 8, 8, 8, 16, 8), (11, 5, 5, 6, 0, 5)] {
+        for padding in [0, 3] {
+            let stride = 19 + padding;
+            let screen = framebuffer::ScreenInfo { width: 19, height: 4, stride_bytes: stride * 4,
+                bits_per_pixel: 32, red_position: format.0, red_size: format.1,
+                green_position: format.2, green_size: format.3, blue_position: format.4, blue_size: format.5 };
+            for mapped in [stride * 4, stride * 8 - 1, stride * 16] {
+                for (x, y) in [(0, 0), (2, 1), (-1, 1), (3, 1), (0, -1), (0, 4)] {
+                    let mut actual = vec![0xabcdef12u32; stride * 4 + 8]; let mut expected = actual.clone();
+                    let fb = framebuffer::Framebuffer::new(1, actual.as_mut_ptr() as Word + 16, mapped, screen).ok().unwrap();
+                    let old = framebuffer::Framebuffer::new(1, expected.as_mut_ptr() as Word + 16, mapped, screen).ok().unwrap();
+                    if !fb.blit_rgb24_row(x, y, &source) {
+                        for (i, rgb) in source.chunks_exact(3).enumerate() { fb.put_pixel(x + i as i32, y, fb.color(rgb[0], rgb[1], rgb[2])); }
+                    }
+                    for (i, rgb) in source.chunks_exact(3).enumerate() { old.put_pixel(x + i as i32, y, old.color(rgb[0], rgb[1], rgb[2])); }
+                    assert_eq!(actual, expected, "format={format:?} padding={padding} mapped={mapped} x={x} y={y}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pnm_row_path_and_scaled_fallback_match_legacy_pixel_walk() {
+    for width in [9usize, 17, 29] {
+        let height = 13;
+        let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i * 73 + 41) as u8).collect();
+        for red in [0, 16] {
+            let screen = framebuffer::ScreenInfo { width: 19, height: 15, stride_bytes: 23 * 4, bits_per_pixel: 32,
+                red_position: red, red_size: 8, green_position: 8, green_size: 8, blue_position: 16 - red, blue_size: 8 };
+            let desktop = framebuffer::Rect::new(1, 2, 17, 12);
+            for dirty in [desktop, framebuffer::Rect::new(4, 5, 8, 6), framebuffer::Rect::new(17, 13, 1, 1)] {
+                for mapped in [23 * 4 * 15, 23 * 4 * 8 + 13] {
+                    let mut actual = vec![0xdeadbeefu32; 23 * 15 + 8]; let mut expected = actual.clone();
+                    let fb = framebuffer::Framebuffer::new(1, actual.as_mut_ptr() as Word + 16, mapped, screen).ok().unwrap();
+                    let old = framebuffer::Framebuffer::new(1, expected.as_mut_ptr() as Word + 16, mapped, screen).ok().unwrap();
+                    compositor::draw_pnm_for_test(&fb, desktop, dirty, width, height, &pixels);
+                    for y in dirty.y..dirty.y + dirty.height {
+                        for x in dirty.x..dirty.x + dirty.width {
+                            let sx = (x - desktop.x) as usize * width / desktop.width as usize;
+                            let sy = (y - desktop.y) as usize * height / desktop.height as usize;
+                            let i = (sy * width + sx) * 3;
+                            old.put_pixel(x, y, old.color(pixels[i], pixels[i + 1], pixels[i + 2]));
+                        }
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn rgb888_translucent_rows_match_all_channel_pairs_and_alpha_values() {
     let mut solid = vec![0u32; 256];
     let mut blit = solid.clone();
@@ -331,6 +386,51 @@ fn opaque_window_frame_damage_avoids_background_under_its_content() {
     println!("opaque frame background area: reference={reference_area} partitioned={partitioned_area}");
 }
 
+#[test]
+fn opaque_multiple_windows_skip_background_beyond_the_first_partition() {
+    let (mut compositor, pixels) = setup();
+    compositor.create_window(18, 480, 80, 300, 300).unwrap();
+    let dirty = framebuffer::Rect::new(80, 80, 700, 300);
+    let (old_area, old_splits) = compositor.render_budget_for_test(dirty, 1);
+    assert_eq!(old_splits, 1);
+    let old_pixels = pixels.clone();
+    let (area, splits) = compositor.render_budget_for_test(dirty, 32);
+    assert!(splits > 1 && splits <= 32);
+    assert!(pixels == old_pixels);
+    let partitioned = pixels.clone();
+    let reference = compositor.render_region_for_test(dirty, true);
+    assert!(pixels == partitioned);
+    assert!(area < old_area / 3, "old={old_area} new={area}");
+    assert!(area < reference / 8);
+    println!("MULTI-OPAQUE background old={old_area} new={area} reference={reference} splits={splits}");
+}
+
+#[test]
+fn opaque_partition_budget_fallback_keeps_pixels_through_overlap_opacity_and_clipping() {
+    let (mut compositor, mut pixels) = setup();
+    let mut windows = Vec::new();
+    for index in 0..10 {
+        windows.push(compositor.create_window(18, 70 + index*43, 60 + index*29, 330, 240).unwrap());
+    }
+    for opacity in [255, 128, 0, 254] {
+        for &id in windows.iter().step_by(3) { compositor.set_window_opacity(18, id, opacity).unwrap(); }
+        for dirty in [framebuffer::Rect::new(0,0,800,600),framebuffer::Rect::new(65,50,630,480),
+            framebuffer::Rect::new(-10,-10,100,100)] {
+            let initial=pixels.clone();
+            let reference_area=compositor.render_region_for_test(dirty,true);
+            let expected=pixels.clone();
+            for budget in [0,1,2,4,32] {
+                pixels.copy_from_slice(&initial);
+                let (area,used)=compositor.render_budget_for_test(dirty,budget);
+                let mismatch=pixels.iter().zip(&expected).position(|(actual,expected)| actual!=expected);
+                assert_eq!(mismatch,None,"opacity={opacity} budget={budget}");
+                assert!(used<=budget);
+                assert!(area<=reference_area);
+            }
+        }
+    }
+}
+
 fn setup_with_vblank(vblank: bool) -> (Compositor, Vec<u32>) {
     let screen = framebuffer::ScreenInfo {
         width: 800,
@@ -349,7 +449,7 @@ fn setup_with_vblank(vblank: bool) -> (Compositor, Vec<u32>) {
         framebuffer::Framebuffer::new(1, pixels.as_mut_ptr() as usize, pixels.len() * 4, screen)
             .ok()
             .unwrap()
-            .with_merged_present(vblank);
+            .with_present_modes(vblank, false);
     (setup_framebuffer(fb), pixels)
 }
 
@@ -392,7 +492,7 @@ fn gpu_protocol_compositor_matches_cpu_pixels_through_motion_and_drag() {
     let fb = framebuffer::Framebuffer::try_gpu(1, gpu_screen())
         .unwrap()
         .unwrap()
-        .with_merged_present(true);
+        .with_present_modes(true, false);
     let (mut cpu, expected) = setup_with_vblank(true);
     let mut accelerated = setup_framebuffer(fb);
     let compare = || {
@@ -465,7 +565,7 @@ fn gpu_timeout_prevents_cpu_reuse_of_both_copy_surfaces() {
         buffer.fill_rect(0, 0, 1, 1, 0xff00ff);
         buffer.put_pixel(0, 0, 0xff00ff);
         assert_eq!(unsafe { (buffer.vaddr() as *const u32).read() }, 0);
-        assert!(buffer.present(rectangle).is_err());
+        assert!(buffer.present(&[rectangle]).is_err());
     }
     drop(source);
     drop(destination);
@@ -508,6 +608,41 @@ fn native_scanout_presents_once_per_composited_frame_without_repainting_sparse_g
     });
     native.render_if_needed();
     PRESENTED.with(|rects| assert_eq!(rects.borrow().len(), 1));
+}
+
+#[test]
+fn software_scanout_batches_disjoint_motion_damage_into_one_request() {
+    let event = || move_by(-550, 180);
+    let (mut fallback, fallback_pixels) = setup();
+    fallback.process_input(event());
+    fallback.render_if_needed();
+    let sparse = PRESENTED.with(|rects| std::mem::take(&mut *rects.borrow_mut()));
+    assert_eq!(sparse.len(), 2);
+
+    gpu_mock::reset();
+    gpu_mock::FAKE.with(|fake| fake.borrow_mut().batch_supported = true);
+    let fb = framebuffer::Framebuffer::try_gpu(1, gpu_screen())
+        .unwrap()
+        .unwrap()
+        .with_present_modes(false, true);
+    let mut software = setup_framebuffer(fb);
+    gpu_mock::FAKE.with(|fake| fake.borrow_mut().calls.clear());
+    software.process_input(event());
+    software.render_if_needed();
+    gpu_mock::FAKE.with(|fake| {
+        let fake = fake.borrow();
+        assert_eq!(fake.calls.len(), 1);
+        assert_eq!(fake.calls[0].0, gpu::PRESENT_BATCH);
+        let expected: Vec<_> = sparse.iter().map(|rect| gpu::Rect {
+            x: rect.x as Word,
+            y: rect.y as Word,
+            width: rect.width as Word,
+            height: rect.height as Word,
+        }).collect();
+        assert_eq!(fake.batches, [expected]);
+        assert!(fake.presented.chunks_exact(4).zip(fallback_pixels)
+            .all(|(bytes, pixel)| bytes == pixel.to_ne_bytes()));
+    });
 }
 
 #[test]

@@ -104,6 +104,7 @@ impl Alpha {
                 return Err(CapabilityError::InvalidArgument);
             }
         }
+        self.split_private_large_mappings(target_pid, base_va, end_va, true)?;
         self.invalidate_process_copy_mappings(target_pid)?;
         let spans = if let Some(ref allocation) = exact_allocation {
             core::slice::from_ref(allocation)

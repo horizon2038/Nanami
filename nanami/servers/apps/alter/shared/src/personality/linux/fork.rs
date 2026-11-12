@@ -1,6 +1,6 @@
 use super::{
     arch, clone_registers_for_fork, inherit_linux_files, map_request_error, read_register_value,
-    write_guest_u32, EmulationAction, LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM,
+    write_guest_u32, LinuxSyscallContext, Runtime, Word, EINVAL, EIO, ENOMEM,
     ENOSYS, ESRCH, LINUX_CLONE_CHILD_SETTID, LINUX_CLONE_PARENT_SETTID, LINUX_CLONE_SETTLS,
     LINUX_CLONE_VM, LINUX_SIGCHLD, LINUX_TASK_PRIORITY, REG_FS_BASE, SYS_CLONE,
 };
@@ -35,13 +35,15 @@ pub(super) fn sys_fork(
         parent_image_name, parent_image_name_len, parent_program_break, parent_mapped_break,
         parent_trace_enabled, parent_diagnostics_enabled, parent_graphics_enabled,
         parent_framebuffer_size, parent_graphics_session, parent_personality,
-        parent_terminal_canonical, parent_terminal_echo, parent_terminal_termios, parent_tgid) = {
+        parent_terminal_canonical, parent_terminal_echo, parent_terminal_termios, parent_tgid,
+        parent_has_tracked_image) = {
         let parent = runtime.managed_process(parent_pid).ok_or(ESRCH)?;
         (parent.pcb, parent.fs_base, parent.owner_pid, parent.terminal_id,
          parent.image_name, parent.image_name_len, parent.program_break, parent.mapped_break,
          parent.trace_enabled, parent.diagnostics_enabled, parent.graphics_enabled,
          parent.framebuffer_size, parent.graphics_session, parent.personality,
-         parent.terminal_canonical, parent.terminal_echo, parent.terminal_termios, parent.tgid)
+         parent.terminal_canonical, parent.terminal_echo, parent.terminal_termios, parent.tgid,
+         parent.rootfs.root_len != 0)
     };
     let image_name =
         ::core::str::from_utf8(&parent_image_name[..parent_image_name_len]).map_err(|_| EINVAL)?;
@@ -60,9 +62,17 @@ pub(super) fn sys_fork(
     let pcb_slot = runtime.next_pcb_slot().ok_or(ENOMEM)?;
     // Mark conservatively before construction: a failed unpublished child can
     // leave a source marker until its references are rolled back by Alpha.
-    let created = if cfg!(target_arch = "x86_64") {
+    // RootFS loading tracks ELF permissions as well as stack/heap VMAs.
+    // Legacy named-image launches only track the stack; keep eager fork until
+    // their data-page rights can be validated by the write-fault handler too.
+    let private_cow = cfg!(target_arch = "x86_64") && parent_has_tracked_image;
+    let created = if private_cow {
         super::private_memory::mark_shared(runtime, parent_pid);
         super::private_memory::with_vm_quiescence(runtime, parent_pid, || {
+            // Revoke writable leases before Alpha downgrades any source leaf.
+            // A failed revocation keeps its physical reference pinned, so the
+            // fork admission check takes the eager path for that page.
+            super::guest_views::invalidate(runtime, parent_pid);
             nanami_runtime::request_process_fork_shared_readonly(
                 parent_pid,
                 pcb_slot,
@@ -71,8 +81,10 @@ pub(super) fn sys_fork(
             .map_err(map_request_error)
         })
     } else {
-        nanami_runtime::request_process_fork(parent_pid, pcb_slot, LINUX_TASK_PRIORITY)
-            .map_err(map_request_error)
+        super::private_memory::with_vm_quiescence(runtime, parent_pid, || {
+            nanami_runtime::request_process_fork(parent_pid, pcb_slot, LINUX_TASK_PRIORITY)
+                .map_err(map_request_error)
+        })
     };
     let child_pid = match created {
         Ok(pid) => pid,
@@ -129,7 +141,7 @@ pub(super) fn sys_fork(
         discard_spawned_child(child_pid);
         return Err(ENOMEM);
     }
-    if cfg!(target_arch = "x86_64") {
+    if private_cow {
         super::private_memory::mark_shared(runtime, child_pid);
     }
     // Constructor-time memory operations must not mistake this suspended task
@@ -234,23 +246,6 @@ pub(super) fn sys_fork(
         child.rootfs.prepared = false;
     }
     Ok(child_pid)
-}
-
-pub(super) fn sys_vfork(
-    runtime: &mut Runtime,
-    parent_pid: Word,
-    context: LinuxSyscallContext,
-) -> EmulationAction {
-    match sys_fork(runtime, parent_pid, context) {
-        Ok(child_pid) => {
-            if runtime.park_signal_waiter(parent_pid, child_pid, context) {
-                EmulationAction::Park
-            } else {
-                EmulationAction::Return(-(ESRCH as isize))
-            }
-        }
-        Err(errno) => EmulationAction::Return(-(errno as isize)),
-    }
 }
 
 pub(super) fn discard_spawned_child(pid: Word) {

@@ -106,6 +106,9 @@ pub trait Filesystem {
     fn read_link(&mut self, inode: u32) -> Result<Vec<u8>, Error>;
     /// Resolve a directory's actual parent/name, including after rename.
     fn parent_name(&mut self, directory: u32) -> Result<(u32, Vec<u8>), Error>;
+    /// A proven parent directory immediately before a failed lookup.
+    /// Observers may retain its canonical name without caching the failure.
+    fn directory_resolved(&mut self, _parent: u32, _directory: Node, _path: &[u8]) {}
 }
 
 pub struct Resolved {
@@ -229,8 +232,16 @@ pub fn resolve_with_leaf_name(
         parent = node.unwrap().inode;
         node = match fs.lookup(parent, name) {
             Ok(found) => Some(found),
-            Err(Error::Missing) if final_component && !trailing_slash && allow_missing => None,
-            Err(error) => return Err(error),
+            Err(error) => {
+                let ancestors = ancestors.as_slice();
+                let grandparent = ancestors.get(ancestors.len().saturating_sub(2)).copied().unwrap_or(root);
+                fs.directory_resolved(grandparent, Node { inode: parent, kind: Kind::Directory }, &path);
+                if error == Error::Missing && final_component && !trailing_slash && allow_missing {
+                    None
+                } else {
+                    return Err(error);
+                }
+            }
         };
         if node.is_some_and(|node| node.kind == Kind::Symlink)
             && (follow_final || !final_component || trailing_slash)

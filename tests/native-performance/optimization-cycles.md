@@ -1,3 +1,70 @@
+Latest checkpoint `fork-cow-prefix`, previous `fork-readonly-demand`.
+Shrink the anonymous allocator's eager COW-fork prefix512KiB→128KiB. Keep the
+whole stack, minimum32-page writable run, ownership/rights/ACK/error policy.
+No new fields/dependencies/Kernel/FPU/targets. Existing protection and readonly
+child-mapping optimizations remain. Later write faults/copies can increase;
+net copies and CPU time are uncounted. Default PF diagnostics stay OFF.
+Native Release/Debug2606/0/20; focused339/0/2. Boundary31/32/33 and detach tests
+pass. Guest640KiB writable fork checks child offsets and parent-after-wait bytes.
+KVM strict40220/kudz7w9a, Files88555/hgeqq5qs, parent21784/dvhiijrb,
+diag49008/3piokh0x, apps49569/ukdrrltr all actual0. Strict/apps SMP4;
+Files/control/diag SMP1/CPU0. Guest huge16/host THP; GUI5apps/pointer/cleanup.
+Normal ping1.315683318s/ACK1.214823320s vs same-fixture parent1.316259731s/
+ACK1.215475151s: no established whole-launch or100ms paint/input readiness gain.
+All18 fork markers parse; launch3452backed/3318shared/2295deferred/134copied.
+Preceding accepted diagnostic had same backed/deferred shape and230copied:
+96 fewer initial copies,393216B. Previous diagnostic fixture differs; later
+faults/net savings uncounted. Readonly deferral counts are inherited work.
+Apps78238/fu9rwllm and86524/l5q9odp_ exit1 before workload because serial splits
+the font-end marker. Preserve raw failures. Apps now reuses existing functional
+render+10s delivery settle; same image passes. Ordinary latency gate unchanged.
+Harness20tests pass; native/product sources1233 plus2 supplemental Python files.
+Six PNGs viewed: normal200ms incomplete/status0B,500ms folders/status0B,
+2000ms723B, keyboard/usr/local7; parent200ms/keyboard normal. Alpha8e92d232,
+Booter6e17610d; ESP init/RootFS fixture only. Canonical14/FAT24/four Ext2 trees.
+Retire older129files before copies; current/previous4images/26snapshots/8PNG,
+two log generations. Tmpfs scratch removed after actual owners terminate.
+No mutating Git/WSL shutdown; full optimization goal remains active.
+Details: session-handoff/logs/linux-native-scope-20261107/fork-cow-prefix/RESULT.md.
+
+Latest checkpoint `fork-readonly-demand`, previous `deferred-protection-fast-path`.
+Private COW fork retains initialized owned backing but defers child PTEs after
+an eager16-page prefix of readonly R/X/RX runs>=128pages. Writable/stack/allocator
+policy, source revoke/ACK, uncertainty and legacy readonly-fork stay intact.
+No new field/authority/ABI/Kernel/FPU/profile; extra existing deferred-index metadata.
+Native release/debug2606/0/20; preliminary core339/0/2 before packed-frame adjustment.
+Fixture1024pages initial MAP1024→16, R/X/RX/refs/bytes/faults/detach/errors tested.
+Real512KiB RO fork fixture upgrades child tail before first read; parent preserved.
+KVM strict75729/qhreadxv, Files25216/nxh8hz6n, parent12984/qk34z02j,
+diag95223/zi4vhs2x, apps43719/b8015bq8 all0. Strict/apps SMP4; perf CPU0/SMP1.
+Huge16/host THP; default PF logs OFF. GUI5apps/pointer/cleanup and6 PNGs verified.
+Normal ping1.315787352s/ACK1.214837059s; parent1.720838491s/ACK1.620001215s.
+Single pair, no repeatable percentage or100ms readiness claim. All18 markers parse;
+launch37→42:3452backed/3222shared/230copied,2295 initial child MAPs omitted.
+Later population/net MAPs/CPU time uncounted. Alpha368c1286, Booter1cd96bbc;
+ESP init and RootFS fixture only. Source1233/canonical14/FAT24/four Ext2 trees.
+Older111files retired before new copies; current/previous4images/26snapshots/8PNG.
+All scratch tmpfs, terminal-owner cleanup; no mutating Git or WSL shutdown.
+Details: session-handoff/logs/linux-native-scope-20261107/fork-readonly-demand/RESULT.md.
+
+Latest checkpoint `deferred-protection-fast-path`, previous `page-fault-log-default-off`.
+Alpha protection reuses request-local confirmed deferred/nonzero-rights state for
+nonwritable MAPs, retaining table creation, copy invalidation, MAP/rollback and
+uncertain UNMAP/ACK. No new fault policy, field, heap, ABI, kernel or FPU change.
+1024-page fixture: old-rights point queries1024→0, MAP1024/UNMAP0 unchanged.
+Native release/debug2602/0/20; focused335/0/2. Actual KVM Files diagnostic has149
+intact markers,36 READY→ping requests/4980 pages (PID42/43/44; not exclusive time).
+Strict47503/kd1e2za9 SMP4, Files79279/5nv8c_3q, parent65735/cxz9lr5u,
+diag56679/cito8q1q all exit0. Guest huge16/host THP. Files1.518862865s vs parent
+1.720575320s, no repeatable whole-launch gain or100ms painted readiness claim.
+Alpha db1572b3/1683888B, Booter552aa048/6929848B. ESP init only; whole Core/RootFS,
+Alters/kernel/services/fixture unchanged. Source1233/canonical14/FAT actual reads18.
+Six PNGs viewed; +200ms pane empty, +500/+2000ms root folders723B, keyboard7items.
+RX-defer and RO-lazy-remap trials rejected/restored; compact receipts in audit/.
+Retire older164files before fresh copies; current/previous4images/26snapshots/8PNG.
+All scratch tmpfs; remove after terminal owners. No mutating Git/WSL shutdown.
+Details: session-handoff/logs/linux-native-scope-20261107/deferred-protection-fast-path/RESULT.md.
+
 # Nanami / Alter optimization cycles
 
 ## snapshot-source-word-view

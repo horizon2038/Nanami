@@ -3,6 +3,11 @@
 use super::*;
 use crate::nanami_core::process::{PhysicalPageReference, ProcessMemoryContext, ProcessPhysicalAllocation};
 
+const DEFER_FORK_READONLY: bool = match option_env!("NANAMI_DEFER_FORK_READONLY") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => true,
+};
+
 #[cfg(test)]
 static DETACH_CONTEXT_RESOLUTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -78,16 +83,17 @@ impl Alpha {
         // Write-only and PROT_NONE pages retain eager copies. COW writable
         // pages must also be readable so removing WRITE leaves a real leaf.
         // Skip ownership collection when no permissions admit sharing.
-        // A write fault is expensive on the current kernel (including its
-        // diagnostics). Copy the fixed, immediately-written stack and small
-        // writable runs eagerly; defer only runs of at least 128 KiB. Copy
-        // the first 512 KiB of the anonymous arena as well: allocator state
-        // there can be written immediately after fork, before exec discards it.
+        // Copy the fixed, immediately-written stack and small writable runs
+        // eagerly; COW still needs a contiguous run of at least128KiB. Keep
+        // the first128KiB of the anonymous arena writable for hot allocator
+        // state. Beyond it, copy only pages actually written after fork.
+        // Page-fault diagnostics now default OFF, so their old serial cost
+        // no longer requires copying the larger512KiB arena prefix.
         // The rest retains COW. This is a request-local admission plan, not a
         // persistent ownership proof.
         let writable = |&(va, permissions): &(usize, usize)| matches!(permissions, 3 | 7)
             && !(USER_STACK_BASE..USER_STACK_BASE + USER_STACK_PAGES * PAGE_SIZE).contains(&va)
-            && !(USER_ANONYMOUS_MAP_BASE..USER_ANONYMOUS_MAP_BASE + 512 * 1024).contains(&va);
+            && !(USER_ANONYMOUS_MAP_BASE..USER_ANONYMOUS_MAP_BASE + 128 * 1024).contains(&va);
         let mut cow_runs = Vec::new();
         if writable_cow {
             for run in pages.chunk_by(|a, b| writable(a) && writable(b)
@@ -166,6 +172,8 @@ impl Alpha {
         // shared page through eager runs and advances only after a shared run.
         let mut shared_cursor = 0;
         let mut begin = 0;
+        #[cfg(not(test))]
+        let mut deferred_pages = 0usize;
         while begin < pages.len() {
             let share = references.get(shared_cursor)
                 .is_some_and(|reference| reference.allocation.base_va == pages[begin].0);
@@ -189,7 +197,24 @@ impl Alpha {
                     PROCESS_FRAME_TOTAL_PAGES,
                 )?;
                 self.process_root_slot(root)?;
+                let mut readonly_start = 0;
+                let mut readonly_end = 0;
                 for (offset, &(va, permissions)) in run.iter().enumerate() {
+                    if writable_cow && DEFER_FORK_READONLY && offset >= readonly_end {
+                        readonly_start = offset;
+                        readonly_end = offset;
+                        while readonly_end < run.len() && matches!(run[readonly_end].1, 1 | 4 | 5) {
+                            readonly_end += 1;
+                        }
+                    }
+                    // A fork child often immediately execs. Keep all owned
+                    // initialized backing, but avoid registering the unused
+                    // tail of large readonly runs. The existing snapshot
+                    // resolver populates absent leaves in bounded2MiB clusters.
+                    // Writable COW/stack/data keep their current eager policy.
+                    let deferred = writable_cow && DEFER_FORK_READONLY
+                        && readonly_end - readonly_start >= 128
+                        && offset >= readonly_start + 16 && offset < readonly_end;
                     let allocation = references[shared_cursor + offset].allocation;
                     let cow_write = permissions & 2 != 0;
                     if permissions & 2 != 0 && !self.processes.vm_space(source)
@@ -234,6 +259,16 @@ impl Alpha {
                     vm.mark_private_page_shared(va, true);
                     if cow_write { vm.mark_private_page_cow_write(va, true); }
                     vm.set_permissions(va, permissions);
+                    if deferred {
+                        vm.mark_mapping_deferred(va);
+                        if offset == 0 || (va >> 12) & 63 == 0 {
+                            vm.prepare_frame_word(va, run.len() - offset);
+                        }
+                        vm.record_frame(va, frame).map_err(|_| CapabilityError::Fatal)?;
+                        #[cfg(not(test))]
+                        { deferred_pages += 1; }
+                        continue;
+                    }
                     if !vm.page_tables_ready(va) {
                         self.memory.ensure_page_tables(space, va, vm)?;
                     }
@@ -260,6 +295,11 @@ impl Alpha {
             }
             if share { shared_cursor += run.len(); }
             begin = end;
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_FORK_READONLY_DIAG") == Some("1") {
+            crate::force_info!("[fork.readonly] source={} target={} pages={} shared={} deferred={} copied={}",
+                source, target, pages.len(), shared_count, deferred_pages, pages.len() - shared_count);
         }
         Ok(())
     }

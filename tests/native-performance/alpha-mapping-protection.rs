@@ -220,6 +220,69 @@ mod protection;
 mod release;
 
 #[test]
+fn confirmed_deferred_protection_maps_all_pages_without_rechecking_logical_permissions() {
+    for rights in [1,4,5] {
+        let pages=1024;
+        let mut a=Alpha::new(0);let base=0x1000000;
+        for page in 0..pages {a.page(1,base+page*PAGE_SIZE,1);}
+        let space=a.processes.memory_entry(1).unwrap().address_space;
+        for page in 0..pages {
+            let va=base+page*PAGE_SIZE;
+            a.processes.vm_space_mut(1).unwrap().mark_mapping_deferred(va);
+            KERNEL.with_borrow_mut(|k| {k.ptes.remove(&(space,va));});
+        }
+        vm_space::VmSpace::take_immutable_permission_counts();
+        a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:1,arg1:base,arg2:pages*PAGE_SIZE,arg3:rights}).unwrap();
+        let (points,_)=vm_space::VmSpace::take_immutable_permission_counts();
+        assert_eq!(points,0);
+        println!("DEFERRED-PROTECT pages={pages} rights={rights} permission-point-queries={points}");
+        KERNEL.with_borrow(|k| {assert_eq!((k.maps,k.unmaps),(pages,0));assert!(k.ptes.values().all(|(_,p)|*p==rights));});
+        for page in 0..pages {
+            let va=base+page*PAGE_SIZE;let vm=a.processes.vm_space(1).unwrap();
+            assert!(!vm.mapping_deferred(va));assert!(!vm.mapping_is_uncertain(va));assert_eq!(vm.permissions(va),rights);
+            assert!(a.processes.find_active_physical_allocation_reference(1,va,1).is_some());
+        }
+    }
+}
+
+#[test]
+fn deferred_protection_failures_restore_original_absence_and_keep_ownership() {
+    for after in [false,true] {
+        let mut a=Alpha::new(1);
+        for page in 1..64 {a.page(1,VA+page*PAGE_SIZE,1);}
+        let space=a.processes.memory_entry(1).unwrap().address_space;
+        for page in 0..64 {
+            let va=VA+page*PAGE_SIZE;
+            a.processes.vm_space_mut(1).unwrap().mark_mapping_deferred(va);
+            KERNEL.with_borrow_mut(|k| {k.ptes.remove(&(space,va));});
+        }
+        KERNEL.with_borrow_mut(|k| {k.map_failure_at=Some(17);k.map_failure=Some(if after {Failure::After}else{Failure::Before});});
+        assert_eq!(a.handle_mapping_protect_request(OsRequestEvent{identifier:1,arg0:1,arg1:VA,arg2:64*PAGE_SIZE,arg3:5}),Err(CapabilityError::Fatal));
+        assert!(KERNEL.with_borrow(|k|k.ptes.is_empty()));
+        for page in 0..64 {
+            let va=VA+page*PAGE_SIZE;let vm=a.processes.vm_space(1).unwrap();
+            assert_eq!(vm.permissions(va),1);assert!(vm.mapping_deferred(va));assert!(!vm.mapping_is_uncertain(va));
+            assert!(a.processes.find_active_physical_allocation_reference(1,va,1).is_some());
+        }
+    }
+}
+
+#[test]
+fn uncertain_deferred_protection_still_requires_unmap_acknowledgement() {
+    let mut a=Alpha::new(1);
+    a.processes.vm_space_mut(1).unwrap().mark_mapping_deferred(VA);
+    a.processes.vm_space_mut(1).unwrap().mark_mapping_uncertain(VA);
+    KERNEL.with_borrow_mut(|k|k.unmap_failure=Some(Failure::Before));
+    assert_eq!(a.protect(5),Err(CapabilityError::Fatal));
+    assert!(a.has_pte());assert!(a.owns_page());
+    assert!(a.processes.vm_space(1).unwrap().mapping_is_uncertain(VA));
+    KERNEL.with_borrow_mut(|k|k.unmap_failure=None);
+    a.protect(5).unwrap();
+    assert!(a.has_pte());assert!(a.owns_page());
+    assert_eq!(a.processes.vm_space(1).unwrap().hardware_permissions(VA),5);
+}
+
+#[test]
 fn single_page_equal_rights_cannot_bypass_unacknowledged_pte_repair() {
         let mut a=Alpha::new(1);
         a.processes.vm_space_mut(1).unwrap().mark_mapping_uncertain(VA);

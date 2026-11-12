@@ -311,10 +311,10 @@ with (logs / "qemu.log").open("w") as diagnostics:
         # Honoka's final online line can interleave too; completed initial
         # rendering is the preceding, equally useful readiness observation.
         if (args.scope_disk_readout or args.app_syscall_scope or args.tinycore_file_mapping
-                or args.app_launch_timeline):
+                or args.app_launch_timeline or args.tinycore_apps):
             # Diagnostic command delivery only: font logs can split mid-tag.
             # This fixed settle is not a boot/readiness timing observation.
-            # File-mapping/timeline are also functional-only: the font line can
+            # File-mapping/timeline/apps are functional-only: the font line can
             # interleave despite a visible input prompt. Native execution,
             # assertions and cleanup remain mandatory below.
             wait_for(lambda text: "[              honoka] initial render done" in text)

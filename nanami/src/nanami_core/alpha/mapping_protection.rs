@@ -217,20 +217,33 @@ impl Alpha {
         // Kernel MAP/UNMAP calls cannot dispatch another Alpha process event.
         // Keep this current VM borrow for both forward updates and rollback.
         let vm = self.processes.vm_space_mut(pid).ok_or(CapabilityError::InvalidArgument)?;
-        for (index, &(va, frame, _, _)) in pages.iter().enumerate() {
+        #[cfg(not(test))]
+        let mut confirmed_deferred_pages = 0usize;
+        for (index, &(va, frame, old, deferred)) in pages.iter().enumerate() {
             let Some(frame) = frame else {
                 vm.set_permissions(va, permissions);
                 continue;
             };
             // Immutable sources were created without native PTEs or tables.
             // Only a later explicit R mapping pays for these native mappings.
+            // This request's snapshot already proved an absent PTE and current
+            // nonzero logical rights (uncertain mappings were recorded as0).
+            // No Alpha event can intervene. Table creation leaves those facts
+            // unchanged; map directly without repeating the point queries.
+            let confirmed_deferred = deferred && old != 0 && permissions != 0 && permissions & 2 == 0;
             let changed = (|| {
-                if (source_backing || vm.snapshot_page_managed(va) || vm.hardware_permissions(va) == 0)
+                if (confirmed_deferred || source_backing || vm.snapshot_page_managed(va) || vm.hardware_permissions(va) == 0)
                     && permissions != 0 && !vm.page_tables_ready(va) {
                     self.memory.ensure_page_tables(entry.address_space, va, vm)?;
                     vm.record_frame(va, frame).map_err(|_| CapabilityError::Fatal)?;
                 }
-                Self::protect_vm_page(vm, entry.address_space, va, frame, permissions)
+                if confirmed_deferred {
+                    #[cfg(not(test))]
+                    { confirmed_deferred_pages += 1; }
+                    Self::map_vm_page(vm, entry.address_space, va, frame, permissions)
+                } else {
+                    Self::protect_vm_page(vm, entry.address_space, va, frame, permissions)
+                }
             })();
             if let Err(error) = changed {
                 Self::restore_protection_pages(vm, entry.address_space, &pages[..=index])?;
@@ -243,6 +256,10 @@ impl Alpha {
                 Self::restore_protection_pages(vm, entry.address_space, &pages)?;
                 return Err(error);
             }
+        }
+        #[cfg(not(test))]
+        if confirmed_deferred_pages != 0 && option_env!("NANAMI_PROTECTION_DEFERRED_DIAG") == Some("1") {
+            crate::force_info!("[protection.deferred] pid={} base={:#x} pages={}", pid, base, confirmed_deferred_pages);
         }
         Ok(())
     }
@@ -318,8 +335,17 @@ impl Alpha {
             }
             vm.set_permissions(va, 0);
         }
+        Self::map_vm_page(vm, address_space, va, frame, permissions)
+    }
+
+    /// Commit a known absent leaf. Callers own preflight, UNMAP/ACK and rollback.
+    fn map_vm_page(
+        vm: &mut crate::nanami_core::vm_space::VmSpace,
+        address_space: CapabilityDescriptor,
+        va: Word, frame: CapabilityDescriptor, permissions: Word,
+    ) -> Result<(), CapabilityError> {
         if permissions != 0 {
-            let hardware = if vm.private_page_cow_write(va) { permissions & !2 } else { permissions };
+            let hardware = if permissions & 2 != 0 && vm.private_page_cow_write(va) { permissions & !2 } else { permissions };
             let attributes = nun::capability_call::address_space::Attribute::from_bits(hardware)
                 .ok_or(CapabilityError::InvalidArgument)?;
             if let Err(error) = arch::address_space::map(address_space, frame, va, attributes) {

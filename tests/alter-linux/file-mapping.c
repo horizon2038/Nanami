@@ -899,6 +899,38 @@ static int fixed_writable_reuse_and_reload(void) {
     return 0;
 }
 
+static int readonly_fork_tail(void) {
+    const word bytes = 512 * 1024;
+    long address = linux_call(9, 0, bytes, 3, 0x22, -1ul, 0);
+    if (address < 0) { return 231; }
+    volatile unsigned char *p = (void *)address;
+    for (word i = 0; i < bytes; ++i) { p[i] = (unsigned char)(i % 193 + 1); }
+    if (call(10, address, bytes, 1, 0) != 0) { return 232; }
+    long child = call(57, 0, 0, 0, 0);
+    if (child < 0) { return 233; }
+    if (child == 0) {
+        /* Upgrade one tail page before any child read can populate the run. */
+        word page = address + 64 * 4096;
+        if (call(10, page, 4096, 3, 0) != 0) { return 234; }
+        p[64 * 4096] = 0xfe;
+        for (word i = 16 * 4096; i < bytes; ++i) {
+            unsigned char expected = i == 64 * 4096 ? 0xfe : (unsigned char)(i % 193 + 1);
+            if (p[i] != expected) { return 235; }
+        }
+        call(60, 0, 0, 0, 0);
+        for (;;) {}
+    }
+    int status = -1;
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 236; }
+    for (word i = 0; i < bytes; ++i) {
+        if (p[i] != (unsigned char)(i % 193 + 1)) { return 237; }
+    }
+    if (call(11, address, bytes, 0, 0) != 0) { return 238; }
+    static const char pass[] = "READONLY-FORK-TAIL-PASS\n";
+    call(1, 1, (word)pass, sizeof(pass) - 1, 0);
+    return 0;
+}
+
 static int readonly_snapshot_tail_and_retirement(void) {
     static unsigned char data[5003];
     static unsigned char churn[4096];
@@ -1355,7 +1387,41 @@ static int deferred_elf_snapshot_cases(void) {
     call(1,1,(word)pass,sizeof(pass)-1,0);return 0;
 }
 
+static int writable_fork_prefix(void) {
+    const word bytes = 640 * 1024;
+    long address = linux_call(9, 0, bytes, 3, 0x22, -1ul, 0);
+    if (address < 0) { return 239; }
+    volatile unsigned char *p = (void *)address;
+    for (word i = 0; i < bytes; ++i) { p[i] = (unsigned char)(i % 193 + 1); }
+    long child = call(57, 0, 0, 0, 0);
+    if (child < 0) { return 240; }
+    if (child == 0) {
+        const word offsets[] = {0x12000, 0x25000, 0x42000, 0x7f000};
+        for (word i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+            word offset = offsets[i];
+            if (p[offset] != (unsigned char)(offset % 193 + 1)) { return 241; }
+            p[offset] = 0xfe;
+            if (p[offset] != 0xfe) { return 242; }
+        }
+        call(60, 0, 0, 0, 0);
+        for (;;) {}
+    }
+    int status = -1;
+    if (call(61, child, (word)&status, 0, 0) != child || status != 0) { return 243; }
+    for (word i = 0; i < bytes; ++i) {
+        if (p[i] != (unsigned char)(i % 193 + 1)) { return 244; }
+    }
+    /* A surviving parent must also regain WRITE after the child releases COW. */
+    p[0x42000] = 0xab;
+    if (p[0x42000] != 0xab || call(11, address, bytes, 0, 0) != 0) { return 245; }
+    static const char pass[] = "FORK-COW-PREFIX-PASS\n";
+    call(1, 1, (word)pass, sizeof(pass) - 1, 0);
+    return 0;
+}
+
 int test_main(void) {
+    int prefix_result = writable_fork_prefix();
+    if (prefix_result != 0) { return prefix_result; }
     int huge_copy_result=huge_mremap_copy_cases();
     if (huge_copy_result!=0) {return huge_copy_result;}
     int deferred_result=deferred_elf_snapshot_cases();
@@ -1428,6 +1494,8 @@ int test_main(void) {
     result = snapshot_write_prepare_and_fixed_reload();
     if (result != 0) { return result; }
     result = fixed_writable_reuse_and_reload();
+    if (result != 0) { return result; }
+    result = readonly_fork_tail();
     if (result != 0) { return result; }
     result = readonly_snapshot_tail_and_retirement();
     if (result != 0) { return result; }

@@ -58,7 +58,7 @@ class LaunchObservationTests(unittest.TestCase):
             self.assertEqual(events[-1], "audit")
             self.assertEqual("kill" in events, forced)
 
-    def test_file_mapping_delivery_accepts_compositor_with_interleaved_font_log(self):
+    def test_functional_delivery_accepts_compositor_with_interleaved_font_log(self):
         source = ast.parse(Path(__file__).with_name("qemu-smoke.py").read_text())
         branches = [node for node in ast.walk(source) if isinstance(node, ast.If)
                     and {"scope_disk_readout", "app_syscall_scope", "tinycore_file_mapping"}.issubset(
@@ -66,13 +66,15 @@ class LaunchObservationTests(unittest.TestCase):
         self.assertEqual(len(branches), 1)
         code = compile(ast.Module(body=branches, type_ignores=[]), "functional-bootstrap", "exec")
         serial = "[shell] font init e[another service] nd\n[              honoka] initial render done\n"
-        for file_mapping, timeline in [(True, False), (False, True), (False, False)]:
+        for file_mapping, timeline, apps in [(True, False, False), (False, True, False),
+                                              (False, False, True), (False, False, False)]:
             clock, observations = FakeClock(), []
             args = SimpleNamespace(scope_disk_readout=False, app_syscall_scope=None,
-                                   tinycore_file_mapping=file_mapping, app_launch_timeline=timeline)
+                                   tinycore_file_mapping=file_mapping, app_launch_timeline=timeline,
+                                   tinycore_apps=apps)
             exec(code, dict(args=args, time=clock, re=re,
                             wait_for=lambda predicate: observations.append(bool(predicate(serial)))))
-            diagnostic = file_mapping or timeline
+            diagnostic = file_mapping or timeline or apps
             self.assertEqual(observations, [diagnostic])
             self.assertEqual(clock.now, 10_000_000_000 if diagnostic else 0)
 

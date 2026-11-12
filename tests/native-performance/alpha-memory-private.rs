@@ -1908,12 +1908,12 @@ fn fork_copies_the_anonymous_allocator_prefix_but_keeps_large_tail_on_cow() {
         for page in 0..pages { a.page(1, base + page * PAGE_SIZE, page as u8, permissions); }
         let before = KERNEL.with(|k| k.borrow().allocations);
         a.clone_process_vm_private_cow(1, 2).unwrap();
-        assert_eq!(KERNEL.with(|k| k.borrow().allocations) - before, 128);
+        assert_eq!(KERNEL.with(|k| k.borrow().allocations) - before, 32);
         for page in 0..pages {
             let va = base + page * PAGE_SIZE;
             assert_eq!(a.byte(1, va), page as u8);
             assert_eq!(a.byte(2, va), page as u8);
-            let shared = page >= 128;
+            let shared = page >= 32;
             assert_eq!(a.physical(1, va) == a.physical(2, va), shared);
             for pid in [1, 2] {
                 let vm = a.processes.vm_space_mut(pid).unwrap();
@@ -1924,16 +1924,21 @@ fn fork_copies_the_anonymous_allocator_prefix_but_keeps_large_tail_on_cow() {
                     if shared { permissions & !2 } else { permissions }));
             }
         }
-        // Actual allocator writes need neither a fault nor a detach; changing
-        // the child's already-writable RAM leaves the parent's snapshot intact.
+        // Hot-prefix writes need no detach. Later allocator writes use the
+        // ordinary COW commit and leave the parent's snapshot intact.
         for offset in [0x12000, 0x25000, 0x42000] {
             let va = base + offset;
+            if offset >= 128 * 1024 {
+                let before = KERNEL.with_borrow(|k| k.allocations);
+                a.prepare(2, va, PAGE_SIZE, nanami_uapi::os::OS_PRIVATE_WRITE_DETACH).unwrap();
+                assert_eq!(KERNEL.with_borrow(|k| k.allocations), before + 1);
+            }
             let physical = a.physical(2, va);
             KERNEL.with(|k| k.borrow_mut().physical.get_mut(&physical).unwrap()[0] = 0xef);
             assert_ne!(a.byte(1, va), 0xef);
             assert_eq!(a.byte(2, va), 0xef);
         }
-        let va = base + 128 * PAGE_SIZE;
+        let va = base + 32 * PAGE_SIZE;
         a.prepare(2, va, PAGE_SIZE, nanami_uapi::os::OS_PRIVATE_WRITE_DETACH).unwrap();
         assert_ne!(a.physical(1, va), a.physical(2, va));
     }
@@ -1943,7 +1948,7 @@ fn fork_copies_the_anonymous_allocator_prefix_but_keeps_large_tail_on_cow() {
 fn allocator_prefix_policy_keeps_readonly_aliases_and_does_not_cover_other_arenas() {
     for (base, permissions) in [(USER_ANONYMOUS_MAP_BASE, 1),
         (USER_ANONYMOUS_MAP_BASE, 5), (USER_ANONYMOUS_MAP_BASE - 32 * PAGE_SIZE, 3),
-        (USER_ANONYMOUS_MAP_BASE + 512 * 1024, 3)]
+        (USER_ANONYMOUS_MAP_BASE + 128 * 1024, 3), (USER_ANONYMOUS_MAP_BASE + 512 * 1024, 3)]
     {
         let mut a = Alpha::new();
         for page in 0..32 { a.page(1, base + page * PAGE_SIZE, 0x59, permissions); }
@@ -1962,7 +1967,7 @@ fn allocator_prefix_policy_keeps_readonly_aliases_and_does_not_cover_other_arena
 fn allocator_prefix_boundary_retains_the_minimum_cow_run_size() {
     for tail in [31, 32, 33] {
         let mut a = Alpha::new();
-        let base = USER_ANONYMOUS_MAP_BASE + 512 * 1024 - 16 * PAGE_SIZE;
+        let base = USER_ANONYMOUS_MAP_BASE + 128 * 1024 - 16 * PAGE_SIZE;
         for page in 0..16 + tail { a.page(1,base + page * PAGE_SIZE,0x59,3); }
         let before=KERNEL.with(|k|k.borrow().allocations);
         a.clone_process_vm_private_cow(1,2).unwrap();
@@ -2126,6 +2131,79 @@ fn exited_cow_task_can_prepare_robust_and_clear_tid_writes_for_live_vm_peers() {
 fn populate(a: &mut Alpha, page: usize, rights: usize) -> Result<usize,CapabilityError> {
     a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:1,arg1:page,arg2:rights,arg3:0})
 }
+
+#[test]
+fn readonly_cow_fork_retains_all_backing_but_maps_only_large_run_prefixes() {
+    for rights in [1,4,5] {
+        for pages in [127,128,512,1024] {
+            let mut a=Alpha::new();let base=0x1000000;
+            for page in 0..pages {a.page(1,base+page*PAGE_SIZE,page as u8,rights);}
+            let before=KERNEL.with_borrow(|k|(k.maps.len(),k.allocations,k.copies));
+            a.clone_process_vm_private_cow(1,2).unwrap();
+            let eager=if pages>=128 {16}else{pages};
+            assert_eq!(KERNEL.with_borrow(|k|(k.maps.len()-before.0,k.allocations,k.copies)),(eager,before.1,before.2));
+            for page in 0..pages {
+                let va=base+page*PAGE_SIZE;let vm=a.processes.vm_space(2).unwrap();
+                assert_eq!(vm.permissions(va),rights);assert_eq!(vm.mapping_deferred(va),page>=eager);
+                assert_eq!(vm.hardware_permissions(va),if page<eager {rights}else{0});
+                assert_eq!(a.physical(1,va),a.physical(2,va));assert_eq!(a.byte(2,va),page as u8);
+                let reference=a.processes.find_active_physical_allocation_reference(2,va,1).unwrap();
+                assert!(!reference.owns_frame_cap);assert_eq!(a.processes.physical_reference_count(reference),2);
+            }
+            let page=pages-1;let va=base+page*PAGE_SIZE;let required=if rights&4!=0 {4}else{1};
+            assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:va,arg2:required,arg3:0}),Ok(usize::from(pages>=128)));
+            assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(va),rights);
+            assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:va,arg2:2,arg3:0}),Ok(0));
+            assert_eq!(a.byte(2,va),page as u8);
+            let mapped=KERNEL.with_borrow(|k|k.maps.iter().filter(|&&(space,_,_)|space==502).count());
+            assert!(mapped<=eager+512 && mapped<=pages);
+            println!("FORK-READONLY pages={pages} rights={rights} initial-maps={eager} maps-after-tail-fault={mapped}");
+        }
+    }
+}
+
+#[test]
+fn deferred_fork_child_keeps_old_bytes_when_parent_detaches_before_first_access() {
+    let mut a=Alpha::new();let base=0x1000000;
+    for page in 0..128 {a.page(1,base+page*PAGE_SIZE,0x58,5);}
+    a.clone_process_vm_private_cow(1,2).unwrap();
+    let va=base+40*PAGE_SIZE;assert!(a.processes.vm_space(2).unwrap().mapping_deferred(va));
+    a.prepare(1,va,PAGE_SIZE,nanami_uapi::os::OS_PRIVATE_WRITE_DETACH).unwrap();
+    let physical=a.physical(1,va);KERNEL.with_borrow_mut(|k|k.physical.get_mut(&physical).unwrap()[0]=0xaa);
+    assert_eq!(a.byte(1,va),0xaa);assert_eq!(a.byte(2,va),0x58);
+    assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:va,arg2:4,arg3:0}),Ok(1));
+    assert_eq!(a.byte(2,va),0x58);assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(va),5);
+}
+
+#[test]
+fn detached_child_page_does_not_break_population_of_neighboring_fork_backing() {
+    let mut a=Alpha::new();let base=0x1000000;
+    for page in 0..128 {a.page(1,base+page*PAGE_SIZE,0x59,1);}
+    a.clone_process_vm_private_cow(1,2).unwrap();
+    let va=base+64*PAGE_SIZE;
+    a.prepare(2,va,PAGE_SIZE,nanami_uapi::os::OS_PRIVATE_WRITE_DETACH).unwrap();
+    let physical=a.physical(2,va);KERNEL.with_borrow_mut(|k|k.physical.get_mut(&physical).unwrap()[0]=0xab);
+    let neighbor=base+80*PAGE_SIZE;
+    assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:neighbor,arg2:1,arg3:0}),Ok(1));
+    assert_eq!(a.byte(2,va),0xab);assert_eq!(a.byte(1,va),0x59);assert_eq!(a.byte(2,neighbor),0x59);
+}
+
+#[test]
+fn failed_deferred_fork_population_keeps_uncertain_child_and_parent_references() {
+    for after in [false,true] {
+        let mut a=Alpha::new();let base=0x1000000;
+        for page in 0..128 {a.page(1,base+page*PAGE_SIZE,0x63,1);}
+        a.clone_process_vm_private_cow(1,2).unwrap();
+        KERNEL.with_borrow_mut(|k|{k.fail_map=1;k.fail_map_after_install=after;});
+        let va=base+16*PAGE_SIZE;
+        assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:va,arg2:1,arg3:0}),Err(CapabilityError::Fatal));
+        let vm=a.processes.vm_space(2).unwrap();assert!(vm.mapping_is_uncertain(va));assert!(vm.frame_may_be_present(va));
+        let reference=a.processes.find_active_physical_allocation_reference(2,va,1).unwrap();
+        assert_eq!(a.processes.physical_reference_count(reference),2);assert_eq!(a.byte(1,va),0x63);
+        assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:4,arg0:2,arg1:va,arg2:1,arg3:0}),Ok(0));
+    }
+}
+
 #[test]
 fn deferred_snapshot_maps_only_header_then_populates_a_bounded_cluster_with_original_bytes() {
     for pages in [64,775,858,1024] {

@@ -1,3 +1,67 @@
+Current active-allocation-index, previous located-pool-retirement (2026-11-14).
+Prepare a commit checkpoint; wait for the user's commit notification before
+starting another optimization. HEAD eb422ca; all earlier uncommitted eviction,
+ownership-walk and located-retirement changes remain in the final source.
+
+Index every active allocation by owner and (VA,page count); equal keys retain
+newest-first selection. Binary exact lookup returns the original Node; one
+backlink word also stores active membership for direct unlinking. Preserve
+global active/deferred chains, range bounds, reference counts, failed retirement
+and request-local revision validation. Reserve split metadata before removing
+the extent. Increasing disjoint batches shift the old suffix once; bulk defer
+and retirement compact once, including successful prefixes before an error.
+Keep empty live-owner vector capacity for reuse; remove it with the owner.
+Deferred lookup remains linear. NANAMI_ACTIVE_ALLOCATION_INDEX=0 disables index
+maintenance/lookup and keeps the prior vector ownership prepass. Normal indexed
+views omit that linear prepass. The control retains the new Node/backlink layout.
+No Kernel, ABI, dependency, scheduler, priority or FPU changes.
+
+Three added internal tests run in two targets:1200-step independent primary-chain
+mutation/failure oracle, bulk insertion/duplicate order and64cycles of512-page
+capacity reuse/owner cleanup. The bulk fixture shifts512 entries once instead
+of524288 scalar shifts. Final Release/Debug each2731/0/20, index-off core-process
+369/0/2, all actual0. Preliminary366/0/2 and369/0/2 also pass. Frozen1528 source
+paths match final native, four Alpha/Booter variants and all six KVM runs;
+post-VM changes are documentation only in three paths. No development or VM
+failure in this cycle; the first complete runtime verifier passes.
+
+All six KVM actual0: strict/uzbtcldp, Files/3vkz67zi, OFF/jkt3fj23,
+diagnostic/nrki6s5e, OFF diagnostic/nwxc1ell, GUI/la2k_ie3. KVM/host, strict/GUI
+SMP4, others SMP1/all QEMU threads CPU0, host THP, true guest huge16, PF dumps0,
+five apps/pointer burst/reversal/cleanup pass. All SMP1 runs have intact HPET
+one-shot1GHz records; SMP4 interleaved records remain unproven as exact lines.
+
+Complete launch diagnostics: active locate447queries/6705probes (max15), versus
+OFF461/124953(max1643), means15 versus271.05 probes. All active queries1124/
+16195 versus1049/931387; the control's range prepass is uncounted, and request
+sets differ. These are query probes, excluding index mutation/compaction,
+range walks, Kernel calls and CPU time. Deferred launch998/4928 versus1046/4751;
+whole-run deferred4070/325915 versus4124/320134. Whole-run complete record counts
+9702/8989 match every diagnostic prefix; launch2122/2095 likewise. Diagnostic
+serial logging strongly changes timing, so its11.68s/12.04s runs are not normal
+performance results. Normal click-to-ping1.114341640s/release-ACK1.013366375s,
+OFF1.517572870s/1.416664865s. Single100ms guest/200ms host poll observations do
+not prove a causal launch speedup or100ms paint/input readiness.
+
+Node80 to88B on64-bit; lookup records observe node capacity65536 and total
+active-index vector capacity70124, including retained empty live-owner rows.
+Additional Node/vector storage1085280B excludes BTreeMap/allocator overhead,
+other Alpha metadata and whole-system RSS; these sampled maxima do not prove
+a complete global peak. Current200/500ms root4folders/0B,2000ms723B; keyboard
+/usr/local7folders/0B. OFF200ms and keyboard show the same directory shapes.
+The app's1s capacity-label timer is not the first-paint/input endpoint.
+
+Only Alpha/Booter canonical binaries change this cycle:0b5d14ae/1717272B and
+9743df1b/5574072B. Core/Alters/fixture/Kernel0.3.12/PF default OFF/HPET/network
+unchanged. ESP init only; full FAT readbacks and all outside-ESP bytes including
+RootFS match. No new FreeBSD build/guest run. Retire view-ownership-walk before
+persistent copies; protect entire previous located-pool-retirement, including
+historical GUI and rejected statfs raw. Retain4images/26snapshots/8PNG/2logs,
+11 unchanged snapshot hardlinks, and remove scratch after producers terminate.
+No mutating Git operation, commit, Kernel edit or WSL stop/compaction. Goal
+unmet; resume deferred ownership/service RPC work after the user's commit.
+Evidence:session-handoff/logs/linux-native-scope-20261107/active-allocation-index.
+
 Rejected rooted filesystem-stat experiment; accepted checkpoint remains
 `page-release-vectors`, previous `page-view-vectors` (2026-11-13).
 The Xfe1.46.2 TCZ and matching upstream DirPanel source show the initial0B label
@@ -24093,3 +24157,158 @@ Post-VM edits are documentation-only in three paths. No mutating Git operation,
 commit, Kernel change or WSL stop/compaction. Optimization pauses for the user's
 commit;100ms goal remains unmet. Resume remaining read/open/mmap/view work after
 their commit notification. Evidence:logs/linux-native-scope-20261107/quiescent-cold-write-views.
+
+## 2026-11-13: batch replacement victims before page grants
+
+Resume from clean HEAD eb422ca. Current view-eviction-vectors, previous
+quiescent-cold-write-views. prepare_pages finishes hit/victim selection before
+effects, marks every victim unready and releases up to17 through the existing
+RELEASE_VIEWS API. Only ACK slots become empty. Partial/lost/malformed replies
+retain unacknowledged pins and prevent every grant/store; sparse-hole retry
+remains valid. One victim stays scalar; NANAMI_BATCH_VIEW_EVICTIONS=0 uses
+scalar releases with the same plan/ACK rules. No new state, heap, API or deps.
+
+Four added production-cache tests prove17victims/one request with byte/boundary
+checks, partial ACK first/middle/last with later releases still attempted, no
+grants/stores on failure, lost/malformed bitmap pin retention and hole retry,
+and five-page read replacement. Final native Release/Debug each2710/0/20;
+OFF related43/0/0 with the four batch-specific cases filtered. Preliminary47/0
+predates the scalar-control switch. Frozen1528source match final native,
+four-variant Linux/FreeBSD cross-builds and6KVM; post-VM edits are three docs only.
+
+All6KVM actual0: strict/be0hnttc, Files/8c3iuly7, OFF/hgf9675w, diagnostic and
+OFF diagnostic IDs in checks.json, GUI/raqcaauw. KVM/host, strict/apps SMP4,
+others SMP1/all QEMU threads CPU0, host THP, true guest huge16, PF dumps0,
+five applications/pointer burst/reversal/cleanup pass. Complete HPET one-shot
+1GHz lines exist in all SMP1 runs. SMP4 interleaved startup records are marked
+unproven as exact backend/frequency lines, not reconstructed. Initial verifier
+assertions for that line and one truncated post-ping OFF view record are kept
+separate from actual VM exits. No source/VM rerun for those parser corrections.
+
+READY-to-ping releases456pages in187 requests vs OFF199. Views412 vs416,
+checked preparations27 vs25, counted APIs626 vs640. Entire release census619
+requests/2057pages vs669/2058. Request sets differ; these APIs are not all IPC,
+Kernel or CPU work. OFF has one incomplete final view print after ping; exclude
+it explicitly from complete-record all counts. Both launch intervals are intact.
+Normal ping1.114067759s/ACK1.013177757s; OFF1.114091027s/1.013249734s. No stable
+whole-launch gain or100ms proof from single100/200ms polling observations.
+Current200/500ms root4/0B,2000ms723B, keyboard usr/local7/0B; OFF200ms and
+keyboard likewise inspected. The capacity-label timer is not a readiness endpoint.
+
+Refresh committed Shell-width/Intel Ethernet/ACPI/driver startup changes into
+the common Core/Booter/Shell used by all variants. Alpha reproduces ea344793;
+Kernel/fixture unchanged. Optimization source changes only page_window.rs;
+normal/control image differences are two Alter RootFS paths, with all outside
+bytes including ESP identical. Full inventories/readbacks/e2fsck pass. FreeBSD
+is cross-built only. Keep4images/26snapshots/8PNG/2logs; carry historical GUI
+and rejected statfs raw from retiring page-release-vectors, protect the previous
+generation, then remove scratch after all actual producers exit. No mutating
+Git operation/commit, Kernel edit, WSL stop or compaction. Goal remains active.
+Next inspect exact active physical allocation point searches in Alpha; they
+still walk per-process chains for page-view/COW/release work. Evidence:
+logs/linux-native-scope-20261107/view-eviction-vectors.
+
+## 2026-11-13: resolve view ownership once per vector
+
+Current view-ownership-walk, previous view-eviction-vectors. Preserve the prior
+uncommitted changes at HEAD eb422ca. For a supervised sealed source and native
+caller with distinct VM owners, one existing active-page walk snapshots exact
+one-page records into17 stack slots. Copy values, not Node handles; duplicate
+VAs retain newest-first selection. Grants cannot change this distinct source
+owner's ledger during the synchronous handler. Shared source/caller ownership
+keeps point resolution. Every per-page authority/right/COW/Frame/shared-buffer/
+pin/MAP/UNMAP/ACK and failed-prefix rule still runs. Use existing scalar root
+lookup instead of a whole ProcessEntry. NANAMI_BATCH_VIEW_OWNERSHIP=0 retains
+point ownership resolution. No new persistent state, heap, API or dependencies.
+
+Five added tests assert real source-node counters17561 scalar vs1041 walk for17
+pages behind1024 unrelated references; same bytes/backing identity and write
+rights, duplicate targets/newest VA/current Frame, later-page rights/COW/
+uncertainty/missing denial, shared-owner fallback and CLONE_VM owner redirection.
+Existing rollback/pin tests remain. Initial358/1/2 was a new fixture reusing an
+old child Frame slot; assign a distinct slot. The added child fixture's missing
+install_process argument caused a separate compile101 and was fixed. Preserve
+both initial logs. Preliminary360/0/2 predates only the scalar root getter;
+final full Release/Debug each2715/0/20 and OFF core-process360/0/2 cover the
+same frozen1528source as four-variant Alpha/Booter and all6KVM. Post-VM edits
+are three documentation paths only, with no product or fixture exceptions.
+
+Six KVM actual0: strict/egtv68r5, Files/4dykqi5b, OFF/g8hhk37g, diagnostic/
+3lybowua, OFF diagnostic/ly2yo3m8, GUI/fqre5dtu. KVM/host, strict/apps SMP4,
+others SMP1/all QEMU threads CPU0; host THP, genuine huge16, PF dumps0, five
+apps/pointer burst/reversal/cleanup pass. All SMP1 HPET lines prove one-shot
+1GHz; interleaved SMP4 records are not reconstructed into exact backend proof.
+
+Diagnostic vectors163requests/1019target pages total,33/90 READY-to-ping.
+Launch candidates92 are yielded in-range records, not visited source nodes.
+OFF161/1009 total,34/92 launch, no batching. Request sets differ. This proves
+real use, not skipped-node totals, complete IPC/kernel census or CPU savings.
+Normal ping1.315334504s/ACK1.214511554s; OFF1.517425495s/1.416531470s. Single
+100ms guest/200ms host poll observations establish no stable launch percentage
+or100ms paint/input readiness. Current200ms root4/0B,500/2000ms723B; keyboard
+usr/local7/0B. OFF200ms and keyboard show the same listing shape.
+
+Only Alpha/Booter canonical bytes change. Normal Alpha1bb05334/1707736B,
+Booter45f5ba35/5565880B. Core/Alters/Kernel/fixture/HPET/network unchanged.
+FAT init only; complete member readbacks and all bytes outside ESP, including
+RootFS, match. No new FreeBSD build or guest run. Retire quiescent-cold-write-
+views before persistent copies; protect previous raw/historical GUI/rejected
+statfs evidence. Keep4images/26snapshots/8PNG/2logs with11 unchanged snapshot
+hardlinks; remove scratch only after actual producers end. No mutating Git
+operation/commit, Kernel edit or WSL stop/compaction. Goal active and unmet.
+Next inspect single-page exact allocation lookup and release-side ownership
+work; preserve newest duplicates, defer/retire failures, recycling and memory
+budgets rather than adding another low-hit preparation cache. Evidence:
+logs/linux-native-scope-20261107/view-ownership-walk.
+
+## 2026-11-13: reuse pool validation locations for retirement
+
+Current located-pool-retirement, previous view-ownership-walk. Preserve prior
+uncommitted work at HEAD eb422ca. Validation returns an allocation location for
+this synchronous request and originating manager only. Before retirement check
+the current owner, full allocation, chain link and ownership revision. Every
+ownership mutation advances the eight-byte revision; saturation disables the
+shortcut without wrapping. Decline stale locations before invoking any free
+callback and use the existing checked retirement. Successful UNMAP/TLB ACK and
+last-reference free precede unlink/recycling. Failed free retains ownership and
+reservation. No Node/index fields, cache, heap, dependencies or service ABI added.
+NANAMI_LOCATED_POOL_RETIRE=0 performs the scalar retirement search after the
+same validation. The original first lookup remains linear.
+
+Six added tests (four internal tests appear in two targets) check scalar
+1024 validation visits plus1024 retirement visits versus1024 plus0 retirement
+rewalks; actual view cleanup1025 plus1025 versus1025 plus0. Constant node/link
+checks still run. Verify shared/final reference values, newest duplicates,
+failed callback/retry,12 mutation classes including defer/split/backing swap/
+partial retirement, recycled nodes, revision saturation and changed VM owner.
+Final Release/Debug each2725/0/20, OFF core-process366/0/2. Preliminary366/0/2
+also passed; no development failure this cycle. Frozen1528source cover all final
+native, four-variant Alpha/Booter and6KVM. Only three docs change after VMs.
+
+All6KVM actual0: strict/8k41i2vs, Files/v_yocdu4, OFF/8rtggev1, diagnostic/
+zityi54w, OFF diagnostic/1xmolak2, GUI/xpo5z_q3. KVM/host, strict/apps SMP4,
+others SMP1/all QEMU threads CPU0; host THP, true huge16, PF dumps0, five apps/
+pointer burst/reversal/cleanup pass. HPET one-shot1GHz complete records in
+strict and all SMP1; the GUI's interleaved line is not exact backend proof.
+
+Diagnostic located commits2239total,454READY-to-ping (owner PID16), all one
+page. OFF2234total/456launch, located0. OFF tags precede fallback and alone
+do not prove its successful ACK. Counted use is not runtime skipped-node
+totals, CPU time or complete IPC; request sets differ. Normal ping1.517659153s/
+ACK1.416729982s, OFF1.316018371s/1.215003088s. The normal observation is slower;
+single100ms guest/200ms host polls establish no causal gain/regression rate.
+Retain the verified redundant walk removal, with no whole-launch speedup or
+100ms readiness claim. Current200ms root4/0B,500/2000ms723B, keyboard usr/local
+7/0B; OFF200ms and keyboard likewise inspected.
+
+Only Alpha/Booter canonical binaries change: c3cc6d59/1712176B and026fac63/
+5569976B. Core/Alters/fixture/Kernel/HPET/network unchanged. FAT init only,
+complete member readbacks and all outside-ESP bytes including RootFS match.
+No new FreeBSD build/guest run. Carry historical GUI/rejected statfs raw from
+retiring view-eviction-vectors; protect the entire previous generation. Keep
+4images/26snapshots/8PNG/2logs and11 unchanged snapshot hardlinks; delete scratch
+after all actual producers finish. No mutating Git operation/commit, Kernel
+edit or WSL stop/compaction. Goal active/unmet. Continue initial exact ownership
+lookups and larger service RPC work, preserving duplicate order, failed
+retirement, recycling and memory budgets. Evidence:
+logs/linux-native-scope-20261107/located-pool-retirement.

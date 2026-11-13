@@ -3,6 +3,57 @@
 The ongoing evidence, acceptance rules and rejected experiments are recorded in
 [Nanami / Alter optimization cycles](optimization-cycles.md).
 
+Active physical allocations now have an owner-specific index ordered by
+(VA, page count), with newest-first duplicate selection. Exact queries use
+binary search; backlinks permit direct unlinking while the original active
+and deferred chains retain their order. Increasing disjoint insertion shifts
+the old suffix once; bulk retirement compacts once. Empty live-owner vectors
+reuse capacity, and owner removal releases the index. Deferred queries retain
+their original walk. NANAMI_ACTIVE_ALLOCATION_INDEX=0 disables index maintenance
+and lookup, retaining the preceding vector ownership walk. That control still
+has the new Node layout. Nodes grow80 to88 bytes on64-bit hosts; observed lookup
+records show capacities65536 nodes and70124 index entries, about1.04MiB extra
+Node/vector storage, excluding map/allocator overhead and other metadata.
+
+The frozen source passes Release/Debug each2731/0/20 and index-off core-process
+369/0/2. Six KVM runs pass, including true guest huge pages and five GUI apps.
+Mutation/failure corpus tests compare the index with primary chains, preserve
+duplicates and validate recycling/capacity reuse. Query probes exclude range
+walks, index maintenance, Kernel calls and CPU time. Single normal/control Files
+ping observations1.114341640s/1.517572870s do not establish a stable launch gain
+or100ms paint/input readiness. See active-allocation-index evidence under the
+session-handoff log tree.
+
+Pool cleanup can retire through the exact location found during validation,
+within the same synchronous request and originating manager. An eight-byte
+ownership revision invalidates locations on mutations; saturation disables
+the shortcut without wrapping. Validate the current owner, full allocation
+and chain link before invoking free; stale locations invoke no callback and
+use checked scalar retirement. Only successful UNMAP/free permits unlinking.
+NANAMI_LOCATED_POOL_RETIRE=0 retains a second checked query. The retirement
+shortcut itself adds only the revision, with no service ABI. Tests cover omitted second scans, newest
+duplicates, shared/last references, failed free/retry, all mutation primitives,
+recycling, owner retargeting and saturation. Constant node/link checks remain.
+
+When the active index is disabled, Alpha's multipage supervisor views collect
+exact one-page ownership records in one active walk, into at most17 stack entries. Source/caller VM owners
+must differ, the source must be sealed and supervised by the native caller, and
+all ordinary per-page rights/COW/current Frame/pin/ACK checks still run. Duplicate
+VAs retain newest-record selection; same-owner grants and single views retain
+point resolution. The normal indexed path instead resolves each page directly.
+NANAMI_BATCH_VIEW_OWNERSHIP=0 selects point resolution in the index-off control.
+Tests prove legacy source-node visits17561 to1041 for17 pages behind1024 unrelated references, duplicate/current
+Frame rules, later-page denials, shared-owner fallback and CLONE_VM ownership.
+
+Cold multipage view preparation selects all replacement victims before effects,
+marks them all unready, and releases up to17 through the existing batch API.
+Only confirmed ACK slots become reusable; partial/lost/malformed responses keep
+unacknowledged pins and issue no grants or stores. A single victim stays scalar.
+NANAMI_BATCH_VIEW_EVICTIONS=0 uses scalar releases with the same plan/ACK rules.
+Tests cover17victims/one request, exact byte boundaries, partial ACKs at three
+positions, no-store fallback, retained pins/hole retry and five-page read
+replacement. No new cache capacity, state, heap storage, API or dependency.
+
 Permission-checked private copyout retains its cached-only fast path. On a cold
 miss, the current fault target may try ordinary write views before private
 preparation only while all VM users are already quiescent. Alpha still requires

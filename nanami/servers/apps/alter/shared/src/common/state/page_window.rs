@@ -238,6 +238,9 @@ impl Cache {
         }
         let mut pending = [PageGrant::default(); MAX_BATCH_PAGES];
         let mut indices = [0; MAX_BATCH_PAGES];
+        let mut victims = [0; MAX_BATCH_PAGES];
+        let mut victim_indices = [0; MAX_BATCH_PAGES];
+        let mut victim_count = 0;
         let mut count = 0;
         for (position, &page) in pages.iter().enumerate() {
             if locals[position] != 0 { continue; }
@@ -253,14 +256,12 @@ impl Cache {
             let index = first + way;
             let local = self.base + index * PAGE;
             if state.leases[index].occupied {
-                state.leases[index].ready = false;
-                #[cfg(not(test))]
-                self.record(1);
-                effects.release(local).ok()?;
-                state.leases[index] = Lease::EMPTY;
+                victims[victim_count] = local;
+                victim_indices[victim_count] = index;
+                victim_count += 1;
             }
-            // Until the grant, released/unused slots stay empty. A subsequent
-            // planning failure therefore needs no rollback of unissued work.
+            // Finish planning before releasing anything. Protected slots keep
+            // every hit and selected victim distinct, including duplicate pages.
             pending[count] = PageGrant { page, local };
             indices[count] = index;
             count += 1;
@@ -268,6 +269,30 @@ impl Cache {
             protected |= 1u64 << index;
         }
         if count == 0 { return Some(locals); }
+        if victim_count != 0 {
+            for &index in &victim_indices[..victim_count] {
+                state.leases[index].ready = false;
+                #[cfg(not(test))]
+                self.record(1);
+            }
+            // All victims become unusable before the first release. Only a
+            // confirmed ACK may clear a slot; partial/lost/malformed replies
+            // must not be followed by any grant or output store.
+            let acknowledged = if option_env!("NANAMI_BATCH_VIEW_EVICTIONS") == Some("0") {
+                let mut acknowledged = 0;
+                for (bit, &local) in victims[..victim_count].iter().enumerate() {
+                    if effects.release(local).is_ok() { acknowledged |= 1 << bit; }
+                }
+                acknowledged
+            } else if victim_count == 1 {
+                Word::from(effects.release(victims[0]).is_ok())
+            } else { effects.release_many(&victims[..victim_count]) };
+            if acknowledged >> victim_count != 0 { return None; }
+            for (bit, &index) in victim_indices[..victim_count].iter().enumerate() {
+                if acknowledged & (1 << bit) != 0 { state.leases[index] = Lease::EMPTY; }
+            }
+            if acknowledged != (1 << victim_count) - 1 { return None; }
+        }
         for (entry, &index) in pending[..count].iter().zip(&indices[..count]) {
             state.leases[index] = Lease { owner, generation, page: entry.page, occupied: true, ready: false };
             #[cfg(not(test))]

@@ -1,5 +1,5 @@
 use super::*;
-use crate::nanami_core::process::{ProcessEntry, SharedMemoryReservation};
+use crate::nanami_core::process::{ProcessEntry, ProcessPhysicalAllocation, SharedMemoryReservation};
 use crate::nanami_core::vm_space::{FRAME_WORD_BYTES, FRAME_WORD_PAGES};
 
 struct SharedMapping {
@@ -7,6 +7,11 @@ struct SharedMapping {
     reservation: SharedMemoryReservation,
     copied: usize,
     mapped: usize,
+}
+
+enum PageViewBacking {
+    Resolve,
+    Resolved(Option<ProcessPhysicalAllocation>),
 }
 
 impl Alpha {
@@ -74,10 +79,50 @@ impl Alpha {
                 return Err(CapabilityError::InvalidArgument);
             }
         }
+        // Granting caller aliases cannot mutate a distinct source owner's
+        // allocation chain during this synchronous handler. Snapshot only the
+        // exact requested one-page records, newest first, in bounded stack
+        // storage. Current authority/rights/COW/Frame checks still run below.
+        // Shared source/caller ownership retains per-page resolution because
+        // installing a caller alias could then change a later source record.
+        let batched = option_env!("NANAMI_BATCH_VIEW_OWNERSHIP") != Some("0")
+            && option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX") == Some("0")
+            && entries.len() > 1
+            && self.processes.memory_owner_pid(request.arg0)
+                != self.processes.memory_owner_pid(request.identifier)
+            && self.processes.find_entry_by_pid(request.arg0).is_some_and(|entry|
+                !entry.exited && entry.capabilities_sealed && entry.reaper_pid == request.identifier)
+            && self.processes.find_entry_by_pid(request.identifier).is_some_and(|entry|
+                !entry.exited && !entry.capabilities_sealed);
+        let mut backing = [None; OS_PAGE_VIEW_VECTOR_MAX];
+        let mut candidates = 0usize;
+        if batched {
+            let start = entries.iter().map(|entry| entry.target).min().unwrap();
+            let end = entries.iter().map(|entry| entry.target).max().unwrap() + PAGE_SIZE;
+            let mut pending = (1usize << entries.len()) - 1;
+            for reference in self.processes.private_page_reference_walk(request.arg0, start, end) {
+                candidates += 1;
+                for (index, entry) in entries.iter().enumerate() {
+                    if pending & (1 << index) != 0 && reference.allocation.base_va == entry.target {
+                        backing[index] = Some(reference.allocation);
+                        pending &= !(1 << index);
+                    }
+                }
+                if pending == 0 { break; }
+            }
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_VIEW_OWNERSHIP_DIAG") == Some("1") {
+            crate::force_info!("[view.ownership] caller={} pid={} pages={} batched={} candidates={}",
+                request.identifier, request.arg0, entries.len(), usize::from(batched), candidates);
+        }
+        let _ = candidates;
         let mut result = (entries.len(), 0);
         for (index, entry) in entries.iter().enumerate() {
             let single = OsRequestEvent { arg1: entry.target, arg2: entry.local, arg3: 0, ..request };
-            if let Err(error) = self.handle_process_page_view_request(single, writable) {
+            let ownership = if batched { PageViewBacking::Resolved(backing[index]) }
+                else { PageViewBacking::Resolve };
+            if let Err(error) = self.handle_process_page_view_with_backing(single, writable, ownership) {
                 // Previous successes remain independently pinned. The failing
                 // entry has exactly the scalar operation's cleanup guarantee;
                 // the untouched suffix owns no new mapping.
@@ -108,6 +153,12 @@ impl Alpha {
         &mut self,
         request: OsRequestEvent,
         writable: bool,
+    ) -> Result<(), CapabilityError> {
+        self.handle_process_page_view_with_backing(request, writable, PageViewBacking::Resolve)
+    }
+
+    fn handle_process_page_view_with_backing(
+        &mut self, request: OsRequestEvent, writable: bool, backing: PageViewBacking,
     ) -> Result<(), CapabilityError> {
         let caller = request.identifier;
         let source_pid = request.arg0;
@@ -140,18 +191,20 @@ impl Alpha {
         }
         // Exact one-page private ownership excludes MMIO and shared-buffer
         // reservations. Do not invent suballocations inside larger extents.
-        let allocation = self
-            .processes
-            .find_active_physical_allocation_reference(source_pid, source_va, 1)
+        let allocation = match backing {
+            PageViewBacking::Resolve => self.processes
+                .find_active_physical_allocation_reference(source_pid, source_va, 1),
+            PageViewBacking::Resolved(allocation) => allocation,
+        }
             .filter(|_| {
                 self.processes
                     .shared_memory_reservation(source_pid, source_va, 1)
                     .is_none()
             })
             .ok_or(CapabilityError::PermissionDenied)?;
-        let owner = self
+        let owner_root = self
             .processes
-            .memory_entry(source_pid)
+            .memory_root_node(source_pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         self.memory
             .ensure_alpha_frame_at_physical_index(allocation.base_page)?;
@@ -163,7 +216,7 @@ impl Alpha {
             .processes
             .vm_space_mut(source_pid)
             .ok_or(CapabilityError::InvalidArgument)?;
-        let child = process_frame_descriptor(owner.root_node, allocation.start_slot);
+        let child = process_frame_descriptor(owner_root, allocation.start_slot);
         let permissions = if writable { 3 } else { 1 };
         if vm.permissions(source_va) & permissions != permissions
             || (writable && vm.private_page_shared(source_va))
@@ -735,8 +788,8 @@ impl Alpha {
             None
         };
         let pool_extent = if !r.owns_frame_caps() && !r.has_page_references() {
-            Some(self.processes.find_active_physical_allocation_reference(entry.pid, r.base_va, r.page_count)
-                .filter(|allocation| !allocation.owns_frame_cap && allocation.start_slot == r.start_slot)
+            Some(self.processes.locate_active_physical_allocation(entry.pid, r.base_va, r.page_count)
+                .filter(|location| !location.allocation.owns_frame_cap && location.allocation.start_slot == r.start_slot)
                 .ok_or(CapabilityError::IllegalOperation)?)
         } else { None };
         self.invalidate_process_copy_mappings(entry.pid)?;
@@ -759,7 +812,7 @@ impl Alpha {
                     process_frame_descriptor(entry.root_node, r.start_slot + page)
                 } else {
                     let physical = if let Some((pages, _)) = &canonical_pages { pages[page].base_page }
-                        else { pool_extent.ok_or(CapabilityError::Fatal)?.base_page + page };
+                        else { pool_extent.ok_or(CapabilityError::Fatal)?.allocation.base_page + page };
                     self.memory.physical_frame_descriptor_from_index(physical)
                         .ok_or(CapabilityError::Fatal)?
                 };
@@ -805,10 +858,23 @@ impl Alpha {
             }
         } else {
             let memory = &mut self.memory;
-            self.processes.retire_active_physical_allocation(entry.pid, r.base_va, r.page_count, |allocation, last| {
+            let mut release = |allocation: ProcessPhysicalAllocation, last| {
                 if last { memory.free_physical(allocation.base_page * PAGE_SIZE, r.page_count * PAGE_SIZE) }
                 else { Ok(()) }
-            })?;
+            };
+            let retired = if option_env!("NANAMI_LOCATED_POOL_RETIRE") != Some("0") {
+                match pool_extent {
+                    Some(location) => self.processes.try_retire_located_physical_allocation(entry.pid, location, &mut release)?,
+                    None => false,
+                }
+            } else { false };
+            #[cfg(not(test))]
+            if option_env!("NANAMI_LOCATED_POOL_RETIRE_DIAG") == Some("1") && pool_extent.is_some() {
+                crate::force_info!("[pool.retire] pid={} pages={} located={}", entry.pid, r.page_count, usize::from(retired));
+            }
+            if !retired {
+                self.processes.retire_active_physical_allocation(entry.pid, r.base_va, r.page_count, release)?;
+            }
         }
         self.processes.recycle_shared_memory(entry.pid, r);
         Ok(())

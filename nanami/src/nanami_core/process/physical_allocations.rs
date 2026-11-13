@@ -1,6 +1,7 @@
 //! Recycled metadata keeps process/reference index churn and heap traffic bounded.
-use super::{PhysicalPageReference, ProcessPhysicalAllocation};
+use super::{PhysicalAllocationLocation, PhysicalPageReference, ProcessPhysicalAllocation};
 use alloc::vec::Vec;
+use alloc::collections::BTreeMap;
 
 #[derive(Default)]
 pub(super) struct PhysicalAllocations {
@@ -8,11 +9,20 @@ pub(super) struct PhysicalAllocations {
     deferred: Index<usize>,
     references: ReferenceCounts,
     nodes: Vec<Node>,
+    // Canonical active node positions ordered by (VA, pages), newest first
+    // for equal keys. Empty live-owner rows retain reusable vector capacity.
+    exact: BTreeMap<usize, Vec<usize>>,
     free: Option<usize>,
+    // Saturation disables located retirement rather than admitting an ABA hit.
+    revision: usize,
     #[cfg(test)]
     range_visits: core::cell::Cell<usize>,
     #[cfg(test)]
     point_visits: core::cell::Cell<usize>,
+    #[cfg(test)]
+    retire_visits: core::cell::Cell<usize>,
+    #[cfg(test)]
+    index_moves: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -20,6 +30,9 @@ pub(super) enum AllocationState {
     Active,
     Deferred,
 }
+
+#[derive(Clone, Copy)]
+enum Lookup { Point, Location, Retirement, Detach }
 
 // Vec node indices cannot reach usize::MAX. Encode index+1 so the empty
 // link uses the NonZero niche rather than a second machine-word discriminant.
@@ -42,11 +55,30 @@ impl Link {
 struct Node {
     allocation: ProcessPhysicalAllocation,
     next: Link,
+    previous: Previous,
     // Inclusive bounds of one-page VAs in this active suffix at insertion.
     // Active chains only gain nodes at the head. Unlink/retirement can leave
     // these bounds conservatively wide; backing replacement preserves VA.
     // Deferred-chain links need not preserve bounds and are never queried.
     pages: PageBounds,
+}
+
+// Vec<Node> cannot approach isize::MAX elements: its byte allocation is already
+// limited to isize::MAX. Reuse the unreachable high bit for active membership.
+#[derive(Clone, Copy)]
+struct Previous(usize);
+impl Previous {
+    const ACTIVE: usize = 1usize << (usize::BITS - 1);
+    fn new(index: Option<usize>, active: bool) -> Self {
+        let link = index.map_or(0, |index| index + 1);
+        assert!(link < Self::ACTIVE);
+        Self(link | if active { Self::ACTIVE } else { 0 })
+    }
+    fn get(self) -> Option<usize> {
+        (self.0 & !Self::ACTIVE).checked_sub(1)
+    }
+    fn active(self) -> bool { self.0 & Self::ACTIVE != 0 }
+    fn set(&mut self, index: Option<usize>) { *self = Self::new(index, self.active()); }
 }
 
 /// Two conservative intervals retain a large gap between an application's
@@ -152,11 +184,142 @@ impl ReferenceCounts {
 }
 
 impl PhysicalAllocations {
+    fn advance_revision(&mut self) { self.revision = self.revision.saturating_add(1); }
+    fn exact_enabled() -> bool { option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX") != Some("0") }
+    fn address_key(allocation: ProcessPhysicalAllocation) -> (usize, usize) {
+        (allocation.base_va, allocation.page_count)
+    }
+
+    fn index_new_nodes(&mut self, pid: usize, first: usize, count: usize) {
+        if !Self::exact_enabled() { return; }
+        let rows = self.exact.entry(pid).or_default();
+        let nodes = &self.nodes;
+        let key = |index: usize| Self::address_key(nodes[index].allocation);
+        let first_key = key(first);
+        let mut last_key = first_key;
+        let mut increasing = true;
+        let mut current = first;
+        for _ in 1..count {
+            current = nodes[current].previous.get().unwrap();
+            let next_key = key(current);
+            increasing &= last_key < next_key;
+            last_key = next_key;
+        }
+        let position = rows.partition_point(|&index| key(index) < first_key);
+        if count == 1 {
+            #[cfg(test)]
+            { self.index_moves += rows.len() - position; }
+            rows.insert(position, first);
+        } else if increasing && rows.get(position).is_none_or(|&index| key(index) > last_key) {
+            // Ordinary increasing, disjoint construction shifts the old suffix
+            // once. No sort scratch or per-page insertion movement is needed.
+            let old_len = rows.len();
+            #[cfg(test)]
+            { self.index_moves += old_len - position; }
+            rows.resize(old_len + count, 0);
+            rows.copy_within(position..old_len, position + count);
+            current = first;
+            for offset in 0..count {
+                rows[position + offset] = current;
+                if offset + 1 != count { current = nodes[current].previous.get().unwrap(); }
+            }
+        } else {
+            // General insertion preserves newest-first ties, including reused
+            // node indices and mixed page counts at the same virtual address.
+            current = first;
+            for offset in 0..count {
+                let position = rows.partition_point(|&index| key(index) < key(current));
+                #[cfg(test)]
+                { self.index_moves += rows.len() - position; }
+                rows.insert(position, current);
+                if offset + 1 != count { current = nodes[current].previous.get().unwrap(); }
+            }
+        }
+    }
+
+    fn remove_index_node(&mut self, pid: usize, index: usize) {
+        if !Self::exact_enabled() { return; }
+        let key = Self::address_key(self.nodes[index].allocation);
+        let rows = self.exact.get_mut(&pid).expect("active ownership index");
+        let start = rows.partition_point(|&row| Self::address_key(self.nodes[row].allocation) < key);
+        let offset = rows[start..].iter().take_while(|&&row|
+            Self::address_key(self.nodes[row].allocation) == key).position(|&row| row == index)
+            .expect("indexed active allocation");
+        rows.remove(start + offset);
+    }
+
+    fn compact_index(&mut self, pid: usize) {
+        if let Some(rows) = self.exact.get_mut(&pid) {
+            rows.retain(|&index| self.nodes[index].previous.active());
+        }
+    }
+
+    fn unlink_node(&mut self, state: AllocationState, pid: usize, index: usize, previous: Option<usize>) {
+        let next = self.nodes[index].next;
+        if let Some(previous) = previous { self.nodes[previous].next = next; }
+        else if let Some(head) = next.get() { self.heads_mut(state).insert(pid, head); }
+        else { self.heads_mut(state).remove(pid); }
+        if let Some(next) = next.get() { self.nodes[next].previous.set(previous); }
+        if matches!(state, AllocationState::Active) { self.remove_index_node(pid, index); }
+        self.nodes[index].previous = Previous::new(None, false);
+    }
+
+    fn find_node(&self, state: AllocationState, pid: usize, base: usize, pages: usize,
+        kind: Lookup) -> Option<(usize, Option<usize>)> {
+        let indexed = matches!(state, AllocationState::Active) && Self::exact_enabled();
+        let mut probes = 0;
+        let result = if indexed {
+            self.exact.get(&pid).and_then(|rows| {
+                let key = (base, pages);
+                let position = rows.partition_point(|&index| {
+                    probes += 1;
+                    Self::address_key(self.nodes[index].allocation) < key
+                });
+                rows.get(position).and_then(|&index| {
+                    probes += 1;
+                    let node = &self.nodes[index];
+                    (node.previous.active() && Self::address_key(node.allocation) == key)
+                        .then_some((index, node.previous.get()))
+                })
+            })
+        } else {
+            let mut next = self.heads(state).get(pid);
+            let mut previous = None;
+            let mut found = None;
+            while let Some(index) = next {
+                let node = self.nodes[index]; probes += 1;
+                if node.allocation.base_va == base && node.allocation.page_count == pages {
+                    found = Some((index, previous)); break;
+                }
+                previous = Some(index); next = node.next.get();
+            }
+            found
+        };
+        #[cfg(test)]
+        if !matches!(kind, Lookup::Detach) {
+            let counter = if matches!(kind, Lookup::Retirement) { &self.retire_visits } else { &self.point_visits };
+            counter.set(counter.get() + probes);
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX_DIAG") == Some("1") {
+            let (rows, capacity) = self.exact.get(&pid).map_or((0,0), |rows| (rows.len(), rows.capacity()));
+            let name = match kind { Lookup::Point => "point", Lookup::Location => "locate",
+                Lookup::Retirement => "retire", Lookup::Detach => "detach" };
+            let index_capacity: usize = self.exact.values().map(|rows| rows.capacity()).sum();
+            crate::force_info!("[alloc.lookup] owner={} active={} kind={} va={:#x} pages={} index={} probes={} rows={} capacity={} node_capacity={} index_capacity={}",
+                pid, usize::from(matches!(state,AllocationState::Active)), name, base, pages,
+                usize::from(indexed), probes, rows, capacity, self.nodes.capacity(), index_capacity);
+        }
+        let _ = (probes, kind);
+        result
+    }
     #[cfg(test)]
     pub(super) fn take_range_visits(&self) -> usize { self.range_visits.replace(0) }
 
     #[cfg(test)]
     pub(super) fn take_point_visits(&self) -> usize { self.point_visits.replace(0) }
+    #[cfg(test)]
+    pub(super) fn take_retire_visits(&self) -> usize { self.retire_visits.replace(0) }
 
     /// Canonicalize a uniquely owned extent before installing page aliases.
     /// Reserve all metadata first: an allocation failure must leave its single
@@ -196,6 +359,9 @@ impl PhysicalAllocations {
         for (partition, count) in self.references.partitions.iter_mut().zip(additional) {
             partition.try_reserve(count)?;
         }
+        if Self::exact_enabled() {
+            self.exact.get_mut(&pid).ok_or(())?.try_reserve(pages - 1).map_err(|_| ())?;
+        }
         // The existing active PID index already has capacity for this owner.
         // Request-local PhysicalPageReference handles must not survive this
         // rewrite; callers collect their page references after canonicalizing.
@@ -207,6 +373,7 @@ impl PhysicalAllocations {
         // All node/reference capacity was reserved before removing the extent.
         // Build the same newest-first chain without re-searching/publishing its
         // PID head for every page. No fallible work or external callback follows.
+        let mut first = None;
         self.active.update(pid, |mut head| {
             for offset in 0..pages {
                 let page = ProcessPhysicalAllocation {
@@ -217,24 +384,33 @@ impl PhysicalAllocations {
                     owns_frame_cap: allocation.owns_frame_cap,
                 };
                 references.increment(Self::key(page));
-                head = Some(Self::push_node(nodes, free, AllocationState::Active, page, head));
+                let index = Self::push_node(nodes, free, AllocationState::Active, page, head);
+                if first.is_none() { first = Some(index); }
+                head = Some(index);
             }
             head.unwrap()
         });
+        self.index_new_nodes(pid, first.unwrap(), pages);
         Ok(())
     }
 
     /// Move this owner's complete active chain without changing references or
     /// allocating replacement records. Deferred tails may already own aliases.
     pub(super) fn defer_all(&mut self, pid: usize) {
+        self.exact.remove(&pid);
         let Some(head) = self.active.remove(pid) else {
             return;
         };
+        self.advance_revision();
         let mut tail = head;
+        self.nodes[tail].previous = Previous::new(None, false);
         while let Some(next) = self.nodes[tail].next.get() {
+            self.nodes[next].previous = Previous::new(Some(tail), false);
             tail = next;
         }
-        self.nodes[tail].next = Link::new(self.deferred.get(pid));
+        let deferred = self.deferred.get(pid);
+        self.nodes[tail].next = Link::new(deferred);
+        if let Some(deferred) = deferred { self.nodes[deferred].previous.set(Some(tail)); }
         self.deferred.insert(pid, head);
     }
 
@@ -295,6 +471,7 @@ impl PhysicalAllocations {
         }
         // Swap list ownership, then retire the old backing's now-head deferred
         // record. Both physical reference totals remain correct throughout.
+        self.advance_revision();
         self.nodes[reference.index].allocation = replacement;
         self.nodes[head].allocation = old;
         self.take(AllocationState::Deferred, reference.owner, old.base_va, 1)
@@ -331,6 +508,7 @@ impl PhysicalAllocations {
         mut allocations: impl Iterator<Item = ProcessPhysicalAllocation>,
     ) {
         let Some(first) = allocations.next() else { return; };
+        self.advance_revision();
         let heads = match state {
             AllocationState::Active => &mut self.active,
             AllocationState::Deferred => &mut self.deferred,
@@ -340,34 +518,42 @@ impl PhysicalAllocations {
         let free = &mut self.free;
         // The head remains borrowed while the disjoint references and nodes
         // change. Preserve per-page reference counts and prepend order.
+        let mut first_index = 0;
+        let mut count = 1;
         heads.update(pid, |previous| {
             references.increment(Self::key(first));
             let mut head = Self::push_node(nodes, free, state, first, previous);
+            first_index = head;
             for allocation in allocations {
                 references.increment(Self::key(allocation));
                 head = Self::push_node(nodes, free, state, allocation, Some(head));
+                count += 1;
             }
             head
         });
+        if matches!(state, AllocationState::Active) { self.index_new_nodes(pid, first_index, count); }
     }
 
     fn push_node(
         nodes: &mut Vec<Node>, free: &mut Option<usize>, state: AllocationState,
         allocation: ProcessPhysicalAllocation, previous: Option<usize>,
     ) -> usize {
-        let mut node = Node { allocation, next: Link::new(previous), pages: PageBounds::EMPTY };
+        let mut node = Node { allocation, next: Link::new(previous),
+            previous: Previous::new(None, matches!(state, AllocationState::Active)), pages: PageBounds::EMPTY };
         if matches!(state, AllocationState::Active) {
             if let Some(next) = previous { node.pages = nodes[next].pages; }
             if allocation.page_count == 1 { node.pages.include(allocation.base_va); }
         }
-        if let Some(index) = *free {
+        let index = if let Some(index) = *free {
             *free = nodes[index].next.get();
             nodes[index] = node;
             index
         } else {
             nodes.push(node);
             nodes.len() - 1
-        }
+        };
+        if let Some(previous) = previous { nodes[previous].previous.set(Some(index)); }
+        index
     }
 
     pub(super) fn for_pid(
@@ -457,12 +643,8 @@ impl PhysicalAllocations {
         base_va: usize,
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
-        self.for_pid(state, pid)
-            .find(|allocation| {
-                #[cfg(test)]
-                self.point_visits.set(self.point_visits.get() + 1);
-                allocation.base_va == base_va && allocation.page_count == page_count
-            })
+        self.find_node(state, pid, base_va, page_count, Lookup::Point)
+            .map(|(index, _)| self.nodes[index].allocation)
     }
 
     pub(super) fn take(
@@ -474,6 +656,32 @@ impl PhysicalAllocations {
     ) -> Option<(ProcessPhysicalAllocation, bool)> {
         let index = self.detach(state, pid, base_va, page_count, false)?;
         Some(self.recycle(index))
+    }
+
+    pub(super) fn locate_active(
+        &self, pid: usize, base: usize, pages: usize,
+    ) -> Option<PhysicalAllocationLocation> {
+        let (index, previous) = self.find_node(AllocationState::Active, pid, base, pages, Lookup::Location)?;
+        Some(PhysicalAllocationLocation { allocation: self.nodes[index].allocation,
+            owner: pid, index, previous, revision: self.revision })
+    }
+
+    pub(super) fn try_take_located<E>(
+        &mut self, location: PhysicalAllocationLocation,
+        release: impl FnOnce(ProcessPhysicalAllocation, bool) -> Result<(), E>,
+    ) -> Result<bool, E> {
+        if self.revision == usize::MAX || self.revision != location.revision { return Ok(false); }
+        let Some(node) = self.nodes.get(location.index).copied() else { return Ok(false); };
+        let linked = if let Some(previous) = location.previous {
+            self.nodes.get(previous).is_some_and(|node| node.next.get() == Some(location.index))
+        } else { self.active.get(location.owner) == Some(location.index) };
+        if !linked || !node.previous.active() || node.allocation != location.allocation { return Ok(false); }
+        let reference = self.references.entry(Self::key(node.allocation));
+        release(node.allocation, reference.count == 1)?;
+        self.advance_revision();
+        self.unlink_node(AllocationState::Active, location.owner, location.index, location.previous);
+        self.recycle_reference(location.index, reference);
+        Ok(true)
     }
 
     pub(super) fn take_unique_deferred(
@@ -491,27 +699,14 @@ impl PhysicalAllocations {
         &mut self, state: AllocationState, pid: usize, base: usize, pages: usize,
         release: impl FnOnce(ProcessPhysicalAllocation, bool) -> Result<(), E>,
     ) -> Result<Option<ProcessPhysicalAllocation>, E> {
-        let mut next = self.heads(state).get(pid);
-        let mut previous: Option<usize> = None;
-        while let Some(index) = next {
-            let node = self.nodes[index];
-            if node.allocation.base_va == base && node.allocation.page_count == pages {
-                let reference = self.references.entry(Self::key(node.allocation));
-                release(node.allocation, reference.count == 1)?;
-                if let Some(previous) = previous {
-                    self.nodes[previous].next = node.next;
-                } else if let Some(head) = node.next.get() {
-                    self.heads_mut(state).insert(pid, head);
-                } else {
-                    self.heads_mut(state).remove(pid);
-                }
-                self.recycle_reference(index, reference);
-                return Ok(Some(node.allocation));
-            }
-            previous = Some(index);
-            next = node.next.get();
-        }
-        Ok(None)
+        let Some((index, previous)) = self.find_node(state, pid, base, pages, Lookup::Retirement) else { return Ok(None); };
+        let allocation = self.nodes[index].allocation;
+        let reference = self.references.entry(Self::key(allocation));
+        release(allocation, reference.count == 1)?;
+        self.advance_revision();
+        self.unlink_node(state, pid, index, previous);
+        self.recycle_reference(index, reference);
+        Ok(Some(allocation))
     }
 
     /// Change list ownership without dropping or re-adding the RAM reference.
@@ -522,7 +717,10 @@ impl PhysicalAllocations {
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
         let index = self.detach(AllocationState::Active, pid, base_va, page_count, false)?;
-        self.nodes[index].next = Link::new(self.deferred.get(pid));
+        let next = self.deferred.get(pid);
+        self.nodes[index].next = Link::new(next);
+        self.nodes[index].previous = Previous::new(None, false);
+        if let Some(next) = next { self.nodes[next].previous.set(Some(index)); }
         self.deferred.insert(pid, index);
         Some(self.nodes[index].allocation)
     }
@@ -541,6 +739,7 @@ impl PhysicalAllocations {
         if self.deferred.get(pid).is_none() && self.deferred.try_reserve(1).is_err() {
             return false;
         }
+        self.advance_revision();
         let mut head = self.active.get(pid);
         let mut next = head;
         let mut previous: Option<usize> = None;
@@ -554,7 +753,10 @@ impl PhysicalAllocations {
                 } else {
                     head = node.next.get();
                 }
+                if let Some(next) = node.next.get() { self.nodes[next].previous.set(previous); }
                 self.nodes[index].next = Link::new(deferred);
+                self.nodes[index].previous = Previous::new(None, false);
+                if let Some(deferred) = deferred { self.nodes[deferred].previous.set(Some(index)); }
                 deferred = Some(index);
                 remaining -= 1;
                 if remaining == 0 { break; }
@@ -569,6 +771,7 @@ impl PhysicalAllocations {
             self.active.remove(pid);
         }
         self.deferred.insert(pid, deferred.unwrap());
+        self.compact_index(pid);
         true
     }
 
@@ -615,11 +818,13 @@ impl PhysicalAllocations {
         // after backward-shift deletion relocates other PIDs.
         let mut previous: Option<usize> = None;
         let mut remaining = pages.len();
+        let result = (|| {
         while let Some(index) = next {
             let node = self.nodes[index];
             if Self::page_in_range(node.allocation, start, end) {
                 let reference = self.references.entry(Self::key(node.allocation));
                 release(node.allocation, reference.count == 1)?;
+                self.advance_revision();
                 if let Some(previous) = previous {
                     self.nodes[previous].next = Link::new(node.next.get());
                 } else if let Some(head) = node.next.get() {
@@ -627,6 +832,7 @@ impl PhysicalAllocations {
                 } else {
                     self.active.remove_at(head_slot);
                 }
+                if let Some(next) = node.next.get() { self.nodes[next].previous.set(previous); }
                 self.recycle_reference(index, reference);
                 remaining -= 1;
                 if remaining == 0 { break; }
@@ -636,6 +842,9 @@ impl PhysicalAllocations {
             next = node.next.get();
         }
         Ok(true)
+        })();
+        self.compact_index(pid);
+        result
     }
 
     fn detach(
@@ -646,27 +855,11 @@ impl PhysicalAllocations {
         page_count: usize,
         require_unique: bool,
     ) -> Option<usize> {
-        let mut next = self.heads(state).get(pid);
-        let mut previous: Option<usize> = None;
-        while let Some(index) = next {
-            let node = self.nodes[index];
-            if node.allocation.base_va == base_va && node.allocation.page_count == page_count {
-                if require_unique && self.count(node.allocation) != 1 {
-                    return None;
-                }
-                if let Some(previous) = previous {
-                    self.nodes[previous].next = Link::new(node.next.get());
-                } else if let Some(head) = node.next.get() {
-                    self.heads_mut(state).insert(pid, head);
-                } else {
-                    self.heads_mut(state).remove(pid);
-                }
-                return Some(index);
-            }
-            previous = Some(index);
-            next = node.next.get();
-        }
-        None
+        let (index, previous) = self.find_node(state, pid, base_va, page_count, Lookup::Detach)?;
+        if require_unique && self.count(self.nodes[index].allocation) != 1 { return None; }
+        self.advance_revision();
+        self.unlink_node(state, pid, index, previous);
+        Some(index)
     }
 
     pub(super) fn remove_pid(
@@ -675,7 +868,9 @@ impl PhysicalAllocations {
         pid: usize,
         mut removed: impl FnMut(ProcessPhysicalAllocation, bool),
     ) {
+        if matches!(state, AllocationState::Active) { self.exact.remove(&pid); }
         let mut next = self.heads_mut(state).remove(pid);
+        if next.is_some() { self.advance_revision(); }
         while let Some(index) = next {
             next = self.nodes[index].next.get();
             let (allocation, last) = self.recycle(index);
@@ -695,17 +890,27 @@ impl PhysicalAllocations {
         mut release: impl FnMut(ProcessPhysicalAllocation, bool) -> Result<(), E>,
     ) -> Result<(), E> {
         let mut next = self.heads_mut(state).remove(pid);
+        if next.is_some() { self.advance_revision(); }
+        let result = (|| {
         while let Some(index) = next {
             let node = self.nodes[index];
+            self.nodes[index].previous.set(None);
             let reference = self.references.entry(Self::key(node.allocation));
             if let Err(error) = release(node.allocation, reference.count == 1) {
                 self.heads_mut(state).insert(pid, index);
                 return Err(error);
             }
             next = node.next.get();
+            if let Some(next) = next { self.nodes[next].previous.set(None); }
             self.recycle_reference(index, reference);
         }
         Ok(())
+        })();
+        if matches!(state, AllocationState::Active) {
+            self.compact_index(pid);
+            if self.active.get(pid).is_none() { self.exact.remove(&pid); }
+        }
+        result
     }
 
     fn recycle(&mut self, index: usize) -> (ProcessPhysicalAllocation, bool) {
@@ -722,6 +927,7 @@ impl PhysicalAllocations {
         let last = reference.count == 1;
         self.references.retire(reference);
         self.nodes[index].next = Link::new(self.free);
+        self.nodes[index].previous = Previous::new(None, false);
         self.free = Some(index);
         (allocation, last)
     }
@@ -860,6 +1066,270 @@ impl<K: Key> Index<K> {
 
 #[cfg(test)]
 mod tests {
+    fn consistent(a: &super::PhysicalAllocations) {
+        use super::*;
+        let mut seen = alloc::vec![false; a.nodes.len()];
+        for (state, heads) in [(AllocationState::Active, &a.active), (AllocationState::Deferred, &a.deferred)] {
+            for &(pid, head) in heads.slots.iter().flatten() {
+                let mut next = Some(head); let mut previous = None; let mut expected = Vec::new();
+                while let Some(index) = next {
+                    assert!(!seen[index], "duplicate/cyclic node"); seen[index] = true;
+                    let node = a.nodes[index];
+                    assert_eq!(node.previous.get(), previous);
+                    assert_eq!(node.previous.active(), matches!(state, AllocationState::Active));
+                    expected.push(index); previous = Some(index); next = node.next.get();
+                }
+                if matches!(state, AllocationState::Active) && PhysicalAllocations::exact_enabled() {
+                    expected.sort_by_key(|&index| PhysicalAllocations::address_key(a.nodes[index].allocation));
+                    assert_eq!(a.exact.get(&pid), Some(&expected));
+                    for &index in &expected {
+                        let row = a.nodes[index].allocation;
+                        let oracle = a.for_pid(state, pid).find(|p| p.base_va == row.base_va && p.page_count == row.page_count);
+                        assert!(a.find(state, pid, row.base_va, row.page_count) == oracle);
+                    }
+                }
+            }
+        }
+        for (&pid, rows) in &a.exact {
+            if a.active.get(pid).is_none() { assert!(rows.is_empty()); }
+        }
+        if !PhysicalAllocations::exact_enabled() { assert!(a.exact.is_empty()); }
+        let mut next = a.free;
+        while let Some(index) = next {
+            assert!(!seen[index]); seen[index] = true;
+            assert!(!a.nodes[index].previous.active()); assert_eq!(a.nodes[index].previous.get(), None);
+            next = a.nodes[index].next.get();
+        }
+        assert!(seen.iter().all(|&seen| seen), "orphaned node");
+        let mut counts = BTreeMap::new();
+        for heads in [&a.active, &a.deferred] {
+            for &(_, head) in heads.slots.iter().flatten() {
+                let mut next = Some(head);
+                while let Some(index) = next {
+                    *counts.entry(PhysicalAllocations::key(a.nodes[index].allocation)).or_insert(0usize) += 1;
+                    next = a.nodes[index].next.get();
+                }
+            }
+        }
+        for (key, count) in counts { assert_eq!(a.references.get(key), Some(count)); }
+    }
+
+    #[test]
+    fn active_index_matches_primary_chains_through_mutation_and_failure_corpus() {
+        use super::*;
+        let mut a = PhysicalAllocations::default(); let mut seed = 0x1512_4abc_u64;
+        for step in 0..1200 {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let pid = (seed as usize >> 8) % 7 + 1;
+            let va = ((seed as usize >> 16) % 64 + 1) * 4096;
+            let rows: Vec<_> = a.for_pid(AllocationState::Active, pid).collect();
+            let chosen = rows.get((seed as usize >> 24) % rows.len().max(1)).copied();
+            match step % 16 {
+                0..=2 => a.insert(AllocationState::Active, pid, sample(va, (seed as usize >> 32) % 64 + 1, step % 3 + 1)),
+                3 => { if let Some(row) = chosen { a.defer(pid, row.base_va, row.page_count).unwrap(); } },
+                4 => { if let Some(row) = chosen { a.take(AllocationState::Active, pid, row.base_va, row.page_count).unwrap(); } },
+                5 => { if let Some(row) = chosen {
+                    let expected = rows.iter().copied().find(|p| p.base_va == row.base_va && p.page_count == row.page_count).unwrap();
+                    let result = a.try_take(AllocationState::Active, pid, row.base_va, row.page_count, |actual, _| {
+                        assert!(actual == expected); if step % 7 == 0 { Err(9) } else { Ok(()) }
+                    });
+                    assert_eq!(result.is_err(), step % 7 == 0);
+                } },
+                6 => { let deferred: Vec<_> = a.for_pid(AllocationState::Deferred, pid).collect();
+                    if let Some(&row) = deferred.first() {
+                        let unique = a.count(row) == 1;
+                        assert_eq!(a.take_unique_deferred(pid, row.base_va, row.page_count).is_some(), unique);
+                    }
+                },
+                7 => a.defer_all(pid),
+                8 => a.remove_pid(AllocationState::Active, pid, |_, _| {}),
+                9 => { let before: Vec<_> = a.for_pid(AllocationState::Active, pid).collect();
+                    let fail = step % 5; let mut calls = 0;
+                    let result = a.try_remove_pid(AllocationState::Active, pid, |_, _| {
+                        calls += 1; if calls > fail { Err(8) } else { Ok(()) }
+                    });
+                    assert_eq!(result.is_err(), before.len() > fail);
+                    assert!(a.for_pid(AllocationState::Active, pid).eq(before.into_iter().skip(fail)));
+                },
+                10 | 11 => {
+                    let base = 0x1000_0000 + step * 16 * 4096;
+                    let pages: Vec<_> = (0..8).map(|i| sample(base + i * 4096, 100000 + step * 16 + i, 1)).collect();
+                    a.insert_many(AllocationState::Active, pid, pages.iter().copied());
+                    consistent(&a);
+                    if step % 16 == 10 { assert!(a.try_defer_pages(pid, base, base + 8 * 4096, &pages)); }
+                    else { let mut calls = 0;
+                        assert_eq!(a.try_retire_pages(pid, base, base + 8 * 4096, &pages, |_, _| {
+                            calls += 1; if calls == 5 { Err(7) } else { Ok(()) }
+                        }), Err(7));
+                    }
+                },
+                12 => { let extent = sample(0x2000_0000 + step * 16 * 4096, 1000000 + step * 16, 4);
+                    a.insert(AllocationState::Active, pid, extent); a.split_unique_extent(pid, extent).unwrap();
+                },
+                13 => { if let Some(row) = rows.iter().find(|p| p.page_count == 1) {
+                    let reference = a.page_references(pid, row.base_va, row.base_va + 4096)[0];
+                    let mut replacement = reference.allocation; replacement.base_page = 10000000 + step;
+                    a.insert(AllocationState::Deferred, pid, replacement);
+                    assert!(a.replace_backing(reference, replacement).is_some());
+                } },
+                14 => { if let Some(row) = chosen {
+                    let location = a.locate_active(pid, row.base_va, row.page_count).unwrap();
+                    if step % 3 == 0 { a.insert(AllocationState::Active, 99, sample(4096, 20000000 + step, 1)); }
+                    assert_eq!(a.try_take_located(location, |_, _| Ok::<(), ()>(())).unwrap(), step % 3 != 0);
+                } },
+                _ => { assert!(a.find(AllocationState::Active, pid, 0xffff_0000, 1).is_none()); },
+            }
+            consistent(&a);
+        }
+        for pid in (1..=7).chain([99]) {
+            a.remove_pid(AllocationState::Active, pid, |_, _| {});
+            a.remove_pid(AllocationState::Deferred, pid, |_, _| {});
+        }
+        consistent(&a); assert!(a.exact.is_empty());
+    }
+
+    #[test]
+    fn active_index_bulk_insertion_moves_the_old_suffix_once_and_preserves_duplicate_order() {
+        use super::*;
+        let mut batch = PhysicalAllocations::default(); let mut scalar = PhysicalAllocations::default();
+        for a in [&mut batch, &mut scalar] {
+            for page in 0..512 { a.insert(AllocationState::Active, 1, sample(0x4000000 + page * 4096, 10000 + page, 1)); }
+            a.index_moves = 0;
+        }
+        let pages: Vec<_> = (0..1024).map(|i| sample((i + 1) * 4096, i, 1)).collect();
+        batch.insert_many(AllocationState::Active, 1, pages.iter().copied());
+        for page in pages { scalar.insert(AllocationState::Active, 1, page); }
+        if PhysicalAllocations::exact_enabled() {
+            assert_eq!((batch.index_moves, scalar.index_moves), (512, 512 * 1024));
+        }
+        assert!(batch.for_pid(AllocationState::Active, 1).eq(scalar.for_pid(AllocationState::Active, 1)));
+        let mixed = [sample(4096,90000,2), sample(4096,90001,1), sample(8192,90002,1), sample(4096,90003,1)];
+        batch.insert_many(AllocationState::Active, 1, mixed.into_iter());
+        assert!(batch.find(AllocationState::Active,1,4096,1) == Some(mixed[3]));
+        assert!(batch.find(AllocationState::Active,1,4096,2) == Some(mixed[0]));
+        consistent(&batch); consistent(&scalar);
+    }
+
+    #[test]
+    fn active_index_reuses_live_owner_capacity_and_releases_it_on_owner_removal() {
+        use super::*;
+        let mut a = PhysicalAllocations::default();
+        let pages: Vec<_> = (0..512).map(|i| sample((i + 1) * 4096, 50000 + i, 1)).collect();
+        a.insert_many(AllocationState::Active,1,pages.iter().copied());
+        let capacity = a.exact.get(&1).map(|rows| rows.capacity());
+        let node_capacity = a.nodes.capacity();
+        for _ in 0..64 {
+            assert!(a.try_retire_pages(1,4096,513*4096,&pages,|_,_|Ok::<(),()>(())).unwrap());
+            a.insert_many(AllocationState::Active,1,pages.iter().copied());
+            assert_eq!(a.exact.get(&1).map(|rows| rows.capacity()),capacity);
+            assert_eq!(a.nodes.capacity(),node_capacity); consistent(&a);
+        }
+        a.defer_all(1); assert!(a.exact.is_empty()); consistent(&a);
+        a.remove_pid(AllocationState::Deferred,1,|_,_|{}); consistent(&a);
+        assert_eq!(core::mem::size_of::<Node>(),88);
+    }
+
+    #[test]
+    fn located_retirement_matches_scalar_with_one_ownership_walk_and_no_rewalk() {
+        use super::*;
+        fn fixture(shared: bool) -> PhysicalAllocations {
+            let mut a = PhysicalAllocations::default();
+            for page in 1..=1024 { a.insert(AllocationState::Active, 1, sample(page * 4096, page, 1)); }
+            if shared { a.insert(AllocationState::Active, 2, sample(4096, 1, 1)); }
+            a
+        }
+        for shared in [false, true] {
+            let mut old = fixture(shared); let mut new = fixture(shared);
+            let old_allocation = old.find(AllocationState::Active, 1, 4096, 1).unwrap();
+            let mut old_last = None;
+            assert!(old.try_take(AllocationState::Active, 1, 4096, 1, |allocation, last| {
+                assert!(allocation == old_allocation); old_last = Some(last); Ok::<(), ()>(())
+            }).unwrap().is_some());
+            let location = new.locate_active(1, 4096, 1).unwrap();
+            let mut new_last = None;
+            assert!(new.try_take_located(location, |allocation, last| {
+                assert!(allocation == old_allocation); new_last = Some(last); Ok::<(), ()>(())
+            }).unwrap());
+            assert_eq!(old_last, Some(!shared)); assert_eq!(new_last, old_last);
+            let (points, retires) = (old.take_point_visits(), old.take_retire_visits());
+            if PhysicalAllocations::exact_enabled() { assert!(points <= 12 && retires <= 12); }
+            else { assert_eq!((points, retires), (1024, 1024)); }
+            assert_eq!((new.take_point_visits(), new.take_retire_visits()), (points, 0));
+            assert!(old.for_pid(AllocationState::Active, 1).eq(new.for_pid(AllocationState::Active, 1)));
+            assert_eq!(new.count(location.allocation), usize::from(shared));
+            assert!(!new.try_take_located(location, |_, _| -> Result<(), ()> { panic!("reused location") }).unwrap());
+        }
+    }
+
+    #[test]
+    fn located_retirement_failure_retains_the_exact_newest_record_and_can_retry() {
+        use super::*;
+        let mut a = PhysicalAllocations::default();
+        let old = sample(4096, 1, 1); let new = sample(4096, 2, 1);
+        a.insert(AllocationState::Active, 1, old); a.insert(AllocationState::Active, 1, new);
+        let location = a.locate_active(1, 4096, 1).unwrap();
+        assert!(location.allocation == new);
+        assert_eq!(a.try_take_located(location, |_, _| Err::<(), _>("free failed")), Err("free failed"));
+        assert_eq!(a.revision, location.revision); assert_eq!(a.count(new), 1);
+        assert!(a.find(AllocationState::Active, 1, 4096, 1) == Some(new));
+        assert!(a.try_take_located(location, |_, last| { assert!(last); Ok::<(), ()>(()) }).unwrap());
+        assert!(a.find(AllocationState::Active, 1, 4096, 1) == Some(old));
+        assert_eq!(a.count(new), 0); assert_eq!(a.count(old), 1);
+    }
+
+    #[test]
+    fn every_ownership_mutation_invalidates_located_retirement_before_callback() {
+        use super::*;
+        for change in 0..12 {
+            let mut a = PhysicalAllocations::default();
+            for page in 1..=4 { a.insert(AllocationState::Active, 1, sample(page * 4096, page, 1)); }
+            a.insert(AllocationState::Active, 2, sample(0x200000, 500, 2));
+            a.insert(AllocationState::Deferred, 9, sample(0x400000, 900, 1));
+            let replacement = sample(4096, 1000, 1);
+            a.insert(AllocationState::Deferred, 1, replacement);
+            let location = a.locate_active(1, 4096, 1).unwrap();
+            match change {
+                0 => a.insert(AllocationState::Active, 7, sample(0x500000, 2000, 1)),
+                1 => a.defer_all(1),
+                2 => { a.defer(1, 4 * 4096, 1).unwrap(); },
+                3 => { a.take(AllocationState::Active, 1, 4 * 4096, 1).unwrap(); },
+                4 => a.remove_pid(AllocationState::Active, 2, |_, _| {}),
+                5 => { a.try_take(AllocationState::Active, 2, 0x200000, 2, |_, _| Ok::<(), ()>(())).unwrap(); },
+                6 => { let pages = a.pages_in_range(1, 3 * 4096, 5 * 4096).collect::<Vec<_>>();
+                    let mut pages = pages; pages.sort_by_key(|p| p.base_va);
+                    assert!(a.try_defer_pages(1, 3 * 4096, 5 * 4096, &pages)); },
+                7 => { let mut pages = a.pages_in_range(1, 3 * 4096, 5 * 4096).collect::<Vec<_>>();
+                    pages.sort_by_key(|p| p.base_va);
+                    assert!(a.try_retire_pages(1, 3 * 4096, 5 * 4096, &pages, |_, _| Ok::<(), ()>(())).unwrap()); },
+                8 => { a.take_unique_deferred(9, 0x400000, 1).unwrap(); },
+                9 => { let extent = a.find(AllocationState::Active, 2, 0x200000, 2).unwrap(); a.split_unique_extent(2, extent).unwrap(); },
+                10 => { let reference = a.page_references(1, 4096, 8192)[0]; assert!(a.replace_backing(reference, replacement).is_some()); },
+                _ => { assert_eq!(a.try_remove_pid(AllocationState::Active, 2, |_, _| Err::<(), _>("failed")), Err("failed")); },
+            }
+            assert!(!a.try_take_located(location, |_, _| -> Result<(), ()> { panic!("stale callback change={change}") }).unwrap());
+        }
+    }
+
+    #[test]
+    fn located_retirement_declines_saturation_and_node_recycling_without_aba() {
+        use super::*;
+        let mut a = PhysicalAllocations::default(); let allocation = sample(4096, 1, 1);
+        a.insert(AllocationState::Active, 1, allocation);
+        let location = a.locate_active(1, 4096, 1).unwrap();
+        a.remove_pid(AllocationState::Active, 1, |_, _| {});
+        a.insert(AllocationState::Active, 2, allocation);
+        assert!(!a.try_take_located(location, |_, _| -> Result<(), ()> { panic!("recycled") }).unwrap());
+        a.revision = usize::MAX - 1;
+        let before_saturation = a.locate_active(2, 4096, 1).unwrap();
+        a.insert(AllocationState::Deferred, 3, sample(8192, 4, 1));
+        assert_eq!(a.revision, usize::MAX);
+        for stale in [before_saturation, a.locate_active(2, 4096, 1).unwrap()] {
+            assert!(!a.try_take_located(stale, |_, _| -> Result<(), ()> { panic!("saturated") }).unwrap());
+        }
+        assert!(a.try_take(AllocationState::Active, 2, 4096, 1, |_, _| Ok::<(), ()>(())).unwrap().is_some());
+        assert_eq!(a.revision, usize::MAX);
+    }
+
     #[test]
     fn extent_split_matches_scalar_registration_with_reserved_metadata_and_recycled_nodes() {
         use super::*;
@@ -987,16 +1457,19 @@ mod tests {
                 let node=a.nodes[index];
                 if PhysicalAllocations::page_in_range(node.allocation,start,end) {
                     let reference=a.references.entry(PhysicalAllocations::key(node.allocation));
-                    release(node.allocation,reference.count==1)?;
+                    if let Err(error) = release(node.allocation,reference.count==1) {
+                        a.compact_index(pid); return Err(error);
+                    }
                     if let Some(previous)=previous { a.nodes[previous].next=Link::new(node.next.get()); }
                     else if let Some(head)=node.next.get() { a.active.insert(pid,head); }
                     else { a.active.remove(pid); }
+                    if let Some(next) = node.next.get() { a.nodes[next].previous.set(previous); }
                     a.recycle_reference(index,reference); remaining-=1;
                     if remaining==0 { break; }
                 } else { previous=Some(index); }
                 next=node.next.get();
             }
-            Ok(true)
+            a.compact_index(pid); Ok(true)
         }
         fn fixture(count:usize,others:bool)->(PhysicalAllocations,Vec<ProcessPhysicalAllocation>) {
             let mut a=PhysicalAllocations::default(); let mut pages=Vec::new();
@@ -1056,7 +1529,8 @@ mod tests {
         use core::sync::atomic::Ordering::Relaxed;
         fn old_insert(a: &mut PhysicalAllocations, state: AllocationState, pid: usize, allocation: ProcessPhysicalAllocation) {
             a.references.increment(PhysicalAllocations::key(allocation));
-            let mut node=Node { allocation,next:Link::new(a.heads(state).get(pid)),pages:PageBounds::EMPTY };
+            let mut node=Node { allocation,next:Link::new(a.heads(state).get(pid)),
+                previous:Previous::new(None,matches!(state,AllocationState::Active)),pages:PageBounds::EMPTY };
             if matches!(state,AllocationState::Active) {
                 if let Some(next)=node.next.get() { node.pages=a.nodes[next].pages; }
                 if allocation.page_count==1 { node.pages.include(allocation.base_va); }
@@ -1064,7 +1538,9 @@ mod tests {
             let index=if let Some(free)=a.free {
                 a.free=a.nodes[free].next.get(); a.nodes[free]=node; free
             } else { a.nodes.push(node); a.nodes.len()-1 };
+            if let Some(next) = a.nodes[index].next.get() { a.nodes[next].previous.set(Some(index)); }
             a.heads_mut(state).insert(pid,index);
+            if matches!(state,AllocationState::Active) { a.index_new_nodes(pid,index,1); }
         }
         fn same(a: &PhysicalAllocations,b: &PhysicalAllocations) {
             assert_eq!(a.active.slots,b.active.slots); assert_eq!(a.deferred.slots,b.deferred.slots);
@@ -1151,10 +1627,11 @@ mod tests {
         struct OldNode {
             _allocation: ProcessPhysicalAllocation,
             _next: Option<usize>,
+            _previous: Previous,
             _pages: PageBounds,
         }
         assert_eq!(core::mem::size_of::<OldNode>() - core::mem::size_of::<Node>(), core::mem::size_of::<usize>());
-        if usize::BITS == 64 { assert_eq!(core::mem::size_of::<Node>(), 80); }
+        if usize::BITS == 64 { assert_eq!(core::mem::size_of::<Node>(), 88); }
         let mut allocations = PhysicalAllocations::default();
         for page in 0..513 {
             let mut allocation = sample((page + 1) * 4096, 100 + page % 17, 1);

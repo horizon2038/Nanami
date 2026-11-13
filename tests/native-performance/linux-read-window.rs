@@ -711,6 +711,95 @@ fn read(
 }
 
 #[test]
+fn bulk_eviction_releases_seventeen_victims_in_one_request_before_writing() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in 1..=81 {
+        machine.page(7, index * PAGE, 0x11);
+        if index <= 64 { assert!(window.copy_from(7, 1, 7, index * PAGE, &[0x11], &mut machine)); }
+    }
+    let bytes = vec![0x57; 16 * PAGE];
+    assert!(window.copy_from(7, 1, 7, 65 * PAGE + 19, &bytes, &mut machine));
+    assert_eq!((machine.release_batches, machine.releases, machine.batches, machine.grants), (1, 17, 1, 81));
+    assert_eq!(machine.maps.len(), 64);
+    for index in 1..=81 {
+        for (offset, &value) in machine.pages[&(7, index * PAGE)].borrow().iter().enumerate() {
+            let address = index * PAGE + offset;
+            assert_eq!(value, if (65 * PAGE + 19..81 * PAGE + 19).contains(&address) { 0x57 } else { 0x11 });
+        }
+    }
+    assert!(window.copy_from_cached(7, 1, 7, 65 * PAGE + 19, &bytes, &mut machine));
+    assert_eq!(machine.release_batches, 1);
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_eviction_partial_ack_retains_failed_pin_without_grants_or_stores() {
+    for failure in [1, 9, 17] {
+        let window = WriteWindow::new();
+        let mut machine = Machine { batch: true, ..Machine::default() };
+        for index in 1..=81 {
+            machine.page(7, index * PAGE, 0x11);
+            if index <= 64 { assert!(window.copy_from(7, 1, 7, index * PAGE, &[0x11], &mut machine)); }
+        }
+        machine.release_fail_at = Some(failure);
+        assert!(!window.copy_from(7, 1, 7, 65 * PAGE + 19, &vec![0x57; 16 * PAGE], &mut machine));
+        assert_eq!((machine.release_batches, machine.releases, machine.batches, machine.grants), (1, 17, 0, 64));
+        assert_eq!(machine.maps.len(), 48);
+        for index in 1..=17 { assert!(!window.copy_from_cached(7, 1, 7, index * PAGE, &[0x57], &mut machine)); }
+        for index in 18..=64 { assert!(window.copy_from_cached(7, 1, 7, index * PAGE, &[0x11], &mut machine)); }
+        assert!(machine.pages.values().all(|p| p.borrow().iter().all(|&b| b == 0x11)));
+        machine.release_fail_at = None;
+        assert!(window.copy_from(7, 1, 7, 65 * PAGE + 19, &vec![0x57; 16 * PAGE], &mut machine));
+        window.clear_owner(7, &mut machine);
+        assert!(!window.has_owner(7)); assert!(machine.maps.is_empty());
+    }
+}
+
+#[test]
+fn bulk_eviction_unknown_ack_retains_all_selected_slots_until_hole_retry() {
+    for malformed in [false, true] {
+        let window = WriteWindow::new();
+        let mut machine = Machine { batch: true, ..Machine::default() };
+        for index in 1..=68 {
+            machine.page(7, index * PAGE, 0x11);
+            if index <= 64 { assert!(window.copy_from(7, 1, 7, index * PAGE, &[0x11], &mut machine)); }
+        }
+        machine.lost_release_reply = !malformed; machine.bad_release_reply = malformed;
+        let fields = [(65 * PAGE, &[1][..]), (66 * PAGE, &[2][..]), (67 * PAGE, &[3][..]), (68 * PAGE, &[4][..])];
+        assert!(!window.copy_from_many(7, 1, 7, &fields, &mut machine));
+        assert_eq!((machine.release_batches, machine.releases, machine.grants), (1, 4, 64));
+        assert_eq!(machine.maps.len(), 60);
+        for index in 1..=4 { assert!(!window.copy_from_cached(7, 1, 7, index * PAGE, &[0x57], &mut machine)); }
+        machine.lost_release_reply = false; machine.bad_release_reply = false; machine.fail_release = true;
+        assert!(!window.copy_from_many(7, 1, 7, &fields, &mut machine));
+        assert_eq!(machine.grants, 64);
+        assert!(machine.pages.values().all(|p| p.borrow().iter().all(|&b| b == 0x11)));
+        machine.fail_release = false;
+        assert!(window.copy_from_many(7, 1, 7, &fields, &mut machine));
+        for (address, source) in fields { assert_eq!(machine.pages[&(7, address)].borrow()[0], source[0]); }
+        window.clear_owner(7, &mut machine);
+        assert!(!window.has_owner(7)); assert!(machine.maps.is_empty());
+    }
+}
+
+#[test]
+fn bulk_read_eviction_batches_five_victims_and_samples_new_backing() {
+    let window = ReadWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in 1..=69 {
+        machine.page(7, index * PAGE, index as u8);
+        if index <= 64 { assert!(window.copy_into(7, 1, 7, index * PAGE, &mut [MaybeUninit::uninit()], &mut machine)); }
+    }
+    let mut output = vec![MaybeUninit::uninit(); 4 * PAGE];
+    assert!(window.copy_into(7, 1, 7, 65 * PAGE + 19, &mut output, &mut machine));
+    assert_eq!((machine.release_batches, machine.releases, machine.batches, machine.grants), (1, 5, 1, 69));
+    for (offset, byte) in output.into_iter().enumerate() { assert_eq!(unsafe { byte.assume_init() }, (65 + (19 + offset) / PAGE) as u8); }
+    window.clear_owner(7, &mut machine); assert!(machine.maps.is_empty());
+}
+
+#[test]
 fn bulk_wrapped_range_protects_its_early_hit_from_the_later_victim_selection() {
     let window = WriteWindow::new();
     let mut machine = Machine { batch: true, ..Machine::default() };

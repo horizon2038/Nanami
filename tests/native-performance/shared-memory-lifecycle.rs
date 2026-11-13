@@ -1002,6 +1002,182 @@ fn private_source(alpha: &mut Alpha) -> usize {
 }
 
 #[test]
+fn pool_view_release_reuses_the_validated_location_without_a_second_chain_walk() {
+    let mut alpha = alpha(); let source = private_source(&mut alpha); let local = 0x8000_0000;
+    let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+    alpha.handle_process_page_view_request(view_request(source, local), true).unwrap();
+    for index in 0..1024 {
+        alpha.processes.register_pool_allocation(1, 0x9000_0000 + index * PAGE_SIZE,
+            allocation.start_slot, allocation.base_page, 1).unwrap();
+    }
+    assert_eq!(alpha.processes.physical_reference_count(allocation), 1026);
+    alpha.processes.take_physical_page_point_visits(); alpha.processes.take_physical_page_retire_visits();
+    release(&mut alpha,1,local,1).unwrap();
+    let points = alpha.processes.take_physical_page_point_visits();
+    if option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX") == Some("0") { assert_eq!(points,1025); }
+    else { assert!(points > 0 && points <= 13); }
+    assert_eq!(alpha.processes.take_physical_page_retire_visits(),
+        if option_env!("NANAMI_LOCATED_POOL_RETIRE")==Some("0") {points} else {0});
+    assert_eq!(alpha.processes.physical_reference_count(allocation),1025);
+    assert!(alpha.processes.shared_memory_reservation(1,local,1).is_none());
+    assert!(alpha.processes.vm_space(1).unwrap().find_frame(local).is_none());
+}
+
+#[test]
+fn located_retirement_declines_a_retargeted_vm_owner_without_releasing_ram() {
+    let mut alpha = alpha();
+    let (base,_) = alpha.handle_shared_memory_request(owned_request(PAGE_SIZE,0,0)).unwrap();
+    let location = alpha.processes.locate_active_physical_allocation(1,base,1).unwrap();
+    alpha.processes.share_address_space(1,2).unwrap();
+    assert!(!alpha.processes.try_retire_located_physical_allocation(1,location,|_,_| {
+        panic!("owner changed")
+    }).unwrap());
+    assert_eq!(alpha.processes.physical_reference_count(location.allocation),1);
+}
+
+#[test]
+fn view_vector_ownership_walk_replaces_repeated_full_chain_searches() {
+    let build = || {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        for index in 1..17 { append_private_source(&mut alpha, source + index * PAGE_SIZE); }
+        // Unrelated metadata at the head must be crossed to reach every low
+        // source page. References are real aliases, not fabricated lookup hits.
+        let first = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+        for index in 0..1024 {
+            alpha.processes.register_pool_allocation(2, 0x2000_0000 + index * PAGE_SIZE,
+                first.start_slot, first.base_page, 1).unwrap();
+        }
+        alpha.processes.take_physical_page_point_visits();
+        alpha.processes.take_physical_page_range_visits();
+        (alpha, source)
+    };
+    let (mut old, source) = build();
+    for index in 0..17 {
+        old.handle_process_page_view_request(view_request(source + index * PAGE_SIZE,
+            0x8000_0000 + index * PAGE_SIZE), true).unwrap();
+    }
+    let old_visits = old.processes.take_physical_page_point_visits();
+    if option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX") == Some("0") { assert_eq!(old_visits, 17561); }
+    else { assert!(old_visits > 0 && old_visits <= 17 * 13); }
+    let (mut new, source) = build();
+    let entries: Vec<_> = (0..17).map(|index|
+        (source + index * PAGE_SIZE, 0x8000_0000 + index * PAGE_SIZE)).collect();
+    let request = view_vector_request(&mut new, &entries);
+    assert_eq!(new.handle_process_page_views_request(request, true).unwrap(), (17, 0));
+    let points = new.processes.take_physical_page_point_visits();
+    let ranges = new.processes.take_physical_page_range_visits();
+    if option_env!("NANAMI_ACTIVE_ALLOCATION_INDEX") != Some("0")
+        || option_env!("NANAMI_BATCH_VIEW_OWNERSHIP") == Some("0") {
+        assert_eq!((points, ranges), (old_visits, 0));
+    } else {
+        assert_eq!((points, ranges), (0, 1041));
+        assert!(points + ranges < old_visits / 16);
+    }
+    for (target, local) in entries {
+        let source_frame = new.processes.vm_space(2).unwrap().find_frame(target).unwrap();
+        let local_frame = new.processes.vm_space(1).unwrap().find_frame(local).unwrap();
+        assert_eq!(new.processes.vm_space(1).unwrap().permissions(local), 3);
+        // Source child capabilities and supervisor pool aliases name the same RAM.
+        assert_eq!(machine(|m| frame_page(m, source_frame)), machine(|m| frame_page(m, local_frame)));
+    }
+}
+
+fn append_private_source(alpha: &mut Alpha, source: usize) {
+    let entry = alpha.processes.memory_entry(2).unwrap();
+    let (_, _, slot) = alpha.processes.reserve_process_heap_at(2, source, 1, PAGE_SIZE, PROCESS_FRAME_TOTAL_PAGES).unwrap();
+    let page = alpha.memory.allocate_physical_any(PAGE_SIZE).unwrap();
+    alpha.memory.ensure_alpha_frame_at_physical_index(page).unwrap();
+    let frame = pool_frame(page);
+    arch::address_space::map(entry.address_space, frame, source,
+        a9n_abi::capability_call::address_space::Attribute::ALL).unwrap();
+    alpha.processes.vm_space_mut(2).unwrap().record_frame(source, frame).unwrap();
+    alpha.processes.register_pool_allocation(2, source, slot, page, 1).unwrap();
+}
+
+#[test]
+fn view_vector_ownership_uses_newest_exact_record_for_duplicate_targets() {
+    for current_matches in [false, true] {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        let prior = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+        let new_page = alpha.memory.allocate_physical_any(PAGE_SIZE).unwrap();
+        alpha.memory.ensure_alpha_frame_at_physical_index(new_page).unwrap();
+        alpha.processes.register_pool_allocation(2, source, prior.start_slot + 1, new_page, 1).unwrap();
+        if current_matches {
+            let vm = alpha.processes.vm_space_mut(2).unwrap();
+            vm.forget_frame(source); vm.record_frame(source, pool_frame(new_page)).unwrap();
+        }
+        let request = view_vector_request(&mut alpha, &[(source, 0x8000_0000), (source, 0x8001_0000)]);
+        let result = alpha.handle_process_page_views_request(request, true).unwrap();
+        if current_matches {
+            assert_eq!(result, (2, 0));
+            for local in [0x8000_0000,0x8001_0000] {
+                assert_eq!(alpha.processes.vm_space(1).unwrap().find_frame(local), Some(pool_frame(new_page)));
+                release(&mut alpha, 1, local, 1).unwrap();
+            }
+        } else {
+            assert_eq!(result, (0, nanami_uapi::os::OS_RESPONSE_PERMISSION_DENIED));
+            assert!(alpha.processes.shared_memory_reservation(1, 0x8000_0000, 1).is_none());
+        }
+        assert_eq!(alpha.processes.physical_reference_count(prior), 1);
+    }
+}
+
+#[test]
+fn view_vector_ownership_does_not_bypass_later_page_rights_cow_or_uncertainty() {
+    for invalid in 0..5 {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha); let second = source + PAGE_SIZE;
+        append_private_source(&mut alpha, second);
+        match invalid {
+            0 => alpha.processes.vm_space_mut(2).unwrap().set_permissions(second, 1),
+            1 => alpha.processes.vm_space_mut(2).unwrap().mark_private_page_shared(second, true),
+            2 => alpha.processes.vm_space_mut(2).unwrap().mark_mapping_uncertain(second),
+            3 => { alpha.processes.vm_space_mut(2).unwrap().forget_frame(second); },
+            _ => { alpha.processes.release_physical_allocation_reference(2, second, 1).unwrap(); },
+        }
+        let request = view_vector_request(&mut alpha, &[(source,0x8000_0000),(second,0x8001_0000),(source,0x8002_0000)]);
+        assert_eq!(alpha.handle_process_page_views_request(request, true).unwrap(),
+            (1, nanami_uapi::os::OS_RESPONSE_PERMISSION_DENIED));
+        assert!(alpha.processes.shared_memory_reservation(1,0x8000_0000,1).is_some());
+        for local in [0x8001_0000,0x8002_0000] { assert!(alpha.processes.shared_memory_reservation(1,local,1).is_none()); }
+        release(&mut alpha,1,0x8000_0000,1).unwrap();
+    }
+}
+
+#[test]
+fn view_vector_ownership_keeps_point_resolution_when_caller_shares_source_vm() {
+    let mut alpha = alpha(); let source = private_source(&mut alpha);
+    append_private_source(&mut alpha, source + PAGE_SIZE);
+    alpha.processes.share_address_space(1,2).unwrap();
+    alpha.processes.take_physical_page_point_visits(); alpha.processes.take_physical_page_range_visits();
+    let request = view_vector_request(&mut alpha, &[(source,0x8000_0000),(source + PAGE_SIZE,0x8001_0000)]);
+    let _ = alpha.handle_process_page_views_request(request, false).unwrap();
+    assert!(alpha.processes.take_physical_page_point_visits() > 0);
+    assert_eq!(alpha.processes.take_physical_page_range_visits(), 0);
+}
+
+#[test]
+fn view_vector_ownership_resolves_the_current_shared_vm_owner() {
+    let mut alpha = alpha(); let source = private_source(&mut alpha);
+    append_private_source(&mut alpha, source + PAGE_SIZE);
+    alpha.processes.install_process(3,1,3,3,31,32,33,3,0,0,0,0x4000000).unwrap();
+    alpha.processes.seal_capabilities(3).unwrap();
+    alpha.processes.share_address_space(3,2).unwrap();
+    let mut request = view_vector_request(&mut alpha, &[(source,0x8000_0000),(source + PAGE_SIZE,0x8001_0000)]);
+    request.arg0 = 3;
+    assert_eq!(alpha.handle_process_page_views_request(request,true).unwrap(), (2,0));
+    for (target,local) in [(source,0x8000_0000),(source + PAGE_SIZE,0x8001_0000)] {
+        let allocation = alpha.processes.find_active_physical_allocation_reference(3,target,1).unwrap();
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 2);
+        assert_eq!(alpha.processes.vm_space(1).unwrap().find_frame(local), Some(pool_frame(allocation.base_page)));
+        release(&mut alpha,1,local,1).unwrap();
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+    }
+}
+
+#[test]
 fn view_vectors_preserve_each_pin_and_read_write_permissions() {
     for writable in [false, true] {
         let mut alpha = alpha();

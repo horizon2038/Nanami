@@ -222,6 +222,17 @@ pub struct PhysicalPageReference {
     index: usize,
 }
 
+/// An allocation location for one synchronous request in this manager only.
+/// Any ownership mutation invalidates it; retain checked scalar retirement.
+#[derive(Clone, Copy)]
+pub struct PhysicalAllocationLocation {
+    pub allocation: ProcessPhysicalAllocation,
+    owner: usize,
+    index: usize,
+    previous: Option<usize>,
+    revision: usize,
+}
+
 impl ProcessManager {
     pub fn new_alpha(
         alpha_root_node: CapabilityDescriptor,
@@ -965,6 +976,22 @@ impl ProcessManager {
             .find(AllocationState::Active, pid, base_va, page_count)
     }
 
+    pub fn locate_active_physical_allocation(
+        &self, pid: usize, base: usize, pages: usize,
+    ) -> Option<PhysicalAllocationLocation> {
+        self.physical_allocations.locate_active(self.memory_owner_pid(pid), base, pages)
+    }
+
+    /// Commit only while the exact located chain is unchanged. No callback is
+    /// invoked on a stale location, and callback failure retains ownership.
+    pub fn try_retire_located_physical_allocation(
+        &mut self, pid: usize, location: PhysicalAllocationLocation,
+        release: impl FnOnce(ProcessPhysicalAllocation, bool) -> Result<(), CapabilityError>,
+    ) -> Result<bool, CapabilityError> {
+        if self.memory_owner_pid(pid) != location.owner { return Ok(false); }
+        self.physical_allocations.try_take_located(location, release)
+    }
+
     pub fn release_physical_allocation_reference(
         &mut self,
         pid: usize,
@@ -1069,6 +1096,11 @@ impl ProcessManager {
     #[cfg(test)]
     pub fn take_physical_page_point_visits(&self) -> usize {
         self.physical_allocations.take_point_visits()
+    }
+
+    #[cfg(test)]
+    pub fn take_physical_page_retire_visits(&self) -> usize {
+        self.physical_allocations.take_retire_visits()
     }
 
     pub fn private_page_reference_walk(

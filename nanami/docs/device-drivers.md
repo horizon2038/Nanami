@@ -172,6 +172,16 @@ and Coffee Lake display-function PCI IDs. Other Intel HD generations are not
 silently treated as register-compatible.
 
 The backend reads BAR0 registers and GGTT, BAR2's aperture, and GGC's GGTT size.
+Startup does **not** use PCI BAR sizing probes on the active firmware GPU:
+those probes temporarily disable memory decoding/bus mastering and write all
+ones to BARs. Instead it reads the assigned 64-bit BAR bases, the Gen9 fixed
+16-MiB GTTMMADR layout and MSAC[4:0] aperture encoding (128 MiB through 4 GiB).
+Disabled memory decoding, illegal encodings and misaligned/unassigned ranges
+are rejected without PCI writes. Unsupported inherited plane/power state,
+stopped frame counters and failed ownership handshakes report a specific
+rejection reason instead of advertising native graphics.
+The register layout follows the [Intel Gen9-family processor datasheet, sections
+4.10, 4.11 and 4.25](https://cdrdv2-public.intel.com/335191/335191-003-kbl-h-processor-datasheet-vol-2.pdf).
 It does not obtain mode/stride/surface from UEFI framebuffer metadata. It:
 
 - Adopts one already running, unscaled, linear XRGB8888 primary plane, with zero
@@ -181,11 +191,21 @@ It does not obtain mode/stride/surface from UEFI framebuffer metadata. It:
 - Allocates two contiguous, page-aligned scanout buffers, using physical
   addresses below the backend's 39-bit limit. Native DMA mappings are WB;
   explicit cache-line flushes publish CPU writes before scanout.
-- Copies the inherited image through the aperture and binds only entirely
-  zero GGTT PTEs. New surfaces may use the full GGTT range addressable by
+- Copies the inherited image through the aperture and binds non-present
+  GGTT PTEs (Present bit zero, not necessarily an all-zero value). New surfaces may use the full GGTT range addressable by
   `PLANE_SURF`, not just BAR2's smaller CPU aperture. Uploads use the DMA's CPU
-  mapping; only the inherited image is read through BAR2. Existing
-  firmware/scratch mappings are never overwritten.
+  mapping; only the inherited image is read through BAR2. Live primary/cursor
+  ranges are excluded from allocation.
+- On Coffee Lake GT1/GT2, a firmware-filled table invokes a boot-only GT
+  ownership transfer before publishing the service. It acquires forcewake,
+  refuses executing firmware rings, resets GuC and obtains every command
+  engine's READY_TO_RESET acknowledgement before a GT-only reset. The display
+  engine is not reset, and its frame counter must still advance. Only then is
+  a 128-MiB GGTT arena reclaimed, outside the entire CPU aperture, enabled
+  cursor ranges and the top 32-MiB reservation. No firmware physical memory is
+  freed. Exact arena PTEs are saved/restored on pre-publication failure;
+  subsequent allocations stay inside the owned arena. BCS submission begins
+  only after service publication, so rollback cannot race an active context.
 - Exposes the existing display protocol and the common GPU protocol. GPU-buffer
   presentation uses the BLT engine when its self-test succeeds; the legacy
   shared-framebuffer path retains CPU copies. Damage history repairs the stale
@@ -253,8 +273,9 @@ program them. There is deliberately no `SET_MODE` request at this stage.
 This initial backend leaves clocks, watermarks, PLLs and HDMI/DisplayPort links
 unchanged. It does not provide resolution changes, complete physical-connector
 enumeration, hotplug, suspend/resume, 3D rendering, DRM ioctls or Mesa integration.
-It is therefore not yet a Linux/Wayland GPU ABI. Firmware that fills all GGTT
-entries with scratch mappings will fall back instead of guessing ownership.
+It is therefore not yet a Linux/Wayland GPU ABI. Filled-GGTT takeover on other
+engine inventories (including GT3's second VCS), busy firmware engines or failed
+handshakes falls back instead of guessing ownership or forcing a busy reset.
 
 QEMU does not emulate the Intel GPU. Host tests exercise production register
 logic, DMA copies, damage repair and timeout ownership using an MMIO model;
@@ -275,6 +296,7 @@ Register/reference sources:
 - [Linux v6.6 PCI generation IDs](https://github.com/torvalds/linux/blob/v6.6/include/drm/i915_pciids.h)
 - [Linux v6.6 Gen9 display registers](https://github.com/torvalds/linux/blob/v6.6/drivers/gpu/drm/i915/i915_reg.h)
 - [Linux v6.6 GGTT setup](https://github.com/torvalds/linux/blob/v6.6/drivers/gpu/drm/i915/gt/intel_ggtt.c)
+- [Intel-authored GT reset implementation](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_reset.c)
 - [Linux v6.6 GMBUS register definitions](https://github.com/torvalds/linux/blob/v6.6/drivers/gpu/drm/i915/display/intel_gmbus_regs.h)
 - [Linux v6.6 AUX register definitions](https://github.com/torvalds/linux/blob/v6.6/drivers/gpu/drm/i915/display/intel_dp_aux_regs.h)
 - [Linux v6.6 VBT record definitions](https://github.com/torvalds/linux/blob/v6.6/drivers/gpu/drm/i915/display/intel_vbt_defs.h)

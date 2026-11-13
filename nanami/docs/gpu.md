@@ -171,19 +171,30 @@ Device references: [Virtio 1.2 specification, section 5.7](https://docs.oasis-op
 The existing Skylake/Kaby Lake/Coffee Lake whitelist and conservative inherited
 display-mode checks still apply. The backend:
 
-- Claims an idle BLT engine with an owned forcewake request. It does not steal
-  an existing request, reset the GPU, reprogram render/media engines or change
-  firmware display clocks/links.
-- Uses one private logical BCS context and Execlists submission. Typed
-  `XY_COLOR_BLT` / `XY_SRC_COPY_BLT` packets implement fills and copies.
+- Acquires independent user forcewake bits in the GT and render domains (the
+  latter is needed to read the private PAT), preserving firmware/kernel bits.
+  Initial known-CFL ownership transfer retires all command engines without
+  resetting display. Subsequent BCS initialization resets only the BCS domain,
+  with READY and reset-complete ACKs; an executing firmware ring is refused.
+- Uses a complete Gen9 non-render logical context, including the per-context
+  register groups and masked STOP_RING clear, with Execlists submission. Typed
+  `XY_COLOR_BLT` / `XY_SRC_COPY_BLT` packets implement fills and copies. The
+  non-render image leaves RCS-only indirect-context fields zero.
 - Installs only owned DMA pages in a private four-level PPGTT, and only uses
-  empty GGTT entries for context/ring/status/surface storage. GPU page-table
-  attributes select an existing UC private-PAT entry; the global GPU PAT and
-  CPU device-map policy are not rewritten.
+  driver-owned GGTT entries for context/ring/status/surface storage. GPU page-table
+  attributes select an existing UC private-PAT memory type independently of
+  that entry's target-cache policy bits. Without full GT ownership the private
+  PAT is never changed. After complete firmware GT retirement (including the
+  vacant-GGTT allocation path), an all-WB reset/default PAT is initialized with
+  one UC slot (index 7), preserving
+  all other entries and checking readback before allocating engine DMA. This
+  GPU-private table is distinct from CPU PAT; CPU device-map policy is unchanged.
 - Explicitly flushes CPU cache lines at CPU/GPU ownership boundaries. A matching
   post-sync memory breadcrumb, context-complete CSB event and idle engine are
   all required before reusing the context/ring. Polling has a bounded timeout
   and yields through the existing timer service; no GPU IRQ path is added.
+  IDLE-to-ACTIVE CSB entries cannot prove completion: their other fields,
+  including context ID and completion flags, are undefined.
 - Fills and copies private scratch surfaces and verifies their pixels before
   exposing hardware capability flags. Failure leaves native CPU scanout
   available; uncertain engine DMA stays pinned. A subsequent device hang fails
@@ -192,6 +203,59 @@ display-mode checks still apply. The backend:
 This is **2D BLT acceleration**, not 3D rendering, OpenGL/Vulkan, Mesa, DRM or
 full Wayland graphics support. Native display applicability/fallback policy is
 documented in [Device Drivers](device-drivers.md).
+
+### Intel specification cross-check (2026-11-14)
+
+The physical `8086:3e91` is checked against the Coffee Lake configuration
+supplement and the common Gen9/Kaby Lake programming volumes below. This is not
+an assumption that an arbitrary Intel GPU shares this interface. Public PRMs
+and Intel-authored driver/test code are used together where the public manual
+omits the complete non-render context image or contains ambiguous field labels.
+
+| Area | Specification and implementation check |
+| --- | --- |
+| GT inventory | CFL configurations distinguish GT2 from GT3's extra media engines. Filled-GGTT takeover remains limited to known GT1/GT2 IDs. |
+| GPU private PAT | KBL Vol 2c part 2, PAT_INDEX / PAT_INDEX_L/H (pp. 503–505): low/high at 0x40e0/0x40e4 default to 0x03030303; low two bits of each byte select UC/WC/WT/WB. All-WB is a valid reset default, not evidence of broken firmware. UC slot 7 is initialized only after full GT ownership, independently of whether scanout used vacant GGTT entries or reclaimed an arena. |
+| Address translation | Vol 5, standard 48-bit legacy PPGTT: four levels, Present/RW, physical address below 39 bits, PAT/PCD/PWT index in leaf bits 7/4/3. Context descriptor selects legacy 48-bit PPGTT; LRCA/ring remain GGTT addresses. |
+| Logical context | Vol 6, Logical Ring Context; Vol 2d, Context Descriptor Format; Intel `gen9_xcs_offsets`: PPHWSP then full Gen9 register image, 14/9/1/44 LRI groups, STOP_RING clear at 0x54. Vol 2c part 1 INDIRECT_CTX_OFFSET (p. 1069) forbids the RCS indirect-context facility on BCS; its slots remain zero. |
+| BLT packets | Vol 2a, XY_COLOR_BLT (pp. 1270–1271), XY_SRC_COPY_BLT (pp. 1325–1327): 7/10 DWORD packets, zero high address, RGBA mask, F0/CC ROP, signed coordinates/pitch, exclusive x2/y2, aligned linear surfaces. Literal packet-vector tests use distinct padded source/destination strides. |
+| Linear pitch | Vol 11 describes byte pitch; some Vol 2a fields say “in DWords”. Intel IGT `intel_blt_copy` confirms byte pitch for linear surfaces and division by four only for tiled surfaces. No unsupported tiled mode is enabled. ABI pitch is already capped below signed 16-bit overflow; forged layouts are rejected. |
+| Synchronization | Vol 2a MI_FLUSH_DW (BlitterCS, pp. 993–995), Vol 6 Context Status (pp. 20–22): post-sync DWORD, TLB invalidation with post-sync enabled, six-entry CSB, valid matching completion plus memory fence and idle. IDLE-to-ACTIVE invalidates all remaining status fields and must be ignored. |
+| Ownership/reset | Vol 2c RESET_CTRL/GDRST: masked request, READY acknowledgement, BCS-only bit 3 reset and completion before submission; no force through a running ring. Both initial CFL GT1/GT2 allocation paths retire all known GT command engines before taking PAT ownership, without resetting display. The vacant path preserves existing PTEs; only the filled path reclaims an arena. Intel's reset code supplies the GuC domain definition absent from the public GDRST bit-5 table. |
+
+The physical boot with free GGTT entries at `0x02000000` exposed a missing
+ownership transition: scanout succeeded, but acceleration still saw the all-WB
+PAT and refused it. GT retirement is now tracked separately from arena
+allocation. The production scanout regression checks vacant-GGTT retirement,
+UC setup, unchanged scanout PTEs, and refusal without PAT mutation when the
+ownership handshake fails. GPU execution/self-test behavior is also covered
+by the separate BCS command model; neither model substitutes for UHD 630 silicon.
+
+Primary references:
+
+- [Intel Coffee Lake configuration supplement](https://cdrdv2.intel.com/v1/dl/getContent/684417).
+- [KBL Vol 2a: command instructions](https://cdrdv2.intel.com/v1/dl/getContent/723916),
+  [Vol 2c part 1: registers A–L](https://cdrdv2.intel.com/v1/dl/getContent/723921),
+  [Vol 2c part 2: registers M–Z](https://cdrdv2.intel.com/v1/dl/getContent/723924),
+  [Vol 2d: structures](https://cdrdv2.intel.com/v1/dl/getContent/723936).
+- [KBL Vol 5: memory views](https://cdrdv2.intel.com/v1/dl/getContent/723948),
+  [Vol 6: command stream programming](https://cdrdv2.intel.com/v1/dl/getContent/723951),
+  [Vol 11: blitter](https://cdrdv2.intel.com/v1/dl/getContent/723968).
+- [Intel non-render context layouts](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_lrc.c),
+  [private PAT setup](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_gtt.c),
+  [reset sequencing](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_reset.c),
+  [non-render flush commands](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/gen8_engine_cs.c).
+- [Intel IGT linear/tiled pitch and BLT command construction](https://android.googlesource.com/platform/external/igt-gpu-tools/+/refs/tags/android-13.0.0_r40/lib/intel_batchbuffer.c).
+
+These checks do not replace physical validation. Acceleration flags remain
+conditional on the on-device padded scratch fill/copy and pixel verification;
+native scanout alone is not evidence of BCS acceleration.
+
+The specification-audit run passed 245 related native tests (one existing
+ignored). The 14 BCS tests include literal command vectors, every PAT index,
+all-WB reset initialization/readback failures, zero non-render indirect-context
+fields, and undefined IDLE-to-ACTIVE status rejection. No physical Intel GPU
+execution or performance improvement is claimed by the host model or QEMU.
 
 ## Validation
 
@@ -208,6 +272,12 @@ model, including CSB wrap and incomplete-fence failures. `honoka-motion` compare
 GPU-protocol and CPU composition pixel-for-pixel through cursor motion and
 window dragging, and checks fail-closed behavior. `core-process` covers mapping
 sharing, both release orders and rollback failures.
+
+The BCS model independently checks the Gen9 context register layout (rather
+than accepting the driver's earlier Gen8-shaped image), forcewake-protected
+PAT access, preservation of firmware wake bits, BCS-only reset/timeout handling,
+and retention of DMA after a submitted self-test fails. These checks are not
+a substitute for the engine's on-device scratch fill/copy verification.
 
 Validation on 2026-10-25: the complete serialized native host suite passed
 846 tests (7 existing ignored), and the root workspace tool/UAPI suites passed
@@ -229,3 +299,5 @@ Primary register references:
 - [Intel Skylake structures PRM](https://cdrdv2-public.intel.com/685883/intel-gfx-prm-osrc-skl-vol02d-commandreference-structures.pdf)
 - [Linux v4.19 logical-ring/context definitions](https://github.com/torvalds/linux/blob/v4.19/drivers/gpu/drm/i915/intel_lrc.c)
 - [Linux v4.19 command definitions](https://github.com/torvalds/linux/blob/v4.19/drivers/gpu/drm/i915/intel_gpu_commands.h)
+- [Intel-authored Gen9 context layout](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_lrc.c)
+- [Intel engine reset sequencing](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/i915/gt/intel_reset.c)

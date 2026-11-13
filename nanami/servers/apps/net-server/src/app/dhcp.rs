@@ -197,6 +197,9 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
 
         let mut retry = 0usize;
         loop {
+            if super::refresh_dhcp_port(runtime, retry != 0) {
+                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
+            }
             nanami_runtime::print!("[net-server][dhcp] discover");
             if retry > 0 {
                 nanami_runtime::print!(" retry=");
@@ -212,6 +215,7 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
                 break;
             }
 
+            super::report_backend_status(runtime);
             retry = retry.saturating_add(1);
             if retry >= DHCP_MAX_RETRIES {
                 use_configured_fallback(runtime, "offer timeout");
@@ -244,8 +248,11 @@ pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
                 return;
             }
 
+            super::report_backend_status(runtime);
             if !runtime.dhcp_offer_valid {
-                nanami_runtime::print!("[net-server][dhcp] request invalidated; restart discover\n");
+                nanami_runtime::print!(
+                    "[net-server][dhcp] request invalidated; restart discover\n"
+                );
                 runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(0x1111_1111);
                 continue 'discover_phase;
             }
@@ -270,6 +277,10 @@ fn use_configured_fallback(runtime: &mut NetRuntime, reason: &str) {
     runtime.dhcp_ack_valid = false;
     nanami_runtime::print!("[net-server][dhcp] ");
     nanami_runtime::print!("{}", reason);
+    if runtime.ip == [0; 4] {
+        nanami_runtime::print!("; IPv4 remains unconfigured (no DHCP lease)\n");
+        return;
+    }
     nanami_runtime::print!("; using configured ip=");
     log_ip(runtime.ip);
     nanami_runtime::print!(" gw=");
@@ -300,6 +311,10 @@ fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, a
         // Preserve the bounded fallback for platforms without a clock service.
         let mut elapsed = 0;
         while elapsed < timeout_ms {
+            if !ack && super::refresh_dhcp_port(runtime, false) {
+                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
+                return false; // Resend DISCOVER using this port's MAC/xid.
+            }
             super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
             if complete(runtime) {
                 return true;
@@ -322,6 +337,10 @@ fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, a
             |ms: Word| ((ms as u128 * hz as u128).div_ceil(1000)).min(Word::MAX as u128) as Word;
         let deadline = start.saturating_add(ticks(timeout_ms));
         loop {
+            if !ack && super::refresh_dhcp_port(runtime, false) {
+                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
+                return Ok(false);
+            }
             let count = super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
             if complete(runtime) {
                 return Ok(true);
@@ -457,8 +476,9 @@ fn send_dhcp_discover(runtime: &NetRuntime) -> Result<(), RequestError> {
     p += 6;
 
     payload[p] = DHCP_OPT_END;
-    p += 1;
 
+    // RFC 1542 2.1: BOOTP consistency checks use IP/UDP lengths, not
+    // Ethernet padding. Keep the zero-filled tail THROUGH those lengths.
     send_dhcp_udp(
         runtime,
         [0xff; 6],
@@ -466,7 +486,7 @@ fn send_dhcp_discover(runtime: &NetRuntime) -> Result<(), RequestError> {
         [255, 255, 255, 255],
         DHCP_CLIENT_PORT,
         DHCP_SERVER_PORT,
-        &payload[..p],
+        &payload,
     )
 }
 
@@ -518,7 +538,6 @@ fn send_dhcp_request(runtime: &NetRuntime) -> Result<(), RequestError> {
     p += 6;
 
     payload[p] = DHCP_OPT_END;
-    p += 1;
 
     send_dhcp_udp(
         runtime,
@@ -527,7 +546,7 @@ fn send_dhcp_request(runtime: &NetRuntime) -> Result<(), RequestError> {
         [255, 255, 255, 255],
         DHCP_CLIENT_PORT,
         DHCP_SERVER_PORT,
-        &payload[..p],
+        &payload,
     )
 }
 

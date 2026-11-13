@@ -157,7 +157,7 @@ fn log_spawn_stage(_: &str, error: RequestError) -> RequestError {
 }
 
 fn load<const TRACE: bool>(vfs: &mut VfsClient) -> (Word, Vec<u8>) {
-    let (base, size) = image_loader::load::<TRACE>(vfs, 4).unwrap();
+    let (base, size) = image_loader::load(vfs, 4).unwrap();
     let bytes = unsafe { std::slice::from_raw_parts(base as *const u8, size) }.to_vec();
     BACKEND.with(|backend| {
         for mapping in &backend.borrow().mappings {
@@ -231,7 +231,7 @@ fn read_failures_zero_and_oversized_replies_close_without_overcopy() {
             Err(error) => error,
             Ok(_) => RequestError::Protocol,
         };
-        assert_eq!(image_loader::load::<false>(&mut vfs, 4), Err(error));
+        assert_eq!(image_loader::load(&mut vfs, 4), Err(error));
         BACKEND.with(|backend| {
             let backend = backend.borrow();
             assert_eq!(backend.closes, 1);
@@ -257,7 +257,7 @@ fn failed_growth_preserves_old_buffer_and_can_retry() {
         let (base, _) = load::<false>(&mut vfs);
         set_file(8192, 9);
         BACKEND.with(|backend| backend.borrow_mut().heap_result = Some(result));
-        assert!(image_loader::load::<false>(&mut vfs, 4).is_err());
+        assert!(image_loader::load(&mut vfs, 4).is_err());
         set_file(16, 7);
         assert_eq!(load::<false>(&mut vfs), (base, expected));
         let expected = set_file(8192, 5);
@@ -275,7 +275,7 @@ fn rejects_invalid_files_before_allocating_or_opening() {
         set_file(size, 1);
         BACKEND.with(|backend| backend.borrow_mut().kind = kind);
         assert_eq!(
-            image_loader::load::<false>(&mut vfs, 4),
+            image_loader::load(&mut vfs, 4),
             Err(RequestError::InvalidArgument)
         );
     }
@@ -293,7 +293,7 @@ fn open_failure_does_not_close_an_unopened_handle() {
     set_file(8, 1);
     BACKEND.with(|backend| backend.borrow_mut().open_error = Some(RequestError::Transport));
     assert_eq!(
-        image_loader::load::<false>(&mut vfs, 4),
+        image_loader::load(&mut vfs, 4),
         Err(RequestError::Transport)
     );
     BACKEND.with(|backend| assert_eq!(backend.borrow().closes, 0));

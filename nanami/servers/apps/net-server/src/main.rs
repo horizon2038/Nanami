@@ -24,22 +24,24 @@ mod dns;
 mod ethernet;
 #[path = "app/icmp.rs"]
 mod icmp;
+#[path = "app/interfaces.rs"]
+mod interfaces;
 #[path = "app/ip.rs"]
 mod ip;
-#[path = "app/tcp.rs"]
-mod tcp;
-#[path = "app/tcp_index.rs"]
-mod tcp_index;
-#[path = "app/tcp_send.rs"]
-mod tcp_send;
-#[path = "app/tcp_state.rs"]
-mod tcp_state;
-#[path = "app/tcp_rx.rs"]
-mod tcp_rx;
 #[path = "app/readiness.rs"]
 mod readiness;
 #[path = "app/routing.rs"]
 mod routing;
+#[path = "app/tcp.rs"]
+mod tcp;
+#[path = "app/tcp_index.rs"]
+mod tcp_index;
+#[path = "app/tcp_rx.rs"]
+mod tcp_rx;
+#[path = "app/tcp_send.rs"]
+mod tcp_send;
+#[path = "app/tcp_state.rs"]
+mod tcp_state;
 #[path = "app/tcp_wire.rs"]
 mod tcp_wire;
 #[path = "app/udp.rs"]
@@ -560,6 +562,38 @@ fn unpack_mac(detail0: Word) -> [u8; 6] {
     ]
 }
 
+fn report_backend_status(runtime: &NetRuntime) {
+    // Optional and non-fatal: distinguish enqueue success from actual DMA/MAC
+    // progress on a failed lease acquisition. No logging on a successful boot.
+    let _ = nanami_client::net::net_device_control_ex(
+        runtime.net_device_port,
+        nanami_client::net::NET_DEVICE_CONTROL_REPORT_STATUS,
+        0,
+        0,
+    );
+}
+
+fn refresh_dhcp_port(runtime: &mut NetRuntime, rotate: bool) -> bool {
+    let selected = interfaces::select_linked(
+        |code, index| match nanami_client::net::net_device_control_ex(
+            runtime.net_device_port,
+            code,
+            index,
+            0,
+        ) {
+            Ok((status, a, b)) if status == nanami_runtime::OS_RESPONSE_OK => Some((a, b)),
+            _ => None,
+        },
+        rotate,
+    );
+    if let Some((index, mac)) = selected {
+        runtime.mac = unpack_mac(mac);
+        nanami_runtime::println!("[net-server][dhcp] selected physical port={}", index);
+        return true;
+    }
+    false
+}
+
 fn pack_mac(mac: [u8; 6]) -> Word {
     ((mac[0] as Word) << 40)
         | ((mac[1] as Word) << 32)
@@ -592,7 +626,6 @@ fn notify_client_sessions(runtime: &NetRuntime) {
         }
     }
 }
-
 
 fn handle_tcp_accept_request(
     runtime: &mut NetRuntime,
@@ -738,8 +771,12 @@ fn handle_network_request(
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
     match request.code {
-        nanami_client::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => arp::handle_snapshot_request(runtime, request),
-        nanami_client::net::NET_SERVICE_REQUEST_READINESS => readiness::handle_readiness_request(runtime, request),
+        nanami_client::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => {
+            arp::handle_snapshot_request(runtime, request)
+        }
+        nanami_client::net::NET_SERVICE_REQUEST_READINESS => {
+            readiness::handle_readiness_request(runtime, request)
+        }
         nanami_client::net::NET_SERVICE_REQUEST_SEND => {
             // Raw L2 frame send: arg0=client shm offset, arg1=len
             let Some(session) = session_for(runtime, request.identifier) else {
@@ -830,9 +867,11 @@ fn handle_network_request(
             nanami_client::net::NET_SERVICE_CONTROL_GET_MAC => {
                 (nanami_runtime::OS_RESPONSE_OK, pack_mac(runtime.mac), 0)
             }
-            nanami_client::net::NET_SERVICE_CONTROL_GET_IPV4_NETMASK => {
-                (nanami_runtime::OS_RESPONSE_OK, pack_ipv4(runtime.subnet_mask) as Word, 0)
-            }
+            nanami_client::net::NET_SERVICE_CONTROL_GET_IPV4_NETMASK => (
+                nanami_runtime::OS_RESPONSE_OK,
+                pack_ipv4(runtime.subnet_mask) as Word,
+                0,
+            ),
             nanami_client::net::NET_SERVICE_CONTROL_ATTACH_SHARED_MEMORY => {
                 cleanup_stale_client_sessions(runtime);
                 let peer_pid = request.arg1;
@@ -1097,8 +1136,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let backend_pid = match backend_connect::connect(
         BACKEND_CONNECT_TIMEOUT_MS.div_ceil(BACKOFF_MS),
         || nanami_client::registry::connect_net_device_with_pid(SLOT_NET_DEVICE_PORT),
-        |error, consecutive| nanami_runtime::println!(
-            "[net-server] backend connect failed: {} consecutive={}", error, consecutive),
+        |error, consecutive| {
+            nanami_runtime::println!(
+                "[net-server] backend connect failed: {} consecutive={}",
+                error,
+                consecutive
+            )
+        },
         || sleep_ms(timer_port, BACKOFF_MS),
     ) {
         Ok(pid) => pid,
@@ -1200,10 +1244,10 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         backend_shm_local: backend_local_vaddr,
         backend_rx_batch,
         mac,
-        ip: [10, 0, 2, 15],
-        subnet_mask: [255, 255, 255, 0],
-        gateway_ip: [10, 0, 2, 2],
-        dns_ip: [10, 0, 2, 3],
+        ip: [0; 4],
+        subnet_mask: [0; 4],
+        gateway_ip: [0; 4],
+        dns_ip: [0; 4],
         arp: ArpCache::EMPTY,
         tcp_connections: [TcpConnection::EMPTY; TCP_MAX_CONNECTIONS],
         tcp_index: TcpIndex::EMPTY,

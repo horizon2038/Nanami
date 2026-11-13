@@ -1,7 +1,7 @@
 //! Production DHCP bootstrap with a full NIC RX queue and deterministic time.
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 use std::{cell::RefCell, collections::VecDeque, ptr};
 pub use std::{print, println};
 pub type Word = usize;
@@ -25,6 +25,54 @@ const IPV4_HDR_LEN: usize = 20;
 const UDP_HDR_LEN: usize = 8;
 const BACKEND_TX_OFFSET: Word = 0;
 struct NetStats;
+#[path = "../../nanami/servers/apps/net-server/src/app/interfaces.rs"]
+mod interfaces;
+pub mod net {
+    pub use nanami_uapi::net::*;
+}
+fn refresh_dhcp_port(_: &mut NetRuntime, _: bool) -> bool {
+    false
+}
+
+#[test]
+fn physical_port_selection_uses_carrier_not_pci_order_and_rotates_on_timeout() {
+    use net::*;
+    let mut carrier = [false, false];
+    let mut active = 0;
+    let mut choose = |carrier: [bool; 2], rotate| {
+        interfaces::select_linked(
+            |code, index| match code {
+                NET_DEVICE_CONTROL_GET_FEATURES => Some((NET_DEVICE_FEATURE_PORTS, 0)),
+                NET_DEVICE_CONTROL_PORT_COUNT => Some((2, active)),
+                NET_DEVICE_CONTROL_PORT_INFO => Some((index, carrier[index] as Word)),
+                NET_DEVICE_CONTROL_SELECT_PORT => {
+                    active = index;
+                    Some((0x040404040404 + index, 0))
+                }
+                _ => None,
+            },
+            rotate,
+        )
+    };
+    assert_eq!(choose(carrier, false), None);
+    carrier[1] = true;
+    assert_eq!(choose(carrier, false), Some((1, 0x040404040405)));
+    assert_eq!(choose(carrier, false), None); // Keep carrier; do not flap.
+    carrier[0] = true;
+    assert_eq!(choose(carrier, true), Some((0, 0x040404040404)));
+    carrier[0] = false;
+    assert_eq!(choose(carrier, false), Some((1, 0x040404040405)));
+}
+
+#[test]
+fn legacy_and_malformed_port_providers_are_not_selected() {
+    assert_eq!(interfaces::select_linked(|_, _| Some((0, 0)), false), None);
+    assert_eq!(interfaces::select_linked(|_, _| None, false), None);
+    assert_eq!(
+        interfaces::select_linked(|_, _| Some((99, 99)), false),
+        None
+    );
+}
 struct NetRuntime {
     mac: [u8; 6],
     ip: [u8; 4],
@@ -59,6 +107,9 @@ struct Fake {
     fail_wait: bool,
     offer_mask: Option<[u8; 4]>,
     ack_mask: Option<[u8; 4]>,
+    strict_bootp_minimum: bool,
+    transmitted: Vec<Vec<u8>>,
+    status_reports: usize,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::default(); }
 pub mod ipc {
@@ -114,6 +165,9 @@ mod arp {
 fn emit_arp_request(_: &NetRuntime, _: [u8; 4]) -> Result<(), RequestError> {
     Ok(())
 }
+fn report_backend_status(_: &NetRuntime) {
+    FAKE.with_borrow_mut(|s| s.status_reports += 1);
+}
 fn sleep_ms(_: Option<Word>, milliseconds: Word) {
     FAKE.with_borrow_mut(|s| {
         s.now += milliseconds;
@@ -142,10 +196,17 @@ fn response(xid: u32, kind: u8, mask: Option<[u8; 4]>) -> Vec<u8> {
     packet
 }
 fn emit_frame(runtime: &NetRuntime, len: usize) -> Result<Word, RequestError> {
+    let frame = unsafe { std::slice::from_raw_parts(runtime.buffer as *const u8, len) };
     let payload =
         unsafe { std::slice::from_raw_parts((runtime.buffer + 42) as *const u8, len - 42) };
     let kind = payload[242];
     FAKE.with_borrow_mut(|s| {
+        s.transmitted.push(frame.to_vec());
+        // RFC 1542 section 2.1: strict BOOTP servers/relays discard messages
+        // whose IP/UDP lengths do not include 300 octets of BOOTP data.
+        if s.strict_bootp_minimum && payload.len() < 300 {
+            return;
+        }
         if s.reply && matches!(kind, 1 | 3) {
             // 63 unrelated LAN packets precede our DHCP reply in a 64-frame queue.
             let mut packets: VecDeque<_> = (0..63).map(|_| None).collect();
@@ -226,6 +287,77 @@ fn lan_burst_does_not_insert_minimum_sleeps_before_dhcp_replies() {
         assert_eq!(s.alarm, None);
     });
 }
+
+#[test]
+fn strict_bootp_server_accepts_full_length_discover_and_request() {
+    let (_buffer, mut runtime) = setup(true);
+    FAKE.with_borrow_mut(|s| s.strict_bootp_minimum = true);
+    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    assert_eq!(runtime.ip, [192, 168, 1, 50]);
+    FAKE.with_borrow(|s| {
+        assert_eq!(s.transmitted.len(), 2);
+        assert_eq!(s.status_reports, 0);
+        for frame in &s.transmitted {
+            assert_eq!(frame.len(), 14 + 20 + 8 + 300);
+            assert_eq!(&frame[..6], &[255; 6]);
+            assert_eq!(&frame[6..12], &runtime.mac);
+            let ip = &frame[14..34];
+            assert_eq!(wire::checksum16(ip, 0), 0);
+            assert_eq!(&ip[12..16], &[0; 4]);
+            assert_eq!(&ip[16..20], &[255; 4]);
+            assert_eq!(u16::from_be_bytes([ip[2], ip[3]]), 328);
+            assert_eq!(&frame[34..38], &[0, 68, 0, 67]);
+            assert_eq!(u16::from_be_bytes([frame[38], frame[39]]), 308);
+            let payload = &frame[42..];
+            assert_eq!(&payload[..3], &[1, 1, 6]);
+            assert_eq!(&payload[28..34], &runtime.mac);
+            assert_eq!(&payload[236..240], &[99, 130, 83, 99]);
+            let end = payload.iter().rposition(|byte| *byte == 255).unwrap();
+            assert!(payload[end + 1..].iter().all(|byte| *byte == 0));
+        }
+    });
+}
+
+#[test]
+fn discover_and_request_use_the_current_physical_ports_mac_and_transaction_id() {
+    // Addresses differ from the backend's initial port. A late port selection
+    // must update Ethernet SA, BOOTP chaddr AND client-id, not only one layer.
+    for mac in [
+        [0, 4, 0x5f, 0x7e, 0xb8, 0xda],
+        [2, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5],
+    ] {
+        let (_buffer, mut runtime) = setup(true);
+        runtime.mac = mac;
+        dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+        assert_eq!(runtime.ip, [192, 168, 1, 50]);
+        FAKE.with_borrow(|s| {
+            assert_eq!(s.transmitted.len(), 2);
+            for frame in &s.transmitted {
+                assert_eq!(&frame[6..12], &mac);
+                let payload = &frame[42..];
+                assert_eq!(&payload[28..34], &mac);
+                assert_eq!(read_u32_be(&payload[4..8]), runtime.dhcp_xid);
+                let mut offset = 240;
+                let mut client_id = None;
+                while payload[offset] != 255 {
+                    let code = payload[offset];
+                    if code == 0 {
+                        offset += 1;
+                        continue;
+                    }
+                    let length = payload[offset + 1] as usize;
+                    if code == 61 {
+                        client_id = Some(&payload[offset + 2..offset + 2 + length]);
+                    }
+                    offset += 2 + length;
+                }
+                let mut expected = vec![1];
+                expected.extend_from_slice(&mac);
+                assert_eq!(client_id, Some(expected.as_slice()));
+            }
+        });
+    }
+}
 #[test]
 fn absent_server_uses_bounded_monotonic_timeouts_and_cancels_alarm() {
     let (_buffer, mut runtime) = setup(false);
@@ -234,6 +366,7 @@ fn absent_server_uses_bounded_monotonic_timeouts_and_cancels_alarm() {
     assert!(!runtime.dhcp_waiting);
     FAKE.with_borrow(|s| {
         assert_eq!(s.now, 188_000);
+        assert_eq!(s.status_reports, 6);
         assert!(s.wakes > 0);
         assert_eq!(s.alarms.last(), Some(&None));
         assert_eq!(s.alarm, None);

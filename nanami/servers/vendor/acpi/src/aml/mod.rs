@@ -77,6 +77,7 @@ where
     pub namespace: Spinlock<Namespace>,
     pub object_token: Spinlock<ObjectToken>,
     context_stack: Spinlock<Vec<MethodContext>>,
+    last_error_location: Spinlock<Option<(AmlName, usize)>>,
     dsdt_revision: u8,
     region_handlers: Spinlock<BTreeMap<RegionSpace, Box<dyn RegionHandler>>>,
 
@@ -112,6 +113,7 @@ where
             namespace: Spinlock::new(Namespace::new(global_lock_mutex)),
             object_token: Spinlock::new(unsafe { ObjectToken::create_interpreter_token() }),
             context_stack: Spinlock::new(Vec::new()),
+            last_error_location: Spinlock::new(None),
             dsdt_revision,
             region_handlers: Spinlock::new(BTreeMap::new()),
             global_lock_mutex,
@@ -169,6 +171,7 @@ where
     /// Evaluate an object at the given path in the namespace. If the object is a method, this
     /// invokes the method with the given set of arguments.
     pub fn evaluate(&self, path: AmlName, args: Vec<WrappedObject>) -> Result<WrappedObject, AmlError> {
+        *self.last_error_location.lock() = None;
         trace!("Invoking AML method: {}", path);
 
         let object = self.namespace.lock().get(path.clone())?.clone();
@@ -176,11 +179,22 @@ where
             Object::Method { .. } => {
                 self.namespace.lock().add_level(path.clone(), NamespaceLevelKind::MethodLocals)?;
                 let context = MethodContext::new_from_method(object, args, path)?;
-                self.do_execute_method(context)
+                let result = self.do_execute_method(context);
+                if result.is_err() {
+                    // Do not resume callers left by an earlier failed request.
+                    self.context_stack.lock().clear();
+                }
+                result
             }
             Object::NativeMethod { f, .. } => f(&args),
             _ => Ok(object),
         }
+    }
+
+    /// Method/scope and AML byte offset when a failed comparison recorded its
+    /// location. Successful operations need no tracing or extra allocations.
+    pub fn last_error_location(&self) -> Option<(AmlName, usize)> {
+        self.last_error_location.lock().clone()
     }
 
     pub fn evaluate_if_present(
@@ -783,7 +797,8 @@ where
                     }
                     Opcode::Store => {
                         let [Argument::Object(object), target] = &op.arguments[..] else { panic!() };
-                        self.do_store(target, object.clone())?;
+                        let result = self.do_store(target, object.clone())?;
+                        context.contribute_arg(Argument::Object(result));
                         context.retire_op(op);
                     }
                     Opcode::RefOf => {
@@ -841,12 +856,17 @@ where
                         let timeout = context.next_u16()?;
 
                         // TODO: should we do something with the sync level??
-                        if mutex == self.global_lock_mutex {
-                            self.acquire_global_lock(timeout)?;
+                        let acquired = if mutex == self.global_lock_mutex {
+                            self.acquire_global_lock(timeout)
                         } else {
-                            self.handler.acquire(mutex, timeout)?;
-                        }
-
+                            self.handler.acquire(mutex, timeout)
+                        };
+                        let result = match acquired {
+                            Ok(()) => 0,
+                            Err(AmlError::MutexAcquireTimeout) => u64::MAX,
+                            Err(error) => return Err(error),
+                        };
+                        context.contribute_arg(Argument::Object(Object::Integer(result).wrap()));
                         context.retire_op(op);
                     }
                     Opcode::Release => {
@@ -1858,57 +1878,47 @@ where
         let left = left.clone().unwrap_transparent_reference();
         let right = right.clone().unwrap_transparent_reference();
 
-        /*
-         * Some of these operations allow strings and buffers to be used as operands. Apparently
-         * NT's interpreter just takes the first 4 bytes of the string/buffer and casts them as an
-         * integer...
-         */
-        let (left, right) = match *left {
-            Object::Integer(left) => (left, right.as_integer()?),
+        // ACPI 19.6.70/71: compare the entire string/buffer, including length,
+        // lexicographically as unsigned bytes. Truncating to a little-endian
+        // integer both loses suffixes and reverses the ordering of prefixes.
+        // Boolean LAnd/LOr, unlike comparison operators, require integers.
+        let ordering = match *left {
+            Object::Integer(left) => {
+                let right = right.as_integer()?;
+                if matches!(op.op, Opcode::LAnd | Opcode::LOr) {
+                    let result = if op.op == Opcode::LAnd {
+                        left != 0 && right != 0
+                    } else {
+                        left != 0 || right != 0
+                    };
+                    context.contribute_arg(Argument::Object(Object::Integer(if result { u64::MAX } else { 0 }).wrap()));
+                    context.retire_op(op);
+                    return Ok(());
+                }
+                left.cmp(&right)
+            }
             Object::String(ref left) => {
-                let left = {
-                    let mut bytes = [0u8; 4];
-                    let left_bytes = left.as_bytes();
-                    let bytes_to_use = usize::min(4, left_bytes.len());
-                    (bytes[0..bytes_to_use]).copy_from_slice(&left_bytes[0..bytes_to_use]);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                let right = {
-                    let mut bytes = [0u8; 4];
-                    let right = right.as_string()?;
-                    let right_bytes = right.as_bytes();
-                    let bytes_to_use = usize::min(4, right_bytes.len());
-                    (bytes[0..bytes_to_use]).copy_from_slice(&right_bytes[0..bytes_to_use]);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                (left, right)
+                left.as_bytes().cmp(right.as_string()?.as_bytes())
             }
             Object::Buffer(ref left) => {
-                let Object::Buffer(ref right) = *right else { panic!() };
-                let left = {
-                    let mut bytes = [0u8; 4];
-                    (bytes[0..left.len()]).copy_from_slice(left);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                let right = {
-                    let mut bytes = [0u8; 4];
-                    (bytes[0..right.len()]).copy_from_slice(right);
-                    u32::from_le_bytes(bytes) as u64
-                };
-                (left, right)
+                left.as_slice().cmp(right.as_buffer()?)
             }
-            _ => Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: left.typ() })?,
+            _ => {
+                *self.last_error_location.lock() = Some((context.current_scope.clone(), context.current_block.pc));
+                Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: left.typ() })?
+            }
         };
 
         let result = match op.op {
-            Opcode::LAnd => (left > 0) && (right > 0),
-            Opcode::LOr => (left > 0) || (right > 0),
-            Opcode::LNotEqual => left != right,
-            Opcode::LLessEqual => left <= right,
-            Opcode::LGreaterEqual => left >= right,
-            Opcode::LEqual => left == right,
-            Opcode::LGreater => left > right,
-            Opcode::LLess => left < right,
+            Opcode::LAnd | Opcode::LOr => {
+                return Err(AmlError::InvalidOperationOnObject { op: Operation::LogicalOp, typ: left.typ() });
+            }
+            Opcode::LNotEqual => ordering != core::cmp::Ordering::Equal,
+            Opcode::LLessEqual => ordering != core::cmp::Ordering::Greater,
+            Opcode::LGreaterEqual => ordering != core::cmp::Ordering::Less,
+            Opcode::LEqual => ordering == core::cmp::Ordering::Equal,
+            Opcode::LGreater => ordering == core::cmp::Ordering::Greater,
+            Opcode::LLess => ordering == core::cmp::Ordering::Less,
             _ => panic!(),
         };
         let result = if result { Object::Integer(u64::MAX) } else { Object::Integer(0) };
@@ -2071,16 +2081,22 @@ where
         else {
             panic!()
         };
+        let source = source.clone().unwrap_transparent_reference();
         let index = index.clone().unwrap_transparent_reference().as_integer()? as usize;
         let length = length.clone().unwrap_transparent_reference().as_integer()? as usize;
 
-        let result = match **source {
+        let result = match *source {
             Object::String(ref string) => {
                 if index >= string.len() {
                     Object::String(String::new())
                 } else {
-                    let upper = usize::min(index + length, index + string.len());
-                    let chars = &string[index..upper];
+                    let upper = index.saturating_add(length).min(string.len());
+                    // AML strings are ASCII. Reject invalid character boundaries
+                    // from a malformed source rather than panicking in Rust.
+                    let chars = string.get(index..upper).ok_or(AmlError::InvalidOperationOnObject {
+                        op: Operation::Mid,
+                        typ: source.typ(),
+                    })?;
                     Object::String(String::from(chars))
                 }
             }
@@ -2088,7 +2104,7 @@ where
                 if index >= buffer.len() {
                     Object::Buffer(vec![])
                 } else {
-                    let upper = usize::min(index + length, index + buffer.len());
+                    let upper = index.saturating_add(length).min(buffer.len());
                     let bytes = &buffer[index..upper];
                     Object::Buffer(bytes.to_vec())
                 }

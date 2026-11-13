@@ -50,6 +50,11 @@ struct Model {
     completion: bool,
     fence: bool,
     sleeps: usize,
+    reset_ready: bool,
+    reset_ack: bool,
+    expected_pat_bits: u64,
+    pat_writable: bool,
+    invalid_idle_event: bool,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -58,7 +63,14 @@ impl Default for Model {
         Self {
             memory: Vec::new(),
             next_physical: 0x1000000,
-            regs: [(0x2209c, 1 << 9), (0x223a0, 5)].into_iter().collect(),
+            regs: [
+                (0x2209c, 0),
+                (0x223a0, 5),
+                (0x40e0, 0x03080303),
+                (0x40e4, 0x03030303),
+            ]
+            .into_iter()
+            .collect(),
             ggtt,
             writes: Vec::new(),
             elsp: Vec::new(),
@@ -70,6 +82,11 @@ impl Default for Model {
             completion: true,
             fence: true,
             sleeps: 0,
+            reset_ready: true,
+            reset_ack: true,
+            expected_pat_bits: 0x10,
+            pat_writable: true,
+            invalid_idle_event: false,
         }
     }
 }
@@ -93,6 +110,13 @@ impl Model {
             let pte =
                 unsafe { ((self.local(table) as *const u64).add((gpu >> shift) & 511)).read() };
             assert_eq!(pte & 3, 3, "GPU access outside private PPGTT");
+            if shift == 12 {
+                assert_eq!(
+                    pte & 0x98,
+                    self.expected_pat_bits,
+                    "PPGTT must select the validated UC private-PAT entry"
+                );
+            }
             table = pte as Word & !4095;
         }
         self.local(table + gpu % PAGE)
@@ -101,11 +125,35 @@ impl Model {
         assert_eq!(descriptor & 0x119, 0x119); // valid, privileged, 48-bit PPGTT.
         let context = self.ggtt((descriptor as Word & 0xfffff000) + PAGE);
         let regs = unsafe { std::slice::from_raw_parts(context as *const u32, PAGE / 4) };
-        assert_eq!(regs[1], (0x22 << 23) | (1 << 12) | 21);
+        // Independently check Gen9's context register layout, not the older
+        // Gen8 11-register prologue that the previous model also assumed.
+        assert_eq!(regs[1], (0x22 << 23) | (1 << 12) | 27);
         assert_eq!(regs[0x21], (0x22 << 23) | (1 << 12) | 17);
+        assert_eq!(regs[0x41], (0x22 << 23) | (1 << 12) | 1);
+        assert_eq!(regs[0x42], 0x22200);
+        assert_eq!(regs[0x51], (0x22 << 23) | (1 << 12) | 87);
+        let group = [
+            0x22028, 0x2209c, 0x220c0, 0x22178, 0x2217c, 0x22358, 0x22170, 0x22150, 0x22154,
+            0x22158, 0x2241c,
+        ];
+        for (index, register) in group.into_iter().enumerate() {
+            assert_eq!(regs[0x52 + index * 2], register);
+        }
+        for index in 0..32 {
+            assert_eq!(regs[0x68 + index * 2], 0x22600 + index as u32 * 4);
+        }
+        assert_eq!(regs[0xa8], 0x22068);
+        assert_eq!(regs[0xaa], 0x0a << 23);
+        assert_eq!(regs[0x18], 0x221c0);
+        assert_eq!(regs[0x1a], 0x221c4);
+        assert_eq!(regs[0x1c], 0x221c8);
+        assert_eq!(regs[0x54], 0x2209c);
+        assert_eq!(regs[0x55] & (1 << 24), 1 << 24); // masked STOP_RING clear
+        assert_eq!(regs[0x03] >> 16, 15); // explicitly disable RS ctx too
         assert_eq!(regs[0x02], 0x22244);
         assert_eq!(regs[0x23], 0);
         assert_eq!(regs[0x0b], 1);
+        assert_eq!([regs[0x19], regs[0x1b], regs[0x1d]], [0; 3]); // no RCS indirect context
         let root = regs[0x33] as Word | ((regs[0x31] as Word) << 32);
         let tail = regs[0x07] as usize;
         assert!(tail <= PAGE && tail % 8 == 0);
@@ -189,10 +237,16 @@ impl Model {
         self.regs.insert(0x2209c, 1 << 9);
         self.regs.insert(0x22034, tail as u32);
         self.regs.insert(0x22030, tail as u32);
-        if self.completion {
+        if self.completion || self.invalid_idle_event {
             let index = ((self.regs[&0x223a0] & 7) + 1) % 6;
-            self.regs
-                .insert(0x22370 + index as usize * 8, (1 << 4) | (1 << 3));
+            let status = if self.invalid_idle_event {
+                // Only bit 0 is defined. Deliberately give the other fields
+                // misleading values, including our ID and CONTEXT_COMPLETE.
+                1 | (1 << 4)
+            } else {
+                (1 << 4) | (1 << 3)
+            };
+            self.regs.insert(0x22370 + index as usize * 8, status);
             self.regs.insert(0x22374 + index as usize * 8, id);
             let previous = self.regs[&0x223a0];
             self.regs.insert(0x223a0, (previous & !7) | index);
@@ -210,19 +264,43 @@ fn reset() -> Hardware {
 }
 impl Registers for Hardware {
     fn read(&self, offset: Word) -> u32 {
-        self.0.borrow().regs.get(&offset).copied().unwrap_or(0)
+        let model = self.0.borrow();
+        if matches!(offset, 0x40e0 | 0x40e4)
+            && model.regs.get(&0xd84).copied().unwrap_or(0) & 2 == 0
+        {
+            return u32::MAX; // PAT belongs to the render forcewake domain.
+        }
+        model.regs.get(&offset).copied().unwrap_or(0)
     }
     fn write(&mut self, offset: Word, value: u32) {
         let mut model = self.0.borrow_mut();
         model.writes.push((offset, value));
-        if matches!(offset, 0xa188 | 0x2209c | 0x2229c | 0x223a0) {
+        if matches!(offset, 0x40e0 | 0x40e4) && !model.pat_writable {
+            return;
+        }
+        if matches!(
+            offset,
+            0xa188 | 0xa278 | 0x220d0 | 0x2209c | 0x2229c | 0x223a0
+        ) {
             let mask = value >> 16;
             let previous = model.regs.get(&offset).copied().unwrap_or(0);
             model
                 .regs
                 .insert(offset, (previous & !mask) | (value & mask));
-            if offset == 0xa188 && model.wake {
-                model.regs.insert(0x130044, value & 1);
+            if matches!(offset, 0xa188 | 0xa278) && model.wake {
+                let requested = model.regs[&offset] & 0xffff;
+                let ack = if offset == 0xa188 { 0x130044 } else { 0xd84 };
+                model.regs.insert(ack, requested);
+            }
+            if offset == 0x220d0 && value & 1 != 0 && model.reset_ready {
+                *model.regs.get_mut(&offset).unwrap() |= 2;
+            }
+        } else if offset == 0x941c && model.reset_ack {
+            assert_eq!(value, 8, "must only reset BCS, not display/other engines");
+            assert_eq!(model.regs[&0x220d0] & 2, 2, "reset without READY handshake");
+            model.regs.insert(offset, 0);
+            for register in [0x2203c, 0x22030, 0x22034, 0x2209c] {
+                model.regs.insert(register, 0);
             }
         } else {
             model.regs.insert(offset, value);
@@ -352,7 +430,18 @@ fn self_test_and_real_bcs_packets_fill_copy_and_keep_padding_unchanged() {
     assert_eq!(model.ggtt[0], 0xdead0001);
     assert!(model.writes.iter().all(|(register, _)| matches!(
         *register,
-        0xa188 | 0x101008 | 0x22098 | 0x220a8 | 0x223a0 | 0x22080 | 0x2229c | 0x2209c | 0x22230
+        0xa188
+            | 0xa278
+            | 0x220d0
+            | 0x941c
+            | 0x101008
+            | 0x22098
+            | 0x220a8
+            | 0x223a0
+            | 0x22080
+            | 0x2229c
+            | 0x2209c
+            | 0x22230
     )));
 }
 
@@ -417,13 +506,82 @@ fn neither_a_breadcrumb_nor_context_completion_alone_retires_dma() {
 }
 
 #[test]
+fn undefined_fields_in_idle_to_active_csb_do_not_retire_the_context() {
+    let mut hardware = reset();
+    let mut engine = blt::Engine::new(&mut hardware, 8192, 24).unwrap();
+    let layout = Layout::new(16, 16, 64).unwrap();
+    let (gpu, local) = surface(&mut hardware, &mut engine, layout);
+    hardware.0.borrow_mut().completion = false;
+    hardware.0.borrow_mut().invalid_idle_event = true;
+    let before = hardware.0.borrow().ggtt.clone();
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        width: 16,
+        height: 16,
+    };
+    assert!(engine
+        .fill(&mut hardware, gpu, layout, local, rect, 1)
+        .is_err());
+    assert!(engine.failed);
+    assert!(engine.unmap(gpu, layout.bytes).is_err());
+    assert_eq!(hardware.0.borrow().ggtt, before);
+}
+
+#[test]
+fn gen9_blt_packets_match_literal_prm_vectors_and_signed_pitch_bounds() {
+    // KBL Vol 2a XY_COLOR_BLT/XY_SRC_COPY_BLT, with linear-byte pitch
+    // cross-checked against Intel IGT intel_blt_copy (tiled pitch differs).
+    let source = Layout::new(80, 40, 384).unwrap();
+    let target = Layout::new(96, 48, 512).unwrap();
+    let rect = Rect {
+        x: 2,
+        y: 3,
+        width: 7,
+        height: 9,
+    };
+    assert_eq!(
+        blt::commands::fill(0x02000000, source, rect, 0x12345678).unwrap(),
+        [0x54300005, 0x03f00180, 0x00030002, 0x000c0009, 0x02000000, 0, 0x12345678]
+    );
+    assert_eq!(
+        blt::commands::copy(0x02000000, source, 0x03000000, target, rect, 11, 12).unwrap(),
+        [
+            0x54f00008, 0x03cc0200, 0x000c000b, 0x00150012, 0x03000000, 0, 0x00030002, 384,
+            0x02000000, 0
+        ]
+    );
+    assert_eq!(
+        blt::commands::flush(0x04000200, 7, true),
+        [0x13044002, 0x04000204, 0, 7]
+    );
+    assert_eq!(
+        blt::commands::flush(0x04000200, 8, false),
+        [0x13004002, 0x04000204, 0, 8]
+    );
+    assert!(Layout::new(16, 16, 32704).is_some());
+    assert!(Layout::new(16, 16, 32768).is_none()); // negative signed 16-bit pitch
+    let forged = Layout {
+        width: 16,
+        height: 16,
+        stride: 32768,
+        bytes: 524288,
+    };
+    assert!(blt::commands::fill(0x02000000, forged, rect, 0).is_err());
+    assert!(blt::commands::copy(0x02000000, forged, 0x03000000, target, rect, 0, 0).is_err());
+    assert!(blt::commands::copy(0x02000000, source, 0x03000000, forged, rect, 0, 0).is_err());
+    assert!(blt::commands::fill(0xfffff000, source, rect, 0).is_err());
+}
+
+#[test]
 fn busy_engine_or_existing_forcewake_owner_is_not_reprogrammed() {
     for existing_owner in [false, true] {
         let mut hardware = reset();
         if existing_owner {
-            hardware.0.borrow_mut().regs.insert(0xa188, 1);
+            hardware.0.borrow_mut().regs.insert(0xa188, 2);
         } else {
             hardware.0.borrow_mut().regs.insert(0x2209c, 0);
+            hardware.0.borrow_mut().regs.insert(0x2203c, 1);
         }
         assert!(blt::Engine::new(&mut hardware, 8192, 24).is_err());
         assert!(hardware.0.borrow().memory.is_empty());
@@ -432,8 +590,154 @@ fn busy_engine_or_existing_forcewake_owner_is_not_reprogrammed() {
             .borrow()
             .writes
             .iter()
-            .all(|(register, _)| *register == 0xa188));
+            .all(|(register, _)| matches!(*register, 0xa188 | 0xa278)));
     }
+}
+
+#[test]
+fn firmware_kernel_forcewake_is_preserved_while_user_client_initializes_disabled_bcs() {
+    let mut hardware = reset();
+    hardware.0.borrow_mut().regs.extend([
+        (0xa188, 1),
+        (0x130044, 1),
+        (0xa278, 1),
+        (0xd84, 1),
+        (0x203c, 0x1234),
+        (0x7019c, 0x4000),
+    ]);
+    blt::Engine::new(&mut hardware, 8192, 24).unwrap();
+    let model = hardware.0.borrow();
+    assert_eq!(model.regs[&0xa188], 3);
+    assert_eq!(model.regs[&0xa278], 3);
+    assert_eq!(model.regs[&0x203c], 0x1234); // other engine left untouched
+    assert_eq!(model.regs[&0x7019c], 0x4000); // display untouched
+    assert_eq!(model.writes.iter().filter(|(r, _)| *r == 0x941c).count(), 2);
+}
+
+#[test]
+fn reset_failures_do_not_allocate_dma_and_release_only_our_forcewake_bits() {
+    for ready in [false, true] {
+        let mut hardware = reset();
+        {
+            let mut model = hardware.0.borrow_mut();
+            model.reset_ready = ready;
+            model.reset_ack = !ready;
+            model
+                .regs
+                .extend([(0xa188, 1), (0x130044, 1), (0xa278, 1), (0xd84, 1)]);
+        }
+        assert!(blt::Engine::new(&mut hardware, 8192, 24).is_err());
+        let model = hardware.0.borrow();
+        assert!(model.memory.is_empty());
+        assert_eq!(model.regs[&0xa188], 1);
+        assert_eq!(model.regs[&0xa278], 1);
+        assert!(model.sleeps <= 50);
+    }
+}
+
+#[test]
+fn missing_wake_or_uc_pat_never_submits_a_context() {
+    for missing_wake in [false, true] {
+        let mut hardware = reset();
+        {
+            let mut model = hardware.0.borrow_mut();
+            model.wake = !missing_wake;
+            if !missing_wake {
+                model.regs.insert(0x40e0, 0x03030303);
+            }
+        }
+        assert!(blt::Engine::new(&mut hardware, 8192, 24).is_err());
+        let model = hardware.0.borrow();
+        assert!(model.memory.is_empty());
+        assert!(model.ids.is_empty());
+        assert!(!model.writes.iter().any(|(reg, _)| *reg == 0x22230));
+        assert_eq!(model.regs.get(&0xa188).copied().unwrap_or(0), 0);
+        assert_eq!(model.regs.get(&0xa278).copied().unwrap_or(0), 0);
+    }
+}
+
+#[test]
+fn a_posted_self_test_timeout_keeps_all_dma_mappings_and_forcewake_pinned() {
+    let mut hardware = reset();
+    hardware.0.borrow_mut().stuck = true;
+    assert!(blt::Engine::new(&mut hardware, 8192, 24).is_err());
+    let model = hardware.0.borrow();
+    assert!(model.pending.is_some());
+    assert!(!model.memory.is_empty());
+    assert!(model.ggtt.iter().filter(|pte| **pte & 1 != 0).count() >= 7);
+    assert_eq!(model.regs[&0xa188] & 2, 2);
+    assert_eq!(model.regs[&0xa278] & 2, 2);
+    assert!(model.sleeps <= 201);
+}
+
+#[test]
+fn all_wb_pat_is_initialized_only_with_exclusive_retired_gt_ownership() {
+    for retired in [false, true] {
+        let mut hardware = reset();
+        {
+            let mut model = hardware.0.borrow_mut();
+            model.regs.insert(0x40e0, 0x03030303);
+            model.expected_pat_bits = 0x98;
+        }
+        if retired {
+            blt::Engine::after_gt_retirement(&mut hardware, 8192, 24).unwrap();
+        } else {
+            assert!(blt::Engine::new(&mut hardware, 8192, 24).is_err());
+        }
+        let model = hardware.0.borrow();
+        assert_eq!(model.regs[&0x40e0], 0x03030303);
+        if retired {
+            assert_eq!(model.regs[&0x40e4], 0x00030303);
+            assert_eq!(model.ids, [1, 2]); // actual fill/copy canaries passed
+        } else {
+            assert_eq!(model.regs[&0x40e4], 0x03030303);
+            assert!(model.memory.is_empty());
+            assert!(!model
+                .writes
+                .iter()
+                .any(|(r, _)| matches!(*r, 0x40e0 | 0x40e4)));
+        }
+    }
+}
+
+#[test]
+fn each_private_pat_index_uses_the_prm_pat_pcd_pwt_leaf_bits() {
+    for (index, bits) in [0, 8, 16, 24, 128, 136, 144, 152].into_iter().enumerate() {
+        let mut hardware = reset();
+        // Only this byte is UC, with nonzero target-cache bits. Those bits
+        // must not be confused with the low two memory-type bits.
+        let pat = (0x0303030303030303u64 & !(255 << (index * 8))) | (12 << (index * 8));
+        {
+            let mut model = hardware.0.borrow_mut();
+            model.regs.insert(0x40e0, pat as u32);
+            model.regs.insert(0x40e4, (pat >> 32) as u32);
+            model.expected_pat_bits = bits;
+        }
+        blt::Engine::new(&mut hardware, 8192, 24).unwrap();
+        let model = hardware.0.borrow();
+        assert_eq!(model.ids.len(), 2); // real fill/copy interpreted through PPGTT
+        assert!(!model
+            .writes
+            .iter()
+            .any(|(register, _)| matches!(*register, 0x40e0 | 0x40e4 | 0x40e8)));
+    }
+}
+
+#[test]
+fn failed_private_pat_readback_aborts_before_any_dma_or_submission() {
+    let mut hardware = reset();
+    {
+        let mut model = hardware.0.borrow_mut();
+        model.regs.insert(0x40e0, 0x03030303);
+        model.pat_writable = false;
+    }
+    assert!(blt::Engine::after_gt_retirement(&mut hardware, 8192, 24).is_err());
+    let model = hardware.0.borrow();
+    assert!(model.memory.is_empty());
+    assert!(model.ids.is_empty());
+    assert_eq!(model.regs[&0x40e4], 0x03030303);
+    assert_eq!(model.regs[&0xa188] & 2, 0);
+    assert_eq!(model.regs[&0xa278] & 2, 0);
 }
 
 #[test]

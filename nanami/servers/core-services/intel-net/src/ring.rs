@@ -170,6 +170,40 @@ impl Rings {
         }
     }
 
+    /// Explicit error-path snapshot only. Never poll this from the packet path,
+    /// read ICR (which would acknowledge an IRQ), or recycle uncertain DMA.
+    pub fn report_status(&mut self, regs: &impl Registers) -> (usize, usize) {
+        self.reclaim_tx();
+        nanami_runtime::println!(
+            "[intel-net] DMA TX pending={} clean={} next={} head={} tail={} RX next={} ready={} head={} tail={} GPTC={} GPRC={}",
+            self.tx_used, self.tx_clean, self.tx_next, regs.read(TX_BASE + HEAD),
+            regs.read(TX_BASE + TAIL), self.rx_next, self.pending(), regs.read(RX_BASE + HEAD),
+            regs.read(RX_BASE + TAIL), regs.read(0x4080), regs.read(0x4074)
+        );
+        nanami_runtime::println!(
+            "[intel-net] DMA controls STATUS={:#x} CTRL={:#x} RCTL={:#x} TCTL={:#x} RXDCTL={:#x} TXDCTL={:#x} GCR={:#x} MAC-Mbps={}",
+            regs.read(STATUS), regs.read(CTRL), regs.read(RCTL), regs.read(TCTL),
+            regs.read(RXDCTL), regs.read(TXDCTL), regs.read(GCR), link_mbps(regs.read(STATUS))
+        );
+        // Counters are clear-on-read deltas since the preceding snapshot.
+        // TPR precedes layer-2 filtering; GPRC alone cannot distinguish no
+        // wire traffic from rejected frames (I211 7.9.5, 8.13).
+        nanami_runtime::println!(
+            "[intel-net] RX deltas TPR={} CRCERRS={} RXERRC={} MPC={} RAL={:#x} RAH={:#x} CTRL_EXT={:#x}",
+            regs.read(0x40d0), regs.read(0x4000), regs.read(0x400c), regs.read(0x4010),
+            regs.read(RAL), regs.read(RAH), regs.read(CTRL_EXT)
+        );
+        if self.advanced {
+            nanami_runtime::println!(
+                "[intel-net] RX routing MRQC={:#x} SRRCTL={:#x} RXCSUM={:#x}",
+                regs.read(0x5818),
+                regs.read(SRRCTL),
+                regs.read(RXCSUM)
+            );
+        }
+        (self.tx_used, usize::from(self.pending()))
+    }
+
     pub unsafe fn send(
         &mut self,
         regs: &mut impl Registers,

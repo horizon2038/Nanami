@@ -30,6 +30,9 @@ pub trait Registers {
     fn write(&mut self, offset: Word, value: u32);
     fn pte(&self, index: Word) -> u64;
     fn write_pte(&mut self, index: Word, value: u64);
+    fn allocatable(&self, _index: Word) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,44 +46,51 @@ pub struct Mode {
 }
 
 pub fn discover(registers: &impl Registers, aperture_bytes: Word) -> Result<Mode, RequestError> {
+    discover_mode(registers, aperture_bytes).map_err(|_| RequestError::Unsupported)
+}
+
+pub fn discover_mode(
+    registers: &impl Registers,
+    aperture_bytes: Word,
+) -> Result<Mode, &'static str> {
     // Active compression/self-refresh has additional ownership and power
     // sequencing requirements. Leave such firmware configurations untouched.
     if registers.read(FBC_CONTROL) & ENABLE != 0
         || registers.read(PSR_CONTROL) & ENABLE != 0
         || registers.read(DC_STATE_ENABLE) & 0x1f != 0
     {
-        return Err(RequestError::Unsupported);
+        return Err("firmware compression/self-refresh/display power state");
     }
     let mut result = None;
     for pipe in 0..3 {
         let step = pipe * PIPE_STEP;
+        for plane in 1..3 {
+            if registers.read(PLANE_CONTROL + step + plane * 0x100) & PLANE_ENABLE != 0 {
+                return Err("additional active plane");
+            }
+        }
         let control = registers.read(PLANE_CONTROL + step);
         if control & PLANE_ENABLE == 0 {
             continue;
         }
-        if result.is_some()
-            || control & FORMAT_MASK != FORMAT_XRGB8888
-            || control & UNSUPPORTED_LAYOUT != 0
-        {
-            return Err(RequestError::Unsupported);
+        if result.is_some() {
+            return Err("multiple active pipes");
         }
-        for plane in 1..3 {
-            if registers.read(PLANE_CONTROL + step + plane * 0x100) & PLANE_ENABLE != 0 {
-                return Err(RequestError::Unsupported);
-            }
+        if control & FORMAT_MASK != FORMAT_XRGB8888 || control & UNSUPPORTED_LAYOUT != 0 {
+            return Err("primary plane pixel format/layout");
         }
         if registers.read(PLANE_POSITION + step) != 0 || registers.read(PLANE_OFFSET + step) != 0 {
-            return Err(RequestError::Unsupported);
+            return Err("plane position/offset");
         }
         let size = registers.read(PLANE_SIZE + step);
         let width = ((size & 0xffff) + 1) as Word;
         let height = ((size >> 16) + 1) as Word;
         let source = registers.read(PIPE_SOURCE + step);
         if width != ((source >> 16) + 1) as Word || height != ((source & 0xffff) + 1) as Word {
-            return Err(RequestError::Unsupported); // Do not silently adopt scaling.
+            return Err("scaled plane"); // Do not silently adopt scaling.
         }
         let stride = (registers.read(PLANE_STRIDE + step) as Word & 0xfff) * 64;
-        let bytes = stride.checked_mul(height).ok_or(RequestError::Protocol)?;
+        let bytes = stride.checked_mul(height).ok_or("stride overflow")?;
         let original_surface = registers.read(PLANE_SURFACE + step);
         if width > 8192
             || height > 4096
@@ -92,7 +102,7 @@ pub fn discover(registers: &impl Registers, aperture_bytes: Word) -> Result<Mode
                 .checked_add(bytes)
                 .is_none_or(|end| end > aperture_bytes)
         {
-            return Err(RequestError::Unsupported);
+            return Err("plane geometry/aperture bounds");
         }
         result = Some(Mode {
             pipe,
@@ -103,7 +113,7 @@ pub fn discover(registers: &impl Registers, aperture_bytes: Word) -> Result<Mode
             original_surface,
         });
     }
-    result.ok_or(RequestError::Unsupported)
+    result.ok_or("no active primary plane")
 }
 
 pub fn frame(registers: &impl Registers, mode: Mode) -> u32 {
@@ -125,7 +135,8 @@ pub fn latched(registers: &impl Registers, mode: Mode, surface: Word) -> bool {
     registers.read(PLANE_LIVE + mode.pipe * PIPE_STEP) & !0xfff == surface as u32
 }
 
-/// Reserve only invalid PTEs. A firmware-filled GGTT is not free memory.
+/// Reserve invalid PTEs only within the driver's allocation domain. Bit zero
+/// is Present; unused address/cache bits do not make an invalid PTE live.
 pub fn free_span(
     registers: &impl Registers,
     entries: Word,
@@ -136,7 +147,7 @@ pub fn free_span(
     }
     let mut count = 0;
     for index in 1..entries {
-        if registers.pte(index) == 0 {
+        if registers.allocatable(index) && registers.pte(index) & 1 == 0 {
             count += 1;
         } else {
             count = 0;
@@ -164,7 +175,7 @@ pub fn bind(
         return Err(RequestError::Unsupported);
     }
     for index in 0..pages {
-        if registers.pte(start + index) != 0 {
+        if !registers.allocatable(start + index) || registers.pte(start + index) & 1 != 0 {
             return Err(RequestError::Protocol);
         }
     }

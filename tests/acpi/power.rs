@@ -40,11 +40,15 @@ mod tests {
         writes: Vec<(u16, u32)>,
         ns: u64,
         enable: bool,
+        acquire_timeout: bool,
         memory: Vec<u64>,
     }
     #[derive(Clone, Default)]
     pub struct Mock(Rc<RefCell<State>>);
     impl Mock {
+        pub fn set_acquire_timeout(&self, timeout: bool) {
+            self.0.borrow_mut().acquire_timeout = timeout;
+        }
         pub fn set_pci(&self, _: acpi::platform::PciConfigRegions) {}
 
         fn write_port(&self, port: u16, value: u32, width: usize) {
@@ -145,12 +149,23 @@ mod tests {
             Handle(0)
         }
         fn acquire(&self, _: Handle, _: u16) -> Result<(), AmlError> {
+            if self.0.borrow().acquire_timeout {
+                return Err(AmlError::MutexAcquireTimeout);
+            }
             Ok(())
         }
         fn release(&self, _: Handle) {}
     }
 
     pub(super) fn setup(aml: &[u8], pm1b: bool) -> (Power<Mock>, Mock) {
+        let (power, host, _) = setup_interpreter(aml, pm1b);
+        (power, host)
+    }
+
+    pub(super) fn setup_interpreter(
+        aml: &[u8],
+        pm1b: bool,
+    ) -> (Power<Mock>, Mock, Arc<Interpreter<Mock>>) {
         let host = Mock::default();
         // FADT is a packed table of integers, byte arrays and MaybeUninit fields.
         let mut fadt: Fadt = unsafe { std::mem::zeroed() };
@@ -164,11 +179,12 @@ mod tests {
         fadt.acpi_enable = 0xa1;
         fadt.acpi_disable = 0xa0;
         let registers = Arc::new(FixedRegisters::new(&fadt, host.clone()).unwrap());
-        let interpreter = Interpreter::new(host.clone(), 2, registers.clone(), None);
+        let interpreter = Arc::new(Interpreter::new(host.clone(), 2, registers.clone(), None));
         interpreter.load_table(aml).unwrap();
         (
-            Power::new(host.clone(), interpreter, registers, &fadt).unwrap(),
+            Power::new(host.clone(), interpreter.clone(), registers, &fadt).unwrap(),
             host,
+            interpreter,
         )
     }
 

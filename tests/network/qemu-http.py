@@ -23,6 +23,10 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
 parser.add_argument('--smp', type=int, default=4)
 parser.add_argument('--nic', choices=('virtio', 'e1000e', 'igb'), default='virtio')
+parser.add_argument('--spare-nic', choices=('e1000e', 'igb'),
+                    help='add an earlier PCI NIC on an isolated, disconnected LAN')
+parser.add_argument('--late-link', action='store_true',
+                    help='with --spare-nic, connect the DHCP NIC only after desktop startup')
 parser.add_argument('--shared-intx', action='store_true',
                     help='put xHCI on the Intel NIC PIRQ to exercise timer RX fallback')
 parser.add_argument('-n', '--requests', type=int, default=1000)
@@ -40,6 +44,10 @@ parser.add_argument('--fix-slirp-backlog', action='store_true',
 args = parser.parse_args()
 if args.shared_intx and args.nic == 'virtio':
     parser.error('--shared-intx requires an Intel NIC')
+if args.spare_nic and args.nic == 'virtio':
+    parser.error('--spare-nic requires an Intel primary NIC')
+if args.late_link and not args.spare_nic:
+    parser.error('--late-link requires --spare-nic')
 if args.boot_multicast and not args.multicast:
     parser.error('--boot-multicast requires --multicast')
 repo = pathlib.Path(__file__).resolve().parents[2]
@@ -78,7 +86,7 @@ command = [
     '-netdev', 'hubport,id=inject-port,hubid=0,netdev=inject',
     '-netdev', 'hubport,id=net0,hubid=0',
     '-device', ('virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on'
-                if args.nic == 'virtio' else f'{args.nic},netdev=net0,addr=5'),
+                if args.nic == 'virtio' else f'{args.nic},id=primary,netdev=net0,addr=5,mac=52:54:00:12:34:56'),
     '-object', f'filter-dump,id=dump,netdev=net0,file={logs / "net.pcap"}',
     '-drive', f'if=pflash,format=raw,readonly=on,file={firmware / "OVMF_CODE.fd"}',
     '-drive', f'if=pflash,format=raw,file={logs / "OVMF_VARS.fd"}',
@@ -89,6 +97,9 @@ command = [
 if args.shared_intx:
     # Slots 5 and 9 share PIRQ A on i440fx. USB owns the IRQ before intel-net.
     command.extend(['-device', 'qemu-xhci,addr=9'])
+if args.spare_nic:
+    command.extend(['-netdev', 'hubport,id=spare-net,hubid=1',
+                    '-device', f'{args.spare_nic},id=spare,netdev=spare-net,addr=4,mac=52:54:00:12:34:57'])
 
 def multicast_frame():
     ip = bytearray(struct.pack('!BBHHHBBH4s4s', 0x45, 0, 28, 0, 0, 1, 17, 0,
@@ -152,15 +163,80 @@ def send(command):
             raise RuntimeError('Monitor closed')
         output += chunk
 
+def check_dhcp_wire(capture):
+    """Check actual guest TX, including BOOTP padding within IP/UDP lengths."""
+    data = capture.read_bytes()
+    if len(data) < 24 or data[:4] not in (b'\xd4\xc3\xb2\xa1', b'\xa1\xb2\xc3\xd4'):
+        raise RuntimeError('Missing/unsupported Ethernet pcap')
+    endian = '<' if data[:4] == b'\xd4\xc3\xb2\xa1' else '>'
+    assert struct.unpack_from(endian + 'I', data, 20)[0] == 1
+    cursor = 24
+    types = set()
+    while cursor + 16 <= len(data):
+        length = struct.unpack_from(endian + 'I', data, cursor + 8)[0]
+        cursor += 16
+        frame = data[cursor:cursor + length]
+        cursor += length
+        if len(frame) < 42 or frame[12:14] != b'\x08\x00':
+            continue
+        ihl = (frame[14] & 15) * 4
+        udp = 14 + ihl
+        if ihl < 20 or len(frame) < udp + 8 or frame[23] != 17:
+            continue
+        if frame[udp:udp + 4] != struct.pack('!HH', 68, 67):
+            continue
+        total = struct.unpack_from('!H', frame, 16)[0]
+        udp_length = struct.unpack_from('!H', frame, udp + 4)[0]
+        assert len(frame) >= 14 + total and total == ihl + udp_length
+        assert udp_length >= 308, 'DHCP UDP payload is shorter than BOOTP minimum'
+        header_sum = sum(struct.unpack('!' + 'H' * (ihl // 2), frame[14:udp]))
+        while header_sum >> 16:
+            header_sum = (header_sum & 0xffff) + (header_sum >> 16)
+        assert header_sum == 0xffff, 'Invalid outgoing DHCP IPv4 checksum'
+        assert frame[:6] == b'\xff' * 6
+        assert frame[26:34] == b'\0' * 4 + b'\xff' * 4
+        payload = frame[udp + 8:udp + udp_length]
+        assert payload[:3] == b'\x01\x01\x06'
+        assert payload[28:34] == frame[6:12]
+        assert payload[236:240] == bytes.fromhex('63825363')
+        option = 240
+        while option < len(payload):
+            code = payload[option]
+            option += 1
+            if code == 0:
+                continue
+            if code == 255:
+                assert not any(payload[option:]), 'Nonzero padding after DHCP END'
+                break
+            assert option < len(payload)
+            size = payload[option]
+            option += 1
+            assert option + size <= len(payload)
+            if code == 53:
+                assert size == 1
+                types.add(payload[option])
+            option += size
+        else:
+            raise RuntimeError('DHCP options missing END')
+    assert {1, 3}.issubset(types), 'Capture must contain both DISCOVER and REQUEST'
+    print('DHCP wire checks passed: DISCOVER/REQUEST padding, lengths, MAC and IPv4 checksum', flush=True)
+
 print(f'Logs: {logs}', flush=True)
 with (logs / 'qemu.log').open('w') as diagnostics:
     process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=diagnostics, env=qemu_env)
     worker = threading.Thread(target=network_peer)
     worker.start()
     try:
+        if args.spare_nic:
+            send('set_link spare off')
+            if args.late_link:
+                send('set_link primary off')
         # Font diagnostics can interleave with another CPU's output. They are
         # not a readiness protocol; actual HTTP listen/traffic is checked below.
         wait_for(lambda text: '[              honoka] online' in text)
+        if args.late_link:
+            time.sleep(1)
+            send('set_link primary on')
         expected_mask = str(ipaddress.IPv4Network(f'10.0.2.0/{args.subnet_prefix}').netmask)
         # SMP boot logs can interleave characters from different services.
         # Only apply_lease logs this dotted mask token; do not require its
@@ -169,6 +245,8 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         if args.shared_intx:
             wait_for(lambda text: 'rx=timer' in text)
         print(f'Guest applied DHCP mask {expected_mask}', flush=True)
+        if args.spare_nic:
+            wait_for(lambda text: 'ports=2' in text and 'selected port=1' in text)
         time.sleep(5)
         for char in 'http-server\n':
             send(f'sendkey { {"-": "minus", chr(10): "ret"}.get(char, char)} 50')
@@ -210,3 +288,5 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         except subprocess.TimeoutExpired:
             process.terminate()
             process.wait(timeout=5)
+
+check_dhcp_wire(logs / 'net.pcap')

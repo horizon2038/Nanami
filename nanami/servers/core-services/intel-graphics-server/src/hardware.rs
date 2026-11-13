@@ -1,5 +1,7 @@
 use crate::gen9::{self, Mode, Rect, Registers, PAGE_BYTES};
+use alloc::vec::Vec;
 use core::{
+    ops::Range,
     ptr,
     sync::atomic::{fence, Ordering},
 };
@@ -14,6 +16,8 @@ pub struct Hardware {
     mmio: Word,
     table: Word,
     entries: Word,
+    owned: Range<Word>,
+    protected: [Range<Word>; 4],
 }
 
 impl Registers for Hardware {
@@ -37,6 +41,23 @@ impl Registers for Hardware {
             ptr::write_volatile((self.table + index * 8) as *mut u64, value);
         }
     }
+    fn allocatable(&self, index: Word) -> bool {
+        self.owned.contains(&index) && !self.protected.iter().any(|range| range.contains(&index))
+    }
+}
+
+struct FirmwareArena {
+    range: Range<Word>,
+    saved: Vec<u64>,
+}
+impl FirmwareArena {
+    fn restore(&self, hardware: &mut Hardware) {
+        for (index, pte) in self.saved.iter().enumerate() {
+            hardware.write_pte(self.range.start + index, *pte);
+        }
+        hardware.write(gen9::GGTT_FLUSH_CONTROL, 1);
+        let _ = hardware.read(gen9::GGTT_FLUSH_CONTROL);
+    }
 }
 
 /// DMA remains owned for the lifetime of scanout, even on a flip timeout.
@@ -55,34 +76,64 @@ pub struct Scanout {
     failed: bool,
     timer: Word,
     blitter: Option<crate::blt::Engine>,
+    // GT ownership and GGTT allocation are different facts. Vacant PTEs do
+    // not grant permission to modify the GT-wide private PAT.
+    gt_retired: bool,
+    firmware_arena: Option<FirmwareArena>,
 }
 
 impl Scanout {
     pub fn new(port: Word, device: Device, timer: Word) -> Result<Self, RequestError> {
-        let registers = pci::probe_bar(port, device.address, 0)?;
-        let aperture = pci::probe_bar(port, device.address, 2)?;
-        if registers.io || aperture.io || registers.bytes != 16 * 1024 * 1024 {
-            return Err(RequestError::Unsupported);
-        }
+        // probe_bar() disables decode/bus mastering and writes all ones. That
+        // requires a quiesced device, not a firmware pipe still scanning out.
+        let layout =
+            crate::pci_layout::read(|offset, width| pci::read(port, device.address, offset, width))
+                .map_err(|error| {
+                    nanami_runtime::println!(
+                        "[intel-graphics] inherited PCI layout unavailable: {}",
+                        error
+                    );
+                    error
+                })?;
         let ggc = pci::read(port, device.address, 0x50, 2)?;
         let size_code = (ggc >> 6) & 3;
         if size_code == 0 {
+            nanami_runtime::println!("[intel-graphics] GGTT disabled GGC={:#x}", ggc);
             return Err(RequestError::Unsupported);
         }
         let table_bytes = (1usize << size_code) * 1024 * 1024;
-        let (_, mmio) = nanami_runtime::request_mmio(registers.physical, MMIO_BYTES)?;
-        let (_, table) =
-            nanami_runtime::request_mmio(registers.physical + GGTT_OFFSET, table_bytes)?;
+        let (_, mmio) = nanami_runtime::request_mmio(layout.registers, MMIO_BYTES)?;
+        let (_, table) = nanami_runtime::request_mmio(layout.registers + GGTT_OFFSET, table_bytes)?;
         let mut hardware = Hardware {
             mmio,
             table,
             entries: table_bytes / 8,
+            // GuC/firmware reserve the top of the GGTT even when PTEs happen
+            // to be non-present. Never allocate there on the vacant path.
+            owned: 1..(table_bytes / 8).min((1usize << 32) / PAGE_BYTES)
+                - 32 * 1024 * 1024 / PAGE_BYTES,
+            protected: core::array::from_fn(|_| 0..0),
         };
-        let mode = gen9::discover(&hardware, aperture.bytes)?;
+        let mode = gen9::discover_mode(&hardware, layout.aperture_bytes).map_err(|reason| {
+            nanami_runtime::println!("[intel-graphics] inherited mode rejected: {} GGC={:#x} FBC={:#x} PSR={:#x} DC={:#x}",
+                reason, ggc, hardware.read(0x43208), hardware.read(0x64800), hardware.read(0x45504));
+            for pipe in 0..3 {
+                let step = pipe * 0x1000;
+                nanami_runtime::println!("[intel-graphics] pipe={} plane-ctl={:#x} stride={:#x} size={:#x} source={:#x}",
+                    pipe, hardware.read(0x70180 + step), hardware.read(0x70188 + step),
+                    hardware.read(0x70190 + step), hardware.read(0x6001c + step));
+            }
+            RequestError::Unsupported
+        })?;
         // An enabled-looking but stopped pipe cannot complete a flip.
         let frame = gen9::frame(&hardware, mode);
         nanami_client::timer::timer_service_sleep_milliseconds(timer, 40)?;
         if gen9::frame(&hardware, mode) == frame {
+            nanami_runtime::println!(
+                "[intel-graphics] pipe={} frame counter stopped value={:#x}",
+                mode.pipe,
+                frame
+            );
             return Err(RequestError::Unsupported);
         }
         let frame_bytes = mode
@@ -91,13 +142,36 @@ impl Scanout {
             .ok_or(RequestError::Protocol)?
             & !(PAGE_BYTES - 1);
         let pages = (frame_bytes / PAGE_BYTES) * 2;
-        // Only touch PTEs that firmware actually left empty; never infer
-        // ownership from identical/scratch mappings or overwrite active pages.
-        // BAR2 limits CPU aperture access, not the display engine's GGTT
-        // address space. CPU uploads use the DMA mapping, so scanout buffers
-        // may live above BAR2's aperture (within PLANE_SURF's 32-bit range).
+        let original_start = mode.original_surface as Word / PAGE_BYTES;
+        hardware.protected[0] = original_start..original_start + frame_bytes / PAGE_BYTES;
+        let cursors = crate::handoff::cursors(&hardware);
+        for (slot, cursor) in hardware.protected[1..].iter_mut().zip(cursors) {
+            *slot = cursor;
+        }
+        // First try invalid PTEs (including nonzero, non-present entries).
+        // A full table requires explicit command-engine ownership transfer,
+        // not guessing which valid firmware PTEs are scratch mappings.
         let scanout_entries = hardware.entries.min((1usize << 32) / PAGE_BYTES);
-        let start = gen9::free_span(&hardware, scanout_entries, pages)?;
+        let vacant = gen9::free_span(&hardware, scanout_entries, pages).ok();
+        let mut firmware_arena = if vacant.is_none() {
+            let range = crate::handoff::arena(&hardware, scanout_entries, layout.aperture_bytes)
+                .map_err(|reason| {
+                    nanami_runtime::println!(
+                        "[intel-graphics] GGTT takeover unavailable: {}",
+                        reason
+                    );
+                    RequestError::Unsupported
+                })?;
+            if range.len() < pages {
+                return Err(RequestError::Unsupported);
+            }
+            Some(FirmwareArena {
+                saved: range.clone().map(|index| hardware.pte(index)).collect(),
+                range,
+            })
+        } else {
+            None
+        };
         let (physical, memory) = nanami_runtime::request_dma(frame_bytes * 2)?;
         if physical
             .checked_add(frame_bytes * 2)
@@ -106,7 +180,7 @@ impl Scanout {
             return Err(RequestError::Unsupported);
         }
         let (_, original) = nanami_runtime::request_mmio(
-            aperture.physical + mode.original_surface as Word,
+            layout.aperture + mode.original_surface as Word,
             frame_bytes,
         )?;
         unsafe {
@@ -118,9 +192,47 @@ impl Scanout {
             );
         }
         crate::cache::flush(memory, frame_bytes * 2);
-        // No fallible setup remains after the PTE commit. A failed service
-        // publication may still unbind safely, before the first PLANE_SURF.
-        gen9::bind(&mut hardware, start, physical, pages)?;
+        let mut gt_retired = false;
+        let start = if let Some(arena) = &firmware_arena {
+            crate::handoff::retire_firmware(&mut hardware, device.device_id, mode, || {
+                nanami_client::timer::timer_service_sleep_milliseconds(timer, 1)
+                    .map_err(|_| "timer unavailable during GT takeover")
+            })
+            .map_err(|reason| {
+                nanami_runtime::println!(
+                    "[intel-graphics] GT ownership transfer refused: {}",
+                    reason
+                );
+                RequestError::Unsupported
+            })?;
+            gt_retired = true;
+            hardware.owned = arena.range.clone();
+            for index in arena.range.clone() {
+                hardware.write_pte(index, 0);
+                if hardware.pte(index) != 0 {
+                    arena.restore(&mut hardware);
+                    return Err(RequestError::Protocol);
+                }
+            }
+            hardware.write(gen9::GGTT_FLUSH_CONTROL, 1);
+            let _ = hardware.read(gen9::GGTT_FLUSH_CONTROL);
+            nanami_runtime::println!(
+                "[intel-graphics] firmware GT retired; owned GGTT arena={:#x}..{:#x}",
+                arena.range.start * PAGE_BYTES,
+                arena.range.end * PAGE_BYTES
+            );
+            arena.range.start
+        } else {
+            vacant.unwrap()
+        };
+        // Restore the exact firmware PTEs on any pre-publication failure. The
+        // live aperture/cursor PTEs and display registers were never changed.
+        if let Err(error) = gen9::bind(&mut hardware, start, physical, pages) {
+            if let Some(arena) = firmware_arena.take() {
+                arena.restore(&mut hardware);
+            }
+            return Err(error);
+        }
         nanami_runtime::println!(
             "[intel-graphics] native scanout pipe={} {}x{} stride={} GGTT={:#x} buffers=2",
             mode.pipe,
@@ -144,6 +256,8 @@ impl Scanout {
             failed: false,
             timer,
             blitter: None,
+            gt_retired,
+            firmware_arena,
         })
     }
 
@@ -172,6 +286,9 @@ impl Scanout {
     pub fn detach_before_flip(&mut self) {
         assert!(!self.started);
         gen9::unbind(&mut self.hardware, self.ggtt_start, self.bound_pages);
+        if let Some(arena) = self.firmware_arena.take() {
+            arena.restore(&mut self.hardware);
+        }
     }
 
     pub fn ensure_healthy(&self) -> Result<(), RequestError> {
@@ -243,6 +360,9 @@ impl Scanout {
     }
 
     pub fn initialize_acceleration(&mut self, pci: Word, device: Device) {
+        // Retirement may reset every command context, so this is boot-only,
+        // before any client or scanout flip. Never repeat it on a live engine.
+        assert!(!self.started && self.blitter.is_none());
         let Some(_) =
             nanami_uapi::gpu::Layout::new(self.mode.width, self.mode.height, self.mode.stride)
         else {
@@ -251,8 +371,36 @@ impl Scanout {
         let result: Result<crate::blt::Engine, RequestError> = (|| {
             let command = pci::read(pci, device.address, 4, 2)?;
             pci::write(pci, device.address, 4, 2, command | 6)?;
+            if !self.gt_retired && crate::handoff::known_inventory(device.device_id) {
+                crate::handoff::retire_firmware(
+                    &mut self.hardware,
+                    device.device_id,
+                    self.mode,
+                    || {
+                        nanami_client::timer::timer_service_sleep_milliseconds(self.timer, 1)
+                            .map_err(|_| "timer unavailable during GT takeover")
+                    },
+                )
+                .map_err(|reason| {
+                    nanami_runtime::println!(
+                        "[intel-graphics] GT ownership transfer refused: {}",
+                        reason
+                    );
+                    RequestError::Unsupported
+                })?;
+                self.gt_retired = true;
+                nanami_runtime::println!(
+                    "[intel-graphics] firmware GT retired; vacant GGTT bindings preserved"
+                );
+            }
             let entries = self.hardware.entries;
-            let mut engine = crate::blt::Engine::new(&mut self.hardware, entries, self.timer)?;
+            let mut engine = if self.gt_retired {
+                // The complete GT handshake, not allocation strategy, permits
+                // initializing a UC slot in the reset/default all-WB PAT.
+                crate::blt::Engine::after_gt_retirement(&mut self.hardware, entries, self.timer)?
+            } else {
+                crate::blt::Engine::new(&mut self.hardware, entries, self.timer)?
+            };
             engine.map(
                 self.ggtt_start * PAGE_BYTES,
                 self.physical,

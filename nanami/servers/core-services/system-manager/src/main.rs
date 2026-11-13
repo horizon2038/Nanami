@@ -347,7 +347,7 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
         entry.path
     );
     if entry.arguments.is_empty() {
-        return spawn_vfs_path::<true>(vfs, path.len(), entry.priority);
+        return spawn_vfs_path(vfs, path.len(), entry.priority);
     }
     // Image loading overwrites VFS SHM, so keep argv in private stack storage.
     let mut strings = [0; MANIFEST_MAX_BYTES];
@@ -370,20 +370,13 @@ fn spawn_rootfs_entry(entry: SystemEntry<'_>, vfs: &mut VfsClient) -> Result<Wor
     spawn_vfs_path_with_launch(vfs, path.len(), strings.as_ptr() as Word, launch)
 }
 
-// Boot diagnostics must precede blocking calls; logging only errors cannot
-// distinguish a stuck image read from a child waiting for exec-service.
-// Ordinary exec requests compile out these per-stage messages.
-fn spawn_vfs_path<const BOOT_TRACE: bool>(
+fn spawn_vfs_path(
     vfs: &mut VfsClient,
     path_len: usize,
     priority: Word,
 ) -> Result<Word, RequestError> {
     use nanami_runtime::diagnostics::{measure, RpcStage};
-    let (image_base, size) = image_loader::load::<BOOT_TRACE>(vfs, path_len)?;
-
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=spawn");
-    }
+    let (image_base, size) = image_loader::load(vfs, path_len)?;
     let result = measure(RpcStage::LoadSpawn, size, || {
         nanami_runtime::request_process_spawn_memory(image_base, size, priority)
     })
@@ -424,7 +417,7 @@ fn spawn_vfs_path_with_launch(
     client_shm: Word,
     launch: LaunchInfo,
 ) -> Result<Word, RequestError> {
-    let (image_base, size) = image_loader::load::<false>(vfs, path_len)?;
+    let (image_base, size) = image_loader::load(vfs, path_len)?;
 
     let pid = nanami_runtime::request_process_spawn_memory_suspended(
         image_base,
@@ -783,7 +776,7 @@ fn handle_exec_spawn_path(
         );
     }
 
-    match spawn_vfs_path::<false>(vfs, path_len, request.arg2) {
+    match spawn_vfs_path(vfs, path_len, request.arg2) {
         Ok(pid) => {
             register_exec_child(runtime, request.identifier, pid);
             (nanami_runtime::OS_RESPONSE_OK, pid, 0)

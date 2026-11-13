@@ -38,13 +38,10 @@ impl ImageBuffer {
 
 // Both spawn paths must close the VFS handle on read failures and reject bad
 // lengths before copying out of the shared transfer buffer.
-pub(super) fn load<const BOOT_TRACE: bool>(
+pub(super) fn load(
     vfs: &mut VfsClient,
     path_len: usize,
 ) -> Result<(Word, Word), RequestError> {
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=stat");
-    }
     let (_, size, kind) = measure(RpcStage::LoadStat, 0, || {
         nanami_client::vfs::vfs_stat(vfs.port, PATH_OFFSET as Word, path_len as Word)
     })
@@ -52,22 +49,13 @@ pub(super) fn load<const BOOT_TRACE: bool>(
     if kind != nanami_client::vfs::VFS_FILE_TYPE_REGULAR || size == 0 {
         return Err(RequestError::InvalidArgument);
     }
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=heap bytes={:#x}", size);
-    }
     let image_base = vfs.image.reserve(size)?;
 
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=open");
-    }
     let handle = measure(RpcStage::LoadOpen, 0, || {
         nanami_client::vfs::vfs_open(vfs.port, PATH_OFFSET as Word, path_len as Word)
     })
     .map_err(|error| log_spawn_stage("open", error))?;
-    let result = read_image::<BOOT_TRACE>(vfs, handle, image_base, size);
-    if BOOT_TRACE {
-        nanami_runtime::println!("[system-manager] load stage=close");
-    }
+    let result = read_image(vfs, handle, image_base, size);
     let _ = measure(RpcStage::LoadClose, 0, || {
         nanami_client::vfs::vfs_close(vfs.port, handle)
     });
@@ -75,7 +63,7 @@ pub(super) fn load<const BOOT_TRACE: bool>(
     Ok((image_base, size))
 }
 
-fn read_image<const BOOT_TRACE: bool>(
+fn read_image(
     vfs: &VfsClient,
     handle: Word,
     image_base: Word,
@@ -88,13 +76,6 @@ fn read_image<const BOOT_TRACE: bool>(
     let mut offset = 0usize;
     while offset < size as usize {
         let chunk = (size as usize - offset).min(chunk_capacity);
-        if BOOT_TRACE {
-            nanami_runtime::println!(
-                "[system-manager] load stage=read offset={:#x} bytes={:#x}",
-                offset,
-                chunk
-            );
-        }
         let read = measure(RpcStage::LoadRead, chunk, || {
             nanami_client::vfs::vfs_read(
                 vfs.port,

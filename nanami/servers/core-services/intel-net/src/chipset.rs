@@ -26,20 +26,47 @@ pub fn reset(regs: &mut impl Registers, family: Family) -> Result<[u8; 6], Reque
         regs.write(RX_SIZE, 0xa2);
         regs.write(TX_SIZE, 0x0400_0014);
     }
-    let control = regs.read(CTRL) & !(CTRL_PHY_RESET | CTRL_FORCE);
+    // PHY auto-negotiation is NOT CTRL.ASDE. I211 3.5.3.1.2.2 requires
+    // ASDE=FRCSPD=0 for the internal PHY's SPD_IND to configure the MAC.
+    // Enabling ASDE can leave a 10 Mb/s MAC on a gigabit PHY: TX descriptors
+    // and GPTC advance while the link partner cannot decode the frames.
+    let control =
+        regs.read(CTRL) & !(CTRL_PHY_RESET | CTRL_FORCE | CTRL_MASTER_DISABLE | CTRL_AUTO_SPEED);
+    if family == Family::I210 {
+        regs.update(CTRL_EXT, SPEED_BYPASS, 0);
+    }
     regs.write(CTRL, control | CTRL_RESET);
-    regs.flush();
+    // Intel's PCH reset sequence explicitly forbids a posted-write flush
+    // here: reading the MAC before its reset delay can hang the function.
+    if family != Family::I219 {
+        regs.flush();
+    }
     regs.delay_ms(20)?;
     regs.wait(CTRL, CTRL_RESET, 0, 100)?;
     regs.write(IMC, u32::MAX);
     let _ = regs.read(ICR);
     regs.write(WUC, 0);
-    let autoneg = if family == Family::I219 { 0 } else { 1 << 5 };
-    regs.write(CTRL, control | CTRL_LINK_UP | autoneg);
+    regs.write(CTRL, control | CTRL_LINK_UP);
     regs.update(CTRL_EXT, 0, DRIVER_LOADED);
     regs.flush();
     regs.delay_ms(20)?;
 
+    // A MAC-only reset does not initialize a powered-down/hung discrete PHY.
+    // Use CTRL.PHY_RST (not the clause-22 soft-reset bit, which bypasses the
+    // I210/I211 internal configuration sequence). Never do this to a PCH PHY.
+    if family != Family::I219 && regs.read(STATUS) & LINK_UP == 0 {
+        regs.write(CTRL, control | CTRL_LINK_UP | CTRL_RESET | CTRL_PHY_RESET);
+        regs.flush();
+        regs.delay_ms(20)?;
+        regs.write(CTRL, control | CTRL_LINK_UP);
+        regs.flush();
+        regs.delay_ms(20)?;
+        regs.wait(CTRL, CTRL_RESET | CTRL_PHY_RESET, 0, 100)?;
+        regs.write(IMC, u32::MAX);
+        let _ = regs.read(ICR);
+        regs.write(WUC, 0);
+        regs.update(CTRL_EXT, 0, DRIVER_LOADED);
+    }
     // Discrete copper PHYs use clause-22 at address 1. Preserve advertisement;
     // only leave power-down/isolate and restart an enabled autonegotiation.
     if family != Family::I219 {
@@ -110,34 +137,106 @@ pub fn configure_queues(
     tx: u64,
     bytes: usize,
 ) -> Result<(), RequestError> {
+    let advanced = matches!(family, Family::Igb | Family::I210);
+    if family == Family::I219 {
+        // PCH required MAC initialization, independent of PHY/ME ownership.
+        // Preserve these policy bits when replacing the threshold fields below.
+        regs.update(CTRL_EXT, 0, (1 << 22) | (1 << 17)); // required; relaxed-order disable
+        regs.update(TXDCTL, 0, 1 << 22);
+        regs.update(TXDCTL + 0x100, 0, 1 << 22);
+        regs.update(TARC0, 0, (1 << 23) | (1 << 24) | (1 << 26) | (1 << 27));
+        // This driver programs TCTL.MULR=0 when activating a port. TARC1's
+        // bit 28 must have the opposite value, including for an unused queue.
+        regs.update(TARC1, 0, (1 << 24) | (1 << 26) | (1 << 28) | (1 << 30));
+        regs.update(RFCTL, 0, (1 << 6) | (1 << 7)); // disable NFS parsing
+    }
     for (base, address) in [(RX_BASE, rx), (TX_BASE, tx)] {
-        regs.write(base + DCTL, 0);
-        if matches!(family, Family::Igb | Family::I210) {
+        if advanced {
+            regs.update(base + DCTL, QUEUE_ENABLE, 0);
             regs.wait(base + DCTL, QUEUE_ENABLE, 0, 100)?;
         }
         regs.write(base + BASE_LOW, address as u32);
         regs.write(base + BASE_HIGH, (address >> 32) as u32);
         regs.write(base + LENGTH, bytes as u32);
-        regs.write(base + HEAD, 0);
-        regs.write(base + TAIL, 0);
+        if !advanced {
+            // Legacy heads are writable only with global RX/TX disabled.
+            regs.write(base + HEAD, 0);
+            regs.write(base + TAIL, 0);
+        }
+        // I211 RDH/TDH are RO. QUEUE_ENABLE initializes head/tail, and tail
+        // writes before its acknowledgement are ignored (333017, 4.5.9/10).
     }
     regs.write(RXCSUM, 0); // checksums remain in net-server
-    regs.write(RFCTL, 0); // legacy descriptors
-    for index in 0..128 {
+
+    // Legacy descriptors; preserve MAC policy.
+    regs.update(RFCTL, 1 << 15, 0);
+
+    // PCH has 32 multicast words and no discrete-controller VLAN filter
+    // array. Do not clear reserved/manageability registers as if it were igb.
+    let multicast_words = if family == Family::I219 { 32 } else { 128 };
+    for index in 0..multicast_words {
         regs.write(MTA + index * 4, 0);
-        regs.write(VFTA + index * 4, 0);
     }
-    if matches!(family, Family::Igb | Family::I210) {
+    if family != Family::I219 {
+        for index in 0..128 {
+            regs.write(VFTA + index * 4, 0);
+        }
+    }
+    if advanced {
         regs.write(SRRCTL, 2 | (1 << 25)); // 2 KiB; advanced one-buffer, no header split
         regs.write(RLPML, 1522);
-    }
-    regs.write(RXDCTL, QUEUE_ENABLE | 8 | (8 << 8) | (4 << 16));
-    regs.write(TXDCTL, QUEUE_ENABLE | 8 | (1 << 8) | (1 << 16));
-    if matches!(family, Family::Igb | Family::I210) {
+        // I211 8.9.9/8.11.15: five-bit descriptor thresholds; bit 24 is
+        // RESERVED, not GRAN. No stale SWFLUSH, priority or head-writeback
+        // policy from firmware. RS with WTHRESH=0 writes DD immediately.
+        regs.write(RXDCTL, QUEUE_ENABLE | 8 | (1 << 8) | (1 << 16));
+        regs.write(TXDCTL, QUEUE_ENABLE | 8 | (1 << 8));
         regs.wait(RXDCTL, QUEUE_ENABLE, QUEUE_ENABLE, 100)?;
         regs.wait(TXDCTL, QUEUE_ENABLE, QUEUE_ENABLE, 100)?;
+    } else {
+        // PCH/e1000e have six-bit thresholds and GRAN=1 means descriptors.
+        // Bit 25 is NOT QUEUE_ENABLE: RX reserves it; TX uses LWTHRESH.
+        // Keep Intel's full-descriptor writeback policy (GRAN=1,WTHRESH=1),
+        // required TX bit 22, and identical TXDCTL for both legacy queues.
+        // One descriptor suffices even with all interrupts masked.
+        let thresholds = DESCRIPTOR_GRANULARITY | 8 | (1 << 8) | (1 << 16);
+        regs.write(RXDCTL, thresholds);
+        regs.write(TXDCTL, thresholds | (1 << 22));
+        regs.write(TXDCTL + 0x100, thresholds | (1 << 22));
     }
     regs.write(TIPG, 10 | (8 << 10) | (6 << 20));
+    regs.flush();
+    Ok(())
+}
+
+/// PCI BME must be enabled before queue initialization: master-disable holds
+/// I210/I211 queues in reset. Descriptors must already refer to pinned memory.
+pub fn start_queues(
+    regs: &mut impl Registers,
+    family: Family,
+    rx: u64,
+    tx: u64,
+    bytes: usize,
+    receive_tail: u32,
+    enable_bus_master: impl FnOnce() -> Result<(), RequestError>,
+) -> Result<(), RequestError> {
+    if matches!(family, Family::I219 | Family::E1000e) {
+        // Rings and packet buffers are write-back/coherent memory. Neither
+        // compiler fences nor volatile accesses make no-snoop DMA coherent.
+        // Disable descriptor AND payload no-snoop before enabling mastering.
+        // ICH8 has inverted bits and is deliberately not a supported family.
+        regs.update(GCR, PCIE_NO_SNOOP, 0);
+        regs.flush();
+    }
+    if family == Family::I210 {
+        // I211 8.2.3: GCR low bits are not its per-queue no-snoop controls.
+        // NS_DIS overrides RXCTRL/TXCTRL and PCIe policy for all DMA. This
+        // driver uses ordinary coherent WB buffers, never no-snoop buffers.
+        regs.update(CTRL_EXT, 0, (1 << 16) | (1 << 17));
+        regs.flush();
+    }
+    enable_bus_master()?;
+    configure_queues(regs, family, rx, tx, bytes)?;
+    regs.write(RX_BASE + TAIL, receive_tail);
     regs.flush();
     Ok(())
 }

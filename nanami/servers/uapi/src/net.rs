@@ -12,6 +12,18 @@ pub const NET_DEVICE_CONTROL_GET_MAC: Word = 17;
 pub const NET_DEVICE_CONTROL_ATTACH_RX_NOTIFICATION: Word = 18;
 pub const NET_DEVICE_CONTROL_GET_FEATURES: Word = 19;
 pub const NET_DEVICE_FEATURE_RECV_BATCH: Word = 1;
+/// Optional physical-port inventory. Existing single-port providers need not implement it.
+pub const NET_DEVICE_FEATURE_PORTS: Word = 2;
+/// PORT_COUNT returns (count, active_index). PORT_INFO(index) returns (PCI BDF,
+/// carrier: bit 0). SELECT_PORT(index) returns the selected MAC, packed like GET_MAC.
+/// Selection requires the SHM owner and does not change the shared-memory attachment.
+pub const NET_DEVICE_CONTROL_PORT_COUNT: Word = 20;
+pub const NET_DEVICE_CONTROL_PORT_INFO: Word = 21;
+pub const NET_DEVICE_CONTROL_SELECT_PORT: Word = 22;
+/// Optional, SHM-owner-only failure snapshot. Logs device DMA/register state;
+/// returns (pending TX descriptors, next RX descriptor ready). No reset/retry.
+pub const NET_DEVICE_CONTROL_REPORT_STATUS: Word = 23;
+pub const NET_DEVICE_PORT_CARRIER: Word = 1;
 
 /// RECV_BATCH(offset, slots) writes up to `slots` fixed-stride records and
 /// returns their count. Each record is a little-endian u32 length followed by

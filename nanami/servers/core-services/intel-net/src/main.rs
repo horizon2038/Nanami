@@ -1,13 +1,16 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("intel-net needs a coherent PCI DMA backend");
 
 mod chipset;
+mod ports;
 mod registers;
 mod ring;
 mod service;
 
+use alloc::vec::Vec;
 use core::ptr;
 use nanami_client::{
     pci, registry, timer,
@@ -116,22 +119,28 @@ fn prepare(
     })
 }
 
-fn select(port: Word, timer: Word) -> Result<Candidate, RequestError> {
-    let mut candidates: [Option<Candidate>; 8] = core::array::from_fn(|_| None);
-    let mut count = 0;
+fn discover(port: Word, timer: Word) -> Result<Vec<Candidate>, RequestError> {
+    let mut candidates = Vec::new();
     let mut index = 0;
     while let Some(device) = pci::enumerate(port, index)? {
         index += 1;
         let Some(kind) = family(device.vendor_id, device.device_id, device.class) else {
             continue;
         };
-        if count == candidates.len() {
+        if candidates.len() == 8 {
             break;
         }
         match prepare(port, device, kind, timer) {
             Ok(candidate) => {
-                candidates[count] = Some(candidate);
-                count += 1;
+                nanami_runtime::println!(
+                    "[intel-net] port={} PCI {:06x} {} status={:#x} carrier={}",
+                    candidates.len(),
+                    device.address.packed(),
+                    kind.driver(),
+                    candidate.regs.read(STATUS),
+                    candidate.regs.read(STATUS) & LINK_UP != 0
+                );
+                candidates.push(candidate);
             }
             Err(error) => nanami_runtime::println!(
                 "[intel-net] PCI {:06x} {} initialization failed: {}",
@@ -141,23 +150,10 @@ fn select(port: Word, timer: Word) -> Result<Candidate, RequestError> {
             ),
         }
     }
-    if count == 0 {
+    if candidates.is_empty() {
         return Err(RequestError::Unsupported);
     }
-    // Give every PHY the same bounded opportunity to negotiate. Unselected
-    // devices remain DMA/interrupt-disabled; they never publish net-device.
-    for attempt in 0..=150 {
-        for candidate in &mut candidates[..count] {
-            if candidate.as_ref().unwrap().regs.read(STATUS) & LINK_UP != 0 {
-                return Ok(candidate.take().unwrap());
-            }
-        }
-        if attempt != 150 {
-            timer::timer_service_sleep_milliseconds(timer, 20)?;
-        }
-    }
-    nanami_runtime::println!("[intel-net] no carrier; selecting first supported PCI function");
-    Ok(candidates[0].take().unwrap())
+    Ok(candidates)
 }
 
 fn interrupt_route(port: Word, device: pci::Device) -> Option<Word> {
@@ -177,25 +173,59 @@ fn interrupt_route(port: Word, device: pci::Device) -> Option<Word> {
     (line != 0 && line < 24).then_some(line)
 }
 
-fn serve(
-    mut selected: Candidate,
-    port: Word,
-    physical: Word,
-    memory: Word,
-) -> Result<(), RequestError> {
-    let advanced = matches!(selected.family, Family::Igb | Family::I210);
-    let mut rings = unsafe { ring::Rings::new(memory, physical as u64, advanced) };
-    let regs = &mut selected.regs;
-    chipset::configure_queues(
-        regs,
-        selected.family,
-        physical as u64,
-        (physical + ring::TX_OFFSET) as u64,
-        ring::RING_BYTES,
-    )?;
+fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
+    let single_device = (candidates.len() == 1).then_some(candidates[0].device);
+    let timer_port = candidates[0].regs.timer;
+    let mut ports = Vec::new();
+    for mut selected in candidates {
+        let (physical, memory) = nanami_runtime::request_dma(ring::DMA_BYTES)?;
+        let advanced = matches!(selected.family, Family::Igb | Family::I210);
+        let rings = unsafe { ring::Rings::new(memory, physical as u64, advanced) };
+        // I210/I211 master-disable resets/holds the DMA queues. Leave that
+        // state BEFORE programming/enabling them, while global RX/TX is off.
+        // The new descriptors already reference our pinned DMA allocation.
+        if let Err(error) = chipset::start_queues(
+            &mut selected.regs,
+            selected.family,
+            physical as u64,
+            (physical + ring::TX_OFFSET) as u64,
+            ring::RING_BYTES,
+            (ring::COUNT - 1) as u32,
+            || {
+                let command = pci::read(port, selected.device.address, 4, 2)?;
+                pci::write(port, selected.device.address, 4, 2, command | 6 | (1 << 10))
+            },
+        ) {
+            selected.regs.write(IMC, u32::MAX);
+            selected.regs.write(RCTL, 0);
+            selected.regs.write(TCTL, 0);
+            selected.regs.flush();
+            nanami_runtime::println!(
+                "[intel-net] PCI {:06x} queue setup failed: {}; RXDCTL={:#x} TXDCTL={:#x}; retaining DMA, trying other ports",
+                selected.device.address.packed(), error,
+                selected.regs.read(RXDCTL), selected.regs.read(TXDCTL)
+            );
+            // request_dma mappings have no Rust destructor. Keep these pages
+            // pinned until process destruction; never reuse them for another NIC.
+            continue;
+        }
+        ports.push(ports::Port {
+            regs: selected.regs,
+            rings,
+            physical: physical as u64,
+            mac: selected.mac,
+            bdf: selected.device.address.packed(),
+        });
+    }
+    if ports.is_empty() {
+        return Err(RequestError::Unsupported);
+    }
+    let mut active = ports.iter().position(|port| port.carrier()).unwrap_or(0);
+    // Multi-port mode uses one notification clock, not one timer per port.
+    // Only the selected port has RX/TX enabled; all DMA allocations stay pinned.
     let mut irq = false;
     let mut notification = nanami_runtime::PROCESS_SLOT_NOTIFICATION;
-    if let Some(number) = interrupt_route(port, selected.device) {
+    if let Some(number) = single_device.and_then(|device| interrupt_route(port, device)) {
         match nanami_runtime::request_irq(number, IRQ_NOTIFICATION, IRQ_SLOT) {
             Ok(()) => {
                 nanami_runtime::ipc::bind_current_thread_notification(
@@ -212,18 +242,11 @@ fn serve(
             ),
         }
     }
-    let command = pci::read(port, selected.device.address, 4, 2)?;
-    let command = if irq {
-        command & !(1 << 10)
-    } else {
-        command | (1 << 10)
-    };
-    pci::write(port, selected.device.address, 4, 2, command | 6)?;
-    regs.write(RCTL, RX_CONTROL);
-    regs.write(TCTL, TX_CONTROL);
-    regs.write(RX_BASE + TAIL, (ring::COUNT - 1) as u32);
-    regs.flush();
     if irq {
+        let device = single_device.unwrap();
+        let command = pci::read(port, device.address, 4, 2)?;
+        pci::write(port, device.address, 4, 2, command & !(1 << 10))?;
+        let regs = &mut ports[active].regs;
         let _ = regs.read(ICR);
         regs.write(ITR, 4000); // bounded interrupt rate; ~1 ms on 82574/PCH
         regs.write(IMS, RX_INTERRUPTS);
@@ -232,16 +255,23 @@ fn serve(
     // No busy polling. Unsupported/shared INTx routes use notification-driven
     // 2 ms polling; IRQ mode has only a slow lost-wakeup/link maintenance tick.
     timer::timer_service_interval_on_notification_milliseconds(
-        regs.timer,
+        timer_port,
         if irq { 1000 } else { 2 },
         notification,
     )?;
-    let mut service = service::Service::new(physical as u64, selected.mac);
+    let mut service = service::Service::new(ports[active].physical, ports[active].mac);
+    ports[active].regs.write(RCTL, RX_CONTROL);
+    ports[active].regs.write(TCTL, TX_CONTROL);
+    ports[active].regs.flush();
     registry::register_net_device()?;
-    nanami_runtime::println!("[intel-net] ready {} PCI {:06x} device={:04x} MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} rx={}",
-        selected.family.driver(), selected.device.address.packed(), selected.device.device_id,
-        selected.mac[0], selected.mac[1], selected.mac[2], selected.mac[3], selected.mac[4], selected.mac[5],
-        if irq { "interrupt" } else { "timer" });
+    nanami_runtime::println!(
+        "[intel-net] ready ports={} active={} PCI {:06x} carrier={} rx={}",
+        ports.len(),
+        active,
+        ports[active].bdf,
+        ports[active].carrier(),
+        if irq { "interrupt" } else { "timer" }
+    );
     let service_port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_SLOT);
     let mut reply = None;
     loop {
@@ -253,17 +283,53 @@ fn serve(
         };
         match event {
             ServiceEvent::Request(request) => {
-                reply = Some(service.request(request, regs, &mut rings));
+                use nanami_client::net::*;
+                let inventory = request.code == NET_DEVICE_REQUEST_CONTROL
+                    && matches!(
+                        request.arg0,
+                        NET_DEVICE_CONTROL_GET_FEATURES
+                            | NET_DEVICE_CONTROL_PORT_COUNT
+                            | NET_DEVICE_CONTROL_PORT_INFO
+                            | NET_DEVICE_CONTROL_SELECT_PORT
+                    );
+                if inventory && service.authorized(request.identifier) {
+                    let previous = active;
+                    reply = Some(
+                        match ports::control(
+                            &mut ports,
+                            &mut active,
+                            &mut service,
+                            request.arg0,
+                            request.arg1,
+                        ) {
+                            Ok((a, b)) => (nanami_runtime::OS_RESPONSE_OK, a, b),
+                            Err(_) => (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+                        },
+                    );
+                    if previous != active {
+                        nanami_runtime::println!(
+                            "[intel-net] selected port={} PCI {:06x} carrier={} MAC-Mbps={}",
+                            active,
+                            ports[active].bdf,
+                            ports[active].carrier(),
+                            link_mbps(ports[active].regs.read(STATUS))
+                        );
+                    }
+                } else {
+                    let selected = &mut ports[active];
+                    reply = Some(service.request(request, &mut selected.regs, &mut selected.rings));
+                }
             }
             ServiceEvent::Notification { .. } => {
-                let _ = regs.read(ICR); // clear device level before rearming IO-APIC
-                rings.reclaim_tx();
-                service.notify_rx(&rings);
+                let selected = &mut ports[active];
+                let _ = selected.regs.read(ICR); // clear device level before rearming IO-APIC
+                selected.rings.reclaim_tx();
+                service.notify_rx(&selected.rings);
                 if irq {
                     nanami_runtime::ipc::interrupt_ack(
                         nanami_runtime::ipc::process_slot_descriptor(IRQ_SLOT),
                     )?;
-                    service.notify_rx(&rings); // cover the masked-interrupt window
+                    service.notify_rx(&selected.rings); // cover the masked-interrupt window
                 }
             }
             ServiceEvent::Fault { .. } => {}
@@ -276,10 +342,9 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     registry::connect_boot_service("timer-service", TIMER_SLOT)?;
     let timer = nanami_runtime::ipc::process_slot_descriptor(TIMER_SLOT);
     let port = pci::connect(PCI_SLOT)?;
-    let selected = select(port, timer)?;
-    let (physical, memory) = nanami_runtime::request_dma(ring::DMA_BYTES)?;
-    // From this point onward, errors must retain the pinned DMA allocation.
-    if let Err(error) = serve(selected, port, physical, memory) {
+    let candidates = discover(port, timer)?;
+    // From this point onward, errors must retain all pinned DMA allocations.
+    if let Err(error) = serve(candidates, port) {
         nanami_runtime::println!("[intel-net] stopped: {}; retaining DMA", error);
     }
     retain_dma()

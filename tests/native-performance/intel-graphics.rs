@@ -1,6 +1,7 @@
 //! The production Gen9 register logic and scanout with an in-memory MMIO model.
 //! This checks software sequencing, not electrical/display hardware behavior.
 #![allow(dead_code)]
+extern crate alloc;
 extern crate self as nanami_client;
 extern crate self as nanami_gpu;
 extern crate self as nanami_runtime;
@@ -49,8 +50,12 @@ macro_rules! println { ($($arg:tt)*) => {{ let _ = format_args!($($arg)*); }}; }
 mod gen9;
 #[path = "../../nanami/servers/uapi/src/intel_graphics.rs"]
 mod generations;
+#[path = "../../nanami/servers/core-services/intel-graphics-server/src/handoff.rs"]
+mod handoff;
 #[path = "../../nanami/servers/core-services/intel-graphics-server/src/hardware.rs"]
 mod hardware;
+#[path = "../../nanami/servers/core-services/intel-graphics-server/src/pci_layout.rs"]
+mod pci_layout;
 #[path = "../../nanami/servers/uapi/src/pci.rs"]
 pub mod pci_uapi;
 use gen9::{Rect, Registers};
@@ -89,6 +94,11 @@ struct Model {
     running: bool,
     latch: bool,
     timer_error: bool,
+    gt_handshake: bool,
+    resets: Vec<u32>,
+    stuck_reset: u32,
+    stuck_ready: bool,
+    fail_engine_dma: bool,
 }
 impl Default for Model {
     fn default() -> Self {
@@ -109,6 +119,11 @@ impl Default for Model {
             running: true,
             latch: true,
             timer_error: false,
+            gt_handshake: false,
+            resets: Vec::new(),
+            stuck_reset: 0,
+            stuck_ready: false,
+            fail_engine_dma: false,
         }
     }
 }
@@ -140,6 +155,9 @@ pub fn request_mmio(physical: Word, bytes: Word) -> Result<(Word, Word), Request
 pub fn request_dma(bytes: Word) -> Result<(Word, Word), RequestError> {
     MODEL.with(|model| {
         let mut model = model.borrow_mut();
+        if !model.dma.is_empty() && model.fail_engine_dma {
+            return Err(RequestError::Transport);
+        }
         assert!(model.dma.is_empty());
         model.dma = vec![0; bytes];
         Ok((DMA_BASE, model.dma.as_mut_ptr() as Word))
@@ -172,24 +190,15 @@ pub mod pci {
     pub fn write(
         _: usize,
         _: Address,
-        _: usize,
-        _: usize,
-        _: u32,
+        offset: usize,
+        width: usize,
+        value: u32,
     ) -> Result<(), crate::RequestError> {
-        panic!("unexpected PCI command write");
+        assert_eq!((offset, width, value), (4, 2, 6));
+        Ok(())
     }
-    pub fn probe_bar(_: usize, _: Address, index: usize) -> Result<Bar, crate::RequestError> {
-        let physical = match index {
-            0 => super::MMIO_BASE,
-            2 => super::APERTURE_BASE,
-            _ => return Err(crate::RequestError::InvalidArgument),
-        };
-        Ok(Bar {
-            physical,
-            bytes: 16 * 1024 * 1024,
-            io: false,
-            prefetchable: index == 2,
-        })
+    pub fn probe_bar(_: usize, _: Address, _: usize) -> Result<Bar, crate::RequestError> {
+        panic!("must not size BARs on an active firmware GPU");
     }
     pub fn read(
         _: usize,
@@ -197,8 +206,16 @@ pub mod pci {
         offset: usize,
         width: usize,
     ) -> Result<u32, crate::RequestError> {
-        assert_eq!((offset, width), (0x50, 2));
-        Ok(1 << 6)
+        match (offset, width) {
+            (4, 2) => Ok(6),
+            (0x10, 4) => Ok(super::MMIO_BASE as u32 | 4),
+            (0x14 | 0x1c, 4) => Ok(0),
+            (0x18, 4) => Ok(super::APERTURE_BASE as u32 | 12),
+            (0x50, 2) => super::MODEL
+                .with(|model| Ok((model.borrow().table.len() * 8 / (1024 * 1024)).ilog2() << 6)),
+            (0x62, 1) => Ok(0), // 128 MiB, no destructive sizing writes.
+            _ => panic!("unexpected PCI register {offset:#x}/{width}"),
+        }
     }
 }
 pub mod timer {
@@ -211,6 +228,25 @@ pub mod timer {
             model.sleeps.push(milliseconds);
             if model.timer_error {
                 return Err(crate::RequestError::Transport);
+            }
+            if model.gt_handshake {
+                for (request, ack) in [(0xa188, 0x130044), (0xa278, 0xd84), (0xa270, 0xd88)] {
+                    model.mmio[ack / 4] = model.mmio[request / 4] & 3;
+                }
+                let reset = model.mmio[0x941c / 4];
+                if reset != 0 && reset != model.stuck_reset {
+                    model.resets.push(reset);
+                    model.mmio[0x941c / 4] = 0;
+                }
+                for base in [0x2000, 0x22000, 0x12000, 0x1a000] {
+                    if model.mmio[(base + 0xd0) / 4] & 1 != 0 && !model.stuck_ready {
+                        model.mmio[(base + 0xd0) / 4] |= 2;
+                    }
+                    if reset & 1 != 0 {
+                        model.mmio[(base + 0x3c) / 4] = 0;
+                        model.mmio[(base + 0x9c) / 4] = 1 << 9;
+                    }
+                }
             }
             if model.running {
                 model.mmio[super::FRAME / 4] += 1;
@@ -342,29 +378,164 @@ fn timer_failure_poisoning_also_retains_dma() {
 }
 
 #[test]
-fn filled_ggtt_and_stopped_pipe_fail_before_dma_allocation() {
-    for filled in [false, true] {
+fn stopped_pipe_fails_before_dma_allocation() {
+    reset();
+    MODEL.with(|model| model.borrow_mut().running = false);
+    assert!(matches!(
+        hardware::Scanout::new(16, device(), 24),
+        Err(RequestError::Unsupported)
+    ));
+    MODEL.with(|model| assert!(model.borrow().dma.is_empty()));
+}
+
+#[test]
+fn filled_ggtt_takeover_requires_ack_and_preserves_pte_contents_on_timeout() {
+    reset();
+    MODEL.with(|model| model.borrow_mut().table.fill(0x700001));
+    assert!(matches!(
+        hardware::Scanout::new(16, device(), 24),
+        Err(RequestError::Unsupported)
+    ));
+    MODEL.with(|model| {
+        let model = model.borrow();
+        assert!(model.table.iter().all(|pte| *pte == 0x700001));
+        assert_eq!(model.mmio[SURFACE / 4], 0);
+        assert_eq!(model.mmio[0xa188 / 4], 1 << 16); // our forcewake released
+        assert!(model.resets.is_empty());
+        assert!(model.sleeps.len() < 60);
+    });
+}
+
+#[test]
+fn physical_8mib_filled_ggtt_is_claimed_only_after_gt_reset_and_can_be_restored() {
+    reset();
+    MODEL.with(|model| {
+        let mut model = model.borrow_mut();
+        model.table = vec![0x700001; 8 * 1024 * 1024 / 8];
+        model.gt_handshake = true;
+    });
+    let mut display = scanout();
+    const ARENA: usize = 0xf6000000 / 4096;
+    MODEL.with(|model| {
+        let model = model.borrow();
+        assert_eq!(model.resets, [32, 32, 1, 1]);
+        assert!(model.table[..ARENA].iter().all(|pte| *pte == 0x700001));
+        assert_eq!(model.table[ARENA], DMA_BASE as u64 | 1);
+        assert_eq!(model.table[ARENA + 1], (DMA_BASE + FRAME_BYTES) as u64 | 1);
+        assert_eq!(model.table[ARENA + 2], 0);
+        assert_eq!(*model.table.last().unwrap(), 0x700001); // top firmware hole
+        assert_eq!(model.mmio[SURFACE / 4], 0); // no display programming by reset
+    });
+    display.detach_before_flip();
+    MODEL.with(|model| assert!(model.borrow().table.iter().all(|pte| *pte == 0x700001)));
+}
+
+#[test]
+fn vacant_ggtt_also_acquires_gt_ownership_before_initializing_default_all_wb_pat() {
+    reset();
+    MODEL.with(|model| {
+        let mut model = model.borrow_mut();
+        model.gt_handshake = true;
+        model.fail_engine_dma = true; // stop after PAT setup, before engine allocation
+                                      // Match the physical trace: 8 MiB GGTT table, first vacant PTE at
+                                      // GPU address 32 MiB, and the documented all-WB PAT default.
+        model.table = vec![0; 8 * 1024 * 1024 / 8];
+        model.table[..32 * 1024 * 1024 / 4096].fill(0x700001);
+        model.mmio[0x40e0 / 4] = 0x03030303;
+        model.mmio[0x40e4 / 4] = 0x03030303;
+    });
+    let mut display = scanout();
+    MODEL.with(|model| {
+        assert_eq!(
+            model.borrow().table[32 * 1024 * 1024 / 4096],
+            DMA_BASE as u64 | 1
+        )
+    });
+    let table = MODEL.with(|model| model.borrow().table.clone());
+    display.initialize_acceleration(16, device());
+    MODEL.with(|model| {
+        let model = model.borrow();
+        assert_eq!(model.resets, [32, 32, 1, 1, 8, 8]);
+        assert_eq!(model.mmio[0x40e0 / 4], 0x03030303);
+        assert_eq!(model.mmio[0x40e4 / 4], 0x00030303);
+        assert_eq!(model.table, table); // no filled-table arena reclamation
+        assert_eq!(model.mmio[SURFACE / 4], 0);
+        assert_eq!(model.mmio[0x22230 / 4], 0); // no context submitted on DMA failure
+    });
+    assert_eq!(display.accelerated(), 0);
+    let shared = vec![0x44; display.mode.bytes];
+    display
+        .present(shared.as_ptr() as Word, rect(0, 0))
+        .unwrap();
+}
+
+#[test]
+fn vacant_ggtt_does_not_change_pat_when_gt_ownership_cannot_be_acquired() {
+    reset();
+    MODEL.with(|model| {
+        let mut model = model.borrow_mut();
+        model.mmio[0x40e0 / 4] = 0x03030303;
+        model.mmio[0x40e4 / 4] = 0x03030303;
+    });
+    let mut display = scanout();
+    display.initialize_acceleration(16, device());
+    MODEL.with(|model| {
+        let model = model.borrow();
+        assert!(model.resets.is_empty());
+        assert_eq!(model.mmio[0x40e4 / 4], 0x03030303);
+    });
+    assert_eq!(display.accelerated(), 0);
+}
+
+#[test]
+fn busy_firmware_command_engine_is_not_reset_and_no_pte_is_changed() {
+    reset();
+    MODEL.with(|model| {
+        let mut model = model.borrow_mut();
+        model.table.fill(0x700001);
+        model.gt_handshake = true;
+        model.mmio[0x203c / 4] = 1;
+        model.mmio[0x2030 / 4] = 8;
+    });
+    assert!(hardware::Scanout::new(16, device(), 24).is_err());
+    MODEL.with(|model| {
+        let model = model.borrow();
+        assert!(model.resets.is_empty());
+        assert!(model.table.iter().all(|pte| *pte == 0x700001));
+    });
+}
+
+#[test]
+fn takeover_never_claims_ptes_after_reset_or_ready_handshake_failure() {
+    for ready in [false, true] {
         reset();
         MODEL.with(|model| {
             let mut model = model.borrow_mut();
-            if filled {
-                model.table.fill(0x700001);
-            } else {
-                model.running = false;
+            model.table.fill(0x700001);
+            model.gt_handshake = true;
+            model.stuck_ready = ready;
+            if !ready {
+                model.stuck_reset = 1;
             }
         });
-        assert!(matches!(
-            hardware::Scanout::new(16, device(), 24),
-            Err(RequestError::Unsupported)
-        ));
-        MODEL.with(|model| assert!(model.borrow().dma.is_empty()));
+        assert!(hardware::Scanout::new(16, device(), 24).is_err());
+        MODEL.with(|model| {
+            let model = model.borrow();
+            assert!(model.table.iter().all(|pte| *pte == 0x700001));
+            assert_eq!(model.resets, [32, 32]);
+            for base in [0x2000, 0x22000, 0x12000, 0x1a000] {
+                assert_eq!(model.mmio[(base + 0xd0) / 4], 1 << 16);
+            }
+            assert_eq!(model.mmio[SURFACE / 4], 0);
+            assert!(model.sleeps.len() < 110);
+        });
     }
 }
 
 #[test]
 fn scanout_can_use_empty_ggtt_entries_above_the_cpu_aperture() {
     reset();
-    const APERTURE_PAGES: usize = 16 * 1024 * 1024 / 4096;
+    const APERTURE_PAGES: usize = 128 * 1024 * 1024 / 4096;
     MODEL.with(|model| model.borrow_mut().table[..APERTURE_PAGES].fill(0x700001));
     let mut display = scanout();
     let shared = vec![0x44u8; display.mode.bytes];
@@ -384,6 +555,49 @@ struct FakeRegisters {
     registers: std::collections::BTreeMap<Word, u32>,
     table: Vec<u64>,
     corrupt: Option<Word>,
+}
+
+#[test]
+fn inherited_pci_layout_uses_msac_and_reads_64bit_bars_without_writes() {
+    for code in [0, 1, 3, 7, 15, 31] {
+        let layout = pci_layout::read(|offset, width| match (offset, width) {
+            (4, 2) => Ok(6),
+            (0x10, 4) => Ok(0x8000_0004),
+            (0x14, 4) => Ok(0),
+            (0x18, 4) => Ok(12),
+            (0x1c, 4) => Ok(1),           // Aperture above 4 GiB.
+            (0x62, 1) => Ok(code | 0xe0), // Ignore scratch bits.
+            _ => panic!("unexpected config access"),
+        })
+        .unwrap();
+        assert_eq!(layout.registers, 0x8000_0000);
+        assert_eq!(layout.aperture, 1usize << 32);
+        assert_eq!(
+            layout.aperture_bytes,
+            (code as usize + 1) * 128 * 1024 * 1024
+        );
+    }
+}
+
+#[test]
+fn inherited_pci_layout_rejects_disabled_decode_illegal_sizes_and_unassigned_bars() {
+    for (command, size, base) in [
+        (0, 1, 0x9000_000c),
+        (6, 2, 0x9000_000c),
+        (6, 1, 12),
+        (6, 3, 0x9000_000c),
+        (6, 1, 0x9000_0001),
+    ] {
+        assert!(pci_layout::read(|offset, width| match (offset, width) {
+            (4, 2) => Ok(command),
+            (0x10, 4) => Ok(0x8000_0004),
+            (0x14 | 0x1c, 4) => Ok(0),
+            (0x18, 4) => Ok(base),
+            (0x62, 1) => Ok(size),
+            _ => panic!("unexpected config access"),
+        })
+        .is_err());
+    }
 }
 impl Registers for FakeRegisters {
     fn read(&self, offset: Word) -> u32 {
@@ -473,6 +687,33 @@ fn ggtt_never_overwrites_present_entries_and_rolls_back_failed_readback() {
         gen9::bind(&mut registers, 4, DMA_BASE, usize::MAX),
         Err(RequestError::Unsupported)
     );
+}
+
+#[test]
+fn ggtt_nonzero_invalid_entries_are_not_mistaken_for_live_mappings() {
+    let mut regs = registers();
+    regs.table.fill(0xabc000); // Present=0, stale physical-address bits.
+    regs.table[2] = 0x123001;
+    assert_eq!(gen9::free_span(&regs, 16, 4), Ok(3));
+    gen9::bind(&mut regs, 3, DMA_BASE, 4).unwrap();
+    assert_eq!(regs.table[2], 0x123001);
+    assert_eq!(regs.table[3], DMA_BASE as u64 | 1);
+}
+
+#[test]
+fn takeover_arena_skips_aperture_active_cursors_and_top_firmware_reservation() {
+    let mut regs = registers();
+    let pages = (1usize << 32) / 4096;
+    let aperture = 128 * 1024 * 1024;
+    let original = handoff::arena(&regs, pages, aperture).unwrap();
+    regs.registers.insert(0x71080, 0x27); // enabled cursor on pipe B
+    regs.registers
+        .insert(0x71084, (original.start * 4096) as u32);
+    let arena = handoff::arena(&regs, pages, aperture).unwrap();
+    assert_eq!(arena.end, original.start);
+    assert!(arena.start * 4096 >= aperture);
+    assert!(arena.end < pages - 32 * 1024 * 1024 / 4096);
+    assert!(handoff::arena(&regs, pages, 1usize << 32).is_err());
 }
 
 #[test]

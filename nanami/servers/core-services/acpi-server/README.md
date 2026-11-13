@@ -18,9 +18,38 @@ scan AML bytes for a hard-coded sleep value. MMIO mappings are cached for the
 server lifetime, including tables spanning multiple initial physical-memory
 generics. The interpreter's hardware accesses remain in userspace.
 
+The UEFI loader retains ACPI reclaim/NVS, boot-service images/data and Runtime
+Services Data and firmware Reserved ranges as non-allocator memory with user-space mapping authority. AML
+SystemMemory OperationRegions can reference firmware data buffers, not just
+ACPI table allocations. These contents are never zeroed or recycled as normal
+RAM. Boot-service code (no longer callable after ExitBootServices) is retained
+as data alongside interleaved boot allocations; it is not executed or reclaimed.
+Kernel/init/trampoline allocations are tracked explicitly at every successful
+loader allocation and subtracted before exporting capabilities. Firmware can
+coalesce their EFI Reserved descriptors with adjacent firmware reservations;
+the EFI type alone cannot distinguish ownership. Unusable/PAL and runtime
+firmware code remain inaccessible. No kernel memory-attribute or allocator
+exception is added, and no physical failure address is hard-coded. This change
+needs the rebuilt loader, not merely a new rootfs.
+Reserved entries are omitted only after gap construction and without joining
+across their holes. The exported map is checked against the existing 128-Generic
+ABI budget, including the kernel's descriptor splitting cost.
+
 The pinned crate includes a [local AML reference-handling patch](../../vendor/acpi/NANAMI.md)
 for integer arguments/locals used by firmware methods. The host tests use the
 same patched dependency; failures still abort shutdown rather than being ignored.
+`Store`/`Acquire` expression results are preserved, including mutex timeout as
+a nonzero result. Invalid comparisons report the failing AML scope and byte
+offset; an uninitialized local is not silently converted to zero. A new firmware
+failure still needs its method/table evidence before changing evaluation rules.
+
+The subsequent physical shutdown reached AML `Mid(String)`, confirming that the
+previously denied firmware data page was now accessible. `Mid` now resolves
+transparent Local/Arg sources and clamps string/buffer slices without overflow.
+Full string/buffer comparisons use unsigned lexicographic order and lengths,
+not four-byte integer truncation. Tests execute real AML methods through the
+same power path, including `_PTS` using a `Mid` result before PM1 S5 writes.
+No firmware method is skipped and no failed transition is reported as success.
 
 Process-local capability slots are assigned in `src/slots.rs`. PCI remains in
 slot 23 throughout AML evaluation; shutdown connects VFS in the distinct slot

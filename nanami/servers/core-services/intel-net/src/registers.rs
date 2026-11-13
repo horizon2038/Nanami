@@ -28,6 +28,9 @@ pub const MTA: usize = 0x5200;
 pub const VFTA: usize = 0x5600;
 pub const RXCSUM: usize = 0x5000;
 pub const RFCTL: usize = 0x5008;
+pub const GCR: usize = 0x5b00;
+pub const TARC0: usize = 0x3840;
+pub const TARC1: usize = 0x3940;
 pub const WUC: usize = 0x5800;
 pub const FEXTNVM11: usize = 0x5bbc;
 pub const RX_SIZE: usize = 0x2404;
@@ -36,12 +39,17 @@ pub const GPIE: usize = 0x1514;
 pub const EIMC: usize = 0x1528;
 pub const RLPML: usize = 0x5004;
 pub const CTRL_RESET: u32 = 1 << 26;
+pub const CTRL_MASTER_DISABLE: u32 = 1 << 2;
 pub const CTRL_PHY_RESET: u32 = 1 << 31;
 pub const CTRL_LINK_UP: u32 = 1 << 6;
+pub const CTRL_AUTO_SPEED: u32 = 1 << 5;
+pub const SPEED_BYPASS: u32 = 1 << 15;
 pub const CTRL_FORCE: u32 = (1 << 3) | (1 << 11) | (1 << 12);
 pub const LINK_UP: u32 = 1 << 1;
 pub const ENABLE: u32 = 1 << 1;
 pub const QUEUE_ENABLE: u32 = 1 << 25;
+pub const DESCRIPTOR_GRANULARITY: u32 = 1 << 24;
+pub const PCIE_NO_SNOOP: u32 = 0x3f;
 pub const DRIVER_LOADED: u32 = 1 << 28;
 pub const RX_CONTROL: u32 = ENABLE | (1 << 15) | (1 << 26); // broadcast, strip CRC, 2 KiB
 pub const TX_CONTROL: u32 = ENABLE | (1 << 3) | (15 << 4) | (64 << 12);
@@ -49,6 +57,17 @@ pub const RX_INTERRUPTS: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7);
 pub const DONE: u8 = 1;
 pub const END_PACKET: u8 = 2;
 pub const TX_COMMAND: u8 = 1 | 2 | 8; // EOP, IFCS, RS; legacy (DEXT=0)
+
+pub fn link_mbps(status: u32) -> usize {
+    if status & LINK_UP == 0 {
+        return 0;
+    }
+    match (status >> 6) & 3 {
+        0 => 10,
+        1 => 100,
+        _ => 1000,
+    }
+}
 
 pub trait Registers {
     fn read(&self, offset: usize) -> u32;

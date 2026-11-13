@@ -88,6 +88,10 @@ impl<H: Handler> Power<H> {
         self.sleep_types
     }
 
+    pub fn last_error_location(&self) -> Option<(AmlName, usize)> {
+        self.interpreter.last_error_location()
+    }
+
     pub fn prepare(&self) -> Result<(), AcpiError> {
         // Do not enter ACPI mode at boot: this service does not yet own thermal
         // management or SCI events. Switch only during an explicit shutdown.

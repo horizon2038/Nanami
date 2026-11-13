@@ -15,6 +15,19 @@ pub struct Service {
 }
 
 impl Service {
+    pub fn authorized(&self, caller: Word) -> bool {
+        caller != 0 && self.owner == caller
+    }
+
+    pub fn select(&mut self, physical: u64, mac: [u8; 6]) {
+        self.physical = physical;
+        self.mac = mac;
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn new(physical: u64, mac: [u8; 6]) -> Self {
         Self {
             physical,
@@ -108,6 +121,12 @@ impl Service {
                 Ok((count, 0))
             }
             NET_DEVICE_REQUEST_CONTROL => match request.arg0 {
+                NET_DEVICE_CONTROL_REPORT_STATUS => {
+                    if self.owner == 0 {
+                        return Err(RequestError::InvalidArgument);
+                    }
+                    Ok(rings.report_status(regs))
+                }
                 NET_DEVICE_CONTROL_GET_FEATURES => Ok((NET_DEVICE_FEATURE_RECV_BATCH, 0)),
                 NET_DEVICE_CONTROL_GET_MAC => {
                     let mut value = 0;

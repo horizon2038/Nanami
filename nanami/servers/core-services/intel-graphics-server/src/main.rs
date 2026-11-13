@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!("Intel Gen9 graphics requires the x86_64/pc99 backend");
 mod blt;
@@ -10,7 +11,9 @@ mod ddc;
 mod edid;
 mod gen9;
 mod gpu;
+mod handoff;
 mod hardware;
+mod pci_layout;
 mod vbt;
 use hardware::Scanout;
 use nanami_client::{device, gfx, pci};
@@ -45,7 +48,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     retain_scanout()
 }
 
-fn initialize(port: Word) -> Result<Scanout, RequestError> {
+fn initialize(port: Word) -> Result<(Scanout, pci::Device), RequestError> {
     let platform = nanami_runtime::request_nanami_info_platform()?;
     if platform.architecture_name() != "x86_64" || platform.platform_name() != "pc99" {
         return Err(RequestError::Unsupported);
@@ -67,8 +70,7 @@ fn initialize(port: Word) -> Result<Scanout, RequestError> {
             );
             let mut scanout = Scanout::new(port, device, timer)?;
             scanout.inspect_output(port, device);
-            scanout.initialize_acceleration(port, device);
-            return Ok(scanout);
+            return Ok((scanout, device));
         }
         index += 1;
     }
@@ -197,7 +199,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::connect_service_by_name(device::DEVICE_MANAGER_SERVICE, MANAGER_SLOT)?;
     let manager = nanami_runtime::ipc::process_slot_descriptor(MANAGER_SLOT);
     let result = pci::connect(PCI_SLOT).and_then(initialize);
-    let mut display = match result {
+    let (mut display, device) = match result {
         Ok(display) => display,
         Err(error) => {
             nanami_runtime::println!("[intel-graphics] native initialization unavailable: {}; requesting framebuffer fallback", error);
@@ -210,6 +212,13 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         device::report_display_probe(manager, false)?;
         return Err(error.into());
     }
+    // No command-engine submission before publication: a failed registration
+    // can still restore firmware GGTT PTEs without racing a live BCS context.
+    // Once published, every subsequent failure retains the process/resources.
+    display.initialize_acceleration(
+        nanami_runtime::ipc::process_slot_descriptor(PCI_SLOT),
+        device,
+    );
     if let Err(error) = device::report_display_probe(manager, true) {
         // The service is already published and callers may hold its port.
         // Keep serving instead of exiting and leaving them blocked. A failed

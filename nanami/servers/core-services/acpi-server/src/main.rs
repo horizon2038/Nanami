@@ -196,6 +196,11 @@ impl State {
             nanami_runtime::println!("[acpi-server] entering S5");
             power.enter_s5()
         });
+        if result.is_err() {
+            if let Some((method, offset)) = power.last_error_location() {
+                nanami_runtime::println!("[acpi-server] AML failure scope={} offset={:#x}", method, offset);
+            }
+        }
         if let Err(error) = power.restore_mode() {
             nanami_runtime::println!(
                 "[acpi-server] restoring firmware power mode failed: {:?}",

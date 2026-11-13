@@ -2,7 +2,7 @@
 use fontdue::{Font, FontSettings};
 use nanami_runtime::Word;
 
-use super::{COLS, FONT_W};
+use super::FONT_W;
 
 // MIT License
 // Copyright (c) 2018 Source Foundry Authors
@@ -180,12 +180,12 @@ impl TextRenderer {
         fb_width: usize,
         fb_height: usize,
         y: usize,
-        text: &[u8; COLS],
-        colors: &[u32; COLS],
+        text: &[u8],
+        colors: &[u32],
     ) {
         let mut x = 0usize;
         let mut i = 0usize;
-        while i < COLS.min(fb_width / FONT_W) {
+        while i < text.len().min(colors.len()).min(fb_width / FONT_W) {
             let ch = text[i];
             if ch != 0 {
                 if self.use_fontdue {

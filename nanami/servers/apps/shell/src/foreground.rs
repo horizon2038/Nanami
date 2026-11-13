@@ -72,7 +72,7 @@ impl ForegroundApp {
             terminal_id: 0,
             lifecycle_port: 0,
             active_pid: 0,
-            terminal: Terminal::new(crate::COLS, crate::ROWS),
+            terminal: Terminal::new(crate::DEFAULT_COLUMNS, crate::ROWS),
             pending: [0; TERMINAL_READ_BYTES],
             pending_pos: 0,
             pending_len: 0,

@@ -32,6 +32,7 @@ parser.add_argument('--framebuffer-smoke', action='store_true', help='Run fb-siz
 parser.add_argument('--desktop-info-smoke', action='store_true', help='Capture the desktop system-info panel after boot, then exit')
 parser.add_argument('--pipeline-smoke', action='store_true', help='Require a PIPELINE_TRACE image; verify a key traverses all input stages without any mouse event')
 parser.add_argument('--terminal-smoke', action='store_true', help='Exercise native history/editing, BusyBox vi and window resize (requires busybox)')
+parser.add_argument('--shell-width-smoke', action='store_true', help='Verify completed native command output uses the resized Shell width')
 parser.add_argument('--gui-resize-smoke', action='store_true', help='Shrink/grow and close every native GUI client')
 parser.add_argument('--framebuffer-case', choices=('all', 'default', 'clamped', 'stress'), default='all', help='Isolate a framebuffer case; clamped checks mapping/remapping only, stress repeats 128 mappings')
 parser.add_argument('--doom-save', action='store_true', help='Save/load a Doom game and record USB write/flush counts (requires --doom-first)')
@@ -73,8 +74,8 @@ if args.bash_input_stress < 0 or (args.bash_input_stress and not (args.bash_smok
     parser.error('--bash-input-stress requires a positive count, --bash-smoke and --usb-storage')
 if args.drag_stress and args.mouse_stress <= 0:
     parser.error('--drag-stress requires --mouse-stress')
-if args.no_network and not args.bash_smoke:
-    parser.error('--no-network requires --bash-smoke; the default test launches HTTP')
+if args.no_network and not (args.bash_smoke or args.shell_width_smoke):
+    parser.error('--no-network requires --bash-smoke or --shell-width-smoke; the default test launches HTTP')
 if args.bash_smoke and (args.unplug_root or args.duplicate_root):
     parser.error('--bash-smoke requires a stable, unique root disk')
 if args.usb_storage and args.virtio_storage:
@@ -206,7 +207,9 @@ with (logs / 'qemu.log').open('w') as diagnostics:
             print('PASS: ambiguous root disks were rejected before block-device publication', flush=True)
             raise SystemExit(0)
         wait_for(lambda s: 'usb-server] online controllers=' in s
-                 and s.count('boot-hid=1') >= 2 and 'font init end' in s and '[              honoka] online' in s)
+                 and s.count('boot-hid=1') >= 2
+                 and (args.shell_width_smoke or 'font init end' in s)
+                 and '[              honoka] online' in s)
         if args.usb_storage:
             log = serial.read_text(errors='replace')
             assert 'usb-server] service registered: block-device' in log
@@ -282,6 +285,11 @@ with (logs / 'qemu.log').open('w') as diagnostics:
         if args.terminal_smoke:
             from terminal_resize import exercise as exercise_terminal
             exercise_terminal(qmp, wait_for, serial, logs)
+            raise SystemExit(0)
+
+        if args.shell_width_smoke:
+            from shell_width import exercise as exercise_shell_width
+            exercise_shell_width(qmp, serial, logs)
             raise SystemExit(0)
 
         if args.gui_resize_smoke:

@@ -265,6 +265,10 @@ name = "shell-render"
 path = "shell-render.rs"
 
 [[test]]
+name = "shell-width"
+path = "shell-width.rs"
+
+[[test]]
 name = "image-loader"
 path = "image-loader.rs"
 

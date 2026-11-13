@@ -8,6 +8,7 @@ impl Shell {
         {
             Ok(true) => {
                 self.foreground.resize(self.cols(), self.rows());
+                self.files.resize(self.cols());
                 self.scroll_to_bottom();
                 if !self.foreground.is_active() {
                     self.refresh_prompt_line();

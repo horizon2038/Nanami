@@ -8,6 +8,7 @@ pub use std::println;
 use std::{cell::RefCell, collections::VecDeque};
 pub type Word = usize;
 const COLS: usize = 89;
+const DEFAULT_COLUMNS: usize = COLS;
 const ROWS: usize = 33;
 pub const PROCESS_SLOT_NOTIFICATION: Word = 21;
 
@@ -37,6 +38,7 @@ struct Backend {
     writes: Vec<Vec<u8>>,
     max_read: usize,
     read_result: Option<Result<usize, RequestError>>,
+    sizes: Vec<(usize, usize)>,
 }
 impl Default for Backend {
     fn default() -> Self {
@@ -47,6 +49,7 @@ impl Default for Backend {
             writes: Vec::new(),
             max_read: usize::MAX,
             read_result: None,
+            sizes: Vec::new(),
         }
     }
 }
@@ -83,7 +86,8 @@ pub mod terminal {
             Ok((backend.shm.as_mut_ptr() as Word, backend.shm.len()))
         })
     }
-    pub fn terminal_create(_: Word, _: Word, _: Word) -> Result<Word, RequestError> {
+    pub fn terminal_create(_: Word, columns: Word, rows: Word) -> Result<Word, RequestError> {
+        BACKEND.with(|backend| backend.borrow_mut().sizes.push((columns, rows)));
         Ok(1)
     }
     pub fn terminal_attach_output_notification(
@@ -139,7 +143,13 @@ pub mod terminal {
     pub fn terminal_set_output_crlf(_: Word, _: Word, _: bool) -> Result<(), RequestError> {
         Ok(())
     }
-    pub fn terminal_set_size(_: Word, _: Word, _: Word, _: Word) -> Result<(), RequestError> {
+    pub fn terminal_set_size(
+        _: Word,
+        _: Word,
+        columns: Word,
+        rows: Word,
+    ) -> Result<(), RequestError> {
+        BACKEND.with(|backend| backend.borrow_mut().sizes.push((columns, rows)));
         Ok(())
     }
 }
@@ -300,4 +310,20 @@ fn session_cleanup_also_drains_in_full_sized_chunks() {
         assert_eq!(backend.reads, [4096, 4096, 4096]);
         assert!(backend.output.is_empty());
     });
+}
+
+#[test]
+fn widened_terminal_updates_service_and_keeps_output_beyond_initial_columns() {
+    let bytes = vec![b'W'; 110];
+    let mut app = app(&bytes);
+    app.resize(120, ROWS);
+    assert!(app.drain_output().is_some());
+    assert_eq!(app.terminal.cols(), 120);
+    assert_eq!(app.terminal.cursor(), (110, 0));
+    assert!(app.terminal.row(0)[..110]
+        .iter()
+        .all(|cell| cell.byte == b'W'));
+    app.prepare_start();
+    assert_eq!(app.terminal.cols(), 120);
+    BACKEND.with(|backend| assert_eq!(backend.borrow().sizes, [(89, ROWS), (120, ROWS)]));
 }

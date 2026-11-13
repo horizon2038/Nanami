@@ -7,6 +7,8 @@ pub use screen::Cell;
 use screen::Screen;
 use style::Style;
 
+pub const MAX_COLUMNS: usize = 512;
+
 #[derive(Clone, Copy)]
 enum State {
     Ground,
@@ -40,7 +42,7 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(cols: usize, rows: usize) -> Self {
         Self {
-            screen: Screen::new(cols.clamp(1, 512), rows.clamp(1, 256)),
+            screen: Screen::new(cols.clamp(1, MAX_COLUMNS), rows.clamp(1, 256)),
             alternate: None,
             style: Style::DEFAULT,
             saved_style: Style::DEFAULT,
@@ -115,7 +117,7 @@ impl Terminal {
     }
     pub fn resize(&mut self, cols: usize, rows: usize) {
         self.view_offset = 0;
-        let (cols, rows) = (cols.clamp(1, 512), rows.clamp(1, 256));
+        let (cols, rows) = (cols.clamp(1, MAX_COLUMNS), rows.clamp(1, 256));
         self.screen.resize(cols, rows);
         if let Some((screen, _)) = &mut self.alternate {
             screen.resize(cols, rows);

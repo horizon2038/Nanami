@@ -21,6 +21,7 @@ pub struct FileShell {
     vfs_port: Word,
     shm: Word,
     shm_size: Word,
+    columns: usize,
 }
 
 pub struct CommandOutput {
@@ -70,7 +71,12 @@ impl FileShell {
             vfs_port: 0,
             shm: 0,
             shm_size: 0,
+            columns: crate::DEFAULT_COLUMNS,
         }
+    }
+
+    pub fn resize(&mut self, columns: usize) {
+        self.columns = columns.clamp(1, COLS);
     }
 
     pub fn cwd_line(&self) -> [u8; COLS] {
@@ -291,6 +297,7 @@ impl FileShell {
                 bytes as usize,
                 &mut line,
                 &mut line_len,
+                self.columns,
             );
             if consumed != bytes as usize {
                 truncated = true;
@@ -495,6 +502,7 @@ fn push_text_chunk(
     len: usize,
     line: &mut [u8; COLS],
     line_len: &mut usize,
+    columns: usize,
 ) -> usize {
     let mut i = 0usize;
     while i < len {
@@ -507,7 +515,7 @@ fn push_text_chunk(
             *line = [0u8; COLS];
             *line_len = 0;
         } else {
-            if *line_len >= COLS {
+            if *line_len >= columns {
                 if out.len() + 1 >= MAX_OUTPUT_LINES {
                     break;
                 }

@@ -34,7 +34,9 @@ const WINDOW_Y: Word = 78;
 const WINDOW_OPACITY: u8 = 224;
 const CONTENT_WIDTH: usize = 712;
 const CONTENT_HEIGHT: usize = 396;
-const COLS: usize = CONTENT_WIDTH / FONT_W;
+const DEFAULT_COLUMNS: usize = CONTENT_WIDTH / FONT_W;
+// Capacity follows the VT screen's supported maximum, not the initial window.
+const COLS: usize = terminal::MAX_COLUMNS;
 const ROWS: usize = CONTENT_HEIGHT / FONT_H;
 const FONT_W: usize = 8;
 const FONT_H: usize = 12;
@@ -103,6 +105,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
 
     let mut shell = Shell::new(honoka_port, window_id, surface, present_notification, text);
     shell.foreground.resize(shell.cols(), shell.rows());
+    shell.files.resize(shell.cols());
     shell.boot();
     shell.repaint_all();
     shell.present_full();
@@ -1490,7 +1493,7 @@ impl Shell {
     }
 
     fn cols(&self) -> usize {
-        (self.surface.width / FONT_W).max(1)
+        (self.surface.width / FONT_W).clamp(1, terminal::MAX_COLUMNS)
     }
     fn rows(&self) -> usize {
         (self.surface.height / FONT_H).max(1)
@@ -1680,14 +1683,12 @@ impl Shell {
     fn push_colored_line(&mut self, line: [u8; COLS], colors: [u32; COLS]) -> bool {
         let following_bottom = self.scrollback.len() <= self.rows()
             || self.scroll_offset >= self.scrollback.len().saturating_sub(self.rows());
-        let scrolled = self.scrollback.push(line, colors);
-        if scrolled {
-            self.scroll_offset = self.scroll_offset.saturating_sub(1);
-        }
+        let evicted = self.scrollback.push_wrapped(&line, &colors, self.cols());
+        self.scroll_offset = self.scroll_offset.saturating_sub(evicted);
         if following_bottom {
             self.scroll_to_bottom();
         }
-        scrolled
+        evicted != 0
     }
 }
 

@@ -616,6 +616,19 @@ themes are compositor responsibilities. Reference clients include
 `honoka-client`, `image-viewer`, `eg-test`, `shell`, and
 `performance-monitor`.
 
+Shell updates the VT screen and terminal-service geometry when its content
+surface is resized. Command output and saved scrollback use the current column
+count, not the initial 712-pixel / 89-column window. The shared line capacity is
+the VT screen's 512-column limit; history rows are allocated lazily on the heap
+and reused when the bounded 128-row history wraps. Built-in output wraps at the
+current width, including `cat`, and completed external-command output retains
+characters and colors beyond the initial width. Existing stored row boundaries
+are preserved; resizing does not reconstruct/reflow old soft-wrapped history.
+
+`tests/usb/qemu-hid.py --image IMAGE --no-network --shell-width-smoke` verifies
+89→113→89-column resizing, right-side pixels after `pci-info` exits, and built-in
+`cat` through USB input on a private VM snapshot.
+
 ## Network Applications
 
 `network-service` provides shared-memory protocols for network configuration,

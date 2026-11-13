@@ -1,10 +1,23 @@
 //! Cold private-backing mutations. Never stop/replay an already handled wait.
 use super::{map_request_error, Runtime, Word, EIO};
 use alloc::vec::Vec;
-use nanami_runtime::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED};
+use nanami_runtime::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED, OS_PRIVATE_WRITE_DETACH_POPULATE};
 
 pub(super) fn needs_checked_write_preparation(runtime: &Runtime, pid: Word) -> bool {
     runtime.managed_process(pid).is_some_and(|process| process.vm_writable_private_shared)
+}
+
+/// A delivered fault keeps this target stopped until the current handler
+/// replies. No other VM user may run while a cold lease is proved and used.
+/// Alpha still checks each page's current RW rights, COW state and Frame;
+/// this permits no backing mutation or permission upgrade. A failed view must
+/// store nothing and return to the ordinary preparation/barrier path.
+pub(super) fn can_try_cold_write_view(runtime: &Runtime, pid: Word) -> bool {
+    if option_env!("NANAMI_COLD_WRITE_VIEWS") == Some("0") || pid == 0
+        || runtime.current_fault_pid != pid { return false; }
+    let Some(process) = runtime.managed_process(pid).filter(|process|
+        !process.exited && process.vm_group != 0) else { return false; };
+    !(0..runtime.managed.len()).any(|index| active_vm_user(runtime, index, process.vm_group))
 }
 
 pub(super) fn invalidate_write_origin(runtime: &Runtime) {
@@ -57,7 +70,7 @@ pub(super) fn mark_readonly_shared(runtime: &mut Runtime, pid: Word) {
     }
 }
 
-/// Repair only an ordinary user write-protection fault on logically writable
+/// Repair an ordinary present or missing write fault on logically writable
 /// private memory. Alpha is authoritative about sharing; unrelated faults must
 /// keep their signal behavior. DETACH restores Alpha's tracked logical rights
 /// before clearing COW. All VM peers remain stopped and views invalidated.
@@ -66,7 +79,7 @@ pub(crate) fn materialize_private_write_fault(
 ) -> bool {
     const PAGE: Word = 4096;
     if !cfg!(target_arch = "x86_64") || architecture_code & !7 != 0
-        || architecture_code & 3 != 3
+        || architecture_code & 2 == 0
         || !runtime.managed_process(pid).is_some_and(|process| process.vm_private_shared)
     { return false; }
     let page = address & !(PAGE - 1);
@@ -82,7 +95,7 @@ pub(crate) fn materialize_private_write_fault(
         // the final logical rights. A second PROTECT only repeats validation
         // and copy-window invalidation after that authoritative commit.
         // The commit result distinguishes an unrelated fault without QUERY.
-        nanami_runtime::request_process_private_write(pid, page, PAGE, OS_PRIVATE_WRITE_DETACH)
+        nanami_runtime::request_process_private_write(pid, page, PAGE, OS_PRIVATE_WRITE_DETACH_POPULATE)
             .map_err(map_request_error)
     }) == Ok(true)
 }
@@ -120,6 +133,16 @@ pub(super) fn with_private_protect<T>(
 
 enum Preparation { Snapshot, Guarded, Protect, Checked }
 
+/// Fresh zero-COW construction internally replaces its hot prefix and grants
+/// logical WRITE. Keep every VM peer stopped and revoke views until completion.
+pub(super) fn with_anonymous_cow<T>(runtime: &Runtime, pid: Word, _address: Word, _bytes: Word,
+    operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> {
+    with_vm_quiescence(runtime, pid, || {
+        super::guest_views::invalidate(runtime, pid);
+        operation()
+    })
+}
+
 /// An undivided huge leaf is wholly contained in one logical VMA. A prior
 /// partial mutation would have split that leaf before splitting this metadata.
 fn may_have_large_backing(runtime: &Runtime, pid: Word, address: Word, bytes: Word) -> bool {
@@ -127,6 +150,17 @@ fn may_have_large_backing(runtime: &Runtime, pid: Word, address: Word, bytes: Wo
     let Some(end) = address.checked_add(bytes) else { return false; };
     runtime.managed_process(pid).is_some_and(|process| process.mappings.iter().any(|mapping|
         mapping.size >= 1 << 21 && mapping.base < end
+            && mapping.base.checked_add(mapping.size).is_some_and(|limit| address < limit)))
+}
+
+// Readonly constructors may use shared zero backing without a fork/snapshot
+// marker. A nonwritable VMA therefore does not prove exclusive physical RAM.
+// Include PROT_NONE: it can retain a formerly readonly page's backing.
+fn may_have_readonly_backing(runtime: &Runtime, pid: Word, address: Word, bytes: Word) -> bool {
+    if !cfg!(any(target_arch = "x86_64", test)) { return false; }
+    let Some(end) = address.checked_add(bytes) else { return true; };
+    runtime.managed_process(pid).is_some_and(|process| process.mappings.iter().any(|mapping|
+        mapping.prot & 2 == 0 && mapping.base < end
             && mapping.base.checked_add(mapping.size).is_some_and(|limit| address < limit)))
 }
 
@@ -177,7 +211,8 @@ fn with_private_write_inner<T>(
     }
     let shared = match preparation {
         Preparation::Snapshot => true,
-        Preparation::Guarded | Preparation::Protect => runtime.managed_process(pid).is_some_and(|p| p.vm_private_shared),
+        Preparation::Guarded | Preparation::Protect => runtime.managed_process(pid).is_some_and(|p| p.vm_private_shared)
+            || may_have_readonly_backing(runtime, pid, address, bytes),
         Preparation::Checked => needs_checked_write_preparation(runtime, pid),
     };
     let large = matches!(preparation, Preparation::Guarded | Preparation::Protect)
@@ -196,6 +231,9 @@ fn with_private_write_inner<T>(
                 || super::guest_views::has_cached_owner(runtime, pid)
         }
     };
+    if shared && query && matches!(preparation, Preparation::Checked) {
+        report_checked_preparation(pid, address, bytes, true);
+    }
     let detach = shared && (!query || nanami_runtime::request_process_private_write(pid, address, bytes, OS_PRIVATE_WRITE_QUERY)
         .map_err(map_request_error)?);
     if !detach && !large {
@@ -204,6 +242,9 @@ fn with_private_write_inner<T>(
     with_vm_quiescence(runtime, pid, || {
         super::guest_views::invalidate(runtime, pid);
         if detach {
+            if matches!(preparation, Preparation::Checked) {
+                report_checked_preparation(pid, address, bytes, false);
+            }
             // This caller follows with protection while every peer remains
             // stopped. Avoid an intermediate old-rights PTE; failed protection
             // leaves initialized old-rights backing handled by snapshot faults.
@@ -215,6 +256,15 @@ fn with_private_write_inner<T>(
         }
         operation()
     })
+}
+
+#[inline]
+fn report_checked_preparation(_pid: Word, _address: Word, _bytes: Word, _query: bool) {
+    #[cfg(target_os = "none")]
+    if option_env!("NANAMI_COLD_WRITE_VIEWS_DIAG") == Some("1") {
+        nanami_runtime::println!("[linux.write-prep] pid={} address={:#x} bytes={} query={}",
+            _pid, _address, _bytes, usize::from(_query));
+    }
 }
 
 /// Fork also needs this barrier: an earlier permission downgrade may still

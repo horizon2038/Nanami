@@ -115,37 +115,51 @@ impl ProcessManager {
         pid: usize,
         max_frame_slots: usize,
     ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize), CapabilityError> {
+        self.reserve_private_replacement_slots(pid, 1, max_frame_slots)
+    }
+
+    /// Reserve a contiguous replacement run without reserving another VA.
+    /// Failure leaves recycled ranges and the allocation cursor unchanged.
+    pub fn reserve_private_replacement_slots(
+        &mut self,
+        pid: usize,
+        pages: usize,
+        max_frame_slots: usize,
+    ) -> Result<(CapabilityDescriptor, CapabilityDescriptor, usize), CapabilityError> {
+        if pages == 0 { return Err(CapabilityError::InvalidArgument); }
         let pid = self.memory_owner_pid(pid);
         let entry = self
             .memory_entry(pid)
             .ok_or(CapabilityError::InvalidArgument)?;
         if let Some(space) = self.shared_memory.get_mut(&pid) {
-            if let Some(slot) = space.slots.find(1) {
-                let count = space.slots.remove(slot);
-                if count > 1 {
-                    space.slots.insert(slot + 1, count - 1);
-                }
+            if let Some(slot) = space.slots.find(pages) {
+                space.slots.take(slot, pages);
                 return Ok((entry.root_node, entry.address_space, slot));
             }
         }
-        if entry.next_frame_slot >= max_frame_slots {
-            return Err(CapabilityError::InvalidArgument);
-        }
+        let end = entry.next_frame_slot.checked_add(pages)
+            .filter(|&end| end <= max_frame_slots)
+            .ok_or(CapabilityError::InvalidArgument)?;
         self.entry_mut_by_pid(pid)
             .ok_or(CapabilityError::InvalidArgument)?
-            .next_frame_slot += 1;
+            .next_frame_slot = end;
         Ok((entry.root_node, entry.address_space, entry.next_frame_slot))
     }
 
     /// Only after the old leaf, temporary aliases, capability and physical
     /// ownership record have been removed. This does not free virtual space.
     pub fn recycle_private_frame_slot(&mut self, pid: usize, slot: usize) {
+        self.recycle_private_frame_slots(pid, slot, 1);
+    }
+
+    pub fn recycle_private_frame_slots(&mut self, pid: usize, slot: usize, pages: usize) {
+        if pages == 0 { return; }
         let pid = self.memory_owner_pid(pid);
         self.shared_memory
             .entry(pid)
             .or_default()
             .slots
-            .insert(slot, 1);
+            .insert(slot, pages);
     }
 
     pub fn reserve_shared_memory(

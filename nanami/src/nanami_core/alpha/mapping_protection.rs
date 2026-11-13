@@ -86,6 +86,7 @@ impl Alpha {
         if request.identifier != pid && entry.reaper_pid != request.identifier {
             return Err(CapabilityError::PermissionDenied);
         }
+        let supervised = entry.capabilities_sealed && request.identifier != pid;
         let entry = self
             .processes
             .memory_context(pid)
@@ -99,6 +100,13 @@ impl Alpha {
         if source_backing && permissions & !1 != 0 {
             return Err(CapabilityError::PermissionDenied);
         }
+        // A sealed task's existing snapshot-fault path can populate confirmed
+        // absent, initialized backing with its current logical rights. Keep
+        // the first 256 KiB eager, but do not materialize the rest of a large
+        // readonly edit just to change its metadata. Native immutable sources,
+        // single-page demand requests and WRITE upgrades retain eager mapping.
+        let keep_deferred = supervised && !source_backing && end - base >= 128 * PAGE_SIZE
+            && option_env!("NANAMI_EAGER_SNAPSHOT_PROTECTION") != Some("1");
         let unchanged = self.processes.vm_space_mut(pid).is_some_and(|vm| {
             // A single uncertain PTE needs removal and shootdown acknowledgement
             // even when its current logical permissions already match.
@@ -219,6 +227,8 @@ impl Alpha {
         let vm = self.processes.vm_space_mut(pid).ok_or(CapabilityError::InvalidArgument)?;
         #[cfg(not(test))]
         let mut confirmed_deferred_pages = 0usize;
+        #[cfg(not(test))]
+        let mut kept_deferred_pages = 0usize;
         for (index, &(va, frame, old, deferred)) in pages.iter().enumerate() {
             let Some(frame) = frame else {
                 vm.set_permissions(va, permissions);
@@ -231,6 +241,12 @@ impl Alpha {
             // No Alpha event can intervene. Table creation leaves those facts
             // unchanged; map directly without repeating the point queries.
             let confirmed_deferred = deferred && old != 0 && permissions != 0 && permissions & 2 == 0;
+            if confirmed_deferred && keep_deferred && va - base >= 64 * PAGE_SIZE {
+                vm.set_permissions(va, permissions);
+                #[cfg(not(test))]
+                { kept_deferred_pages += 1; }
+                continue;
+            }
             let changed = (|| {
                 if (confirmed_deferred || source_backing || vm.snapshot_page_managed(va) || vm.hardware_permissions(va) == 0)
                     && permissions != 0 && !vm.page_tables_ready(va) {
@@ -258,8 +274,10 @@ impl Alpha {
             }
         }
         #[cfg(not(test))]
-        if confirmed_deferred_pages != 0 && option_env!("NANAMI_PROTECTION_DEFERRED_DIAG") == Some("1") {
-            crate::force_info!("[protection.deferred] pid={} base={:#x} pages={}", pid, base, confirmed_deferred_pages);
+        if (confirmed_deferred_pages != 0 || kept_deferred_pages != 0)
+            && option_env!("NANAMI_PROTECTION_DEFERRED_DIAG") == Some("1") {
+            crate::force_info!("[protection.deferred] pid={} base={:#x} pages={} kept={}",
+                pid, base, confirmed_deferred_pages, kept_deferred_pages);
         }
         Ok(())
     }

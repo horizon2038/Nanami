@@ -212,6 +212,19 @@ impl MemoryManager {
         (max_bits < PHYSICAL_CHUNK_RADIX).then_some(AllocationFrameHint { first, end, max_bits })
     }
 
+    /// A large virtual zero tail can now need only one physical page. Bound
+    /// its cold conversion (and small payload prefix) to the real allocation,
+    /// rather than materializing the ordinary amortized8MiB Frame range.
+    /// Existing Ready identities still prevail; this hint grants no authority.
+    pub(crate) fn small_allocation_frame_hint(&self, first: usize, pages: usize) -> Option<AllocationFrameHint> {
+        if pages == 0 || option_env!("NANAMI_ALLOCATION_FRAME_CEILING") == Some("0") { return None; }
+        let end = first.checked_add(pages)?;
+        (end - 1).checked_mul(PAGE_SIZE)?;
+        let max_bits = (PAGE_BITS + (usize::BITS - (pages - 1).leading_zeros()) as usize)
+            .min(PHYSICAL_CHUNK_RADIX);
+        (max_bits < PHYSICAL_CHUNK_RADIX).then_some(AllocationFrameHint { first, end, max_bits })
+    }
+
     /// Prepare the permanent 4K Frames for an already reserved allocation.
     /// Conversion and quarantine still run at the first page of each new
     /// range. A Ready range needs no more work before its end.

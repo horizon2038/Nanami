@@ -14,6 +14,16 @@ struct Machine {
     releases: usize,
     uncertain: bool,
     fail_release: bool,
+    batch: bool,
+    batches: usize,
+    grant_fail_at: Option<usize>,
+    uncertain_grant_at: Option<usize>,
+    lost_batch_reply: bool,
+    bad_batch_reply: bool,
+    release_batches: usize,
+    release_fail_at: Option<usize>,
+    lost_release_reply: bool,
+    bad_release_reply: bool,
 }
 impl Machine {
     fn page(&mut self, pid: Word, address: Word, value: u8) {
@@ -22,8 +32,31 @@ impl Machine {
     }
 }
 impl LeaseEffects for Machine {
+    fn release_many(&mut self, locals: &[Word]) -> Word {
+        self.release_batches += 1;
+        let mut acknowledged = 0;
+        for (index, &local) in locals.iter().enumerate() {
+            if self.release(local).is_ok() { acknowledged |= 1 << index; }
+        }
+        if self.lost_release_reply { 0 }
+        else if self.bad_release_reply { 1 << locals.len() }
+        else { acknowledged }
+    }
+    fn batch_supported(&self) -> bool { self.batch }
+    fn grant_many(&mut self, pid: Word, entries: &[PageGrant]) -> BatchGrant {
+        self.batches += 1;
+        for (completed, entry) in entries.iter().enumerate() {
+            if let Err(error) = self.grant(pid, entry.page, entry.local) {
+                return BatchGrant::Stopped { completed, error };
+            }
+        }
+        if self.lost_batch_reply { BatchGrant::Uncertain }
+        else if self.bad_batch_reply { BatchGrant::Stopped { completed: entries.len() + 1, error: GrantError::Uncertain } }
+        else { BatchGrant::Complete }
+    }
     fn grant(&mut self, pid: Word, page: Word, local: Word) -> Result<(), GrantError> {
         self.grants += 1;
+        if self.grant_fail_at == Some(self.grants) { return Err(GrantError::NotInstalled); }
         let Some(backing) = self.pages.get(&(pid, page)).cloned() else {
             return Err(GrantError::NotInstalled);
         };
@@ -31,17 +64,17 @@ impl LeaseEffects for Machine {
             self.maps.insert(local, backing).is_none(),
             "overwrote a live lease"
         );
-        if self.uncertain {
+        if self.uncertain || self.uncertain_grant_at == Some(self.grants) {
             return Err(GrantError::Uncertain);
         }
         Ok(())
     }
     fn release(&mut self, local: Word) -> Result<(), ()> {
         self.releases += 1;
-        if self.fail_release {
+        if self.fail_release || self.release_fail_at == Some(self.releases) {
             return Err(());
         }
-        assert!(self.maps.remove(&local).is_some());
+        self.maps.remove(&local); // Sparse release also acknowledges confirmed holes.
         Ok(())
     }
 }
@@ -57,6 +90,76 @@ impl Effects for Machine {
 impl WriteEffects for Machine {
     fn write(&mut self, local: Word, offset: Word, source: &[u8]) {
         self.maps[&local].borrow_mut()[offset..offset + source.len()].copy_from_slice(source);
+    }
+}
+
+#[test]
+fn full_lease_invalidation_batches_all_slots_without_touching_source_bytes() {
+    for pages in [1, 17, 18, 64] {
+        for write in [false, true] {
+            let reader = ReadWindow::new();
+            let writer = WriteWindow::new();
+            let mut machine = Machine::default();
+            for index in 0..pages {
+                let page = (index + 1) * PAGE;
+                machine.page(7, page, index as u8);
+                if write { assert!(writer.copy_from(7, 1, 7, page, &[index as u8], &mut machine)); }
+                else { assert!(reader.copy_into(7, 1, 7, page, &mut [MaybeUninit::uninit()], &mut machine)); }
+            }
+            assert_eq!(machine.maps.len(), pages);
+            if write { writer.clear_owner(7, &mut machine); }
+            else { reader.clear_owner(7, &mut machine); }
+            assert_eq!(machine.release_batches, pages.div_ceil(MAX_BATCH_PAGES));
+            assert_eq!(machine.releases, pages);
+            assert!(machine.maps.is_empty());
+            assert!(!reader.has_owner(7)); assert!(!writer.has_owner(7));
+            for index in 0..pages { assert!(machine.pages[&(7, (index + 1) * PAGE)].borrow().iter().all(|&byte| byte == index as u8)); }
+        }
+    }
+}
+
+#[test]
+fn release_bitmaps_keep_only_unacknowledged_leases_unready_until_retry() {
+    for failure in [1, 9, 17, 18, 32] {
+        let writer = WriteWindow::new();
+        let mut machine = Machine::default();
+        for index in 0..32 {
+            let page = (index + 1) * PAGE;
+            machine.page(7, page, 23);
+            assert!(writer.copy_from(7, 1, 7, page, &[23], &mut machine));
+        }
+        machine.release_fail_at = Some(failure);
+        writer.clear_owner(7, &mut machine);
+        assert_eq!(machine.releases, 32); // A failure must not skip later pages.
+        assert_eq!(machine.maps.len(), 1);
+        assert!(writer.has_owner(7));
+        for index in 0..32 { assert!(!writer.copy_from_cached(7, 1, 7, (index + 1) * PAGE, &[99], &mut machine)); }
+        machine.release_fail_at = None;
+        writer.clear_owner(7, &mut machine);
+        assert!(!writer.has_owner(7)); assert!(machine.maps.is_empty());
+        assert_eq!(machine.releases, 33);
+        assert_eq!(machine.release_batches, 3); // Retry the remaining single VA.
+    }
+}
+
+#[test]
+fn unknown_release_reply_preserves_all_leases_without_stores_and_retries_holes() {
+    for bad in [false, true] {
+        let writer = WriteWindow::new();
+        let mut machine = Machine::default();
+        for page in [PAGE, 2 * PAGE, 3 * PAGE] {
+            machine.page(7, page, 23);
+            assert!(writer.copy_from(7, 1, 7, page, &[23], &mut machine));
+        }
+        machine.lost_release_reply = !bad;
+        machine.bad_release_reply = bad;
+        writer.clear_owner(7, &mut machine);
+        assert!(machine.maps.is_empty()); assert!(writer.has_owner(7));
+        assert!(!writer.copy_from_cached(7, 1, 7, PAGE, &[99], &mut machine));
+        assert!(machine.pages[&(7, PAGE)].borrow().iter().all(|&byte| byte == 23));
+        machine.lost_release_reply = false; machine.bad_release_reply = false;
+        writer.clear_owner(7, &mut machine);
+        assert!(!writer.has_owner(7));
     }
 }
 
@@ -605,6 +708,150 @@ fn read(
         return None;
     }
     Some(bytes.map(|byte| unsafe { byte.assume_init() }))
+}
+
+#[test]
+fn bulk_wrapped_range_protects_its_early_hit_from_the_later_victim_selection() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in (1..=17).chain([33, 49, 65]) { machine.page(7, index * PAGE, 0x55); }
+    for index in [1, 33, 49, 65] { assert!(window.copy_from(7, 1, 7, index * PAGE, &[0x55], &mut machine)); }
+    let bytes = vec![0x77; 16 * PAGE];
+    assert!(window.copy_from(7, 1, 7, PAGE + 1, &bytes, &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.releases), (1, 20, 1));
+    assert!(window.copy_from_cached(7, 1, 7, PAGE + 1, &bytes, &mut machine));
+    assert_eq!(machine.pages[&(7, PAGE)].borrow()[0], 0x55);
+    assert_eq!(machine.pages[&(7, PAGE)].borrow()[1], 0x77);
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_planning_failure_never_issues_a_grant_for_its_unpublished_slots() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in (1..=17).chain([33, 49, 65]) { machine.page(7, index * PAGE, 0x55); }
+    for index in [1, 33, 49, 65] { assert!(window.copy_from(7, 1, 7, index * PAGE, &[0x55], &mut machine)); }
+    machine.fail_release = true;
+    assert!(!window.copy_from(7, 1, 7, PAGE + 1, &vec![0x77; 16 * PAGE], &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.maps.len()), (0, 4, 4));
+    assert!(machine.pages.values().all(|page| page.borrow().iter().all(|&byte| byte == 0x55)));
+    machine.fail_release = false;
+    assert!(window.copy_from(7, 1, 7, PAGE + 1, &vec![0x77; 16 * PAGE], &mut machine));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_read_prepares_five_exact_pages_in_one_request_and_samples_fresh_bytes() {
+    let window = ReadWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in 1..=6 { machine.page(7, index * PAGE, index as u8); }
+    let mut output = vec![MaybeUninit::new(0xaa); 4 * PAGE];
+    assert!(window.copy_into(7, 1, 7, PAGE + 19, &mut output, &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.maps.len()), (1, 5, 5));
+    for (index, value) in output.iter().enumerate() {
+        assert_eq!(unsafe { value.assume_init() }, ((19 + index) / PAGE + 1) as u8);
+    }
+    for page in machine.pages.values() { page.borrow_mut().fill(0x76); }
+    assert!(window.copy_into(7, 1, 7, PAGE + 19, &mut output, &mut machine));
+    assert!(output.iter().all(|byte| unsafe { byte.assume_init() } == 0x76));
+    assert_eq!((machine.batches, machine.grants), (1, 5));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_cold_io_quantum_prepares_seventeen_pages_once_and_keeps_boundary_bytes() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in 1..=17 { machine.page(7, index * PAGE, 0x11); }
+    let input = vec![0x57; 16 * PAGE];
+    assert!(window.copy_from(7, 1, 7, PAGE + 19, &input, &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.maps.len()), (1, 17, 17));
+    for index in 1..=17 {
+        let page = machine.pages[&(7, index * PAGE)].borrow();
+        for (offset, &byte) in page.iter().enumerate() {
+            let address = index * PAGE + offset;
+            assert_eq!(byte, if (PAGE + 19..17 * PAGE + 19).contains(&address) { 0x57 } else { 0x11 });
+        }
+    }
+    assert!(window.copy_from_cached(7, 1, 7, PAGE + 19, &vec![0x86; 16 * PAGE], &mut machine));
+    assert_eq!((machine.batches, machine.grants), (1, 17));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_denial_keeps_the_successful_prefix_without_stores_and_does_not_own_the_suffix() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, grant_fail_at: Some(3), ..Machine::default() };
+    for index in 1..=4 { machine.page(7, index * PAGE, 0x11); }
+    assert!(!window.copy_from(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.maps.len()), (1, 3, 2));
+    assert!(machine.pages.values().all(|page| page.borrow().iter().all(|&byte| byte == 0x11)));
+    machine.grant_fail_at = None;
+    assert!(window.copy_from(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+    assert_eq!((machine.batches, machine.grants, machine.maps.len()), (2, 5, 4));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_uncertain_entry_retains_its_pin_until_cleanup_ack_and_never_stores() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, uncertain_grant_at: Some(2), ..Machine::default() };
+    for index in 1..=4 { machine.page(7, index * PAGE, 0x11); }
+    assert!(!window.copy_from(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+    assert_eq!((machine.grants, machine.maps.len()), (2, 2));
+    assert!(machine.pages.values().all(|page| page.borrow().iter().all(|&byte| byte == 0x11)));
+    assert!(!window.copy_from_cached(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+    machine.fail_release = true;
+    window.clear_owner(7, &mut machine);
+    assert_eq!(machine.maps.len(), 2);
+    machine.fail_release = false;
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+    machine.uncertain_grant_at = None;
+    assert!(window.copy_from(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
+}
+
+#[test]
+fn bulk_lost_or_malformed_response_retains_every_local_va_without_publishing_hits() {
+    for malformed in [false, true] {
+        let window = WriteWindow::new();
+        let mut machine = Machine { batch: true, lost_batch_reply: !malformed,
+            bad_batch_reply: malformed, ..Machine::default() };
+        for index in 1..=4 { machine.page(7, index * PAGE, 0x11); }
+        assert!(!window.copy_from(7, 1, 7, PAGE, &vec![0x57; 4 * PAGE], &mut machine));
+        assert_eq!(machine.maps.len(), 4);
+        for index in 1..=4 {
+            assert!(!window.copy_from_cached(7, 1, 7, index * PAGE, &[0x57], &mut machine));
+        }
+        assert_eq!(machine.grants, 4);
+        assert!(machine.pages.values().all(|page| page.borrow().iter().all(|&byte| byte == 0x11)));
+        window.clear_owner(7, &mut machine);
+        assert!(machine.maps.is_empty());
+    }
+}
+
+#[test]
+fn bulk_vector_deduplicates_pages_and_does_not_regrant_warm_leases() {
+    let window = WriteWindow::new();
+    let mut machine = Machine { batch: true, ..Machine::default() };
+    for index in 1..=2 { machine.page(7, index * PAGE, 0); }
+    let fields = [(PAGE + 7, &[1, 2][..]), (PAGE + 19, &[3][..]), (2 * PAGE, &[4][..])];
+    assert!(window.copy_from_many(7, 1, 7, &fields, &mut machine));
+    assert_eq!((machine.batches, machine.grants), (1, 2));
+    assert_eq!(&machine.pages[&(7, PAGE)].borrow()[7..9], &[1, 2]);
+    assert_eq!(machine.pages[&(7, PAGE)].borrow()[19], 3);
+    assert_eq!(machine.pages[&(7, 2 * PAGE)].borrow()[0], 4);
+    assert!(window.copy_from_many_cached(7, 1, 7, &fields, &mut machine));
+    assert_eq!((machine.batches, machine.grants), (1, 2));
+    window.clear_owner(7, &mut machine);
+    assert!(machine.maps.is_empty());
 }
 
 #[test]

@@ -2,6 +2,11 @@
 use super::*;
 use crate::nanami_core::vm_space::{FRAME_WORD_BYTES, FRAME_WORD_PAGES};
 
+pub(super) const SNAPSHOT_POPULATE_PAGES: usize = match option_env!("NANAMI_SNAPSHOT_POPULATE_WIDE") {
+    Some(value) if value.len() == 1 && value.as_bytes()[0] == b'1' => 512,
+    _ => 64,
+};
+
 // Request-local admission only. Construct once, consume before aliasing; no
 // source mutation or reentrant dispatch occurs during target conflict checks.
 struct SnapshotSourceAdmission {
@@ -285,12 +290,22 @@ impl Alpha {
             return Ok(usize::from(vm.frame_may_be_present(page)
                 && vm.hardware_permissions(page) & required != 0));
         }
-        // Prefetch up to 2 MiB of existing 4 KiB leaves. DSO read-only data
-        // often remains in the initial reservation without another MAP_FIXED.
-        // A small fault cluster makes those pages pay repeated kernel traps.
-        const CLUSTER: usize = 512 * PAGE_SIZE;
+        // Populate one 256 KiB word-aligned window. Large DSO reservations
+        // contain metadata and data the current execution may never touch.
+        // Fault dumps now default OFF; avoid registering an entire 2 MiB on
+        // each first access. The wide opt-out retains the previous window.
+        const CLUSTER: usize = SNAPSHOT_POPULATE_PAGES * PAGE_SIZE;
         let base = page & !(CLUSTER - 1);
         let end = base.checked_add(CLUSTER).ok_or(CapabilityError::InvalidArgument)?;
+        // No Alpha event can mutate ownership during this synchronous walk.
+        // Collect bounded one-page records once instead of restarting the
+        // owner's chain for every leaf. Allocation failure or duplicate VAs
+        // retain point lookup's original newest-record semantics below.
+        // Refcounts, pool Frames and VM rights are still checked at each MAP.
+        let allocations = self.processes.try_physical_pages_in_range(pid, base, end, SNAPSHOT_POPULATE_PAGES);
+        let mut allocation_index = 0;
+        #[cfg(not(test))]
+        let mut populated = 0;
         for va in (base..end).step_by(PAGE_SIZE) {
             let vm = self.processes.vm_space(pid).ok_or(CapabilityError::InvalidArgument)?;
             if !vm.mapping_deferred(va) || vm.mapping_is_uncertain(va) || vm.permissions(va) == 0 {
@@ -298,7 +313,14 @@ impl Alpha {
             }
             let frame = vm.find_frame(va).ok_or(CapabilityError::Fatal)?;
             let permissions = vm.permissions(va);
-            let allocation = self.processes.find_active_physical_allocation_reference(pid, va, 1)
+            let allocation = if let Some(rows) = &allocations {
+                while allocation_index < rows.len() && rows[allocation_index].base_va < va {
+                    allocation_index += 1;
+                }
+                rows.get(allocation_index).filter(|row| row.base_va == va).copied()
+            } else {
+                self.processes.find_active_physical_allocation_reference(pid, va, 1)
+            }
                 .filter(|allocation| !allocation.owns_frame_cap)
                 .ok_or(CapabilityError::PermissionDenied)?;
             if self.processes.physical_reference_count(allocation) == 0
@@ -315,6 +337,13 @@ impl Alpha {
                 return Err(error);
             }
             vm.complete_deferred_mapping(va);
+            #[cfg(not(test))]
+            { populated += 1; }
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_SNAPSHOT_POPULATE_DIAG") == Some("1") {
+            crate::force_info!("[snapshot.populate] pid={} page={:#x} mapped={} indexed={} cluster={}",
+                pid, page, populated, usize::from(allocations.is_some()), SNAPSHOT_POPULATE_PAGES);
         }
         Ok(1)
     }

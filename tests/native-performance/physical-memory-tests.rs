@@ -509,6 +509,8 @@ struct Fake {
     batches: usize,
     map_attributes: Vec<usize>,
     tables: BTreeMap<(usize, usize, usize), usize>,
+    depth_queries: Vec<(usize, usize, usize)>,
+    fail_depth_query: bool,
     parents: BTreeMap<usize, usize>,
     fail_revoke: bool,
     fail_revoke_after: bool,
@@ -730,7 +732,9 @@ pub mod arch {
             address: usize,
             leaf_bits: usize,
         ) -> Result<usize, CapabilityError> {
-            FAKE.with_borrow(|fake| {
+            FAKE.with_borrow_mut(|fake| {
+                fake.depth_queries.push((address_space, address, leaf_bits));
+                if fake.fail_depth_query { return Err(CapabilityError::Fatal); }
                 let minimum = match leaf_bits {12=>1,21=>2,_=>return Err(CapabilityError::InvalidDepth)};
                 for depth in (minimum..=3).rev() {
                     let key = (address_space, address >> (12 + 9 * depth), depth);
@@ -1224,6 +1228,32 @@ fn large_allocation_hint_bounds_cold_frame_cap_creation_and_reuses_ready_ranges(
 }
 
 #[test]
+fn tiny_zero_backing_hint_bounds_caps_across_alignment_boundaries_and_preserves_ready_identity() {
+    for pages in [1usize, 2, 7, 17, 127] {
+        for offset in [0usize, 2047] {
+            let (mut memory, _) = boot(40, true);
+            let first = (0x200000000usize >> 12) + offset;
+            let before = FAKE.with_borrow(|fake| fake.frames.values().map(|(_, count)| count).sum::<usize>());
+            let hint = memory.small_allocation_frame_hint(first, pages);
+            let mut descriptors = Vec::new();
+            for page in first..first + pages {
+                memory.ensure_alpha_frame_for_allocation(page, hint).unwrap();
+                descriptors.push(memory.physical_frame_descriptor_from_index(page).unwrap());
+            }
+            let created = FAKE.with_borrow(|fake| fake.frames.values().map(|(_, count)| count).sum::<usize>()) - before;
+            assert!(created <= 2 * pages.next_power_of_two(), "pages={pages} offset={offset} created={created}");
+            if offset == 0 { assert_eq!(created, pages.next_power_of_two()); }
+            let calls = FAKE.with_borrow(|fake| fake.calls);
+            for (offset, &descriptor) in descriptors.iter().enumerate() {
+                memory.ensure_alpha_frame_for_allocation(first + offset, hint).unwrap();
+                assert_eq!(memory.physical_frame_descriptor_from_index(first + offset), Some(descriptor));
+            }
+            assert_eq!(FAKE.with_borrow(|fake| fake.calls), calls);
+        }
+    }
+}
+
+#[test]
 fn bounded_frame_ranges_coexist_with_later_ordinary_and_overlapping_requests() {
     let (mut memory,_)=boot(40,true);let first=0x200000000usize>>12;
     let hint=memory.allocation_frame_hint(first,256);assert!(hint.is_some());
@@ -1643,6 +1673,60 @@ fn destroy_test_address_space(
             .retain(|&(owner, _, _), _| owner != address_space)
     });
     memory.release_page_tables(address_space)
+}
+
+#[test]
+fn page_table_preparation_reuses_confirmed_small_tables_but_queries_large_leaves() {
+    use nanami_core::vm_space::VmTracker;
+    let (mut memory, _) = boot(33, true);
+    let base = 0x2000_0000;
+    let mut vm = HeapVm::default();
+    memory.ensure_page_tables(500, base, &mut vm).unwrap();
+    assert!(!vm.page_tables_ready(base)); // Tables alone publish no leaf proof.
+    let page = memory.allocate_physical_any(4096).unwrap();
+    memory.ensure_alpha_frame_at_physical_index(page).unwrap();
+    let frame = memory.physical_frame_descriptor_from_index(page).unwrap();
+    memory.map_frame_strict(500, frame, base, &mut vm).unwrap();
+    let queries = FAKE.with_borrow(|f| f.depth_queries.len());
+    for offset in 0..512 {
+        memory.ensure_page_tables(500, base + offset * 4096, &mut vm).unwrap();
+    }
+    assert_eq!(FAKE.with_borrow(|f| f.depth_queries.len()), queries);
+    // A 4K table proof must never bypass the different huge-leaf query.
+    memory.ensure_page_tables_for_leaf(500, base, 21, &mut vm).unwrap();
+    assert_eq!(FAKE.with_borrow(|f| f.depth_queries[queries..].to_vec()), [(500, base, 21)]);
+    // Another address space starts without the original VM's readiness.
+    memory.ensure_page_tables(501, base, &mut HeapVm::default()).unwrap();
+    FAKE.with_borrow(|f| assert!(f.depth_queries[queries + 1..].iter().all(|row| row.0 == 501)));
+    // Removing a leaf leaves its table usable by subsequent page views.
+    arch::address_space::unmap(500, frame, base).unwrap();
+    vm.frames.remove(&base);
+    let queries = FAKE.with_borrow(|f| f.depth_queries.len());
+    memory.ensure_page_tables(500, base, &mut vm).unwrap();
+    assert_eq!(FAKE.with_borrow(|f| f.depth_queries.len()), queries);
+    // Demotion/promotion invalidation must restore the Kernel query path.
+    vm.ready.clear();
+    FAKE.with_borrow_mut(|f| { f.tables.remove(&(500, base >> 21, 1)); });
+    memory.ensure_page_tables(500, base, &mut vm).unwrap();
+    assert_eq!(FAKE.with_borrow(|f| f.depth_queries.len()), queries + 2);
+    assert!(!vm.page_tables_ready(base));
+}
+
+#[test]
+fn unconfirmed_page_table_preparation_propagates_query_and_conversion_failure() {
+    let (mut memory, _) = boot(33, true);
+    let mut vm = HeapVm::default();
+    FAKE.with_borrow_mut(|f| f.fail_depth_query = true);
+    assert_eq!(memory.ensure_page_tables(500, 0x2000_0000, &mut vm), Err(CapabilityError::Fatal));
+    assert!(vm.ready.is_empty());
+    FAKE.with_borrow_mut(|f| {
+        f.fail_depth_query = false;
+        f.fail_kind = Some((CapabilityType::PageTable, 0));
+    });
+    assert_eq!(memory.ensure_page_tables(500, 0x2000_0000, &mut vm), Err(CapabilityError::Fatal));
+    assert!(vm.ready.is_empty());
+    memory.ensure_page_tables(500, 0x2000_0000, &mut vm).unwrap();
+    assert!(vm.ready.is_empty());
 }
 
 #[test]

@@ -7,15 +7,22 @@ const ENOMEM: i32 = 12;
 const LINUX_PAGE_SIZE: Word = 4096;
 const BASE: Word = 0x100000;
 #[derive(Debug, PartialEq)]
-enum Event { AutoFinal(Word, Word, Word), Final(Word, Word, Word, Word, Word, Word), Dynamic(Word, Word), Fixed(Word, Word, Word), Add(Word, Word, Word), Protect(Word, Word, Word), Release(Word, Word), Unmap(Word, Word) }
+enum Event { Shared, Barrier, Cow(Word, Word, Word, Word), AutoFinal(Word, Word, Word), Final(Word, Word, Word, Word, Word, Word), Dynamic(Word, Word), Fixed(Word, Word, Word), Add(Word, Word, Word), Protect(Word, Word, Word), Release(Word, Word), Unmap(Word, Word) }
 #[derive(Default)]
 struct Effects { events: Vec<Event>, construct_error: bool, release_error: bool, protect_error: bool, response: Option<(Word, Word)> }
 thread_local! { static EFFECTS: RefCell<Effects> = RefCell::new(Effects::default()); }
 fn event(e: Event) { EFFECTS.with_borrow_mut(|s| s.events.push(e)); }
 fn map_request_error(e: i32) -> i32 { e }
 mod private_memory {
+    pub(super) fn mark_shared(_: &mut super::Runtime, _: usize) { super::event(super::Event::Shared); }
+    pub(super) fn with_anonymous_cow<T>(_: &super::Runtime, _: usize, _: usize, _: usize,
+        operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> { super::event(super::Event::Barrier); operation() }
     pub(super) fn with_mapping_mutation<T>(_: &super::Runtime, _: usize, _: usize, _: usize, _: bool,
         operation: impl FnOnce() -> Result<T, i32>) -> Result<T, i32> { operation() }
+}
+pub fn request_process_map_anonymous_zero_cow(pid: Word, base: Word, bytes: Word, prot: Word) -> Result<(Word, Word), i32> {
+    event(Event::Cow(pid, base, bytes, prot));
+    EFFECTS.with_borrow(|s| if s.construct_error { Err(5) } else { Ok(s.response.unwrap_or((BASE,(bytes+4095)&!4095))) })
 }
 pub fn request_process_map_initialized_protected_at(pid: Word, base: Word, bytes: Word, source: Word, copied: Word, prot: Word) -> Result<(), i32> {
     event(Event::Final(pid, base, bytes, source, copied, prot));
@@ -92,7 +99,10 @@ fn automatic_placement_publishes_final_rights_without_protect() {
     for prot in 1..=7 { for len in [1,4096,4097,256*4096] {
         let mut r=reset(); let mapped=(len+4095)&!4095;
         assert_eq!(production::map(&mut r,7,None,len,prot),Ok((BASE,mapped)));
-        assert_eq!(events(),vec![Event::AutoFinal(7,len,prot),Event::Add(BASE,mapped,prot)]);
+        let expected = if cfg!(target_arch="x86_64") && len >= 128*4096 && matches!(prot,3|7) {
+            vec![Event::Shared,Event::Barrier,Event::Cow(7,0,len,prot),Event::Add(BASE,mapped,prot)]
+        } else { vec![Event::AutoFinal(7,len,prot),Event::Add(BASE,mapped,prot)] };
+        assert_eq!(events(),expected);
     }}
 }
 #[test]
@@ -107,4 +117,17 @@ fn automatic_publication_failure_releases_without_retry_or_protect() {
 fn fixed_rounding_overflow_and_invalid_address_do_not_publish() {
     let mut r=reset();assert_eq!(production::map(&mut r,7,Some(BASE),usize::MAX,3),Err(ENOMEM));assert!(events().is_empty());
     for base in [0,BASE+1] {let mut r=reset();assert_eq!(production::map(&mut r,7,Some(base),4096,3),Err(22));assert_eq!(events().len(),1);}
+}
+
+#[test]
+fn large_zero_cow_marks_sharing_and_enters_barrier_before_construction_or_failure() {
+    if !cfg!(target_arch="x86_64") { return; }
+    for requested in [None,Some(BASE)] { for fail in [false,true] {
+        let mut r=reset();EFFECTS.with_borrow_mut(|s|s.construct_error=fail);
+        let got=production::map(&mut r,7,requested,128*4096,3);
+        assert_eq!(got,if fail {Err(5)} else {Ok((BASE,128*4096))});
+        let mut expected=vec![Event::Shared,Event::Barrier,Event::Cow(7,requested.unwrap_or(0),128*4096,3)];
+        if !fail {expected.push(Event::Add(BASE,128*4096,3));}
+        assert_eq!(events(),expected);
+    }}
 }

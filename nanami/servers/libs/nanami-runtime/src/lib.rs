@@ -8,6 +8,8 @@ pub mod io;
 pub mod ipc;
 mod mmio;
 mod platform;
+mod page_views;
+pub use page_views::{request_mapping_release_views, request_process_read_views, request_process_write_views};
 pub mod service;
 mod version;
 
@@ -715,7 +717,7 @@ pub fn request_process_private_write(
     if pid == 0
         || bytes == 0
         || address.checked_add(bytes).is_none()
-        || !matches!(mode, OS_PRIVATE_WRITE_QUERY | OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED)
+        || !matches!(mode, OS_PRIVATE_WRITE_QUERY | OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED | OS_PRIVATE_WRITE_DETACH_POPULATE)
     {
         return Err(RequestError::InvalidArgument);
     }
@@ -808,6 +810,25 @@ pub fn request_process_map_initialized_at(
     source_bytes: Word,
 ) -> Result<(), RequestError> {
     request_map_initialized(target_pid, base, mapped_bytes, source, source_bytes, None)
+}
+
+/// Fresh anonymous RW/RWX under acknowledged VM quiescence. The caller must
+/// mark writable-private sharing and revoke views before entering Alpha.
+pub fn request_process_map_anonymous_zero_cow(
+    target_pid: Word, base: Word, size_bytes: Word, permissions: Word,
+) -> Result<(Word, Word), RequestError> {
+    if target_pid == 0 || size_bytes == 0 || base & 4095 != 0 || !matches!(permissions, 3 | 7) {
+        return Err(RequestError::InvalidArgument);
+    }
+    let mapped = size_bytes.checked_add(4095).ok_or(RequestError::InvalidArgument)? & !4095;
+    if base != 0 && base.checked_add(mapped).is_none() { return Err(RequestError::InvalidArgument); }
+    let initializer = [0, 0, permissions | OS_MAP_INITIALIZER_COW_ZERO];
+    let (status, address, bytes) = call_os_port(OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED,
+        target_pid, mapped, base, initializer.as_ptr() as Word, 5)?;
+    if status != OS_RESPONSE_OK { return Err(RequestError::Status(status)); }
+    if address == 0 || address & 4095 != 0 || bytes != mapped || address.checked_add(bytes).is_none()
+        || (base != 0 && address != base) { return Err(RequestError::Protocol); }
+    Ok((address, bytes))
 }
 
 /// Trusted supervisor only: publish freshly initialized pages with final rights.

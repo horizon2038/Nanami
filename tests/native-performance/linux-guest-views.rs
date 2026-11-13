@@ -11,11 +11,34 @@ pub enum OsPersonality {
 #[derive(Clone, Copy)]
 pub enum RequestError {
     Status(Word),
+    Transport,
+    Protocol,
 }
-pub const OS_RESPONSE_INVALID_ARGUMENT: Word = 1;
-pub const OS_RESPONSE_PERMISSION_DENIED: Word = 2;
-pub const OS_RESPONSE_INVALID_DESCRIPTOR: Word = 4;
-pub const OS_RESPONSE_ILLEGAL_OPERATION: Word = 5;
+pub use nanami_uapi::os::{OsPageViewEntry, OS_PAGE_VIEW_VECTOR_MAX,
+    OS_RESPONSE_INVALID_ARGUMENT, OS_RESPONSE_PERMISSION_DENIED,
+    OS_RESPONSE_INVALID_DESCRIPTOR, OS_RESPONSE_ILLEGAL_OPERATION, OS_RESPONSE_FATAL};
+fn request_process_read_views(pid: Word, entries: &[OsPageViewEntry]) -> Result<(Word, Word), RequestError> {
+    BATCH_REQUESTS.with(|count| count.set(count.get() + 1));
+    for (index, entry) in entries.iter().enumerate() {
+        match request_process_read_view(pid, entry.target, entry.local) {
+            Ok(()) => {},
+            Err(RequestError::Status(status)) => return Ok((index, status)),
+            Err(error) => return Err(error),
+        }
+    }
+    VECTOR_REPLY.with(Cell::get).unwrap_or(Ok((entries.len(), 0)))
+}
+fn request_process_write_views(pid: Word, entries: &[OsPageViewEntry]) -> Result<(Word, Word), RequestError> {
+    BATCH_REQUESTS.with(|count| count.set(count.get() + 1));
+    for (index, entry) in entries.iter().enumerate() {
+        match request_process_write_view(pid, entry.target, entry.local) {
+            Ok(()) => {},
+            Err(RequestError::Status(status)) => return Ok((index, status)),
+            Err(error) => return Err(error),
+        }
+    }
+    VECTOR_REPLY.with(Cell::get).unwrap_or(Ok((entries.len(), 0)))
+}
 #[path = "../../nanami/servers/apps/alter/shared/src/common/state/page_window.rs"]
 pub mod page_window;
 mod state {
@@ -103,7 +126,13 @@ mod private_memory {
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/memory_protection.rs"]
 mod protection;
-thread_local! { static REQUESTS: Cell<usize> = const { Cell::new(0) }; }
+thread_local! {
+    static REQUESTS: Cell<usize> = const { Cell::new(0) };
+    static BATCH_REQUESTS: Cell<usize> = const { Cell::new(0) };
+    static VECTOR_REPLY: Cell<Option<Result<(Word, Word), RequestError>>> = const { Cell::new(None) };
+    static RELEASE_BATCHES: Cell<usize> = const { Cell::new(0) };
+    static RELEASE_REPLY: Cell<Option<Result<Word, RequestError>>> = const { Cell::new(None) };
+}
 #[cfg(target_os = "linux")]
 thread_local! {
     static INSTALL_VIEWS: Cell<bool> = const { Cell::new(false) };
@@ -161,6 +190,18 @@ fn request_mapping_release(local: Word, bytes: Word) -> Result<(), RequestError>
         return Ok(());
     }
     panic!("a denied installation owns no mapping to release");
+}
+fn request_mapping_release_views(locals: &[Word]) -> Result<Word, RequestError> {
+    RELEASE_BATCHES.with(|count| count.set(count.get() + 1));
+    let mut acknowledged = 0;
+    for (index, &local) in locals.iter().enumerate() {
+        #[cfg(target_os = "linux")]
+        let present = VIEWS.with(|views| views.borrow().iter().any(|&(_, address)| address == local));
+        #[cfg(not(target_os = "linux"))]
+        let present = true;
+        if !present || request_mapping_release(local, 4096).is_ok() { acknowledged |= 1 << index; }
+    }
+    RELEASE_REPLY.with(Cell::get).unwrap_or(Ok(acknowledged))
 }
 #[path = "../../nanami/servers/apps/alter/shared/src/personality/linux/guest_views.rs"]
 mod production;
@@ -326,6 +367,10 @@ fn long_native_copies_stop_exactly_at_an_inaccessible_page() {
 
 fn runtime(scratch: &[u8], personality: OsPersonality) -> Runtime {
     REQUESTS.with(|count| count.set(0));
+    BATCH_REQUESTS.with(|count| count.set(0));
+    VECTOR_REPLY.with(|reply| reply.set(None));
+    RELEASE_BATCHES.with(|count| count.set(0));
+    RELEASE_REPLY.with(|reply| reply.set(None));
     PROTECT_FAIL.with(|fail| fail.set(false));
     PROTECT_CALLS.with(|n| n.set(0));
     Runtime {
@@ -678,6 +723,58 @@ fn repeated_direct_read_copyouts_use_two_cross_page_leases_without_more_requests
 
 #[test]
 #[cfg(target_os = "linux")]
+fn native_vector_fatal_transport_and_malformed_replies_keep_every_uncertain_pin() {
+    let enabled = option_env!("NANAMI_GUEST_WRITE_VIEWS").map_or(cfg!(target_arch="x86_64"), |v| v=="1");
+    if !enabled || option_env!("NANAMI_BATCH_PAGE_VIEWS") == Some("0") { return; }
+    for reply in [Err(RequestError::Status(OS_RESPONSE_FATAL)), Err(RequestError::Transport),
+        Err(RequestError::Protocol), Ok((99, 0))] {
+        let scratch = vec![0x57; 4096];
+        let runtime = runtime(&scratch, OsPersonality::Linux);
+        INSTALL_VIEWS.with(|mode| mode.set(true));
+        // The fake server installs both pages, then loses/corrupts its reply.
+        // In particular actual FATAL=5 must never become NotInstalled.
+        VECTOR_REPLY.with(|value| value.set(Some(reply)));
+        assert!(!production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_shm, 4096));
+        VIEWS.with(|views| {
+            assert_eq!(views.borrow().len(), 2);
+            for &(_, local) in views.borrow().iter() {
+                assert!(unsafe { core::slice::from_raw_parts(local as *const u8, 4096) }.iter().all(|&byte| byte==0));
+            }
+        });
+        assert!(!production::copy_from_scratch_cached(&runtime, 7, 0x5013, runtime.posix_shm, 4096));
+        REQUESTS.with(|count| assert_eq!(count.get(), 2));
+        production::invalidate(&runtime, 7);
+        VIEWS.with(|views| assert!(views.borrow().is_empty()));
+        INSTALL_VIEWS.with(|mode| mode.set(false));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn native_release_vectors_keep_unknown_acks_unready_and_retry_already_released_pages() {
+    let enabled = option_env!("NANAMI_GUEST_WRITE_VIEWS").map_or(cfg!(target_arch="x86_64"), |v| v=="1");
+    if !enabled || option_env!("NANAMI_BATCH_PAGE_RELEASE") == Some("0") { return; }
+    for reply in [Err(RequestError::Transport), Err(RequestError::Protocol),
+        Err(RequestError::Status(OS_RESPONSE_FATAL)), Ok(1 << 8)] {
+        let scratch = vec![0x57; 4096];
+        let runtime = runtime(&scratch, OsPersonality::Linux);
+        INSTALL_VIEWS.with(|mode| mode.set(true));
+        assert!(production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_shm, 4096));
+        RELEASE_REPLY.with(|value| value.set(Some(reply)));
+        production::invalidate(&runtime, 7);
+        VIEWS.with(|views| assert!(views.borrow().is_empty()));
+        assert!(runtime.write_window.has_owner(7));
+        assert!(!production::copy_from_scratch_cached(&runtime, 7, 0x5013, runtime.posix_shm, 4096));
+        RELEASE_REPLY.with(|value| value.set(None));
+        production::invalidate(&runtime, 7);
+        assert!(!runtime.write_window.has_owner(7));
+        RELEASE_BATCHES.with(|count| assert_eq!(count.get(), 2));
+        INSTALL_VIEWS.with(|mode| mode.set(false));
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn full_io_quantum_copyouts_use_seventeen_native_aliases_and_cached_only_reuse() {
     let control = [0u8; 32];
     let mut direct = vec![0u8; 64 * 1024 + 7];
@@ -688,8 +785,10 @@ fn full_io_quantum_copyouts_use_seventeen_native_aliases_and_cached_only_reuse()
     if !enabled { return; }
     INSTALL_VIEWS.with(|mode| mode.set(true));
     let mut expected = vec![0u8; 17 * 4096];
-    assert!(!production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_direct_shm + 7, 65536));
-    REQUESTS.with(|count| assert_eq!(count.get(), 0));
+    let batched = option_env!("NANAMI_BATCH_PAGE_VIEWS") != Some("0");
+    assert_eq!(production::copy_from_scratch(&runtime, 7, 0x5013, runtime.posix_direct_shm + 7, 65536), batched);
+    REQUESTS.with(|count| assert_eq!(count.get(), if batched { 17 } else { 0 }));
+    BATCH_REQUESTS.with(|count| assert_eq!(count.get(), usize::from(batched)));
     for epoch in 0..32 {
         let len = [65536, 32769, 16385, 65535][epoch % 4];
         for (i, byte) in direct.iter_mut().enumerate() { *byte = (i * 37 + epoch * 11) as u8; }
@@ -711,6 +810,7 @@ fn full_io_quantum_copyouts_use_seventeen_native_aliases_and_cached_only_reuse()
         });
         assert_eq!(direct, before);
         REQUESTS.with(|count| assert_eq!(count.get(), 17));
+        BATCH_REQUESTS.with(|count| assert_eq!(count.get(), usize::from(batched)));
     }
     production::invalidate(&runtime, 7);
     VIEWS.with(|views| assert!(views.borrow().is_empty()));

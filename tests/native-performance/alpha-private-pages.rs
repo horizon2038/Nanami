@@ -59,6 +59,8 @@ fn min_usize(a: usize, b: usize) -> usize { a.min(b) }
 struct Processes {
     inner: ProcessManager,
     snapshots: std::cell::Cell<usize>,
+    pool_scalar_calls: usize,
+    pool_run_calls: usize,
 }
 impl core::ops::Deref for Processes {
     type Target=ProcessManager;
@@ -68,6 +70,16 @@ impl core::ops::DerefMut for Processes {
     fn deref_mut(&mut self)->&mut ProcessManager {&mut self.inner}
 }
 impl Processes {
+    fn register_pool_allocation(&mut self, pid: usize, base: usize, slot: usize,
+        physical: usize, pages: usize) -> Result<(), CapabilityError> {
+        self.pool_scalar_calls += 1;
+        self.inner.register_pool_allocation(pid, base, slot, physical, pages)
+    }
+    fn register_pool_page_run(&mut self, pid: usize, base: usize, slot: usize,
+        physical: usize, pages: usize) -> Result<(), CapabilityError> {
+        self.pool_run_calls += 1;
+        self.inner.register_pool_page_run(pid, base, slot, physical, pages)
+    }
     fn try_physical_pages_in_range(&self,pid:usize,base:usize,end:usize,max:usize)
         ->Option<Vec<nanami_core::process::ProcessPhysicalAllocation>> {
         self.snapshots.set(self.snapshots.get()+1);
@@ -500,6 +512,9 @@ impl Memory {
     fn allocation_frame_hint(&self, first: usize, pages: usize) -> Option<(usize, usize)> {
         (pages >= 256).then_some((first, pages))
     }
+    fn small_allocation_frame_hint(&self, first: usize, pages: usize) -> Option<(usize, usize)> {
+        Some((first, pages))
+    }
     fn ensure_alpha_frame_for_allocation(&mut self, page: usize, hint: Option<(usize, usize)>) -> Result<(), CapabilityError> {
         if let Some((first, pages))=hint { assert!(page>=first && page-first<pages); }
         self.ensure_alpha_frame_at_physical_index(page)
@@ -566,6 +581,7 @@ struct Alpha {
     cached_copy_frames: std::collections::BTreeSet<usize>,
     copy_maps: usize,
     initialization_maps: usize,
+    fail_initialization_map: Option<usize>,
     initialization_evictions: usize,
     pinned_copies: Vec<Option<usize>>,
     lookups: usize,
@@ -573,10 +589,6 @@ struct Alpha {
     fail_copy: Option<usize>,
 }
 impl Alpha {
-    fn zero_physical_pages(&mut self,first:usize,pages:usize)->Result<(),CapabilityError> {
-        for page in first..first+pages {self.memory.pages.get_mut(&page).unwrap().fill(0);}
-        Ok(())
-    }
     fn allocate_process_frame(&mut self, _: usize, _: usize, _: usize) -> Result<usize, CapabilityError> {
         panic!("native management caps are outside this prepared-pool fixture")
     }
@@ -607,12 +619,14 @@ impl Alpha {
         }
         Self {
             memory: Memory::default(),
-            processes: Processes {inner:processes,snapshots:std::cell::Cell::new(0)},
+            processes: Processes {inner:processes,snapshots:std::cell::Cell::new(0),
+                pool_scalar_calls: 0, pool_run_calls: 0},
             rollbacks: 0,
             initialization_sources: Default::default(),
             cached_copy_frames: Default::default(),
             copy_maps: 0,
             initialization_maps: 0,
+            fail_initialization_map: None,
             initialization_evictions: 0,
             pinned_copies: Vec::new(),
             lookups: 0,
@@ -656,6 +670,7 @@ impl Alpha {
     }
     fn map_initialization_page(&mut self, page: usize) -> Result<usize, CapabilityError> {
         self.initialization_maps += 1;
+        if self.fail_initialization_map == Some(page) { return Err(CapabilityError::Fatal); }
         if self.memory.physical_frame_descriptor_from_index(page).is_some_and(|f|f&SLICE_KEY!=0) {
             return Ok(self.memory.pages.get_mut(&page).unwrap().as_mut_ptr() as usize);
         }
@@ -760,6 +775,10 @@ mod mapping_protection;
 mod mapping_release;
 #[path = "../../nanami/src/nanami_core/alpha/memory_pages.rs"]
 mod memory_pages;
+#[path = "../../nanami/src/nanami_core/alpha/memory_anonymous.rs"]
+mod memory_anonymous;
+#[path = "../../nanami/src/nanami_core/alpha/memory_zero.rs"]
+mod memory_zero;
 #[path = "../../nanami/src/nanami_core/alpha/memory_large.rs"]
 mod memory_large;
 #[path = "../../nanami/src/nanami_core/alpha/memory_private.rs"]
@@ -782,6 +801,279 @@ mod page_fill;
 use page_fill::fill_lazy_page;
 
 use memory_pages::PageSource;
+
+#[test]
+fn cow_batch_allocates_once_copies_actual_bytes_and_keeps_the_final_original_owner() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO") == Some("0") { return; }
+    let batched = option_env!("NANAMI_PRIVATE_BATCH_BACKING") != Some("0");
+    for rights in [3, 7] {
+        let mut a = huge_alpha(); a.memory.large_enabled = false;
+        let base = 0x800000;
+        a.map_process_anonymous_zero_cow(2, Some(base), 128, rights).unwrap();
+        let original = a.processes.find_active_physical_allocation_reference(2, base + 64 * PAGE_SIZE, 1).unwrap();
+        // Same-Frame admission is not proof that the current bytes are zero.
+        a.memory.pages.get_mut(&original.base_page).unwrap().fill(0x57);
+        for (index, copied) in [(64, 64), (16, 47)] {
+            a.memory.allocation_requests.clear();
+            a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0, arg0: 2,
+                arg1: base + index * PAGE_SIZE, arg2: PAGE_SIZE,
+                arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE }).unwrap();
+            assert_eq!(a.memory.allocation_requests, if batched { vec![copied * PAGE_SIZE] } else { vec![PAGE_SIZE; copied] });
+        }
+        assert_eq!(a.memory.pages.len(), 128);
+        assert_eq!(a.processes.physical_reference_count(original), 1);
+        assert!(a.processes.deferred_physical_allocations_for_pid(2).next().is_none());
+        let frames: std::collections::BTreeSet<_> = (0..128).map(|i| {
+            let va = base + i * PAGE_SIZE;
+            let vm = a.processes.vm_space(2).unwrap();
+            assert_eq!(vm.hardware_permissions(va), rights);
+            assert!(!vm.mapping_is_uncertain(va)); assert!(!vm.private_page_shared(va));
+            assert_eq!(transfer_bytes(&a, 2, va, PAGE_SIZE), vec![if i < 16 { 0 } else { 0x57 }; PAGE_SIZE]);
+            vm.find_frame(va).unwrap()
+        }).collect();
+        assert_eq!(frames.len(), 128);
+        let physical = a.processes.find_active_physical_allocation_reference(2, base + 64 * PAGE_SIZE, 1).unwrap().base_page;
+        a.memory.pages.get_mut(&physical).unwrap()[0] = 0xa7;
+        assert_eq!(transfer_bytes(&a, 2, base + 65 * PAGE_SIZE, 1), vec![0x57]);
+        release_range(&mut a, base, 128 * PAGE_SIZE).unwrap(); retire_deferred_pool_pages(&mut a, 2).unwrap();
+        assert!(a.memory.pages.is_empty());
+    }
+}
+
+#[test]
+fn cow_batch_fragmented_ram_falls_back_without_losing_slots_or_page_ownership() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO") == Some("0") { return; }
+    let batched = option_env!("NANAMI_PRIVATE_BATCH_BACKING") != Some("0");
+    let mut a = huge_alpha(); a.memory.large_enabled = false; let base = 0x800000;
+    a.map_process_anonymous_zero_cow(2, Some(base), 256, 3).unwrap();
+    a.memory.fragmented = true; a.memory.allocation_requests.clear();
+    a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0, arg0: 2,
+        arg1: base + 64 * PAGE_SIZE, arg2: PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE }).unwrap();
+    let mut expected = if batched { vec![64 * PAGE_SIZE] } else { Vec::new() };
+    expected.extend(core::iter::repeat_n(PAGE_SIZE, 64));
+    assert_eq!(a.memory.allocation_requests, expected);
+    let rows = a.processes.physical_pages_in_range(2, base, base + 256 * PAGE_SIZE);
+    let slots: std::collections::BTreeSet<_> = rows.iter().map(|r| r.start_slot).collect();
+    assert_eq!(slots.len(), rows.len());
+    assert_eq!(transfer_bytes(&a, 2, base, 256 * PAGE_SIZE), vec![0; 256 * PAGE_SIZE]);
+    assert!(a.processes.deferred_physical_allocations_for_pid(2).next().is_none());
+    release_range(&mut a, base, 256 * PAGE_SIZE).unwrap(); retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn cow_batch_conversion_and_copy_failures_retain_the_unpublished_suffix_for_retryable_retirement() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO") == Some("0") { return; }
+    let batched = option_env!("NANAMI_PRIVATE_BATCH_BACKING") != Some("0");
+    for conversion in [false, true] {
+        let mut a = huge_alpha(); a.memory.large_enabled = false; let base = 0x800000;
+        a.map_process_anonymous_zero_cow(2, Some(base), 256, 3).unwrap();
+        if conversion { a.memory.fail_ensure = Some(a.memory.next + 7); }
+        else { a.fail_initialization_map = Some(a.memory.next + 7); }
+        assert_eq!(a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0, arg0: 2,
+            arg1: base + 64 * PAGE_SIZE, arg2: PAGE_SIZE,
+            arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE }), Err(CapabilityError::Fatal));
+        let pending = a.processes.deferred_physical_allocations_for_pid(2).collect::<Vec<_>>();
+        assert_eq!(pending.len(), if batched { 58 } else { 1 });
+        for (offset, page) in pending.iter().enumerate() {
+            if batched { assert_eq!(page.base_va, base + (70 + offset) * PAGE_SIZE); }
+            assert_eq!(page.page_count, 1);
+            assert_eq!(a.processes.physical_reference_count(*page), 1);
+            assert!(a.memory.pages.contains_key(&page.base_page));
+        }
+        assert_eq!(a.memory.freed_pages, 0);
+        // Model an acknowledged complete root teardown before release.
+        let space = a.processes.memory_context(2).unwrap().address_space;
+        KERNEL.with_borrow_mut(|k| k.ptes.retain(|&(s, _), _| s != space));
+        for i in 0..256 { a.processes.vm_space_mut(2).unwrap().confirm_unmapped(base + i * PAGE_SIZE); }
+        a.memory.fail_ensure = None; a.fail_initialization_map = None;
+        release_range(&mut a, base, 256 * PAGE_SIZE).unwrap();
+        a.memory.fail_free = true;
+        assert_eq!(retire_deferred_pool_pages(&mut a, 2), Err(CapabilityError::Fatal));
+        assert!(!a.memory.pages.is_empty());
+        a.memory.fail_free = false;
+        retire_deferred_pool_pages(&mut a, 2).unwrap(); assert!(a.memory.pages.is_empty());
+    }
+}
+
+#[test]
+fn cow_batch_fatal_allocation_keeps_old_backing_and_returns_the_reserved_slots() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO") == Some("0") { return; }
+    let batched = option_env!("NANAMI_PRIVATE_BATCH_BACKING") != Some("0");
+    let mut a = huge_alpha(); a.memory.large_enabled = false; let base = 0x800000;
+    a.map_process_anonymous_zero_cow(2, Some(base), 256, 3).unwrap();
+    let first = a.processes.find_entry_by_pid(2).unwrap().next_frame_slot;
+    a.memory.fail_allocate = Some(a.memory.next);
+    assert_eq!(a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0, arg0: 2,
+        arg1: base + 64 * PAGE_SIZE, arg2: PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE }), Err(CapabilityError::Fatal));
+    assert_eq!(a.memory.pages.len(), 17);
+    assert!(a.processes.deferred_physical_allocations_for_pid(2).next().is_none());
+    if batched {
+        assert_eq!(a.processes.reserve_private_replacement_slots(2, 64, PROCESS_FRAME_TOTAL_PAGES).unwrap().2, first);
+        a.processes.recycle_private_frame_slots(2, first, 64);
+    }
+    a.memory.fail_allocate = None;
+    a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0, arg0: 2,
+        arg1: base + 64 * PAGE_SIZE, arg2: PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE }).unwrap();
+    release_range(&mut a, base, 256 * PAGE_SIZE).unwrap(); retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn writable_zero_aliases_keep_hot_prefix_writable_and_isolate_guarded_tail_writes() {
+    let shared = option_env!("NANAMI_SHARED_WRITABLE_ZERO") != Some("0")
+        && option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+        && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+    for pages in [128,256,511] { for rights in [3,7] { for requested in [None,Some(0x800000),Some(0x811000)] {
+        let mut a=huge_alpha();a.memory.large_enabled=false;
+        let base=a.map_process_anonymous_zero_cow(2,requested,pages,rights).unwrap();
+        assert_eq!(a.memory.pages.len(),if shared {17} else {pages});
+        assert_eq!(transfer_bytes(&a,2,base,pages*PAGE_SIZE),vec![0;pages*PAGE_SIZE]);
+        for i in 0..pages {
+            let va=base+i*PAGE_SIZE;let vm=a.processes.vm_space(2).unwrap();
+            assert_eq!(vm.permissions(va),rights);
+            assert_eq!(vm.hardware_permissions(va),if shared && i>=16 {0} else {rights});
+            assert_eq!(vm.private_page_cow_write(va),shared && i>=16);
+            assert_eq!(vm.mapping_deferred(va),shared && i>=16);assert!(!vm.mapping_is_uncertain(va));
+            let row=a.processes.find_active_physical_allocation_reference(2,va,1).unwrap();
+            assert_eq!(a.processes.physical_reference_count(row),if shared && i>=16 {pages-16} else {1});
+        }
+        for i in [0,15,16,64,pages-1] {
+            let va=base+i*PAGE_SIZE;
+            if a.processes.vm_space(2).unwrap().private_page_shared(va) {
+                assert_eq!(a.process_frame_for_write(2,va),Err(CapabilityError::IllegalOperation));
+            }
+            a.handle_process_private_write(OsRequestEvent {identifier:3,code:0,arg0:2,arg1:va,arg2:PAGE_SIZE,
+                arg3:nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE}).unwrap();
+            assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(va),rights,
+                "pages={pages} requested={requested:?} index={i} shared={} deferred={} uncertain={}",
+                a.processes.vm_space(2).unwrap().private_page_shared(va),
+                a.processes.vm_space(2).unwrap().mapping_deferred(va),
+                a.processes.vm_space(2).unwrap().mapping_is_uncertain(va));
+            assert!(!a.processes.vm_space(2).unwrap().mapping_is_uncertain(va));
+            let frame=a.process_frame_for_write(2,va).unwrap();let physical=a.memory.frames[&frame];
+            a.memory.pages.get_mut(&physical).unwrap()[0]=0xa7;
+        }
+        for i in 0..pages {
+            assert_eq!(transfer_bytes(&a,2,base+i*PAGE_SIZE,1),vec![if [0,15,16,64,pages-1].contains(&i) {0xa7} else {0}]);
+        }
+        release_range(&mut a,base,pages*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+        assert!(a.memory.pages.is_empty());
+    }}}
+}
+
+#[test]
+fn writable_zero_aliases_survive_fork_partial_release_and_same_address_reuse() {
+    let mut a=huge_alpha();a.memory.large_enabled=false;let base=0x800000;
+    a.map_process_anonymous_zero_cow(2,Some(base),256,3).unwrap();
+    a.processes.install_process(4,3,204,104,15,25,0,4,0,0,0x100000,0x1000000).unwrap();
+    a.processes.ensure_vm_space_for_pid(4).unwrap();a.processes.seal_capabilities(4).unwrap();
+    a.clone_process_vm_private_cow(2,4).unwrap();
+    let changed=base+200*PAGE_SIZE;
+    a.handle_process_private_write(OsRequestEvent {identifier:3,code:0,arg0:4,arg1:changed,arg2:PAGE_SIZE,
+        arg3:nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE}).unwrap();
+    let frame=a.processes.vm_space(4).unwrap().find_frame(changed).unwrap();let physical=a.memory.frames[&frame];
+    a.memory.pages.get_mut(&physical).unwrap()[0]=0x71;
+    assert_eq!(transfer_bytes(&a,2,base,256*PAGE_SIZE),vec![0;256*PAGE_SIZE]);
+    assert_eq!(transfer_bytes(&a,4,changed,1),vec![0x71]);
+    release_range(&mut a,base,128*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+    a.map_process_anonymous_zero_cow(2,Some(base),128,3).unwrap();
+    assert_eq!(transfer_bytes(&a,2,base,256*PAGE_SIZE),vec![0;256*PAGE_SIZE]);
+    a.handle_mapping_release_request(OsRequestEvent {identifier:3,code:0,arg0:base,arg1:256*PAGE_SIZE,arg2:4,
+        arg3:nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES}).unwrap();
+    retire_deferred_pool_pages(&mut a,4).unwrap();
+    release_range(&mut a,base,256*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn writable_zero_construction_keeps_genuine_huge_leaves_and_rejects_native_or_bad_rights() {
+    let mut a=huge_alpha();let base=0x800000;
+    a.map_process_anonymous_zero_cow(2,Some(base),512,3).unwrap();
+    let space=a.processes.memory_context(2).unwrap().address_space;
+    KERNEL.with_borrow(|k| {assert!(k.huge.contains(&(space,base)));assert_eq!(k.ptes[&(space,base)].1,3);});
+    for i in 0..512 {assert!(!a.processes.vm_space(2).unwrap().private_page_shared(base+i*PAGE_SIZE));}
+    for rights in [0,1,2,4,5,6,8] {assert_eq!(a.map_process_anonymous_zero_cow(2,Some(0x1000000),256,rights),Err(CapabilityError::PermissionDenied));}
+    assert_eq!(a.map_process_anonymous_zero_cow(1,Some(0x1000000),256,3),Err(CapabilityError::PermissionDenied));
+    release_range(&mut a,base,512*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn writable_zero_failed_final_map_retires_all_aliases_after_acknowledged_cleanup() {
+    for after in [false,true] {for ordinal in [1,16] {
+        let mut a=huge_alpha();a.memory.large_enabled=false;
+        KERNEL.with_borrow_mut(|k|k.fail_map_once=Some((k.map_attempts+ordinal,after)));
+        assert_eq!(a.map_process_anonymous_zero_cow(2,Some(0x800000),256,3),Err(CapabilityError::Fatal));
+        retire_deferred_pool_pages(&mut a,2).unwrap();
+        assert!(a.memory.pages.is_empty());
+        assert!(!a.processes.vm_space(2).unwrap().has_backed_pages(0x800000,0x900000));
+    }}
+}
+
+#[test]
+fn zero_cluster_fault_never_changes_readonly_none_uncertain_or_different_frame_neighbors() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO")==Some("0") {return;}
+    let mut a=huge_alpha();a.memory.large_enabled=false;let base=0x800000;
+    a.map_process_anonymous_zero_cow(2,Some(base),256,3).unwrap();
+    for (i,rights) in [(90,1),(92,0)] {
+        a.handle_mapping_protect_request(OsRequestEvent {identifier:3,code:0,arg0:2,
+            arg1:base+i*PAGE_SIZE,arg2:PAGE_SIZE,arg3:rights}).unwrap();
+    }
+    a.handle_process_private_write(OsRequestEvent {identifier:3,code:0,arg0:2,arg1:base+93*PAGE_SIZE,
+        arg2:PAGE_SIZE,arg3:nanami_uapi::os::OS_PRIVATE_WRITE_DETACH}).unwrap();
+    let separate=a.processes.vm_space(2).unwrap().find_frame(base+93*PAGE_SIZE).unwrap();
+    a.processes.vm_space_mut(2).unwrap().mark_mapping_uncertain(base+91*PAGE_SIZE);
+    let before=KERNEL.with_borrow(|k|k.map_attempts);
+    a.handle_process_private_write(OsRequestEvent {identifier:3,code:0,arg0:2,arg1:base+64*PAGE_SIZE,
+        arg2:PAGE_SIZE,arg3:nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE}).unwrap();
+    assert_eq!(KERNEL.with_borrow(|k|k.map_attempts)-before,60);
+    let vm=a.processes.vm_space(2).unwrap();
+    assert_eq!(vm.permissions(base+90*PAGE_SIZE),1);
+    assert_eq!(vm.permissions(base+92*PAGE_SIZE),0);
+    assert!(vm.mapping_is_uncertain(base+91*PAGE_SIZE));
+    assert_eq!(vm.find_frame(base+93*PAGE_SIZE),Some(separate));
+    for i in 64..128 {
+        if [90,91,92,93].contains(&i) {continue;}
+        assert_eq!(vm.hardware_permissions(base+i*PAGE_SIZE),3);
+        assert!(!vm.private_page_shared(base+i*PAGE_SIZE));
+        assert!(!vm.mapping_is_uncertain(base+i*PAGE_SIZE));
+    }
+    assert_eq!(transfer_bytes(&a,2,base,256*PAGE_SIZE),vec![0;256*PAGE_SIZE]);
+    release_range(&mut a,base,256*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn absent_zero_cluster_map_failures_keep_backing_until_all_required_unmap_acks() {
+    if option_env!("NANAMI_SHARED_WRITABLE_ZERO")==Some("0") {return;}
+    for after in [false,true] {for fail_unmap in [false,true] {
+        let mut a=huge_alpha();a.memory.large_enabled=false;let base=0x800000;
+        a.map_process_anonymous_zero_cow(2,Some(base),256,3).unwrap();
+        KERNEL.with_borrow_mut(|k| {
+            k.fail_map_once=Some((k.map_attempts+7,after));
+            if fail_unmap {k.fail_unmap=Some(UnmapFailure::Before);}
+        });
+        let failed=base+70*PAGE_SIZE;
+        assert_eq!(a.handle_process_private_write(OsRequestEvent {identifier:3,code:0,arg0:2,
+            arg1:base+64*PAGE_SIZE,arg2:PAGE_SIZE,arg3:nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_POPULATE}),Err(CapabilityError::Fatal));
+        assert!(a.processes.find_active_physical_allocation_reference(2,failed,1).is_some());
+        assert_eq!(a.processes.vm_space(2).unwrap().mapping_is_uncertain(failed),fail_unmap);
+        assert!(!a.processes.deferred_physical_allocations_for_pid(2).collect::<Vec<_>>().is_empty());
+        assert_eq!(a.memory.freed_pages,0);
+        // A confirmed root teardown removes all leaves before retirement; a
+        // failed shootdown must never be replaced by this modeled proof.
+        let space=a.processes.memory_context(2).unwrap().address_space;
+        KERNEL.with_borrow_mut(|k| {k.fail_unmap=None;k.ptes.retain(|&(s,_),_|s!=space);});
+        let vm=a.processes.vm_space_mut(2).unwrap();
+        for i in 0..256 {vm.confirm_unmapped(base+i*PAGE_SIZE);}
+        release_range(&mut a,base,256*PAGE_SIZE).unwrap();retire_deferred_pool_pages(&mut a,2).unwrap();
+        assert!(a.memory.pages.is_empty());
+    }}
+}
 
 #[test]
 fn huge_frame_metadata_keeps_all_slice_keys_permissions_and_one_large_pte() {
@@ -830,10 +1122,147 @@ fn direct_deferred_image_has_one_private_owner_and_initialized_bytes_before_any_
         assert!(!allocation.owns_frame_cap);assert_eq!(a.processes.physical_reference_count(allocation),1);
     }
     assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:3,code:0,arg0:2,arg1:base+40*PAGE_SIZE,arg2:1,arg3:0}),Ok(1));
-    KERNEL.with_borrow(|k|assert_eq!(k.ptes.keys().filter(|&&(s,_)|s==space).count(),512));
+    let cluster=memory_snapshot::SNAPSHOT_POPULATE_PAGES;
+    KERNEL.with_borrow(|k|assert_eq!(k.ptes.keys().filter(|&&(s,_)|s==space).count(),cluster));
+    assert!(a.processes.vm_space(2).unwrap().mapping_deferred(base+cluster*PAGE_SIZE));
+    assert_eq!(a.handle_populate_snapshot(OsRequestEvent{identifier:3,code:0,arg0:2,arg1:base+cluster*PAGE_SIZE,arg2:1,arg3:0}),Ok(1));
+    KERNEL.with_borrow(|k|assert_eq!(k.ptes.keys().filter(|&&(s,_)|s==space).count(),(2*cluster).min(pages)));
     a.handle_mapping_protect_request(OsRequestEvent{identifier:3,code:0,arg0:2,arg1:base+700*PAGE_SIZE,arg2:PAGE_SIZE,arg3:3}).unwrap();
     assert!(!a.processes.vm_space(2).unwrap().mapping_deferred(base+700*PAGE_SIZE));
     assert_eq!(transfer_bytes(&a,2,base,pages*PAGE_SIZE),actual);
+}
+
+#[test]
+fn readonly_protection_keeps_cold_snapshot_tail_faultable_with_current_rights() {
+    for pages in [127, 128, 256, 1024] {
+        for rights in [1, 4, 5] {
+            let mut a = huge_alpha();
+            a.memory.large_enabled = false;
+            let source = a.source(pages * PAGE_SIZE);
+            let base = 0x800000;
+            a.map_process_initialized_pages_deferred(2, base, pages, Some(source), 16 * PAGE_SIZE).unwrap();
+            let original = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
+            let before = KERNEL.with_borrow(|k| k.map_attempts);
+            let allocation_cursor = a.memory.next;
+            a.handle_mapping_protect_request(OsRequestEvent {
+                identifier: 3, code: 0, arg0: 2, arg1: base, arg2: pages * PAGE_SIZE, arg3: rights,
+            }).unwrap();
+            let eager = if pages >= 128 && option_env!("NANAMI_EAGER_SNAPSHOT_PROTECTION") != Some("1") {
+                64
+            } else { pages };
+            let expected_maps = if rights == 1 { eager - 16 } else { eager };
+            assert_eq!(KERNEL.with_borrow(|k| k.map_attempts) - before, expected_maps);
+            assert_eq!(a.memory.next, allocation_cursor);
+            for page in 0..pages {
+                let va = base + page * PAGE_SIZE;
+                let vm = a.processes.vm_space(2).unwrap();
+                assert_eq!(vm.permissions(va), rights);
+                assert_eq!(vm.mapping_deferred(va), page >= eager);
+                assert_eq!(vm.hardware_permissions(va), if page < eager { rights } else { 0 });
+                let allocation = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
+                assert!(!allocation.owns_frame_cap);
+                assert_eq!(a.processes.physical_reference_count(allocation), 1);
+            }
+            let tail = base + (pages - 1) * PAGE_SIZE;
+            let required = if rights & 4 != 0 { 4 } else { 1 };
+            assert_eq!(a.handle_populate_snapshot(OsRequestEvent {
+                identifier: 3, code: 0, arg0: 2, arg1: tail, arg2: required, arg3: 0,
+            }), Ok(1));
+            assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(tail), rights);
+            assert_eq!(a.handle_populate_snapshot(OsRequestEvent {
+                identifier: 3, code: 0, arg0: 2, arg1: tail, arg2: 2, arg3: 0,
+            }), Ok(0));
+            assert_eq!(transfer_bytes(&a, 2, base, pages * PAGE_SIZE), original);
+            println!("READONLY-PROTECT pages={pages} rights={rights} eager={eager} protection-maps={expected_maps}");
+        }
+    }
+}
+
+#[test]
+fn readonly_protection_tail_write_upgrade_still_detaches_all_shared_bytes() {
+    let mut a = huge_alpha();
+    a.memory.large_enabled = false;
+    let pages = 256;
+    let base = 0x800000;
+    a.map_process_initialized_pages_deferred(2, base, pages, None, 16 * PAGE_SIZE).unwrap();
+    fill_private_fork_pattern(&mut a, base, pages);
+    let original = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
+    a.handle_mapping_protect_request(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 2, arg1: base, arg2: pages * PAGE_SIZE, arg3: 5,
+    }).unwrap();
+    a.processes.seal_capabilities(1).unwrap();
+    a.clone_process_vm_private_cow(2, 1).unwrap();
+    a.handle_process_private_write(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 1, arg1: base, arg2: pages * PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_DEFERRED,
+    }).unwrap();
+    a.handle_mapping_protect_request(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 1, arg1: base, arg2: pages * PAGE_SIZE, arg3: 3,
+    }).unwrap();
+    assert_eq!(transfer_bytes(&a, 1, base, pages * PAGE_SIZE), original);
+    for page in 0..pages {
+        let va = base + page * PAGE_SIZE;
+        let vm = a.processes.vm_space(1).unwrap();
+        assert!(!vm.mapping_deferred(va));
+        assert!(!vm.private_page_shared(va));
+        assert_eq!(vm.hardware_permissions(va), 3);
+        let frame = vm.find_frame(va).unwrap();
+        let physical = a.memory.frames[&frame];
+        a.memory.pages.get_mut(&physical).unwrap()[0] = 0xee;
+    }
+    assert_eq!(transfer_bytes(&a, 2, base, pages * PAGE_SIZE), original);
+}
+
+#[test]
+fn readonly_protection_failure_rolls_back_metadata_only_tail_and_present_pages() {
+    for after in [false, true] {
+        let mut a = huge_alpha();
+        a.memory.large_enabled = false;
+        let source = a.source(256 * PAGE_SIZE);
+        let base = 0x800000;
+        a.map_process_initialized_pages_deferred(2, base, 256, Some(source), 16 * PAGE_SIZE).unwrap();
+        let original = transfer_bytes(&a, 2, base, 256 * PAGE_SIZE);
+        assert_eq!(a.handle_populate_snapshot(OsRequestEvent {
+            identifier: 3, code: 0, arg0: 2, arg1: base + 128 * PAGE_SIZE, arg2: 1, arg3: 0,
+        }), Ok(1));
+        let prefix = if option_env!("NANAMI_EAGER_SNAPSHOT_PROTECTION") == Some("1") { 128 } else { 64 };
+        KERNEL.with_borrow_mut(|k| { k.fail_map_once = Some((k.map_attempts + prefix + 1, after)); });
+        assert_eq!(a.handle_mapping_protect_request(OsRequestEvent {
+            identifier: 3, code: 0, arg0: 2, arg1: base, arg2: 256 * PAGE_SIZE, arg3: 5,
+        }), Err(CapabilityError::Fatal));
+        for page in 0..256 {
+            let va = base + page * PAGE_SIZE;
+            let present = page < 16 || (128..192).contains(&page);
+            let vm = a.processes.vm_space(2).unwrap();
+            assert_eq!(vm.permissions(va), 1);
+            assert_eq!(vm.mapping_deferred(va), !present);
+            assert!(!vm.mapping_is_uncertain(va));
+            assert_eq!(vm.hardware_permissions(va), usize::from(present));
+            let allocation = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
+            assert_eq!(a.processes.physical_reference_count(allocation), 1);
+        }
+        assert_eq!(transfer_bytes(&a, 2, base, 256 * PAGE_SIZE), original);
+    }
+}
+
+#[test]
+fn readonly_protection_cannot_skip_an_uncertain_tail_leaf() {
+    let mut a = huge_alpha();
+    a.memory.large_enabled = false;
+    let base = 0x800000;
+    let tail = base + 200 * PAGE_SIZE;
+    a.map_process_initialized_pages_deferred(2, base, 256, None, 16 * PAGE_SIZE).unwrap();
+    a.processes.vm_space_mut(2).unwrap().mark_mapping_uncertain(tail);
+    let before = KERNEL.with_borrow(|k| k.unmaps);
+    KERNEL.with_borrow_mut(|k| { k.fail_unmap = Some(UnmapFailure::Before); });
+    assert_eq!(a.handle_mapping_protect_request(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 2, arg1: base, arg2: 256 * PAGE_SIZE, arg3: 1,
+    }), Err(CapabilityError::Fatal));
+    assert!(KERNEL.with_borrow(|k| k.unmaps) > before);
+    assert!(a.processes.vm_space(2).unwrap().mapping_is_uncertain(tail));
+    let allocation = a.processes.find_active_physical_allocation_reference(2, tail, 1).unwrap();
+    let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0");
+    assert_eq!(a.processes.physical_reference_count(allocation), if shared { 240 } else { 1 });
 }
 
 #[test]
@@ -856,6 +1285,386 @@ fn deferred_constructor_keeps_available_huge_leaf_and_defers_only_small_suffix()
     assert!(actual[..source.bytes].iter().enumerate().all(|(i,&byte)| byte == (i%239) as u8));
     assert!(actual[source.bytes..].iter().all(|&byte| byte == 0));
     release_range(&mut a,base,pages*PAGE_SIZE).unwrap();
+}
+
+#[test]
+fn large_readonly_zero_tail_keeps_final_rights_bytes_and_owned_faultable_backing() {
+    for source_bytes in [0usize, 4097, 20600] {
+        let prefix = source_bytes.div_ceil(PAGE_SIZE);
+        for tail in [127, 128, 511] {
+            for rights in [1, 4, 5, 3, 7] {
+                let mut a = huge_alpha();
+                a.memory.large_enabled = false;
+                let source = (source_bytes != 0).then(|| a.source(source_bytes));
+                let base = 0x800000;
+                let pages = prefix + tail;
+                let before = KERNEL.with_borrow(|k| k.map_attempts);
+                a.map_process_initialized_pages_protected(2, Some(base), pages, source, rights).unwrap();
+                let deferred = tail >= 128 && rights & 2 == 0
+                    && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+                let eager = if deferred { prefix } else { pages };
+                assert_eq!(KERNEL.with_borrow(|k| k.map_attempts) - before, eager);
+                for page in 0..pages {
+                    let va = base + page * PAGE_SIZE;
+                    let vm = a.processes.vm_space(2).unwrap();
+                    assert_eq!(vm.permissions(va), rights);
+                    assert_eq!(vm.mapping_deferred(va), page >= eager);
+                    assert_eq!(vm.hardware_permissions(va), if page < eager { rights } else { 0 });
+                    let allocation = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
+                    assert!(!allocation.owns_frame_cap);
+                    let shared = deferred && option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0") && page >= prefix;
+                    assert_eq!(a.processes.physical_reference_count(allocation), if shared { tail } else { 1 });
+                }
+                let tail_va = base + (pages - 1) * PAGE_SIZE;
+                let required = if rights & 4 != 0 { 4 } else { 1 };
+                assert_eq!(a.handle_populate_snapshot(OsRequestEvent {
+                    identifier: 3, code: 0, arg0: 2, arg1: tail_va, arg2: required, arg3: 0,
+                }), Ok(usize::from(deferred)));
+                assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(tail_va), rights);
+                let bytes = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
+                assert!(bytes[..source_bytes].iter().enumerate().all(|(i, &b)| b == (i % 239) as u8));
+                assert!(bytes[source_bytes..].iter().all(|&b| b == 0));
+                println!("FILE-ZERO-TAIL source={source_bytes} pages={pages} rights={rights} initial-maps={eager}");
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_zero_tail_uses_one_initialized_page_with_per_alias_ownership() {
+    for source_bytes in [0usize, 4097, 20600] {
+        for offset in [0, 17] {
+            let mut a = huge_alpha();
+            a.memory.large_enabled = false;
+            let source = (source_bytes != 0).then(|| a.source(source_bytes));
+            let prefix = source_bytes.div_ceil(PAGE_SIZE);
+            let base = 0x800000 + offset * PAGE_SIZE;
+            let before = a.memory.pages.len();
+            let requests = a.memory.allocation_requests.len();
+            let pages = prefix + 511;
+            a.map_process_initialized_pages_protected(2, Some(base), pages, source, 5).unwrap();
+            let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+                && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+            assert_eq!(a.memory.pages.len() - before, prefix + if shared { 1 } else { 511 });
+            if shared {
+                let expected = if prefix == 0 { vec![PAGE_SIZE] } else { vec![prefix * PAGE_SIZE, PAGE_SIZE] };
+                assert_eq!(&a.memory.allocation_requests[requests..], expected.as_slice());
+            }
+            let zero = a.processes.find_active_physical_allocation_reference(2, base + prefix * PAGE_SIZE, 1).unwrap();
+            for page in prefix..pages {
+                let va = base + page * PAGE_SIZE;
+                let allocation = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
+                assert_eq!(allocation.page_count, 1);
+                assert_eq!(a.processes.physical_reference_count(allocation), if shared { 511 } else { 1 });
+                if shared { assert_eq!(allocation.base_page, zero.base_page); }
+                let vm = a.processes.vm_space(2).unwrap();
+                assert_eq!(vm.permissions(va), 5);
+                assert_eq!(vm.mapping_deferred(va), option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1"));
+                assert_eq!(vm.private_page_shared(va), shared);
+            }
+            let bytes = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
+            assert!(bytes[..source_bytes].iter().enumerate().all(|(i, &byte)| byte == (i % 239) as u8));
+            assert!(bytes[source_bytes..].iter().all(|&byte| byte == 0));
+            release_range(&mut a, base, pages * PAGE_SIZE).unwrap();
+            retire_deferred_pool_pages(&mut a, 2).unwrap();
+            assert_eq!(a.memory.pages.len(), before);
+        }
+    }
+}
+
+#[test]
+fn shared_zero_tail_partial_release_and_write_upgrade_preserve_other_aliases() {
+    let mut a = huge_alpha();
+    a.memory.large_enabled = false;
+    let base = 0x800000;
+    a.map_process_initialized_pages_protected(2, Some(base), 128, None, 1).unwrap();
+    let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+        && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+    let zero = a.processes.find_active_physical_allocation_reference(2, base + 64 * PAGE_SIZE, 1).unwrap();
+    a.handle_populate_snapshot(OsRequestEvent { identifier: 3, code: 0,
+        arg0: 2, arg1: base, arg2: 1, arg3: 0 }).unwrap();
+    release_range(&mut a, base, 64 * PAGE_SIZE).unwrap();
+    retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert_eq!(a.memory.freed_pages, if shared { 0 } else { 64 });
+    let changed = base + 64 * PAGE_SIZE;
+    a.handle_process_private_write(OsRequestEvent { identifier: 3, code: 0,
+        arg0: 2, arg1: changed, arg2: PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH_DEFERRED }).unwrap();
+    a.handle_mapping_protect_request(OsRequestEvent { identifier: 3, code: 0,
+        arg0: 2, arg1: changed, arg2: PAGE_SIZE, arg3: 3 }).unwrap();
+    let frame = a.processes.vm_space(2).unwrap().find_frame(changed).unwrap();
+    let physical = a.memory.frames[&frame];
+    if shared {
+        assert_ne!(physical, zero.base_page);
+        assert_eq!(a.processes.physical_reference_count(zero), 63);
+    }
+    a.memory.pages.get_mut(&physical).unwrap()[0] = 0xa7;
+    assert_eq!(transfer_bytes(&a, 2, changed, 1), vec![0xa7]);
+    assert_eq!(transfer_bytes(&a, 2, changed + PAGE_SIZE, 63 * PAGE_SIZE), vec![0; 63 * PAGE_SIZE]);
+    release_range(&mut a, changed + PAGE_SIZE, 63 * PAGE_SIZE).unwrap();
+    retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert_eq!(a.memory.pages.len(), 1);
+    assert_eq!(a.processes.physical_reference_count(zero), if shared { 0 } else { 1 });
+    assert_eq!(a.processes.vm_space(2).unwrap().hardware_permissions(changed), 3);
+    release_range(&mut a, changed, PAGE_SIZE).unwrap();
+    retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn shared_zero_tail_conversion_and_initialization_failure_keep_or_release_the_single_backing() {
+    for initialization in [false, true] {
+        for free_fails in [false, true] {
+            let mut a = huge_alpha();
+            a.memory.large_enabled = false;
+            let base = 0x800000;
+            let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+                && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+            if initialization { a.fail_initialization_map = Some(1); }
+            else { a.memory.fail_ensure = Some(1); }
+            a.memory.fail_free = free_fails;
+            assert_eq!(a.map_process_initialized_pages_protected(2, Some(base), 128, None, 1), Err(CapabilityError::Fatal));
+            assert!(!a.processes.vm_space(2).unwrap().has_backed_pages(base, base + 128 * PAGE_SIZE));
+            assert_eq!(retire_deferred_pool_pages(&mut a, 2), if free_fails { Err(CapabilityError::Fatal) } else { Ok(()) });
+            let remaining = a.processes.releasable_deferred_physical_allocations_for_pid(2);
+            assert_eq!(a.memory.pages.len(), if free_fails { if shared { 1 } else { 128 } } else { 0 });
+            if free_fails {
+                assert!(!remaining.is_empty());
+                for allocation in remaining { assert!(a.memory.pages.contains_key(&allocation.base_page)); }
+                a.memory.fail_free = false;
+                a.memory.fail_ensure = None;
+                a.fail_initialization_map = None;
+                retire_deferred_pool_pages(&mut a, 2).unwrap();
+            }
+            assert!(a.memory.pages.is_empty());
+            assert!(a.processes.releasable_physical_allocations_for_pid(2).is_empty());
+            assert!(a.processes.releasable_deferred_physical_allocations_for_pid(2).is_empty());
+        }
+    }
+}
+
+#[test]
+fn shared_zero_tail_keeps_genuine_huge_leaf_before_fallback_aliases() {
+    let mut a = huge_alpha();
+    let base = 0x800000;
+    a.map_process_initialized_pages_protected(2, Some(base), 1023, None, 5).unwrap();
+    let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+        && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+    let space = a.processes.memory_context(2).unwrap().address_space;
+    KERNEL.with_borrow(|kernel| assert!(kernel.huge.contains(&(space, base))));
+    assert_eq!(a.memory.pages.len(), 512 + if shared { 1 } else { 511 });
+    assert_eq!(transfer_bytes(&a, 2, base, 1023 * PAGE_SIZE), vec![0; 1023 * PAGE_SIZE]);
+    release_range(&mut a, base, 1023 * PAGE_SIZE).unwrap();
+    retire_deferred_pool_pages(&mut a, 2).unwrap();
+    assert!(a.memory.pages.is_empty());
+}
+
+#[test]
+fn pool_run_registration_keeps_per_page_rights_bytes_and_partial_release() {
+    for pages in [1, 2, 64, 511] {
+        for rights in [1, 3, 5] {
+            for copied in [false, true] {
+                let mut a = huge_alpha();
+                a.memory.large_enabled = false;
+                let source = copied.then(|| a.source((pages * PAGE_SIZE - 3).min(20600)));
+                a.processes.pool_scalar_calls = 0;
+                a.processes.pool_run_calls = 0;
+                let base = 0x800000;
+                a.map_process_initialized_pages_protected(2, Some(base), pages, source, rights).unwrap();
+                let bulk = pages > 1 && option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1");
+                let prefix = source.map_or(0, |s| s.bytes.div_ceil(PAGE_SIZE));
+                let shared = pages - prefix >= 128 && rights & 2 == 0
+                    && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1")
+                    && option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0");
+                let ordinary = if shared { prefix } else { pages };
+                assert_eq!(a.processes.pool_run_calls, usize::from(bulk && ordinary > 1));
+                assert_eq!(a.processes.pool_scalar_calls, if bulk && ordinary > 1 { 0 } else { ordinary });
+                let bytes = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
+                let initialized = source.map_or(0, |source| source.bytes);
+                assert!(bytes[..initialized].iter().enumerate().all(|(i, &b)| b == (i % 239) as u8));
+                assert!(bytes[initialized..].iter().all(|&b| b == 0));
+                for page in 0..pages {
+                    let va = base + page * PAGE_SIZE;
+                    let owned = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
+                    assert_eq!(owned.page_count, 1);
+                    assert!(!owned.owns_frame_cap);
+                    assert_eq!(a.processes.physical_reference_count(owned), if shared && page >= prefix { pages - prefix } else { 1 });
+                    assert_eq!(a.processes.vm_space(2).unwrap().permissions(va), rights);
+                }
+                let middle = base + (pages / 2) * PAGE_SIZE;
+                release_range(&mut a, middle, PAGE_SIZE).unwrap();
+                assert!(a.processes.find_active_physical_allocation_reference(2, middle, 1).is_none());
+                assert_eq!(a.processes.physical_pages_in_range(2, base, base + pages * PAGE_SIZE).len(), pages - 1);
+                println!("POOL-REGISTRATION pages={pages} rights={rights} copied={copied} calls={}",
+                    a.processes.pool_run_calls + a.processes.pool_scalar_calls);
+            }
+        }
+    }
+}
+
+#[test]
+fn pool_run_registration_reuses_owned_extent_without_allocating_or_exposing_old_bytes() {
+    for pages in [2, 64, 511] {
+        let mut a = huge_alpha();
+        a.memory.large_enabled = false;
+        let base = 0x800000;
+        let first = a.memory.allocate_physical_any(pages * PAGE_SIZE).unwrap();
+        a.processes.register_pool_allocation(2, base, 0, first, pages).unwrap();
+        a.processes.defer_active_physical_allocation(2, base, pages).unwrap();
+        let next = a.memory.next;
+        a.processes.pool_scalar_calls = 0;
+        a.processes.pool_run_calls = 0;
+        a.memory.allocation_requests.clear();
+        a.map_process_initialized_pages_protected(2, Some(base), pages, None, 5).unwrap();
+        assert_eq!(a.memory.next, next);
+        assert!(a.memory.allocation_requests.is_empty());
+        let bulk = option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1");
+        assert_eq!(a.processes.pool_run_calls, usize::from(bulk));
+        assert_eq!(a.processes.pool_scalar_calls, if bulk { 0 } else { pages });
+        assert_eq!(transfer_bytes(&a, 2, base, pages * PAGE_SIZE), vec![0; pages * PAGE_SIZE]);
+        for page in 0..pages {
+            let owned = a.processes.find_active_physical_allocation_reference(2, base + page * PAGE_SIZE, 1).unwrap();
+            assert_eq!(owned.base_page, first + page);
+            assert_eq!(a.processes.physical_reference_count(owned), 1);
+        }
+    }
+}
+
+#[test]
+fn pool_run_registration_failure_retains_all_pages_until_unmap_ack() {
+    for after in [false, true] {
+        let mut a = huge_alpha();
+        a.memory.large_enabled = false;
+        let base = 0x800000;
+        KERNEL.with_borrow_mut(|k| {
+            k.fail_map_once = Some((2, true));
+            k.fail_unmap = Some(if after { UnmapFailure::After } else { UnmapFailure::Before });
+        });
+        assert_eq!(a.map_process_initialized_pages_protected(2, Some(base), 64, None, 3), Err(CapabilityError::Fatal));
+        let bulk = option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1");
+        let retained = if bulk { 64 } else { 2 };
+        let owned = a.processes.releasable_physical_allocations_for_pid(2);
+        assert_eq!(owned.len(), retained);
+        assert_eq!(a.memory.pages.len(), retained);
+        assert_eq!(a.memory.freed_pages, 64 - retained);
+        assert!(a.processes.vm_space(2).unwrap().mapping_is_uncertain(base));
+        for page in owned {
+            assert!(!page.owns_frame_cap);
+            assert_eq!(page.page_count, 1);
+            assert_eq!(a.processes.physical_reference_count(page), 1);
+            assert!(a.memory.pages.contains_key(&page.base_page));
+        }
+        KERNEL.with_borrow_mut(|k| { k.fail_unmap = None; });
+        a.handle_mapping_release_request(OsRequestEvent {
+            identifier: 3, code: 0, arg0: base, arg1: 64 * PAGE_SIZE, arg2: 2,
+            arg3: nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES,
+        }).unwrap();
+        assert!(a.processes.releasable_physical_allocations_for_pid(2).is_empty());
+        assert_eq!(a.processes.releasable_deferred_physical_allocations_for_pid(2).len(), retained);
+        KERNEL.with_borrow(|k| { assert!(k.ptes.is_empty()); });
+    }
+}
+
+#[test]
+fn pool_run_registration_keeps_fragmented_and_genuine_huge_paths() {
+    let mut fragmented = huge_alpha();
+    fragmented.memory.large_enabled = false;
+    fragmented.memory.fragmented = true;
+    fragmented.map_process_initialized_pages_protected(2, Some(0x800000), 64, None, 3).unwrap();
+    assert_eq!(fragmented.processes.pool_scalar_calls, 64);
+    assert_eq!(fragmented.processes.pool_run_calls, 0);
+    assert_eq!(fragmented.memory.allocation_requests.len(), 65);
+    let mut huge = huge_alpha();
+    huge.map_process_initialized_pages_protected(2, Some(0x400000), 512, None, 3).unwrap();
+    assert_eq!(huge.processes.pool_scalar_calls, 0);
+    assert_eq!(huge.processes.pool_run_calls, 1);
+    let space = huge.processes.memory_context(2).unwrap().address_space;
+    KERNEL.with_borrow(|k| {
+        assert!(k.huge.contains(&(space, 0x400000)));
+        assert_eq!(k.map_attempts, 1);
+    });
+}
+
+#[test]
+fn large_readonly_zero_tail_prefers_a_genuine_huge_leaf_when_available() {
+    let mut a = huge_alpha();
+    let source = a.source(20600);
+    let base = 0x400000;
+    a.map_process_initialized_pages_protected(2, Some(base), 517, Some(source), 5).unwrap();
+    let space = a.processes.memory_context(2).unwrap().address_space;
+    let deferred = option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+    KERNEL.with_borrow(|k| {
+        assert!(k.huge.contains(&(space, base)));
+        assert_eq!(k.ptes.keys().filter(|&&(s, _)| s == space).count(), if deferred { 1 } else { 6 });
+    });
+    for page in 0..517 {
+        let vm = a.processes.vm_space(2).unwrap();
+        assert_eq!(vm.mapping_deferred(base + page * PAGE_SIZE), deferred && page >= 512);
+        assert_eq!(vm.permissions(base + page * PAGE_SIZE), 5);
+    }
+    let bytes = transfer_bytes(&a, 2, base, 517 * PAGE_SIZE);
+    assert!(bytes[..source.bytes].iter().enumerate().all(|(i, &b)| b == (i % 239) as u8));
+    assert!(bytes[source.bytes..].iter().all(|&b| b == 0));
+}
+
+#[test]
+fn large_readonly_zero_tail_fork_write_preserves_parent_zeroes_and_permissions() {
+    let mut a = huge_alpha();
+    a.memory.large_enabled = false;
+    let source = a.source(20600);
+    let base = 0x800000;
+    a.map_process_initialized_pages_protected(2, Some(base), 517, Some(source), 5).unwrap();
+    a.processes.install_process(4, 3, 204, 104, 15, 25, 0, 4, 0, 0, 0x100000, 0x1000000).unwrap();
+    a.processes.ensure_vm_space_for_pid(4).unwrap();
+    a.processes.seal_capabilities(4).unwrap();
+    a.clone_process_vm_private_cow(2, 4).unwrap();
+    let tail = base + 516 * PAGE_SIZE;
+    a.handle_process_private_write(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 4, arg1: tail, arg2: PAGE_SIZE,
+        arg3: nanami_uapi::os::OS_PRIVATE_WRITE_DETACH,
+    }).unwrap();
+    a.handle_mapping_protect_request(OsRequestEvent {
+        identifier: 3, code: 0, arg0: 4, arg1: tail, arg2: PAGE_SIZE, arg3: 3,
+    }).unwrap();
+    let frame = a.processes.vm_space(4).unwrap().find_frame(tail).unwrap();
+    let physical = a.memory.frames[&frame];
+    a.memory.pages.get_mut(&physical).unwrap()[0] = 0xa7;
+    assert_eq!(transfer_bytes(&a, 4, tail, 1), vec![0xa7]);
+    assert_eq!(transfer_bytes(&a, 2, tail, PAGE_SIZE), vec![0; PAGE_SIZE]);
+    assert_eq!(a.processes.vm_space(2).unwrap().permissions(tail), 5);
+    assert_eq!(a.processes.vm_space(4).unwrap().hardware_permissions(tail), 3);
+}
+
+#[test]
+fn large_readonly_zero_tail_failure_releases_or_retains_unacknowledged_ownership() {
+    for fail_unmap in [false, true] {
+        let mut a = huge_alpha();
+        a.memory.large_enabled = false;
+        let source = a.source(20600);
+        let original = transfer_bytes(&a, 1, source.address, source.bytes);
+        let base = 0x800000;
+        let shared = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0")
+            && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1");
+        // Fail the zero backing after the six initialized source pages.
+        a.memory.fail_ensure = Some(a.memory.next + if shared { 7 } else { 91 });
+        if fail_unmap {
+            KERNEL.with_borrow_mut(|k| { k.fail_unmap = Some(UnmapFailure::Before); });
+        }
+        assert_eq!(a.map_process_initialized_pages_protected(2, Some(base), 517, Some(source), 5),
+            Err(CapabilityError::Fatal));
+        if fail_unmap {
+            assert!(a.processes.vm_space(2).unwrap().mapping_is_uncertain(base));
+            assert!(a.processes.find_active_physical_allocation_reference(2, base, 1).is_some());
+            KERNEL.with_borrow_mut(|k| { k.fail_unmap = None; });
+            a.handle_mapping_release_request(OsRequestEvent {
+                identifier: 3, code: 0, arg0: base, arg1: 517 * PAGE_SIZE, arg2: 2,
+                arg3: nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES,
+            }).unwrap();
+        }
+        assert!(!a.processes.vm_space(2).unwrap().has_backed_pages(base, base + 517 * PAGE_SIZE));
+        assert!(a.processes.physical_pages_in_range(2, base, base + 517 * PAGE_SIZE).is_empty());
+        assert_eq!(transfer_bytes(&a, 1, source.address, source.bytes), original);
+    }
 }
 
 #[test]
@@ -1127,6 +1936,14 @@ fn release_range(a:&mut Alpha,base:usize,bytes:usize)->Result<(),CapabilityError
         identifier:3,code:0,arg0:base,arg1:bytes,arg2:2,arg3:0,
     })
 }
+fn retire_deferred_pool_pages(a: &mut Alpha, pid: usize) -> Result<(), CapabilityError> {
+    let memory = &mut a.memory;
+    a.processes.retire_deferred_physical_allocations(pid, |allocation, last| {
+        assert!(!allocation.owns_frame_cap);
+        if last { memory.free_physical(allocation.base_page * PAGE_SIZE, allocation.page_count * PAGE_SIZE)?; }
+        Ok(())
+    })
+}
 
 #[test]
 fn mixed_protection_installs_final_partial_huge_permissions_in_one_split() {
@@ -1135,6 +1952,9 @@ fn mixed_protection_installs_final_partial_huge_permissions_in_one_split() {
         let base = 0x400000;
         let pages = 513;
         a.map_process_initialized_pages_protected(2, Some(base), pages, None, 1).unwrap();
+        // Keep this test's ordinary neighbor present before the mixed edit.
+        a.handle_mapping_protect_request(OsRequestEvent { identifier: 3, code: 0,
+            arg0: 2, arg1: base + 512 * PAGE_SIZE, arg2: PAGE_SIZE, arg3: 1 }).unwrap();
         fill_private_fork_pattern(&mut a, base, pages);
         let original = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
         let before = KERNEL.with_borrow(|k| (k.map_attempts, k.unmaps));
@@ -1162,6 +1982,8 @@ fn failed_mixed_protection_restores_huge_and_ordinary_pages() {
             let base = 0x400000;
             let pages = 513;
             a.map_process_initialized_pages_protected(2, Some(base), pages, None, 1).unwrap();
+            a.handle_mapping_protect_request(OsRequestEvent { identifier: 3, code: 0,
+                arg0: 2, arg1: base + 512 * PAGE_SIZE, arg2: PAGE_SIZE, arg3: 1 }).unwrap();
             fill_private_fork_pattern(&mut a, base, pages);
             let original = transfer_bytes(&a, 2, base, pages * PAGE_SIZE);
             KERNEL.with_borrow_mut(|k| { k.fail_map_once = Some((k.map_attempts + ordinal, after_map)); });
@@ -1192,6 +2014,8 @@ fn mixed_protection_keeps_the_whole_huge_leaf_next_to_small_pages() {
     let base = 0x400000;
     let bytes = 513 * PAGE_SIZE;
     a.map_process_initialized_pages_protected(2, Some(base), 513, None, 1).unwrap();
+    a.handle_mapping_protect_request(OsRequestEvent { identifier: 3, code: 0,
+        arg0: 2, arg1: base + 512 * PAGE_SIZE, arg2: PAGE_SIZE, arg3: 1 }).unwrap();
     let before = KERNEL.with_borrow(|k| (k.map_attempts, k.unmaps));
     a.handle_mapping_protect_request(OsRequestEvent { identifier: 3, code: 0,
         arg0: 2, arg1: base, arg2: bytes, arg3: 5 }).unwrap();
@@ -1588,6 +2412,9 @@ fn huge_private_construction_initializes_all_bytes_and_maps_only_one_large_leaf(
         for i in 0..count {
             let va=base+i*PAGE_SIZE;
             assert_eq!(vm.permissions(va),5);
+            assert_eq!(vm.mapping_deferred(va), source_bytes == 0
+                && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1")
+                && !(0x400000..0x600000).contains(&va));
             assert!(!vm.mapping_is_uncertain(va));
             let owned=a.processes.find_active_physical_allocation_reference(2,va,1).unwrap();
             assert_eq!(a.processes.physical_reference_count(owned),1);
@@ -1596,7 +2423,9 @@ fn huge_private_construction_initializes_all_bytes_and_maps_only_one_large_leaf(
         let space=a.processes.memory_context(2).unwrap().address_space;
         KERNEL.with_borrow(|k| {
             assert!(k.huge.contains(&(space,0x400000)));
-            assert_eq!(k.ptes.keys().filter(|&&(s,_)|s==space).count(),prefix+2);
+            assert_eq!(k.ptes.keys().filter(|&&(s,_)|s==space).count(),
+                if source_bytes == 0 && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1") { 1 }
+                else { prefix + 2 });
             assert_eq!(k.cap_copies,0);
         });
     }}
@@ -1637,12 +2466,15 @@ fn huge_private_uses_later_intervals_after_blocked_prefix_and_middle_tables() {
                 assert_eq!(k.huge.contains(&(space, first + offset)), !blocked.contains(&offset));
             }
             assert_eq!(k.ptes.keys().filter(|&&(s, _)| s == space).count(),
-                2 + blocked.len() * 512 + 4 - blocked.len());
+                2 + blocked.len() * 512 + 4 - blocked.len()
+                    - usize::from(option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1")));
         });
         for page in 0..pages {
             let va = base + page * PAGE_SIZE;
             let vm = a.processes.vm_space(2).unwrap();
             assert_eq!(vm.permissions(va), 5);
+            assert_eq!(vm.mapping_deferred(va), page + 1 == pages
+                && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1"));
             assert!(!vm.mapping_is_uncertain(va));
             let allocation = a.processes.find_active_physical_allocation_reference(2, va, 1).unwrap();
             assert_eq!(a.processes.physical_reference_count(allocation), 1);
@@ -2331,7 +3163,7 @@ fn sealed_initialized_extent_preserves_bytes_and_fragmented_fallback() {
 }
 
 #[test]
-fn sealed_batch_failures_return_unused_tail_and_keep_claimed_pages_owned() {
+fn sealed_batch_failures_keep_claimed_pages_owned_and_unpublished() {
     initialized_batch_failure_cases(true);
 }
 
@@ -2355,7 +3187,9 @@ fn initialized_batch_failure_cases(sealed: bool) {
         assert_eq!(a.map_process_initialized_pages_protected(2, Some(0x80000), 64, None, 3), Err(CapabilityError::Fatal));
         assert!(a.processes.releasable_physical_allocations_for_pid(2).is_empty());
         let held = a.processes.releasable_deferred_physical_allocations_for_pid(2);
-        let claimed = if failure == 0 { 0 } else if failure <= 3 {
+        let claimed = if failure == 0 { 0 }
+        else if sealed && option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1") { 64 }
+        else if failure <= 3 {
             [1, 32, 64][failure - 1]
         } else {
             [1, 32, 64][(failure - 4) / 2]
@@ -2406,7 +3240,7 @@ fn initialized_batch_retained_failure_cases(sealed: bool) {
             a.memory.fail_free = free_fails;
             KERNEL.with_borrow_mut(|kernel| kernel.fail_unmap = unmap);
             assert!(a.map_process_initialized_pages_protected(2, Some(0x80000), 64, None, 3).is_err());
-            let retained = if free_fails { 64 } else { 32 };
+            let retained = if free_fails || (sealed && option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1")) { 64 } else { 32 };
             let active = a.processes.releasable_physical_allocations_for_pid(2);
             let deferred = a.processes.releasable_deferred_physical_allocations_for_pid(2);
             assert_eq!(a.memory.pages.len(), retained);
@@ -2634,7 +3468,10 @@ fn bulk_frame_preparation_keeps_failed_first_map_owned_and_rolls_back_its_word()
         assert_eq!(a.memory.child_allocations, 0);
         assert!(a.processes.releasable_physical_allocations_for_pid(2).is_empty());
         let held = a.processes.releasable_deferred_physical_allocations_for_pid(2);
-        assert_eq!(held.len(), 1);
+        let retained = if option_env!("NANAMI_SCALAR_POOL_REGISTRATION") == Some("1") { 1 } else { 64 };
+        assert_eq!(held.len(), retained);
+        assert_eq!(a.memory.pages.len(), retained);
+        assert_eq!(a.memory.freed_pages, 64 - retained);
         for allocation in held {
             assert!(!allocation.owns_frame_cap);
             assert_eq!(a.processes.physical_reference_count(allocation), 1);

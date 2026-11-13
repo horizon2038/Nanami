@@ -1419,7 +1419,129 @@ static int writable_fork_prefix(void) {
     return 0;
 }
 
+static volatile word zero_alias_ready, zero_alias_stop, zero_alias_bad;
+static int zero_alias_reader(void) {
+    volatile unsigned char *p = (void *)0x2a010000;
+    if (p[65 * 4096] != 0) { __atomic_store_n(&zero_alias_bad, 1, __ATOMIC_RELAXED); }
+    __atomic_store_n(&zero_alias_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&zero_alias_stop, __ATOMIC_ACQUIRE)) {
+        if (p[65 * 4096] != 0) { __atomic_store_n(&zero_alias_bad, 1, __ATOMIC_RELAXED); }
+        call(24, 0, 0, 0, 0);
+    }
+    return __atomic_load_n(&zero_alias_bad, __ATOMIC_ACQUIRE) ? 227 : 0;
+}
+
+static int shared_readonly_zero_cases(void) {
+    const word base = 0x2a010000, page = 4096, bytes = 129 * page;
+    /* Fixed and below2MiB: exercise the small-page zero-alias fallback before
+       fork/snapshot flags exist. Reads must map several VAs of the same Frame. */
+    if (linux_call(9, base, bytes, 1, 0x32, -1ul, 0) != (long)base) { return 224; }
+    volatile unsigned char *p = (void *)base;
+    if (p[0] || p[page] || p[128 * page]) { return 225; }
+    long stack = linux_call(9, 0, 65536, 3, 0x22, -1ul, 0);
+    if (stack < 0) { return 226; }
+    __atomic_store_n(&zero_alias_ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&zero_alias_stop, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&zero_alias_bad, 0, __ATOMIC_RELAXED);
+    long peer = thread_start(0x100 | 17, stack + 65536, 0, 0, 0, (word)zero_alias_reader);
+    if (peer < 0) { return 226; }
+    while (!__atomic_load_n(&zero_alias_ready, __ATOMIC_ACQUIRE)) { call(24, 0, 0, 0, 0); }
+    int failed = call(10, base + 64 * page, page, 3, 0) != 0;
+    if (!failed) { p[64 * page] = 0xa7; failed = p[65 * page] != 0; }
+    __atomic_store_n(&zero_alias_stop, 1, __ATOMIC_RELEASE);
+    int status = -1;
+    if (call(61, peer, (word)&status, 0, 0) != peer || status != 0
+        || __atomic_load_n(&zero_alias_bad, __ATOMIC_ACQUIRE)
+        || call(11, stack, 65536, 0, 0) != 0 || failed) { return 227; }
+    /* Retained PROT_NONE backing also needs COW before a WRITE upgrade. */
+    if (call(10, base + 128 * page, page, 0, 0) != 0
+        || call(10, base + 128 * page, page, 3, 0) != 0) { return 228; }
+    p[128 * page] = 0xb8;
+    if (p[0] || p[65 * page] || p[127 * page] || p[64 * page] != 0xa7) { return 228; }
+    /* A deferred alias must not be reused as unique RAM while siblings live. */
+    if (call(11, base, 64 * page, 0, 0) != 0
+        || linux_call(9, base, page, 3, 0x32, -1ul, 0) != (long)base) { return 229; }
+    p[0] = 0x99;
+    int pipefd[2]; unsigned char value = 0xcc;
+    if (call(22, (word)pipefd, 0, 0, 0) != 0
+        || call(1, pipefd[1], (word)&value, 1, 0) != 1
+        || call(0, pipefd[0], base + 64 * page + 1, 1, 0) != 1
+        || call(3, pipefd[0], 0, 0, 0) != 0 || call(3, pipefd[1], 0, 0, 0) != 0
+        || p[65 * page] || p[127 * page] || p[64 * page] != 0xa7
+        || p[64 * page + 1] != 0xcc || p[128 * page] != 0xb8) { return 229; }
+    if (call(11, base + 64 * page, 65 * page, 0, 0) != 0
+        || call(11, base, page, 0, 0) != 0) { return 230; }
+    static const char pass[] = "SHARED-READONLY-ZERO-PASS\n";
+    call(1, 1, (word)pass, sizeof(pass) - 1, 0);
+    return 0;
+}
+
+static volatile word writable_zero_ready, writable_zero_stop, writable_zero_bad;
+static int writable_zero_reader(void) {
+    volatile unsigned char *p = (void *)0x2b010000;
+    __atomic_store_n(&writable_zero_ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&writable_zero_stop, __ATOMIC_ACQUIRE)) {
+        if (p[65 * 4096] || p[127 * 4096] || p[199 * 4096]) {
+            __atomic_store_n(&writable_zero_bad, 1, __ATOMIC_RELEASE); break;
+        }
+        call(24, 0, 0, 0, 0);
+    }
+    return 0;
+}
+
+static int writable_zero_cases(void) {
+    const word base = 0x2b010000, page = 4096, bytes = 256 * page;
+    if (linux_call(9, base, bytes, 3, 0x32, -1ul, 0) != (long)base) { return 231; }
+    volatile unsigned char *p = (void *)base;
+    for (word i = 0; i < 256; ++i) { if (p[i * page]) { return 232; } }
+    long stack = linux_call(9, 0, 65536, 3, 0x22, -1ul, 0);
+    if (stack < 0) { return 233; }
+    __atomic_store_n(&writable_zero_ready, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&writable_zero_stop, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&writable_zero_bad, 0, __ATOMIC_RELAXED);
+    long peer = thread_start(0x100 | 17, stack + 65536, 0, 0, 0, (word)writable_zero_reader);
+    if (peer < 0) { return 233; }
+    while (!__atomic_load_n(&writable_zero_ready, __ATOMIC_ACQUIRE)) { call(24, 0, 0, 0, 0); }
+    p[64 * page] = 0xa7;
+    int pipefd[2]; unsigned char value = 0xcc;
+    int failed = call(22, (word)pipefd, 0, 0, 0) != 0;
+    if (!failed) {
+        failed = call(1, pipefd[1], (word)&value, 1, 0) != 1
+            || call(0, pipefd[0], base + 128 * page + 1, 1, 0) != 1;
+        call(3, pipefd[0], 0, 0, 0); call(3, pipefd[1], 0, 0, 0);
+    }
+    __atomic_store_n(&writable_zero_stop, 1, __ATOMIC_RELEASE);
+    int status = -1;
+    if (call(61, peer, (word)&status, 0, 0) != peer || status != 0
+        || __atomic_load_n(&writable_zero_bad, __ATOMIC_ACQUIRE)
+        || call(11, stack, 65536, 0, 0) != 0 || failed) { return 234; }
+    long child = call(57, 0, 0, 0, 0);
+    if (child == 0) {
+        p[200 * page] = 0x71;
+        call(60, p[64 * page] == 0xa7 && p[128 * page + 1] == 0xcc && !p[201 * page] ? 0 : 235, 0, 0, 0);
+        return 235;
+    }
+    if (child < 0 || call(61, child, (word)&status, 0, 0) != child || status != 0
+        || p[200 * page] || p[64 * page] != 0xa7 || p[128 * page + 1] != 0xcc) { return 235; }
+    if (call(11, base, 64 * page, 0, 0) != 0
+        || linux_call(9, base, page, 3, 0x32, -1ul, 0) != (long)base
+        || call(10, base + 200 * page, page, 0, 0) != 0
+        || call(10, base + 200 * page, page, 3, 0) != 0) { return 236; }
+    p[0] = 0x99; p[200 * page] = 0x82;
+    if (p[65 * page] || p[127 * page] || p[199 * page] || p[201 * page]
+        || p[64 * page] != 0xa7 || p[128 * page + 1] != 0xcc
+        || call(11, base + 64 * page, 192 * page, 0, 0) != 0
+        || call(11, base, page, 0, 0) != 0) { return 237; }
+    static const char pass[] = "SHARED-WRITABLE-ZERO-PASS\n";
+    call(1, 1, (word)pass, sizeof(pass) - 1, 0);
+    return 0;
+}
+
 int test_main(void) {
+    int writable_zero_result = writable_zero_cases();
+    if (writable_zero_result != 0) { return writable_zero_result; }
+    int zero_result = shared_readonly_zero_cases();
+    if (zero_result != 0) { return zero_result; }
     int prefix_result = writable_fork_prefix();
     if (prefix_result != 0) { return prefix_result; }
     int huge_copy_result=huge_mremap_copy_cases();

@@ -11,6 +11,8 @@ pub(super) struct PhysicalAllocations {
     free: Option<usize>,
     #[cfg(test)]
     range_visits: core::cell::Cell<usize>,
+    #[cfg(test)]
+    point_visits: core::cell::Cell<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +154,9 @@ impl ReferenceCounts {
 impl PhysicalAllocations {
     #[cfg(test)]
     pub(super) fn take_range_visits(&self) -> usize { self.range_visits.replace(0) }
+
+    #[cfg(test)]
+    pub(super) fn take_point_visits(&self) -> usize { self.point_visits.replace(0) }
 
     /// Canonicalize a uniquely owned extent before installing page aliases.
     /// Reserve all metadata first: an allocation failure must leave its single
@@ -453,7 +458,11 @@ impl PhysicalAllocations {
         page_count: usize,
     ) -> Option<ProcessPhysicalAllocation> {
         self.for_pid(state, pid)
-            .find(|allocation| allocation.base_va == base_va && allocation.page_count == page_count)
+            .find(|allocation| {
+                #[cfg(test)]
+                self.point_visits.set(self.point_visits.get() + 1);
+                allocation.base_va == base_va && allocation.page_count == page_count
+            })
     }
 
     pub(super) fn take(

@@ -296,6 +296,17 @@ struct Alpha {
     processes: ProcessManager,
     memory: Memory,
     copy_window: memory_copy::CopyWindow,
+    descriptor: Vec<u8>,
+}
+fn response_from_status_result(result: Result<(), CapabilityError>) -> (Word, Word, Word) {
+    use nanami_uapi::os::*;
+    (match result {
+        Ok(()) => OS_RESPONSE_OK,
+        Err(CapabilityError::InvalidArgument) => OS_RESPONSE_INVALID_ARGUMENT,
+        Err(CapabilityError::PermissionDenied) => OS_RESPONSE_PERMISSION_DENIED,
+        Err(CapabilityError::IllegalOperation) => OS_RESPONSE_ILLEGAL_OPERATION,
+        Err(CapabilityError::Fatal) => OS_RESPONSE_FATAL,
+    }, 0, 0)
 }
 impl Alpha {
     fn split_private_large_mappings(&mut self, _: usize, _: usize, _: usize, _: bool) -> Result<(), CapabilityError> { Ok(()) }
@@ -348,10 +359,12 @@ impl Alpha {
     fn read_process_memory_into_static_buffer(
         &mut self,
         _: usize,
-        _: usize,
-        _: usize,
+        address: usize,
+        bytes: usize,
     ) -> Result<&[u8], CapabilityError> {
-        panic!("this lifecycle fixture does not issue vector requests");
+        let start = address.checked_sub(1).ok_or(CapabilityError::InvalidArgument)?;
+        let end = start.checked_add(bytes).ok_or(CapabilityError::InvalidArgument)?;
+        self.descriptor.get(start..end).ok_or(CapabilityError::InvalidArgument)
     }
     fn process_frame_for_page(
         &mut self,
@@ -470,6 +483,82 @@ mod implementation {
 mod mapping_protection;
 #[path = "../../nanami/src/nanami_core/alpha/memory_snapshot.rs"]
 mod memory_snapshot;
+#[path = "../../nanami/src/nanami_core/alpha/mapping_release.rs"]
+mod mapping_release;
+
+fn release_vector_request(alpha: &mut Alpha, locals: &[Word]) -> OsRequestEvent {
+    alpha.descriptor = locals.iter().flat_map(|local| local.to_ne_bytes()).collect();
+    OsRequestEvent { identifier: 1, arg0: 1, arg1: locals.len(), arg2: 0, arg3: 0 }
+}
+
+#[test]
+fn release_vectors_acknowledge_independent_unmaps_and_retry_confirmed_holes() {
+    for failure in [None, Some(1), Some(2), Some(3)] {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+        let locals = [0x8000_0000, 0x8001_0000, 0x8002_0000];
+        for local in locals { alpha.handle_process_page_view_request(view_request(source, local), true).unwrap(); }
+        machine(|m| m.fail_unmap_at = failure.map(|index| m.unmap_calls + index));
+        let request = release_vector_request(&mut alpha, &locals);
+        let expected = failure.map_or(7, |index| 7 ^ (1 << (index - 1)));
+        assert_eq!(alpha.handle_release_views_request(request).unwrap(), (expected, 3));
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 1 + usize::from(failure.is_some()));
+        for (index, local) in locals.into_iter().enumerate() {
+            assert_eq!(alpha.processes.shared_memory_reservation(1, local, 1).is_some(), failure == Some(index + 1));
+        }
+        machine(|m| m.fail_unmap_at = None);
+        // This is also the retry after the first response was lost: already
+        // released holes and a still-pinned failure each acknowledge safely.
+        assert_eq!(alpha.handle_release_views_request(request).unwrap(), (7, 3));
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+        assert_eq!(alpha.processes.vm_space(2).unwrap().permissions(source), 7);
+    }
+}
+
+#[test]
+fn release_vector_validates_the_whole_header_before_any_unmap() {
+    for invalid in 0..9 {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        let local = 0x8000_0000;
+        alpha.handle_process_page_view_request(view_request(source, local), false).unwrap();
+        let mut request = release_vector_request(&mut alpha, &[local, local]);
+        match invalid {
+            0 => {},
+            1 => request.arg1 = 0,
+            2 => request.arg1 = nanami_uapi::os::OS_PAGE_VIEW_VECTOR_MAX + 1,
+            3 => request.arg0 = 0,
+            4 => { alpha.descriptor.pop(); },
+            5 => request.arg2 = 2,
+            6 => request.arg3 = 1,
+            7 => request.identifier = 0,
+            _ => request = release_vector_request(&mut alpha, &[local, local + 1]),
+        }
+        let before = machine(|m| m.unmap_calls);
+        assert!(alpha.handle_release_views_request(request).is_err());
+        assert_eq!(machine(|m| m.unmap_calls), before);
+        assert!(alpha.processes.shared_memory_reservation(1, local, 1).is_some());
+        release(&mut alpha, 1, local, 1).unwrap();
+    }
+}
+
+#[test]
+fn release_vector_refuses_partial_objects_but_still_releases_independent_views() {
+    let mut alpha = alpha();
+    let source = private_source(&mut alpha);
+    let (caller, _) = alpha.handle_shared_memory_request(owned_request(2 * PAGE_SIZE, 0, 0)).unwrap();
+    let local = 0x8000_0000;
+    alpha.handle_process_page_view_request(view_request(source, local), false).unwrap();
+    let request = release_vector_request(&mut alpha, &[caller, local, caller + PAGE_SIZE]);
+    assert_eq!(alpha.handle_release_views_request(request).unwrap(), (2, 3));
+    assert!(alpha.processes.shared_memory_reservation(1, caller, 2).is_some());
+    assert!(alpha.processes.shared_memory_reservation(1, local, 1).is_none());
+    for offset in [0, PAGE_SIZE] {
+        assert!(machine(|m| m.maps.contains_key(&(alpha.processes.memory_entry(1).unwrap().address_space, caller + offset))));
+    }
+    release(&mut alpha, 1, caller, 2).unwrap();
+}
 
 fn alpha() -> Alpha {
     machine(|m| {
@@ -487,6 +576,7 @@ fn alpha() -> Alpha {
         processes,
         memory: Memory,
         copy_window: memory_copy::CopyWindow::new(),
+        descriptor: Vec::new(),
     }
 }
 
@@ -912,6 +1002,94 @@ fn private_source(alpha: &mut Alpha) -> usize {
 }
 
 #[test]
+fn view_vectors_preserve_each_pin_and_read_write_permissions() {
+    for writable in [false, true] {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+        let locals = [0x8000_0000, 0x8001_0000];
+        let request = view_vector_request(&mut alpha, &[(source, locals[0]), (source, locals[1])]);
+        assert_eq!(alpha.handle_process_page_views_request(request, writable).unwrap(), (2, 0));
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 3);
+        for local in locals {
+            assert_eq!(alpha.processes.vm_space(1).unwrap().permissions(local), if writable { 3 } else { 1 });
+            release(&mut alpha, 1, local, 1).unwrap();
+        }
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+        assert_eq!(alpha.processes.vm_space(2).unwrap().permissions(source), 7);
+    }
+}
+
+fn view_vector_request(alpha: &mut Alpha, entries: &[(Word, Word)]) -> OsRequestEvent {
+    alpha.descriptor.clear();
+    for &(target, local) in entries {
+        alpha.descriptor.extend_from_slice(&target.to_ne_bytes());
+        alpha.descriptor.extend_from_slice(&local.to_ne_bytes());
+    }
+    OsRequestEvent { identifier: 1, arg0: 2, arg1: 1, arg2: entries.len(), arg3: 0 }
+}
+
+#[test]
+fn view_vectors_stop_at_denial_and_leave_the_unattempted_suffix_unowned() {
+    use nanami_uapi::os::OS_RESPONSE_PERMISSION_DENIED;
+    let mut alpha = alpha();
+    let source = private_source(&mut alpha);
+    let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+    let request = view_vector_request(&mut alpha, &[(source, 0x8000_0000), (source, 0x8001_0000),
+        (source + PAGE_SIZE, 0x8002_0000), (source, 0x8003_0000)]);
+    assert_eq!(alpha.handle_process_page_views_request(request, true).unwrap(), (2, OS_RESPONSE_PERMISSION_DENIED));
+    assert_eq!(alpha.processes.physical_reference_count(allocation), 3);
+    for local in [0x8002_0000, 0x8003_0000] {
+        assert!(alpha.processes.shared_memory_reservation(1, local, 1).is_none());
+    }
+    for local in [0x8000_0000, 0x8001_0000] { release(&mut alpha, 1, local, 1).unwrap(); }
+    assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+}
+
+#[test]
+fn view_vector_header_errors_install_no_aliases() {
+    for invalid in 0..7 {
+        let mut alpha = alpha();
+        let source = private_source(&mut alpha);
+        let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+        let mut request = view_vector_request(&mut alpha, &[(source, 0x8000_0000), (source, 0x8000_0000)]);
+        match invalid {
+            0 => {}, // Duplicate local VA.
+            1 => request.arg2 = 0,
+            2 => request.arg2 = nanami_uapi::os::OS_PAGE_VIEW_VECTOR_MAX + 1,
+            3 => request.arg1 = 0,
+            4 => { alpha.descriptor.pop(); },
+            5 => request.arg3 = 1,
+            _ => { request = view_vector_request(&mut alpha, &[(source + 1, 0x8000_0000)]); },
+        }
+        assert!(alpha.handle_process_page_views_request(request, false).is_err());
+        assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+        assert!(alpha.processes.shared_memory_reservation(1, 0x8000_0000, 1).is_none());
+    }
+}
+
+#[test]
+fn view_vector_failed_cleanup_keeps_the_failing_pin_and_reports_the_confirmed_prefix() {
+    let mut control = alpha();
+    let source = private_source(&mut control);
+    let start = machine(|m| m.operation);
+    control.handle_process_page_view_request(view_request(source, 0x8000_0000), true).unwrap();
+    let per_view = machine(|m| m.operation) - start;
+    assert!(per_view > 0);
+    let mut alpha = alpha();
+    let source = private_source(&mut alpha);
+    let allocation = alpha.processes.find_active_physical_allocation_reference(2, source, 1).unwrap();
+    let request = view_vector_request(&mut alpha, &[(source, 0x8000_0000), (source, 0x8001_0000), (source, 0x8002_0000)]);
+    machine(|m| { m.fail_at = Some(m.operation + 2 * per_view); m.fail_unmap = true; });
+    assert_eq!(alpha.handle_process_page_views_request(request, true).unwrap(), (1, nanami_uapi::os::OS_RESPONSE_FATAL));
+    assert_eq!(alpha.processes.physical_reference_count(allocation), 3);
+    assert!(alpha.processes.shared_memory_reservation(1, 0x8002_0000, 1).is_none());
+    machine(|m| { m.fail_at = None; m.fail_unmap = false; });
+    for local in [0x8000_0000, 0x8001_0000] { release(&mut alpha, 1, local, 1).unwrap(); }
+    assert_eq!(alpha.processes.physical_reference_count(allocation), 1);
+}
+
+#[test]
 fn shared_pool_mapping_work_preserves_leaf_identity_zeroing_and_references() {
     for pages in [1,64,513,1024] {
         let mut alpha=alpha();
@@ -1016,7 +1194,7 @@ fn write_view_pins_only_current_writable_private_ram_without_exec_permission() {
 
 #[test]
 fn write_view_never_upgrades_readonly_or_private_fork_backing() {
-    for failure in 0..8 {
+    for failure in 0..9 {
         let mut alpha = alpha();
         let source = private_source(&mut alpha);
         let local = 0x80000000;
@@ -1039,6 +1217,7 @@ fn write_view_never_upgrades_readonly_or_private_fork_backing() {
             7 => {
                 alpha.processes.seal_capabilities(1).unwrap();
             }
+            8 => alpha.processes.vm_space_mut(2).unwrap().mark_mapping_uncertain(source),
             _ => unreachable!(),
         }
         let before = machine(|m| (m.frames.len(), m.maps.len(), m.live.len()));

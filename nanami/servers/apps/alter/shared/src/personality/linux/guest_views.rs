@@ -2,7 +2,8 @@
 //! Arbitrary raw local addresses retain Alpha's checked-copy path.
 use super::{Runtime, Word};
 use crate::state::page_window::{
-    Effects, GrantError, LeaseEffects, WriteEffects, MAX_CONTIGUOUS_WRITE_BYTES, PAGE,
+    BatchGrant, Effects, GrantError, LeaseEffects, PageGrant, WriteEffects,
+    MAX_BATCH_PAGES, MAX_CONTIGUOUS_WRITE_BYTES, PAGE,
 };
 use core::mem::MaybeUninit;
 pub(super) use crate::state::page_window::{MAX_CONTIGUOUS_READ_BYTES, MAX_WRITE_BUFFERS};
@@ -40,7 +41,36 @@ unsafe fn copy_sampled_words(source: *const u8, destination: *mut u8, words: usi
     }
 }
 impl<const WRITE: bool> LeaseEffects for NativeEffects<WRITE> {
+    fn batch_supported(&self) -> bool {
+        option_env!("NANAMI_BATCH_PAGE_VIEWS") != Some("0")
+    }
+    fn grant_many(&mut self, pid: Word, pages: &[PageGrant]) -> BatchGrant {
+        report_view_rpc(pid, WRITE, pages.len(), true);
+        #[cfg(target_os = "none")]
+        if WRITE && option_env!("NANAMI_LARGE_COPYOUT_DIAG") == Some("1") {
+            DIAGNOSTIC_WRITE_GRANTS.fetch_add(pages.len(), core::sync::atomic::Ordering::Relaxed);
+        }
+        const _: () = assert!(MAX_BATCH_PAGES == nanami_runtime::OS_PAGE_VIEW_VECTOR_MAX);
+        let mut entries = [nanami_runtime::OsPageViewEntry::default(); MAX_BATCH_PAGES];
+        for (entry, page) in entries.iter_mut().zip(pages) {
+            *entry = nanami_runtime::OsPageViewEntry { target: page.page, local: page.local };
+        }
+        let result = if WRITE {
+            nanami_runtime::request_process_write_views(pid, &entries[..pages.len()])
+        } else { nanami_runtime::request_process_read_views(pid, &entries[..pages.len()]) };
+        match result {
+            Ok((completed, 0)) if completed == pages.len() => BatchGrant::Complete,
+            Ok((completed, status)) if completed < pages.len() && status != 0 =>
+                BatchGrant::Stopped { completed, error: grant_error(nanami_runtime::RequestError::Status(status)) },
+            Err(error) => match grant_error(error) {
+                GrantError::NotInstalled => BatchGrant::Stopped { completed: 0, error: GrantError::NotInstalled },
+                GrantError::Uncertain => BatchGrant::Uncertain,
+            },
+            _ => BatchGrant::Uncertain,
+        }
+    }
     fn grant(&mut self, pid: Word, page: Word, local: Word) -> Result<(), GrantError> {
+        report_view_rpc(pid, WRITE, 1, false);
         #[cfg(target_os = "none")]
         if WRITE && option_env!("NANAMI_LARGE_COPYOUT_DIAG") == Some("1") {
             DIAGNOSTIC_WRITE_GRANTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -50,7 +80,44 @@ impl<const WRITE: bool> LeaseEffects for NativeEffects<WRITE> {
         } else {
             nanami_runtime::request_process_read_view(pid, page, local)
         };
-        result.map_err(|error| match error {
+        result.map_err(grant_error)
+    }
+    fn release(&mut self, local: Word) -> Result<(), ()> {
+        report_view_release(1, false);
+        nanami_runtime::request_mapping_release(local, PAGE).map_err(|_| ())
+    }
+    fn release_many(&mut self, locals: &[Word]) -> Word {
+        if option_env!("NANAMI_BATCH_PAGE_RELEASE") == Some("0") {
+            let mut acknowledged = 0;
+            for (index, &local) in locals.iter().enumerate() {
+                if self.release(local).is_ok() { acknowledged |= 1 << index; }
+            }
+            return acknowledged;
+        }
+        report_view_release(locals.len(), true);
+        nanami_runtime::request_mapping_release_views(locals).unwrap_or(0)
+    }
+}
+
+#[inline]
+fn report_view_rpc(_pid: Word, _write: bool, _pages: usize, _batch: bool) {
+    #[cfg(target_os = "none")]
+    if option_env!("NANAMI_COLD_WRITE_VIEWS_DIAG") == Some("1") {
+        nanami_runtime::println!("[linux.view-rpc] pid={} write={} pages={} batch={}",
+            _pid, usize::from(_write), _pages, usize::from(_batch));
+    }
+}
+
+#[inline]
+fn report_view_release(_pages: usize, _batch: bool) {
+    #[cfg(target_os = "none")]
+    if option_env!("NANAMI_COLD_WRITE_VIEWS_DIAG") == Some("1") {
+        nanami_runtime::println!("[linux.view-release] pages={} batch={}", _pages, usize::from(_batch));
+    }
+}
+
+fn grant_error(error: nanami_runtime::RequestError) -> GrantError {
+        match error {
             nanami_runtime::RequestError::Status(
                 nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT
                 | nanami_runtime::OS_RESPONSE_PERMISSION_DENIED
@@ -60,11 +127,7 @@ impl<const WRITE: bool> LeaseEffects for NativeEffects<WRITE> {
             // Unknown status values are protocol errors, not proof that the
             // remote operation left the VA unmapped.
             _ => GrantError::Uncertain,
-        })
-    }
-    fn release(&mut self, local: Word) -> Result<(), ()> {
-        nanami_runtime::request_mapping_release(local, PAGE).map_err(|_| ())
-    }
+        }
 }
 impl Effects for NativeEffects<false> {
     fn read(&mut self, local: Word, offset: Word, destination: &mut [MaybeUninit<u8>]) {

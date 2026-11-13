@@ -73,6 +73,10 @@ name = "fault-reply"
 path = "fault-reply.rs"
 
 [[test]]
+name = "fault-memory"
+path = "fault-memory.rs"
+
+[[test]]
 name = "fault-signal-return"
 path = "fault-signal-return.rs"
 
@@ -579,6 +583,10 @@ name = "ahci-session"
 path = "ahci-session.rs"
 
 [workspace]
+
+[[test]]
+name = "runtime-page-views"
+path = "runtime-page-views.rs"
 
 [profile.dev]
 incremental = false

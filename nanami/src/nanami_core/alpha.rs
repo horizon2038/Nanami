@@ -19,6 +19,7 @@ mod memory_lazy;
 mod memory_large;
 mod memory_zero;
 mod memory_pages;
+mod memory_anonymous;
 mod memory_private;
 mod memory_requests;
 mod memory_retirement;
@@ -815,6 +816,15 @@ impl Alpha {
             }
             nanami_uapi::os::OS_REQUEST_PROCESS_WRITE_VIEW => {
                 response_from_status_result(self.handle_process_page_view_request(request, true))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_READ_VIEWS => {
+                response_from_details_result(self.handle_process_page_views_request(request, false))
+            }
+            nanami_uapi::os::OS_REQUEST_PROCESS_WRITE_VIEWS => {
+                response_from_details_result(self.handle_process_page_views_request(request, true))
+            }
+            nanami_uapi::os::OS_REQUEST_MAPPING_RELEASE_VIEWS => {
+                response_from_details_result(self.handle_release_views_request(request))
             }
             OS_REQUEST_NANAMI_CONTROL => {
                 response_from_status_result(self.handle_nanami_control_request(request))

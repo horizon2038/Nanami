@@ -138,6 +138,10 @@ pub const OS_REQUEST_PROCESS_MAP_INITIALIZED_PROTECTED: Word = 0x1035;
 /// byte is initialized; available huge leaves may be mapped in full, while
 /// remaining small PTEs are populated by the supervisor on demand.
 pub const OS_MAP_INITIALIZER_DEFER: Word = 1 << 8;
+/// Fresh anonymous RW/RWX mapping under the supervisor's VM barrier. Both
+/// source words must be zero. Small zero backing may be shared under COW;
+/// the supervisor must mark writable-private sharing before issuing this call.
+pub const OS_MAP_INITIALIZER_COW_ZERO: Word = 1 << 9;
 /// Create immutable owned RAM without mapping it into the native caller.
 /// (0, capacity, source VA, initialized prefix bytes) -> (source address, 0).
 /// The returned address identifies backing for Alpha copies/private snapshots;
@@ -147,6 +151,28 @@ pub const OS_REQUEST_MEMORY_SOURCE_CREATE: Word = 0x1036;
 /// Populate initialized deferred snapshot backing, including a bounded cluster.
 /// (supervised PID, page VA, required R/W/X bit, 0) -> populated/already-present.
 pub const OS_REQUEST_PROCESS_POPULATE_SNAPSHOT: Word = 0x1037;
+/// Borrow a bounded vector of READ_VIEW/WRITE_VIEW pages. Arguments:
+/// (supervised PID, OsPageViewEntry array VA, count, 0). Header errors install
+/// no views. Otherwise OK returns (completed prefix count, first failure status),
+/// with failure0 only when all entries completed. A transport/protocol error
+/// leaves every requested local VA potentially installed. Release each pin
+/// independently; no byte is copied and no guest permissions are elevated.
+pub const OS_REQUEST_PROCESS_READ_VIEWS: Word = 0x1038;
+pub const OS_REQUEST_PROCESS_WRITE_VIEWS: Word = 0x1039;
+/// Release up to OS_PAGE_VIEW_VECTOR_MAX caller-local pages independently.
+/// (Word array VA, count, 0, 0) -> (acknowledged-entry bitmap, echoed count).
+/// Validate/copy the whole header first. A failed page does not stop later
+/// releases. Missing pages acknowledge through the ordinary sparse-release
+/// checks, so an uncertain reply can be retried. Unacknowledged VAs stay pinned
+/// and unusable until confirmed release; no target process may be specified.
+pub const OS_REQUEST_MAPPING_RELEASE_VIEWS: Word = 0x103a;
+pub const OS_PAGE_VIEW_VECTOR_MAX: usize = 17;
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OsPageViewEntry {
+    pub target: Word,
+    pub local: Word,
+}
 /// PRIVATE_SNAPSHOT permission flag: descriptor adds page-aligned eager bytes.
 /// Only R snapshots accept it; remaining initialized pages retain logical R
 /// while their PTE is deferred. A matching supervisor handles missing faults.
@@ -158,6 +184,10 @@ pub const OS_PRIVATE_WRITE_DETACH: Word = 1;
 /// PTE, ready for the caller's following PROTECT. The supervisor must support
 /// POPULATE_SNAPSHOT faults if that later protection fails or is abandoned.
 pub const OS_PRIVATE_WRITE_DETACH_DEFERRED: Word = 2;
+/// Sealed target write-fault repair under the same VM barrier. Publish final
+/// rights even when the old initialized pool leaf was absent. Repeated COW
+/// aliases of one Frame may be detached in a bounded neighboring cluster.
+pub const OS_PRIVATE_WRITE_DETACH_POPULATE: Word = 3;
 // PRIVATE_WRITE response arg0 is a boolean: QUERY found shared private pages,
 // or DETACH successfully repaired a nonempty set. No shared pages returns 0.
 /// PROCESS_FORK arg3 opt-in (legacy name). Sealed tasks share eligible private

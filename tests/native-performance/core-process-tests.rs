@@ -108,6 +108,31 @@ fn manager() -> ProcessManager {
 }
 
 #[test]
+fn replacement_slot_batches_share_the_owner_and_preserve_holes_on_failed_reservations() {
+    let mut m = manager();
+    install(&mut m, 1, 201); install(&mut m, 2, 202);
+    m.share_address_space(2, 1).unwrap();
+    let owner = m.find_entry_by_pid(1).unwrap();
+    let start = owner.next_frame_slot;
+    let limit = start + 64;
+    assert_eq!(m.reserve_private_replacement_slots(2, 64, limit).unwrap(),
+        (owner.root_node, owner.address_space, start));
+    assert_eq!(m.find_entry_by_pid(1).unwrap().next_frame_slot, limit);
+    m.recycle_private_frame_slots(2, start, 16);
+    m.recycle_private_frame_slots(1, start + 32, 32);
+    for count in [0, 33, usize::MAX] {
+        assert_eq!(m.reserve_private_replacement_slots(2, count, limit), Err(CapabilityError::InvalidArgument));
+        assert_eq!(m.find_entry_by_pid(1).unwrap().next_frame_slot, limit);
+    }
+    assert_eq!(m.reserve_private_replacement_slots(2, 16, limit).unwrap().2, start);
+    assert_eq!(m.reserve_private_replacement_slots(1, 32, limit).unwrap().2, start + 32);
+    assert_eq!(m.reserve_private_replacement_slot(2, limit), Err(CapabilityError::InvalidArgument));
+    m.recycle_private_frame_slot(1, start + 16);
+    m.recycle_private_frame_slot(2, start + 17);
+    assert_eq!(m.reserve_private_replacement_slots(1, 2, limit).unwrap().2, start + 16);
+}
+
+#[test]
 fn preferred_heap_alignment_keeps_exact_slots_shared_cursor_and_space_fallback() {
     let mut m = manager();
     install(&mut m, 1, 201);

@@ -1,3 +1,297 @@
+Rejected rooted filesystem-stat experiment; accepted checkpoint remains
+`page-release-vectors`, previous `page-view-vectors` (2026-11-13).
+The Xfe1.46.2 TCZ and matching upstream DirPanel source show the initial0B label
+and1000ms directory-size refresh timer. Late status bytes are not proof of OS
+stall or initial paint/input readiness. Do not shorten the app timer to improve
+the reported startup endpoint. Application and Kernel remain unchanged.
+Try a handleless rooted STATFS path using fresh Ext2/writeback counters, generic
+POSIX proxy and direct Alter control channel. Validate paths/symlinks, full80byte
+replies, unsupported-provider fallback and no handle lifetime changes. Native
+candidate Release/Debug2690/0/20, related optout80/0/0; eight candidate KVMs all0,
+including strict new guest counters/path/symlink/missing/trailing-slash/EFAULT
+checks, five apps, pointer reversal and cleanup. Strict diagnostic has4 rooted
+STATFS records (3success/1expected error); actual Files diagnostic has0. The
+old profile's8 FD-based FSTATFS operations are a different path. A new protocol
+and15 changed/added paths do not remove work in this target workload: reject.
+Before first verification, correct the helper's regex for Runtime's left-padded
+tag observed in raw. Complete padded-tag parsing proves strict4/3 and Files0;
+no earlier incorrect census or failed verifier run is substituted.
+New normal1.519149192s/ACK1.418218044s; optout1.720616163s/1.619790648s;
+fresh accepted1.518232763s/1.417308943s. Single100/200ms polling observations,
+no causal whole-launch gain/retreat percentage or100ms readiness proof.
+Restore all1245 pre-experiment source hashes and14 canonical hashes exactly,
+including all guest/host test changes; remove the3 added files. Revalidate the
+restored tree: Release/Debug2681/0/20, fresh strict KVM u6rvityd actual0 with16
+true guest huge leaves, HPET1GHz, PF0 and all required markers. Candidate counts
+are not accepted-tree results. Candidate FreeBSD is cross-built, not guest-run.
+All candidate VMs KVM/host; strict2/GUI SMP4, others SMP1/all QEMU threads CPU0.
+Keep candidate patch/guards/raw/receipts below current logs in
+page-release-vectors/rejected-rooted-statfs-20261113. No candidate image/snapshot/
+PNG is retained; current+previous4images/26snapshots/8PNG/2logs remain. Clean
+tmpfs and init.map after actual producers terminate. No mutating Git, commit,
+Kernel edit, WSL shutdown/compaction. Goal remains active. Next inspect real
+read/open/mmap and cold COW preparation/view creation, preserving every peer
+ACK, lease, generation, current right and uncertain-backing check. Do not
+repeat the rejected small-hit proof cache or add an unused metadata protocol.
+
+Latest checkpoint `page-release-vectors`, previous `page-view-vectors`.
+Batch caller-local page-view releases in vectors of at most17. Copy and validate
+the whole header before any release; use the ordinary sparse release for every
+page and return an independent acknowledgement bitmap plus echoed count.
+Keep every ownership, UNMAP/TLB ACK and failed-backing retention check. Failed
+entries do not prevent later independent releases; all selected leases become
+unready before the first request, and only acknowledged entries become empty.
+Lost or malformed replies retain the whole selection; confirmed holes can be
+retried through existing sparse-release validation. Partial objects remain
+rejected. No new persistent field/heap/dependency/Kernel ABI; scalar eviction,
+grant/COW/VM generations and genuine huge preference remain. New Alpha and both
+Alters must be paired. NANAMI_BATCH_PAGE_RELEASE=0 selects scalar release.
+Native Release/Debug each2681/0/20; related optout423/0/2. New coverage exercises
+64slots/4requests,17-boundaries, all read/write bytes, partial ACKs/continued
+suffixes, no stores, transport/protocol failures, retrying holes and whole-header
+validation. Initial Alpha build101 lacked an explicit diagnostic bitmap type;
+initial native354/1/2 reset a test process after installing shared mappings.
+Fix Word typing and fixture setup, then run final complete checks; initial raw
+and actual owner1/child101 receipts remain separate under initial-failures.
+All1245 frozen source hashes match final native/build/8VM guards. No post-VM
+fixture exception; later3-document changes have a separate before/after ledger.
+Eight KVM actual0: strict/skgnkgrg,strict-diag/uvuy74ss,Files/7xikj76k,optout/
+cjctqdwf,parent/k79pwf71,diag/7a086zea,optout-diag/lgt9mgqz,GUI/n6focd__.
+KVM/host, strict2/GUI SMP4; others SMP1/all threads CPU0. True guest huge16 in
+both strict runs, host THP, HPET1GHz, PF0, all5apps/pointer reversal/cleanup pass.
+Diagnostic release vectors1768pages/377requests; READY-to-ping342/82, all ACK.
+Optout release-vector0. Count only this release path, not whole RPC/Kernel/CPU
+work or per-guest attribution. Normal click-to-ping1.114055432s/ACK1.012659958s;
+same-source optout1.315833307s/1.214952030s; fresh previous1.315844459s/
+1.215008988s. Single100/200ms-poll observations; stable speedup not established,
+100ms painted/input readiness remains unmet. New200/500ms root4folders/0B,
+2000ms723B; keyboard/usr/local7folders/0B. Previous200ms status4/right list
+blank narrow, keyboard7/0B. Next inspect the delayed metadata refresh directly.
+Alpha ea344793/1707376B,Booter1ff2d399/6954424B,Linux105f7adc/878160B,
+FreeBSD353c2c89/866312B. RootFS2Alter paths and ESP init only; Core/fixture/
+Kernel/HPET/network preserved. FAT42 readbacks and independent Ext2/other-region
+verification pass. Carry historical-gui raw from page-table-ready before its
+retirement; retain4images/26snapshots/8PNG/2logs,9hardlinked snapshots. Remove
+tmpfs scratch and init.map only after all producers terminate. No Git mutation,
+commit, Kernel edit, WSL shutdown/compaction. Goal remains active.
+Details: session-handoff/logs/linux-native-scope-20261107/page-release-vectors/RESULT.md.
+
+Latest checkpoint `pool-run-registration`, previous `file-zero-tail-demand`.
+Use existing register_pool_page_run for a fresh contiguous pool batch or reused
+pool extent. Keep independent per-page records/refs, prepend order, partial
+release/COW/rights/initialization and every required MAP/UNMAP/TLB ACK. Huge
+allocation remains first; fragmented/native/already registered huge paths stay.
+NANAMI_SCALAR_POOL_REGISTRATION=1 restores scalar. No production field/ABI/
+Kernel/FPU/target/dependency/Alter change. On failure, the whole reserved batch
+can remain owned for sparse release/deferred retirement instead of immediately
+freeing an unclaimed suffix. Uninitialized suffixes publish no Frames/PTEs;
+successful paths allocate the same RAM. Retention/accounting/ACK retry tested.
+Four new production-path tests cover1/2/64/511,R/RW/RX,zero/payload,partial
+release,reused dirty RAM/no new allocation,failed MAP/UNMAP,fragmentation/huge.
+Default/scalar alpha-private-pages160 each; full Release/Debug2634/0/20.
+Initial focused98496 actual101/159pass/1fail expected one retained page at first
+MAP failure. Correct whole-run64-page retained/freed accounting while preserving
+all PTE/rights/rollback checks; final71231/scalar44996 actual0.
+Same-source READY->ping:92 ordered PID/base/pages/reused tuples match,2960pages.
+Registration calls2960->92,2868 fewer owner-head updates. Per-page ownership is
+retained; population50requests/2577MAPs in both. Other registration paths/CPU
+time uncounted. Normal1.317806043s/ACK1.216933432s; previous Alpha1.518768226s/
+ACK1.417841926s. Single100/200ms-poll observations, no established percentage
+or100ms painted/input readiness; diagnostic timing excluded.
+Final KVM actual0: strict36446/s5gycvjt,Files50402/bv6w22gy,parent56273/52pfwq9m,
+diag58333/eke3b5ba,scalar11540/ykh_6dzs,GUI51712/_pgm39x1. Strict/GUI SMP4,
+others SMP1/all threads CPU0; KVMcpu host/host THP/true guest huge16/HPET1GHz/
+network timeout/PF0. Final GUI5apps/pointer motion/reversal/cleanup pass.
+Important unresolved failure: initial candidate GUI20270/u_5tixgx actual1,
+Files window absent/empty log after successful pointer test. Parent GUI37877/
+6fux91yy passes, unchanged candidate repeat51712 passes. Do not call the failure
+unrelated or fixed. Keep raw failure and gui-stability.json; investigate this
+SMP4 Files startup intermittency next. Functional stability remains unverified.
+Six PNGs viewed: current200ms root4/0B,500/2000ms723B,keyboard/usr/local7/0B;
+parent200ms root4/0B,keyboard7/0B. Failure PNG actually viewed, hash recorded.
+Alpha8a99839e/1684192B,Booter499a63c2/6933944B; Alters/Core/HPET/net/Kernel/
+fixtures/libraries/all5RootFS regions unchanged. ESP init only; parent exact
+previous image. Source1239/canonical14/FAT30/full other regions verified.
+Retire older152files before copies;4images/26snapshots/8PNG/2logs,11hardlinks.
+All tmpfs scratch removed after actual owners; final storage receipts apply.
+No mutating Git/WSL shutdown;100ms/full optimization goal remains active.
+Details: session-handoff/logs/linux-native-scope-20261107/pool-run-registration/RESULT.md.
+
+Latest checkpoint `file-zero-tail-demand`, previous `readonly-protection-demand`.
+For fixed readonly mappings into live sealed pool-backed guests, initialize and
+retain RAM but defer ordinary PTEs for a zero tail>=128pages. Include zero-only
+requests; preserve final R/X/RX in packed words. Genuine huge allocation runs
+first; no reserved stack/NONE/WRITE change. NANAMI_EAGER_FILE_ZERO_TAIL=1 restores
+eager publication. Common Alter fault routing repairs initialized absent backing
+for both Linux and FreeBSD; Linux-only COW precedence, bus/rights checks and stack
+fallback remain. Keep refs, detach, all required MAP/UNMAP/TLB ACKs and uncertainty
+retention. No new field/ABI/Kernel/FPU/target/dependency; HPET/net/PF OFF unchanged.
+Fresh xfe mmap phase identifies20600-byte libxcb-util with2MiB LOAD alignment:
+6file aliases plus511 separately constructed zero pages. First source-only
+candidate missed zero-only requests and was not adopted; its2626/5VM evidence is
+isolated. Final native Release/Debug2630/0/20; alpha-private-pages default/eager156
+each; four real common-fault tests cover both personalities and rejection/fallback.
+Both Alters build; no FreeBSD guest KVM execution. Tests cover127/128/511tail,
+0/4097/20600source,R/X/RX/RW/RWX,huge,refs/bytes/fault rights,fork WRITE isolation,
+failed MAP/UNMAP. Preserve initial compile/release-hole/eager-edge fixture failures;
+materialize mixed-test neighbors explicitly to retain original rollback coverage.
+Same-source READY->ping, matching constructor PID/base/pages/source: initial PTE
+511->0, subsequent populate2577->2577MAPs/50->50requests. Counted combined MAP
+3088->2577,511 fewer, no extra request in this interval. Other MAP/UNMAP/CPU
+uncounted; diagnostic timing excluded. Normal1.519281788s/ACK1.418399950s,
+parent Alpha1.518133722s/ACK1.417318057s: no established whole-launch gain;
+100ms guest/200ms host polling,100ms painted/input-ready remains unmet.
+All KVM actual0: strict15451/9qsyj224,Files21310/7yx73iyb,parent20752/ewm9u4us,
+diag82486/dujr1hxl,eager35342/4bibj_wu,GUI88896/jyxivhqz. Strict/GUI SMP4,
+others SMP1/all threads CPU0; KVMcpu host/host THP/strict true huge>=16/PF0.
+GUI5apps/pointer motion/reversal/cleanup pass. HPET/network markers verified.
+Six PNGs viewed: current200ms root4/0B,500/2000ms723B,keyboard/usr/local7/0B;
+control200ms unfinished pane/status4/0B,keyboard7/0B. Exact first ready unknown.
+Alpha2b2153ed/1684192B,Booter457ac208/6933944B,Linux Alter02bca385/869112B,
+FreeBSD Alter7699bb5d/850160B. Each RootFS differs only in the two Alters with
+metadata preserved; control uses the same new Alters and old ESP init. Other
+variants replace only ESP init. Core/HPET/net/fixtures/libraries/Kernel unchanged.
+Source1239/canonical14/all5RootFS trees/FAT30/full other regions verified.
+Retire older154files before copies;4images/26snapshots/8PNG/2logs,9hardlinks.
+All tmpfs scratch removed after actual owners; final storage receipts apply.
+No mutating Git or WSL shutdown; full optimization/100ms goal remains active.
+Details: session-handoff/logs/linux-native-scope-20261107/file-zero-tail-demand/RESULT.md.
+
+Latest checkpoint `readonly-protection-demand`, previous `snapshot-fault-window`.
+For supervised sealed readonly protection>=128pages, keep existing deferred
+tail after64pages/256KiB absent with new logical R/X/RX rights. Existing faults
+map current rights later. Native immutable sources/single-page demands/NONE/
+WRITE/uncertainty/true huge leaves retain original transactions. Keep VM peer
+barriers, invalidation, COW detach, refs and all required UNMAP/TLB ACKs/error
+retention. No new field/authority/ABI/Kernel/FPU/target/dependency; user HPET/net
+and default PF OFF unchanged. NANAMI_EAGER_SNAPSHOT_PROTECTION=1 keeps old eager.
+Old deferred-ELF trial had76 HAL dumps/4.74s; PF dumps are now OFF, eager prefix
+is64pages and existing request is used. Recompare current normal/control.
+Same-source diagnostics READY->ping:36 ordered PID/base/deferred-count rows match.
+Protection MAP4980->2794, kept2186; population680->2577maps/13->50requests.
+Combined counted MAP5660->5371:289 fewer,37 extra requests. Other MAPs/CPU time
+uncounted; whole-run shapes differ so no whole-run net claim. Diagnostic time
+excluded. Normal ping1.517741708s/ACK1.416920211s vs parent1.517852500s/
+ACK1.416963682s; no established speedup or100ms paint/input readiness.
+Production focused default/eager4 each; full Release/Debug2622/0/20. Cover
+127/128/256/1024 R/X/RX/current fault rights/bytes/refs, shared WRITE detach,
+parent bytes, before/after MAP rollback and uncertain tail failed UNMAP.
+1024-page R->RX MAP1024->64 and R->R1008->48, no physical allocation.
+Preserve initial101:82806 used a protection-stub fixture; move to actual handler.
+47415 had3pass/1fail: child already held source pages, fix setup to keep it empty.
+Final focused2437/eager2003 actual0; final product behavior unchanged by setup fixes.
+KVM strict6894/dl26hmtm, Files48047/fsxe4lsz, parent60461/azru9rju,
+diag5252/ogwwlk6n, eager88258/mup06ih2, apps53179/k9qqgydy all actual0.
+Strict/apps SMP4, others SMP1/all threads CPU0; host THP/guest huge16/HPET1GHz
+one-shot/network timeout/PF0; GUI5apps/pointer/cleanup. Six PNGs viewed: current
+200ms root4/0B,500/2000ms723B, keyboard/usr/local7; parent200ms unfinished pane/
+old terminal remnants/status4/0B, keyboard7. Exact first readiness unknown.
+Alpha919b42de/1684192B, Booterc69ad570/6933944B. Core/five RootFS regions/other
+services/fixture/library/Kernel unchanged; ESP init only. Source1237/canonical14/
+FAT30/full regions verified. Retire older127files before copies; current/previous
+4images/26snapshots/8PNG/two logs,11 hardlinks. Scratch removed after owners;
+receipts apply. No mutating Git/WSL shutdown;100ms/full optimization goal active.
+Details: session-handoff/logs/linux-native-scope-20261107/readonly-protection-demand/RESULT.md.
+
+Latest checkpoint `snapshot-fault-window`, previous `snapshot-populate-ownership`.
+Shrink snapshot-fault population512pages/2MiB ->64pages/256KiB. Keep request-local
+ownership lookup, every rights/uncertainty/refcount/ready Frame check, COW WRITE
+stripping, all MAP/UNMAP/TLB ACKs and failure retention. Temporary record capacity
+20KiB->2.5KiB. NANAMI_SNAPSHOT_POPULATE_WIDE=1 retains old width. No new field,
+authority/ABI/Kernel/FPU/target/dependency. User HPET/network and default PF OFF
+unchanged. Existing genuine huge allocations retained; Files DSO permission
+segments are below2MiB and shared backing already4KiB caps. Other larger DSOs
+still offer future ownership-model work; see huge-page-admission.json.
+Same-source diagnostics READY->ping: wide6requests/2524maps vs narrow13/680:
+1844 fewer fault-population MAPs,7 extra requests. All56wide/163narrow markers
+parse,14074/8174maps total. Other MAPs, later net cost and CPU time uncounted.
+Normal ping1.316000127s/ACK1.214943558s vs parent1.518524330s/ACK1.417679260s,
+single observations with100/200ms polling; no established whole-launch gain
+or100ms painted/input readiness. Diagnostic times excluded.
+Default/wide core each347/0/2, wide direct fixture1; final Release/Debug2618/0/20.
+Initial Release101: existing direct fixture expected old512 PTEs, actual64.
+Correct width-dependent count and test next-window access, then rerun both suites.
+Test-only correction followed packaging; product/image bytes unchanged. Keep raw
+failure and post-package-test-correction.json. Window boundaries/repeated access/
+next-window bytes/refs and stale later Frame rejection covered.
+KVM strict9787/pb7zlmln, Files97535/l5erjnz7, parent17990/xnosazdh,
+narrow45801/l586qdob, wide69598/yzznlo47, apps29274/0fuirfie all actual0.
+Strict/apps SMP4, others SMP1/all threads CPU0; KVMcpu host/host THP/guest huge16.
+GUI5apps/pointer/cleanup, HPET one-shot/network timeout/PF dumps0. GUI tick-hz
+text interleaves; exact frequency unverified there, complete1GHz marker in five
+others. Initial verifier1 retained; corrected helper records that evidence limit.
+Six PNGs viewed: normal200ms root4/0B,500/2000ms723B, keyboard/usr/local7;
+parent200ms unfinished pane/status4items/0B, keyboard7. Exact first readiness unknown.
+Alpha0b1eb94f/1684040B, Booterf6c30d19/6929848B. Core/five whole RootFS regions/
+all other services/fixture/library/Kernel unchanged, ESP init only. Source1237,
+canonical14/FAT30/full image-region verification. Retire older142files before
+copies; current/previous4images/26snapshots/8PNG/two logs only,11 hardlinks.
+Scratch removed after actual owners; final cleanup receipts apply. No mutating
+Git or WSL shutdown; full optimization/100ms goal active and unmet.
+Details: session-handoff/logs/linux-native-scope-20261107/snapshot-fault-window/RESULT.md.
+
+Latest checkpoint `snapshot-populate-ownership`, previous `fork-writable-demand`.
+Snapshot-fault population collects bounded512 one-page records once, then uses
+an ascending cursor. Keep initial fault preflight and every current VM-right,
+uncertainty/refcount/ready-pool-Frame check, all MAPs/order/error ownership.
+Allocation failure/duplicates/excess records retain newest-record point lookup.
+Temporary metadata capacity20KiB on64-bit; no persistent production field,
+authority/ABI/Kernel/FPU/dependency. Point-visit counters are test-only.
+Same1024-page baseline377976 point/0 range visits -> candidate768+1024=1792.
+MAP496/physical alloc0 unchanged; candidate checks497 pool Frames. Counts are
+not CPU time. Initial filter miss0tests not admitted; correct baseline1 and
+focused3 pass. Final Release/Debug2617/0/20, including duplicate/error prefix,
+shared owner, PROT_NONE/uncertainty and stale nonfault-neighbor Frame checks.
+KVM strict52079/cx2fwwom, Files57645/gq663akp, parent8103/xgc6odbi,
+diag22399/5td0e3li, apps85829/j0rpwl6i all actual0. Strict/apps SMP4,
+perf SMP1/all threads CPU0. Host THP/guest huge16/HPET one-shot/PF dumps0.
+GUI5apps/pointer/cleanup pass. Normal ping1.720328760s/ACK1.619277421s vs
+parent1.719563379s/ACK1.618652767s: no established whole-launch gain or100ms
+readiness. All56 diagnostic markers parse:56 indexed requests/14074 maps;
+READY->ping6 requests/2524 maps, all indexed. Runtime chain lengths/CPU uncounted.
+Six PNGs viewed: current200/500/2000ms root4/723B, keyboard7; parent200ms
+folders/status0B, keyboard/usr/local7. Exact first readiness unproven.
+Alpha8e6ec3e9/1684040B (+152), Booter774ddfe8/6929848B. Core/four whole
+RootFS regions/services/fixtures/Kernel unchanged; ESP init only. Source1237,
+canonical14/FAT24/full outside-region verification. Retire older207files before
+copies; current/previous4images/26snapshots/8PNG/two logs only,11 hardlinks.
+Tmpfs scratch removed after actual owners. No mutating Git/WSL shutdown;
+goal active. Remaining2524 launch MAPs motivate genuine huge-leaf investigation
+with partial protections/COW/ACKs preserved.
+Details: session-handoff/logs/linux-native-scope-20261107/snapshot-populate-ownership/RESULT.md.
+
+Latest checkpoint `fork-writable-demand`, previous `fork-cow-prefix`.
+Pull user commits6001ec6/d27a7d1; rebuild merged HPET and optional-network
+startup timeout before applying the pending optimization. Baseline uses the
+same merged Core/net-server as the candidate. User source/Kernel/FPU/ABI untouched.
+Large writable COW runs>=128pages map only16 child pages initially. Keep every
+initialized byte/ref/slot and all parent WRITE revokes/ACKs; fixed stack,
+allocator128KiB eager copy,32-page COW admission and readonly policy stay intact.
+Existing fault population strips WRITE until detach; added faults/deferred
+metadata are a tradeoff, and later net MAPs/CPU time are uncounted. Opt out with
+NANAMI_DEFER_FORK_WRITABLE=0. No new VM field or external dependency.
+Merged focused179/0/1; final Release/Debug2614/0/20. RW/RWX127/128/512/1024,
+write population, pre-access detach, absent-source descendants and failed MAP
+ownership tested. Native1024 child MAP1024->16, parent remaps1024 unchanged.
+KVM parent30659/h0ffu9ts, strict76005/yvhajdff, Files55167/udxi51ty,
+diag45823/5ua1f6k7, apps26949/0tqs1nxj all actual0; strict/apps SMP4,
+perf SMP1/all threads CPU0. Host THP/guest huge16/default PF dumps0.
+All five execute HPET one-shot and merged network timeout; GUI5apps/pointer/cleanup.
+Normal ping1.518061705s/ACK1.417150464s vs merged control1.518297248s/
+ACK1.417442330s: no whole-launch or100ms readiness gain established.
+All18 fork/18 writable tags pair. Launch3452backed/3318shared/2773deferred/
+134copied:478 newly deferred writable child PTEs,478 initial MAPs omitted.
+Inherited readonly2295/copies134 unchanged; this is not net savings after faults.
+Six PNGs viewed: normal200ms folders/status0B,500/2000ms723B, keyboard7;
+control200ms incomplete/status0B and keyboard/usr/local7. Exact readiness unknown.
+HPET693c9418/Core6c5bdc72/net74cf651a; Core only HPET raw record and RootFS
+only net-server, all attributes/other payloads checked. Alpha36314fa5,
+Booterfa4a1448. Source1237/canonical14/FAT24/four Ext2 trees.
+Retire older130files before copies; current/previous4images/26snapshots/8PNG,
+two logs only. Tmpfs scratch removed after actual owners; no mutating Git or
+WSL shutdown. Full optimization goal active;100ms remains unmet.
+Details: session-handoff/logs/linux-native-scope-20261107/fork-writable-demand/RESULT.md.
+
 Latest checkpoint `fork-cow-prefix`, previous `fork-readonly-demand`.
 Shrink the anonymous allocator's eager COW-fork prefix512KiB→128KiB. Keep the
 whole stack, minimum32-page writable run, ownership/rights/ACK/error policy.
@@ -23311,3 +23605,491 @@ owned-huge-initialization/userspace-lto images4/snapshots26/selectedPNG8. Retire
 older directories as well as media; all tmpfs native/build/diagnostic/five-VM
 artifacts removed. Logs:session-handoff/logs/linux-native-scope-20261107/owned-huge-initialization.
 Uncommitted, goal active; the remaining~1.5s still needs substantial work.
+
+# 2026-11-13: GUI window selection follow-up
+
+The intermittent SMP4 Files timeout was reproduced with both current and parent
+Alpha. In run 57h1sn5s the old selector repeatedly checked unnamed, unmapped
+helper 0x2005f1 because its WM_CLASS contained `xfe`, while the titled main
+window 0x2003cd existed later in the tree. Client stacks reached the ordinary
+main event loop; both socket queues were empty. Do not infer a stopped timer
+or lost IPC notification from those normal event waits.
+
+Match only the quoted window title immediately after the ID, and inspect every
+matching candidate until one is IsViewable. Keep the original liveness, 60-poll,
+five-application and cleanup requirements. Five shell-selector regression tests
+pass and now run in CI. Normal runtime KVM/cpu host/SMP4 passes: standard five
+apps 95549/vwsnq2p0, and 100 Files launches followed by the other four apps
+70473/1hc2dy2m. Both include pointer burst/reversal and cleanup. Temporary Alter
+instrumentation was restored before either normal-runtime verification.
+
+Keep the original 20270 failure: it has no pre-cleanup tree, so its individual
+cause is not directly proven. A separate pre-Nanami boot/capture failure
+46973/5s2_zvm2 ended with harness -2/owner254 and QEMU -11; the identical image
+passed on repeat. No new latency result is admitted. Existing pool registration
+changes and their native 2634/0/20 Release/Debug results remain unchanged.
+Evidence is folded into the current checkpoint, with no extra persistent image
+generation. The overall optimization goal and 100 ms readiness target remain open.
+
+# 2026-11-13: share readonly zero backing and bound tiny Frame conversion
+
+Current readonly-zero-alias; previous pool-run-registration. For a live sealed
+x86 pool mapping with at least128 readonly zero-tail pages, initialize one4KiB
+page and register independent existing ownership/refcount records for every VA.
+Keep deferred PTEs and current R/X/RX. Copy payload/partial-page prefixes
+separately. Genuine huge allocation runs first; writable/native/retained backing
+keeps the original path. NANAMI_SHARED_FILE_ZERO_TAIL=0 restores distinct pages.
+Only new tiny backing uses bounded Frame conversion; ready identities, failed
+conversion quarantine and source/device authority checks remain unchanged.
+
+Alter's common Linux/FreeBSD guard treats non-WRITE VMAs, including PROT_NONE,
+as potentially shared before privileged writes or WRITE upgrades even without
+a fork marker. Keep query, peer stop/view invalidation, detach and all ACKs.
+Ordinary checked writes to logically writable mappings keep the fast guard.
+No new production field, Kernel/ABI/FPU/target/dependency or HPET/network change.
+Do not reuse a deferred zero alias without globally unique ownership. Inspect
+actual reap paths too: same-PID physical aliases are grouped for one release;
+mixed active/deferred/peer references hold RAM until the last callback. Existing
+failure-prefix and grouped-release tests cover these source paths.
+
+Release/Debug each2641 passed,0 failed,20 ignored. Seven new Rust tests exercise
+zero/payload/rights, per-VA ownership, partial release and write isolation,
+conversion/initialization/free failure/retry, huge preference, bounded cold
+Frame creation and unmarked readonly/NONE write guards with failed peer stop.
+Initial focused27262/56243 exit101 preserved: old distinct-RAM/immediate-free
+assumptions and missing caller DETACH were corrected without dropping coverage.
+Final focused12248 and distinct-page17795 exit0. Native cold aligned one-page
+Frame factory calls2048->1; this is not a total runtime Kernel-call count.
+
+Only the guest file-mapping C fixture changed after Rust/native validation.
+Build with existing freestanding/static/no-SSE flags. Its first new129-page
+case reads shared zero aliases, upgrades WRITE with a live CLONE_VM reader,
+checks PROT_NONE recovery, partial-unmap/remap and copyout isolation. Atomic
+readiness guarantees the initial child read precedes parent mutation. Final
+strict FILE-MAPPING-PASS/exit0 includes all new and existing guest cases.
+
+Six final KVM/cpu host owners all exit0: strict38808/_e3_df5l, Files15479/
+ovr2ijq3, previous whole-change control93514/m4yu849s, diagnostic62235/o38ca6ph,
+distinct diagnostic24073/wjiierc7, GUI29607/k3959uut. Strict/GUI SMP4; others
+SMP1/all QEMU threads CPU0. Host THP, strict16 genuine guest2MiB leaves,
+HPET1GHz one-shot, network timeout and0 PF dumps verified. Corrected GUI
+selector passes all five apps, pointer burst/reversal and cleanup. Previous
+pool failure raw/attribution limits remain preserved.
+
+Matched constructor PID33/512 pages before observer and Files PID42/511 pages
+in READY->ping: zero backing1023->2 pages,1021 fewer/4,182,016B. Files alone
+511->1,510 fewer/2,088,960B (~1.99MiB), also avoiding those zero initializations.
+Basis is actual matched request shape and production allocation tests; no global
+guest-RAM delta, CPU-time saving or total Kernel cap/MAP count is claimed.
+Normal ping1.113725347s/ACK1.012975472s; parent1.315911335s/ACK1.215058105s.
+Single100ms guest/200ms host poll observations, not an established percentage.
+Six PNGs viewed: current200ms root4/status0B,500/2000ms723B, keyboard/usr/local
+7/0B; parent200ms root4/0B and keyboard7/0B.100ms first paint/input remains unmet.
+
+Alpha9e6df358/1,688,440B; Booterf7231648/6,938,040B; Linux Alter32b329eb/
+870,344B; FreeBSD963a91d7/850,288B. Core/Kernel/services unchanged.1242 source,
+14 canonical guards,30 actual FAT reads and all image other regions verified.
+RootFS changes only both Alters plus desktop/file-mapping fixtures; parent uses
+old Alpha/Alters and only updated fixtures. Metadata and every other entry stay
+unchanged. No FreeBSD guest run this cycle. Retire338 file-zero-tail-demand
+files before persistent copies; retain4images/26snapshots/8PNG/2log generations,
+hardlink8 unchanged snapshots. Remove tmpfs scratch only after actual terminal
+owners. No mutating Git operation, commit or WSL/VHDX compaction. Goal active.
+Evidence:session-handoff/logs/linux-native-scope-20261107/readonly-zero-alias.
+
+# 2026-11-13: reject three additional candidates; keep readonly-zero-alias
+
+Implement and test the candidates before deciding. None is retained in product
+or test sources. Restore all1242 source and14 canonical hashes to the accepted
+readonly-zero-alias baseline before the final documentation-only append.
+Current/previous remain readonly-zero-alias/pool-run-registration; no new
+persistent image, snapshot or PNG generation. Goal/100ms readiness stay open.
+
+PROT_NONE restoration: keep a confirmed absent initialized pool tail deferred
+when returning to readonly. Related default/legacy each168 pass; full native
+Release/Debug each2645/0/20. Diagnostic owner17678/zjl2p3dt exits0 but observes
+zero candidate markers across the whole VM, so this does not address observed
+Files work and is withdrawn. Initial focused37077 exits101/165pass/3fail:
+new fixtures used forbidden constructor rights0 and a zero-based failure
+ordinal. Initial full-native73036 exits1/child101 because a native-only Memory
+mock lacked the new pool-namespace predicate. Preserve both raw failures and
+the corrected proofs. Restore that test-only mock too. No speed claim.
+
+Protection prefix:64->16 eager pages, admission128->64. Related default/wide
+each165 pass, including63/64/65/95/96 pages and rollback after a cold unaligned
+tail. Both diagnostics22068/st0e11ae and28938/vc9kb2nq exit0. All36 ordered
+(pid,base,mapped+kept) rows match4980 pages. Protection MAP2794->611; later
+population MAP2577->4279. Counted net reduction481, but population requests
+50->91. Normal1706/i9nsz9p7 ping1.517995122s/ACK1.417051660s; fresh accepted
+parent36330/x2orgkbm1.319044818s/1.218214125s. Both exit0 and pass the functional
+timeline/keyboard harness; screenshots were not visually assessed this followup.
+Do not admit a percentage from single observations. Withdraw the tradeoff;
+no full native, strict or five-GUI validation was performed for this candidate.
+
+Tiny Frame conversion: known allocations below256 pages amortize over1MiB
+instead of8MiB, retaining already Ready identities. Default/legacy physical
+tests each66 pass, including new boundaries, warm identities and failed
+conversion quarantine under both retry policies. Diagnostics80860/fhypflxf and
+31750/g3z3ge4m exit0. Parse every complete conversion marker: candidate40875
+Frames/83 ranges; legacy40875/71. READY->ping candidate2048/6; legacy1024/3.
+All-observed Frame creation is equal, with more conversion-range/node work,
+so reject the policy despite local cold microcases creating fewer Frames.
+These markers count successful ordinary pool conversions, not all Kernel
+objects, genuine-huge demotion work, physical RAM bytes or CPU time. Diagnostic
+timings1.317571218s/1.317158722s are excluded. No full native/strict/five-GUI or
+normal timing comparison was run for this candidate. Restore both source files.
+
+All build/cache/media/VM scratch stays in tmpfs. Retire each rejected candidate's
+media before building the next, retain caches until the end, then remove all
+scratch after actual terminal owners. Preserve candidate patches, exact-source
+guards, build/VM reports and failures under the accepted checkpoint's
+rejected-candidates-20261113/ followup; it is not another accepted generation.
+Original per-experiment tooling was not separately copied; build-flags.json
+records the issued edits alongside the archived build reports. No new Kernel,
+ABI, target, dependency, version, Git mutation, commit or VHDX compaction.
+Next inspect actual initializer alias replacement/MAP work under the existing
+4096-alias/64-KiB metadata budget; ready-source reuse/role swap already exist.
+
+# 2026-11-13: reject zero-alias borrowing and inaccessible fork sharing
+
+Both candidates were implemented and exercised, then withdrawn. Current and
+previous stay readonly-zero-alias/pool-run-registration. Restore1242 source and
+14 canonical hashes before these documentation-only edits. No new persistent
+image, snapshot or PNG. Goal/100ms paint and input readiness remain unmet.
+
+Zeroing through an existing Ready CopyWindow permanent pool alias passes212
+related tests in each default/legacy mode. Pilot9093/dp_qfbc6 exits0:11 reuse
+events before observer, none during Files launch. Final diagnostics85839/
+e5sd2skt and31640/6anynkal exit0. Both have133 zero requests/3604 pages, only
+one page during launch. All50 launch snapshot tuples match, but whole-boot
+sequences290/291 and physical zero inputs differ. Last-pre-observer to last-
+launch observations count2817/2853 temporary MAPs. Do not establish a36-MAP
+gain or attribute the unmatched cumulative totals as a regression. Initializer
+MAPs are a subset of temporary MAPs; do not add them together.
+
+Inaccessible fork sharing aliases initialized pool4K backing with logical
+rights0 and no child PTE; preserve hardware page-table absence through detach,
+independent references and guarded WRITE upgrades. Genuine huge/native caps
+keep eager copies. Four added private-page tests and core-process pass515/2
+ignored in both default and eager-NONE modes. A mistaken standalone target
+name exits1/child101 with0 tests; corrected aggregate target passes, raw retained.
+KVM25284/03e428e4 and92802/sv9v5io7 exit0: source37/target42 has the only NONE
+page in the whole run and launch. Shared0->1/copied1->0 avoids just4096 bytes;
+reject rather than retain this as a solution to the large copy workload.
+All candidate product/native/guest changes are restored, including the new
+guest case, which was built but not run under strict. Neither candidate ran
+full native/strict/five-GUI or normal timing controls. Diagnostic times excluded.
+
+The existing initializer default is4096 aliases/64KiB, not2048/32KiB. The
+smaller value belongs to NANAMI_SMALL_INIT_WINDOW=1. Correct stale planning
+and README descriptions without changing capacity. Next distinguish actual
+copy callers and bytes, then reduce a substantial initialized-copy path.
+Keep patches, raw failures, build flags and source/VM guards in
+readonly-zero-alias/rejected-copy-candidates-20261113. Scratch remains in
+tmpfs and is removed only after all actual owners terminate. No Kernel/ABI/
+target/dependency/version changes, Git mutation, commit or Windows compaction.
+
+# 2026-11-13: writable-zero-sharing with deferred leaves and bounded fault repair
+
+Current writable-zero-sharing; previous readonly-zero-alias. Alter marks
+private sharing, quiesces VM peers and revokes views before an explicit fresh
+anonymous RW/RWX zero-COW request. Alpha validates sealed target/native reaper,
+zero source words and exact3/7 rights. Prefer genuine huge pages; small fallback
+uses one initialized zero page plus16 private writable hot pages. Cold aliases
+retain logical WRITE/COW and per-VA references, with no initial PTE. Automatic
+readonly zero-tail admission runs after resolving its VA, as for fixed mappings.
+Retained extents/native/nonpool/unsupported paths preserve their rules.
+
+New fault-only mode OS_PRIVATE_WRITE_DETACH_POPULATE repairs present or missing
+WRITE faults under the existing acknowledged VM barrier. Up to64 neighbors
+must match the current permanent pool Frame, logical RW/RWX and private COW,
+with confirmed metadata. Other Frames, readonly, NONE and uncertain neighbors
+are untouched. Ordinary fork Frames differ and keep point repair. Unique RAM
+needs no copy; old active/new deferred ownership survives every fallible step.
+Only an acknowledged UNMAP restores absence after failed MAP; otherwise retain
+uncertainty until root teardown. Keep old modes0/1/2 semantics. New Alpha and
+Alters are paired; Kernel/Kernel ABI/FPU/targets/dependencies remain unchanged.
+
+Final Release/Debug2649/0/20; related default/optout566/0/2; extracted actual
+handler/runtime10 and workspace UAPI1 pass. Test automatic/fixed/unaligned VAs,
+zero bytes, hot/cold rights, fork, partial release/reuse, true huge preference,
+neighbor filtering, before/after MAP failures and failed shootdown retention.
+Guest first case exercises256 RW pages, live CLONE_VM, write/copyout isolation,
+fork, NONE restoration and partial remap. Final FILE-MAPPING-PASS plus0 includes
+that case; its standalone stdout marker is not separately asserted in serial.
+
+All six current KVM owners exit0: strict24495/kpjn7zwl, Files24860/qs2l7l0r,
+parent32261/osad4sy0, diagnostic24122/2t0ikbax, optout34952/x85rrp94,
+GUI29843/78q__wqj. KVM/cpu host; SMP4 strict/GUI, SMP1 all threads CPU0 for
+timing/diagnostics. Guest huge16; host THP; HPET1GHz one-shot, network timeout
+and PF dumps0. Five apps, pointer motion/reversal and cleanup pass. FreeBSD
+cross-build succeeds; no FreeBSD guest execution is claimed this cycle.
+
+Launch diagnostic has7 constructors, each256 shared references before16-page
+private prefix and240 cold leaves. Initial1MiB backing256->17 pages saves239/
+978944B per request. PID42 launch flow has3 requests: request totals768->51,
+717 fewer pages/2936832B. Exec/VA reuse can occur; these are not simultaneous
+or peak/lifetime RSS.12 repair requests cover543 previously absent pages;
+neighbor prefetch means this is not543 individual writes or531 avoided faults.
+No paired constructor tuple proof from optout (markers are absent there), nor
+total Kernel MAP/cap/global RAM counter. Native production default/optout and
+observed current paths establish the request-level initial work change.
+
+Normal1.315858389s/ACK1.214827758; fresh parent1.316206816s/ACK1.215393820.
+Single100ms guest/200ms host poll observations; no percentage/100ms readiness
+claim. Actually view6 PNGs: current200ms root4/status0B,500/2000ms723B,
+keyboard usr/local7/0B; parent200ms root4/0B and keyboard7/0B. Ping does not
+prove first paint/input. Alpha3fbbec91/1698056B, Booter51744453/6946232B,
+Alters f668e94b/871624B and567f51c7/854664B. Core/Kernel/services unchanged.
+
+Preserve prototypes separately: initial missing-auto admission shared0 despite
+native2646/0/20/three KVM0; corrected eager/per-page version native2646/0/20
+but normal1.518487244s against fresh parent1.113720207s. Reject that policy;
+do not claim a stable percentage from those single runs. Preserve compile and
+test-mode expectation failures, then corrected proofs, without calling them
+production regressions. Full Source1243/canonical14/FAT reads30/other regions
+and RootFS inventory/metadata pass. Normal RootFS changes both Alters plus
+fixture3 paths; parent fixture1 path only. Retire pool-run-registration before
+copies, preserving its unresolved GUI attribution/raw subset, and protect the
+readonly-zero-alias generation unchanged. Keep4images/26snapshots/8PNG/2logs;
+8 unchanged snapshots are hardlinked. All scratch/cache/media stays in tmpfs,
+removed after actual producers terminate. No Git mutation or commit/compaction.
+Goal stays active:100ms and full optimization unmet. Next reduce remaining
+service RPC and physical/slot/ownership work within COW batches.
+Evidence:session-handoff/logs/linux-native-scope-20261107/writable-zero-sharing.
+
+## 2026-11-13: reserve COW batch backing and slots once
+
+Accepted cow-batch-backing, previous writable-zero-sharing. Only sealed mode3
+same-pool-Frame neighborhoods, at most64 pages, prepare contiguous replacement
+RAM and slots once and prepend independent deferred owners once. Reverse
+insertion keeps the next ascending-VA replacement at the deferred head.
+Preserve actual copied bytes, current rights, per-VA physical references,
+MAP/UNMAP/TLB acknowledgements and uncertain backing. Retain the original page
+for the final alias only if no active/deferred global peer remains. Record the
+entire replacement suffix before any fallible conversion/copy/MAP. Fragmented
+RAM/slots fall back without losing reservations; fatal errors propagate.
+Ordinary distinct-Frame fork, native, other modes and genuine huge preference
+retain their behavior. NANAMI_PRIVATE_BATCH_BACKING=0 disables only this batch.
+
+Frozen1243-source final Release/Debug each2654/0/20; related optout522/0/2.
+New cases verify64-to1 RAM allocation calls, nonzero source bytes, independent
+writes, last-owner reuse, fragmented fallback, conversion/copy failure suffix
+retention and free retry, fatal reservation rollback, shared-owner slot holes
+and overflow. Existing before/after MAP and failed shootdown cases still pass.
+Initial cross build child101 exposed missing PartialEq on the real error enum;
+use match. The initial full native child0 was excluded when its guard detected
+this source edit (owner1). Both initial raw attempts remain separate from final.
+
+Six KVM actual0: strict64622/mlj29s0e, normal34748/k48srvbp,
+parent26089/oel3dfj7, diagnostic22420/bvpp0m33, optout67956/_6sjbirl,
+five apps47773/u9opbmtl. All KVM/host CPU; strict/apps SMP4, other SMP1 with
+all QEMU threads CPU0. Host THP,16 genuine guest huge reports in strict,
+HPET1GHz one-shot, PF dump0, five apps/pointer reversal/cleanup pass.
+In launch,12 batches repair543 pages and allocate541 replacement pages using
+12 physical requests and12 slot reservations. Sorted write tuples match the
+same-source optout. Native proves per-request64-to1 allocation calls; this is
+work reduction, not a whole-launch percentage or global RAM/cap/MAP census.
+Normal ping1.113454678s/ACK1.012587428s; fresh parent1.518646278s/1.417770526s.
+Single100ms guest/200ms host observations;100ms paint/input readiness remains
+unmet. Six screenshots viewed: new200/500ms root4/0B,2000ms723B, keyboard7/0B;
+parent200ms status4 but blank/narrow right list, keyboard7/0B.
+
+Only Alpha/booter canonical bytes change. Kernel v0.3.12/PF default OFF,
+HPET/network/Core/Alters/fixture/targets/dependencies/ABI unchanged. Thirty FAT
+member readbacks and every byte outside ESP match the previous media. No Rust
+source exception between native and VMs; post-VM documentation edits recorded.
+Retire readonly-zero-alias before copying, protect writable-zero-sharing, keep
+4images/26snapshots/8PNG/2log generations,11 unchanged snapshots hardlinked.
+Remove tmpfs scratch after every actual producer terminates. No Git mutation,
+commit, Kernel edit, WSL stop or compaction. Goal active; next reduce remaining
+service RPC and repeated same-Frame transfer/registration work.
+Evidence:session-handoff/logs/linux-native-scope-20261107/cow-batch-backing.
+
+## 2026-11-13: reject Frame ceiling and private-preparation proof cache
+
+Current remains cow-batch-backing, previous writable-zero-sharing. Implemented
+and tested both proposals, then restored all1243 source and14 canonical hashes
+to the accepted baseline before this documentation update.
+
+COW allocation-sized Frame conversion: related default/optout587/0/2 each;
+two KVM diagnostic actual0,63863/rgq3_ctq and35247/8ad1oufz. Both covered factory
+totals39328 Frames, launch1536/3ranges; only global range count increased59->74.
+Sorted launch constructor/write shapes match. Reject postponed conversion work
+that does not reduce total Frames. No full native/strict/GUI/normal timing at
+this stage. Do not repeat another arbitrary conversion-width reduction.
+
+Private-preparation proof:3 words per allocated VMA table, generation-bound
+page intervals after acknowledged preparation plus successful checked copy or
+mode3 fault repair. Invalidate on sharing/mutation/generation change, share with
+CLONE_VM, start empty after private fork, never record failed-copy suffixes.
+Final guarded/protect/snapshot and huge-barrier behavior remains full protocol.
+Candidate Release/Debug each2663/0/20, related default/optout148/0/2, disabled
+views1 pass. Initial mock visibility failure101 was corrected and retained.
+Eight final KVM actual0:28669/b6ywufqx,77366/re9uc8a3,84481/yxr66eha,
+25726/o020v335,22929/a7dy7nav,73700/aqe0_k_u,8307/dxjrznw6,99718/51vmrn5o.
+New normal1.315906036s and1.316006605s; fresh baseline1.113629352s and1.113945191s.
+These100ms guest/200ms host poll observations do not establish a precise causal
+regression rate. No whole-launch benefit was shown. Final diagnostic1224 rows/
+29hits, launch276/10, Files PID42=7; optout1220/0, launch273/0. The small saving
+does not justify added persistent state and invalidation maintenance. Revert it.
+
+Checked-only first stage had567 rows/40hits, launch160/22; optout566/0 and159/0.
+Its initial zero-marker claim was a parser error: nanami-runtime pads tags to20
+columns. Keep the original error and corrected padding-aware result distinct.
+The guarded-expansion intermediate was not adopted either; its launch had no
+guarded calls. All stages/source/patch/owner/raw retained separately. Across
+the turn13 KVM actual0, all KVM/host; strict/apps SMP4 and others SMP1/all threads
+CPU0, host THP, HPET1GHz one-shot, Kernel0.3.12/PF dumps0. Strict genuine huge16,
+five GUI apps/pointer reversal/cleanup pass. No FreeBSD guest execution.
+
+Only trial Alter RootFS bytes changed, and full tree/metadata/readback/e2fsck
+plus ESP/outside-RootFS checks pass. Alpha/booter/Core/fixture/other services and
+Kernel remained byte-identical. Final2663 candidate native counts are not a new
+accepted-baseline test result; accepted2654/0/20 stays authoritative.
+No new persistent media/PNG generation. Retain4images/26snapshots/8PNG/2logs and
+delete tmpfs after all actual producers terminate. No mutating Git command,
+commit, Kernel edit, WSL stop or compaction. Goal active;100ms unmet.
+Next classify Alpha request MAP/UNMAP/Frame-conversion work for mmap/read/open
+and remove substantial registration/re-registration. Present-leaf MAP is rejected
+by existing Kernel; supported Frame bits12/21/30 do not admit intermediate sizes.
+Evidence:cow-batch-backing/rejected-preparation-hints-20261113.
+
+## 2026-11-13: reuse confirmed4K tables in direct preparation callers
+
+Current page-table-ready, previous cow-batch-backing. Reuse existing VmTracker
+readiness in MemoryManager::ensure_page_tables. No new state or dependency.
+Unknown regions and huge-leaf calls still query the Kernel; existing table/huge
+invalidation, physical references/pins, uncertain backing and leaf ACKs remain.
+Release/Debug each2656/0/20. New tests cover512 repeated preparations without
+queries, separate address spaces, huge queries despite a4K proof, leaf UNMAP,
+explicit invalidation/recreation, query and conversion failures. Initial child101
+was a new fixture dividing an already-page-index return by4096; corrected only
+the fixture. Final cross-build reproduces the exact tested Alpha/Booter bytes.
+
+Four normal KVM actual0: strict79340/1idfk0y2, Files18849/975zb72p,
+parent8807/ys9j7xkx, apps13352/v681wbo4. Strict/apps SMP4, others SMP1/CPU0;
+all KVM/host, host THP, genuine guest huge16, HPET1GHz one-shot, PF dumps0,
+five GUI apps, pointer burst/reversal and cleanup pass. Normal ping1.518105662s/
+ACK1.417120616s, fresh control1.316091133s/1.215283833s. No whole-launch gain is
+established from these100ms guest/200ms host observations. New200ms screenshot
+has status4 with blank/narrow right list;500/2000ms root4/723B, keyboard7/0B.
+Parent200ms root4/0B and keyboard7/0B.100ms paint/input readiness is unachieved.
+
+Two census KVM actual0:61111/mwz7gi33,52956/n08x4gk6. Launch views change from
+472 requests/472 MAP/472 table queries to473/473/4; Files PID42 from311/311
+queries to309/4. Request shapes are not identical. Selected Alpha/Memory wrappers
+inside handlers are not a complete Kernel/RPC census; inclusive ticks include
+preemption and diagnostic elapsed times are not normal performance evidence.
+Three prior observer-input timeouts actual1 are retained; two-second delay and
+log gating alone failed. Final helper waits10seconds before focus and sends
+Ctrl-U for both conditions; measured click/observer/timelines are unchanged.
+Direct input-loss attribution remains unproven; product harness stays unchanged.
+Correct initial field completeness assertion23->22, check every sequence and
+backwards flag, and remove all temporary probe imports/modules from production.
+
+Only Alpha/Booter canonical bytes change; Kernel/Core/Alters/fixture/RootFS and
+HPET/network fixes are unchanged.18 FAT member readbacks for normal/control media
+and ESP-outside byte checks pass. Move unresolved historical-gui raw before
+retiring writable-zero-sharing. Keep4images/26snapshots/8PNG/2logs,11 unchanged
+snapshot hardlinks, protect the previous cow checkpoint, and remove tmpfs/cache
+after all actual producers finish. No Git mutation/commit/Kernel change/WSL
+stop/compaction. Goal active. Next address the hundreds of remaining page-view
+RPCs and larger read/open/mmap work; do not equate fewer queries with whole-launch
+speedup. Evidence:session-handoff/logs/linux-native-scope-20261107/page-table-ready.
+
+## 2026-11-13: batch exact supervisor page grants
+
+Current page-view-vectors, previous page-table-ready. New READ_VIEWS/WRITE_VIEWS
+Nanami requests carry up to17(target,local) pairs and return a confirmed prefix
+plus first failure status. Copy/validate descriptors before grants. Delegate each
+pin, RAM/right/COW check and MAP/UNMAP acknowledgement to the existing scalar
+transaction. Cache planning protects hits and selected slots, releases victims
+before grants, deduplicates source pages, preserves successful prefixes and
+retains uncertain pages/untrustworthy responses without publishing Ready hits.
+No store precedes full preparation. The cold64KiB view now prepares in one RPC;
+NANAMI_BATCH_PAGE_VIEWS=0 preserves scalar/cold checked behavior. No new permanent
+cache state, Kernel ABI, target/FPU, scheduler/priority or external dependency.
+
+Final serial Release/Debug each2672/0/20, optout414/0/2. Eight KVM actual0:
+74235/6hw0r2h2,39249/4coz69ux,30275/lc9ebive,71178/wl0d9irj,
+35939/tg5k4_4o,61647/3opswbyl,63927/0h5bvhiz,71923/0z354bg4.
+KVM/host throughout; strict2/apps SMP4, other runs SMP1/all QEMU threads CPU0.
+Both strict runs genuine guest huge16; host THP, HPET1GHz one-shot, PF dumps0,
+five apps/pointer burst/reversal/cleanup pass. FreeBSD is cross-built only.
+
+Strict diagnostic confirms two complete17page batches and the existing64KiB,
+fork/COW byte checks. Four status4 rejected vectors preserve prefix0/1 and use
+the checked fallback. Desktop diagnostic144 batches/779pages all complete;
+launch34/92, Files PID42 alone24/53. Vector-only counts are not a complete Kernel
+or RPC census; cold backend admission also differs from the old checked path.
+Normal ping1.315686178s/ACK1.214728043s, same-source optout1.315418358s/1.214562158s,
+fresh previous1.315855592s/1.214979265s. No whole-launch improvement established.
+New200ms root4/0B,500/2000ms723B, keyboard7/0B; previous200ms blank/narrow list
+despite status4, keyboard7/0B.100ms paint/input readiness remains unachieved.
+
+After the VMs, correct only linux-guest-views.rs: replace stale manual statuses
+with actual UAPI constants and verify FATAL5/transport/corrupt replies retain
+all mapped unready pins without stores. Preserve old VM-source hash separately
+from final native source; product source/canonical bytes remain unchanged and
+final cross-build reproduces the tested binaries. Earlier2671/0/20 and413/0/2
+are not the final counts. Initial cold-adapter expectation failures and the
+unnecessary scalar read-prefix ordering change were corrected before all VMs;
+raw failures remain separate. No failed run is replaced with a success record.
+
+Alpha/Booter and both Alters are the only canonical changes. RootFS two Alter
+paths, ESP init only,42 final FAT member readbacks, unaffected regions, original
+Core/fixture/Kernel/HPET/network verified. Retire cow-batch-backing before copying
+media; protect previous page-table-ready and its unresolved historical GUI raw.
+Keep4images/26snapshots/8PNG/2logs with9 unchanged snapshot hardlinks; delete
+tmpfs/cache/media/init.map only after producers terminate. No Git mutation,
+commit, Kernel edit, WSL stop or compaction. Goal active. Continue with remaining
+release/service RPC waits and read/open/mmap work; do not call all optimization
+complete. Evidence:session-handoff/logs/linux-native-scope-20261107/page-view-vectors.
+
+## 2026-11-13: quiescent cold write views; commit checkpoint
+
+Current quiescent-cold-write-views, previous page-release-vectors. After logical
+permissions and the unchanged cached-only attempt, try cold WRITE_VIEW(S) only
+for the stopped current fault target with no active VM peer. Reuse existing
+active_vm_user rules. Alpha's ordinary grants still prove current RW/non-COW,
+certain one-page RAM, matching Frame and ownership. All pages precede any store;
+failure retains partial/unready leases and returns to checked QUERY/DETACH,
+quiescence and ordered-prefix fallback. No new state, heap, API or dependency.
+NANAMI_COLD_WRITE_VIEWS=0 preserves the earlier path. Unsupported/raw scratch,
+oversized vectors and unchecked writes keep existing behavior.
+
+Frozen1245 source files match final default/optout focused498/0/2 each, full
+Release/Debug2686/0/20 each, Linux/FreeBSD four-variant cross-builds and7KVM.
+CI host tools/protocols46 and GUI selection5 tests pass. All7KVM actual0:
+l7qlae2w,b6c0658o,anff3zmv,y8317edg,zjol6uqv,hfyyzjwf,fxmdj44u.
+KVM/host throughout, strict/apps SMP4, others SMP1/all QEMU threads CPU0;
+host THP, genuine guest huge16, HPET1GHz one-shot, PF dumps0, five apps,
+pointer burst/reversal and cleanup pass. FreeBSD is cross-built only.
+
+READY-to-ping Files PID42 cold attempts89/success81/refusal8; checked private
+preparations11(QUERY10), optout93(QUERY89); write-view requests101 vs102,
+preparation plus write views112 vs195. Across processes, counted preparation
+plus all views plus releases641 vs777. These APIs are not a complete IPC,
+Kernel or CPU census; request sets are not byte-identical. Runtime truncates
+the cold-view tag to20 characters. Preserve the first incorrect long-tag0
+parser output separately; corrected full raw parsing produces these counts
+without any VM/source rerun. Normal ELF contains no diagnostic tags.
+
+Normal click-to-ping1.315348344s/release-ACK1.214492284s, same-source optout
+1.523116042s/1.422455808s, fresh previous1.316349015s/1.215484357s.
+Single100ms guest/200ms host polling does not establish a stable launch gain.
+Current200ms has status4 but blank/narrow right list;500ms root4/0B,2000ms723B;
+previous200ms root4/0B. Both keyboard challenges show usr/local7/0B.
+Xfe's one-second capacity-label timer is not a first-paint/input endpoint.
+
+Only two Alter canonical binaries and their RootFS paths change this cycle;
+all bytes outside RootFS, including ESP, remain exact. Alpha/Booter/Core,
+Kernel0.3.12/PF default OFF, fixtures and HPET/network fixes remain unchanged.
+Retire page-view-vectors before persistent copies; protect all previous raw,
+historical GUI and rejected statfs evidence. Keep4images/26snapshots/8PNG/2logs
+and11 unchanged snapshot hardlinks. Delete scratch after actual producers end.
+Post-VM edits are documentation-only in three paths. No mutating Git operation,
+commit, Kernel change or WSL stop/compaction. Optimization pauses for the user's
+commit;100ms goal remains unmet. Resume remaining read/open/mmap/view work after
+their commit notification. Evidence:logs/linux-native-scope-20261107/quiescent-cold-write-views.

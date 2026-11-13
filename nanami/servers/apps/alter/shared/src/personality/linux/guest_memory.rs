@@ -194,6 +194,11 @@ pub(super) fn copyout_from(
         if super::guest_views::copy_from_scratch_cached(runtime, pid, user_ptr, source, len) {
             return Ok(());
         }
+        if super::private_memory::can_try_cold_write_view(runtime, pid) {
+            let copied = super::guest_views::copy_from_scratch(runtime, pid, user_ptr, source, len);
+            report_cold_write_view(pid, "scratch", len, copied);
+            if copied { return Ok(()); }
+        }
     }
     super::private_memory::with_checked_private_write(runtime, pid, user_ptr, len, || {
         if super::guest_views::copy_from_scratch(runtime, pid, user_ptr, source, len) {
@@ -223,6 +228,11 @@ pub(super) fn copyout_owned(
         super::private_memory::invalidate_checked_write_origin(runtime, pid, user_ptr, source.len());
         if super::guest_views::copy_from_owned_cached(runtime, pid, user_ptr, source) {
             return Ok(());
+        }
+        if super::private_memory::can_try_cold_write_view(runtime, pid) {
+            let copied = super::guest_views::copy_from_owned(runtime, pid, user_ptr, source);
+            report_cold_write_view(pid, "owned", source.len(), copied);
+            if copied { return Ok(()); }
         }
     }
     super::private_memory::with_checked_private_write(runtime, pid, user_ptr, source.len(), || {
@@ -270,6 +280,12 @@ pub(super) fn copyout_owned_many<const N: usize>(
             if super::guest_views::copy_from_owned_many_cached(runtime, pid, buffers) {
                 return Ok(());
             }
+            if super::private_memory::can_try_cold_write_view(runtime, pid) {
+                let copied = super::guest_views::copy_from_owned_many(runtime, pid, buffers);
+                report_cold_write_view(pid, "vector", buffers.iter().fold(0usize,
+                    |total, (_, bytes)| total.saturating_add(bytes.len())), copied);
+                if copied { return Ok(()); }
+            }
         }
         if let Some((base, bytes)) = single_page_copyout_span(buffers) {
             let permissions_valid = cached_permissions_valid || buffers.iter().all(|(target, source)|
@@ -305,6 +321,15 @@ fn single_page_copyout_span<const N: usize>(buffers: &[(Word, &[u8]); N]) -> Opt
     }
     if start / LINUX_PAGE_SIZE != (end - 1) / LINUX_PAGE_SIZE { return None; }
     Some((start, end - start))
+}
+
+#[inline]
+fn report_cold_write_view(_pid: Word, _kind: &str, _bytes: Word, _copied: bool) {
+    #[cfg(target_os = "none")]
+    if option_env!("NANAMI_COLD_WRITE_VIEWS_DIAG") == Some("1") {
+        nanami_runtime::println!("[linux.cold-write-view] pid={} kind={} bytes={} copied={}",
+            _pid, _kind, _bytes, usize::from(_copied));
+    }
 }
 
 fn copyout_owned_many_prepared<const N: usize>(

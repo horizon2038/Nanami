@@ -316,7 +316,14 @@ impl Alpha {
                 7
             };
             let source = Some(PageSource { pid: caller_pid, address: source[0], bytes: source[1] });
-            if protected && permissions & nanami_uapi::os::OS_MAP_INITIALIZER_DEFER != 0 {
+            if protected && permissions & nanami_uapi::os::OS_MAP_INITIALIZER_COW_ZERO != 0 {
+                let rights = permissions & !nanami_uapi::os::OS_MAP_INITIALIZER_COW_ZERO;
+                if !supervised || !matches!(rights, 3 | 7) || source.is_none_or(|s| s.address != 0 || s.bytes != 0)
+                    || self.processes.find_entry_by_pid(caller_pid).is_none_or(|entry|
+                        entry.capabilities_sealed || entry.exited || entry.resource_quarantined)
+                { return Err(CapabilityError::PermissionDenied); }
+                self.map_process_anonymous_zero_cow(target_pid, (requested_base != 0).then_some(requested_base), page_count, rights)?
+            } else if protected && permissions & nanami_uapi::os::OS_MAP_INITIALIZER_DEFER != 0 {
                 if !supervised || requested_base == 0
                     || permissions != (1 | nanami_uapi::os::OS_MAP_INITIALIZER_DEFER)
                     || self.processes.find_entry_by_pid(caller_pid).is_none_or(|entry|

@@ -829,9 +829,19 @@ impl ProcessManager {
         pid: usize,
         allocation: ProcessPhysicalAllocation,
     ) {
+        self.defer_physical_allocations_for_pid(pid, core::iter::once(allocation));
+    }
+
+    /// Prepend in iterator order, retaining an independent physical reference
+    /// for every page, including the unpublished suffix of a failed batch.
+    pub fn defer_physical_allocations_for_pid(
+        &mut self,
+        pid: usize,
+        allocations: impl Iterator<Item = ProcessPhysicalAllocation>,
+    ) {
         let pid = self.memory_owner_pid(pid);
         self.physical_allocations
-            .insert(AllocationState::Deferred, pid, allocation);
+            .insert_many(AllocationState::Deferred, pid, allocations);
     }
 
     /// After all leaves/capabilities are gone, retain RAM ownership until each
@@ -1054,6 +1064,11 @@ impl ProcessManager {
     #[cfg(test)]
     pub fn take_physical_page_range_visits(&self) -> usize {
         self.physical_allocations.take_range_visits()
+    }
+
+    #[cfg(test)]
+    pub fn take_physical_page_point_visits(&self) -> usize {
+        self.physical_allocations.take_point_visits()
     }
 
     pub fn private_page_reference_walk(

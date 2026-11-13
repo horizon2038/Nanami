@@ -3,6 +3,48 @@
 The ongoing evidence, acceptance rules and rejected experiments are recorded in
 [Nanami / Alter optimization cycles](optimization-cycles.md).
 
+Permission-checked private copyout retains its cached-only fast path. On a cold
+miss, the current fault target may try ordinary write views before private
+preparation only while all VM users are already quiescent. Alpha still requires
+current RW, non-COW, certain ordinary RAM and matching Frame/ownership; prepare
+every lease before any store. Refusal retains partial grants/unready pins and
+uses the existing checked preparation and ordered fallback. No permission or
+backing mutation is admitted by this attempt. Set NANAMI_COLD_WRITE_VIEWS=0 for
+the earlier path. Tests cover peer states, permissions, uncertain/COW refusal,
+cross-page no-store, ordered vector prefixes and unsupported scratch/size paths.
+The accepted frozen source passes2686 native tests in both Debug and Release;
+the focused default and optout suites each pass498, with2 ignored. Counted
+preparation/view work falls in the Files launch census; whole-launch speedup
+and100ms paint/input readiness remain unproven.
+
+Supervisor page-view invalidation releases up to17 exact local pages in one
+Nanami request. Validate the entire header first, retain ordinary per-page
+ownership/UNMAP/TLB checks, and continue after an independent failure. Only
+acknowledged bitmap entries become reusable; lost/malformed replies leave all
+selected leases unready. Existing sparse-release validation makes a confirmed
+hole retryable without discarding retained or uncertain backing. Tests cover
+64slots/4requests, partial ACKs, bounded chunks, failures, no stores, lost replies,
+hole retries, partial-object rejection and actual wire fields. Set
+NANAMI_BATCH_PAGE_RELEASE=0 for scalar releases. Pair new Alpha and both Alters;
+no Kernel ABI, dependencies, heap buffers or persistent fields are added.
+
+Large supervised anonymous RW/RWX mappings can share initialized zero backing
+under the explicit `OS_MAP_INITIALIZER_COW_ZERO` contract. Genuine huge leaves
+are preferred; the small-page fallback keeps16 hot pages private and writable,
+with the cold initialized tail logically writable/COW and absent from hardware.
+Current Frame identity, references, rights, uncertainty and VM quiescence remain
+mandatory. `OS_PRIVATE_WRITE_DETACH_POPULATE` repairs a missing or present write
+fault and can detach at most64 neighboring writable COW aliases of the same
+pool Frame. Other Frames and readonly/NONE/uncertain pages are unchanged.
+Existing QUERY/DETACH/DEFERRED modes retain their contracts. Alpha and both
+Alters must be updated together; this extends Nanami's service protocol, not
+the Kernel ABI. `NANAMI_SHARED_WRITABLE_ZERO=0` selects ordinary anonymous RAM.
+Native coverage checks automatic/fixed placement, zero bytes, cold PTE absence,
+fork, copyout guards, partial reuse, huge preference, neighbor exclusion and
+retention after MAP/UNMAP failures. KVM evidence records actual use and its
+limits: request-level initial RAM savings are not global/lifetime RSS, and
+prefetched neighbors do not prove an avoided-fault count or CPU speedup.
+
 Directory name-cache misses can search borrowed warm block bytes without a
 scratch copy. Existing positive/negative precedence and negative publication
 rules remain: malformed/inode/type/map/I/O/bounds failures cache no miss. Tests
@@ -125,7 +167,8 @@ Alpha's static image/record staging reader now probes an existing ready
 initialization alias by its freshly resolved Frame before using CopyWindow.
 The copy into independent static storage remains; no source view survives it.
 The lossy Frame hint occupies padding in the existing initialization rows:
-2048 aliases, their physical-slot policy and32-KiB metadata bound stay unchanged.
+4096 aliases, their physical-slot policy and64-KiB metadata bound stay unchanged
+(the compact `NANAMI_SMALL_INIT_WINDOW=1` configuration uses2048/32KiB).
 Empty/Pending/Ready states preserve failed MAP/UNMAP tracking. A collision,
 stale Frame or pending entry declines to the original copy window without scans
 or ownership inference. Initialization-window tests exercise hints/collisions/
@@ -1502,8 +1545,9 @@ interpreter that must bypass the cache to preserve its live main image.
 `ext2-file-versions` checks bounded token eviction and
 exhaustion; storage/truncate tests also compile the real invalidation hooks.
 `alpha-initialization-window` checks stable pool-frame mappings, bounded collision
-eviction, and MAP/UNMAP failure ownership. Its 2,048-entry cache uses an 8-MiB
-alias range and 32 KiB of metadata, not an 8-MiB data buffer. Tests also cover
+eviction, and MAP/UNMAP failure ownership. Its default 4,096-entry cache uses a
+16-MiB alias range and64 KiB of metadata; the compact optout uses2,048 entries,
+8MiB of alias space and32KiB of metadata. Tests also cover
 resident reuse above the old capacity and failed MAP followed by failed cleanup.
 The cycle notes report both measured fork/exec gains and slower controls.
 Real ELF updates and complete Linux
@@ -2534,3 +2578,69 @@ retry. This is reserved capability metadata, not anonymous RAM returned to the
 buddy allocator. The independent `--tinycore-apps` QEMU test validates the
 installed upstream applications' viewable X11 windows; see the
 [Tiny Core recipe](../../thirdparty/tinycore/README.md).
+
+Bounded same-pool-Frame COW fault batches now reserve replacement RAM and slots
+once and prepend all deferred page owners once. They retain actual source bytes,
+per-VA references, final-owner reuse and all leaf acknowledgements. Fragmented
+RAM/slots fall back to point allocation; conversion/copy/MAP failure retains the
+unpublished suffix until acknowledged cleanup. `NANAMI_PRIVATE_BATCH_BACKING=0`
+uses the point path. Tests cover64-to1 allocation requests, nonzero source bytes,
+last-owner reuse, fragmentation, fatal allocation rollback, failed suffix
+retirement/retry, and shared-owner slot holes/overflow. The preceding checkpoint
+is `cow-batch-backing`; its Release/Debug each2654/0/20, optout522/0/2, and six
+KVM runs pass. See its source guards and raw evidence under `session-handoff`.
+
+The follow-up COW Frame ceiling and private-write proof cache trials were
+implemented and reverted. Frame counts were unchanged39328/launch1536 while
+conversion ranges increased59->74. The final proof-cache candidate passed
+Release/Debug2663/0/20, related default/optout148/0/2, disabled views1, and eight
+KVM runs, but saved only7 preparations in the Files PID42 flow and showed no
+whole-launch benefit in two comparisons. Accepted source/binaries were restored
+exactly; those candidate tests do not replace the accepted2654/0/20 result.
+Runtime bracketed tags are padded to20 columns: diagnostic parsers must allow
+whitespace after `[`. Small source/patch/raw records and the parser correction
+remain under `cow-batch-backing/rejected-preparation-hints-20261113`; no additional
+image, snapshot or PNG generation was retained for those rejected trials.
+
+The preceding `page-table-ready` checkpoint also reuses the existing confirmed
+4K table hint inside `ensure_page_tables`, including direct page-view callers.
+Unknown regions and huge-leaf preparation keep the Kernel query; table/huge
+invalidation and every leaf MAP/UNMAP acknowledgement remain unchanged. No new
+cache, ABI or dependency. Release/Debug each2656/0/20; new cases cover512 repeated
+preparations, separate address spaces, huge queries, leaf UNMAP, invalidation,
+and query/conversion failures. Four normal KVM runs and two census runs pass;
+strict/GUI SMP4, timing/census SMP1 on CPU0, genuine huge16 and five apps pass.
+Launch view work: control472 requests/472 MAP/472 table queries; new473/473/4.
+These request sets differ and cover selected handler wrappers, not all Kernel
+work. Normal ping1.518105662s versus fresh control1.316091133s does not establish
+a whole-launch benefit.100ms paint/input readiness remains unachieved. Three
+earlier observer-input timeouts, the corrected fixture failure, exact probe
+sources and pre-launch helper differences remain separate in the raw evidence.
+Keep only current/previous generations and remove tmpfs after producers finish.
+
+Current `page-view-vectors` batches up to17 exact supervisor page grants in one
+Nanami RPC. Scalar authority, RAM pins, COW, rights and leaf acknowledgements
+remain unchanged. Protect all prepared hits/slots before victim selection; wait
+for victim-release ACKs before granting. Preserve a known successful prefix,
+quarantine uncertain entries and retain every requested VA on a lost/malformed
+reply. No output stores precede complete preparation. `NANAMI_BATCH_PAGE_VIEWS=0`
+retains scalar grants and the initial checked-copy admission. Update Alpha and
+both Alters together; no Kernel/target/FPU/priority/dependency changes.
+
+Final Release/Debug each2672/0/20, related optout414/0/2; eight KVM actual0 include
+normal/diagnostic strict, three normal timing conditions, two diagnostic timing
+conditions and five GUI apps/pointer/cleanup. Genuine guest huge16 in both strict
+runs. Real guest17page batches complete twice; native tests verify bytes, pins,
+prefix failures, failed cleanup, protected hits and lost/corrupt replies. A final
+host fixture correction imports actual UAPI status values and checks FATAL5;
+the old VM fixture hash is preserved separately from final native proof. Product
+sources and canonical bytes are unchanged after VMs, and cross-build reproduces
+the tested binaries. See `post-vm-test-change.json` for that one host-only path.
+
+Launch vector work is34 requests/92pages, including Files PID42=24/53. This is
+not a complete RPC/Kernel census or an exact delta from cold checked copies.
+Normal1.315686178s, same-source optout1.315418358s, fresh preceding image1.315855592s
+are single100ms guest/200ms host poll observations; no whole-launch gain or100ms
+paint/input readiness is established. Keep current/previous only and retire
+scratch after actual producers terminate. Evidence:page-view-vectors in the
+session-handoff log tree.

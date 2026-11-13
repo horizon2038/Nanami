@@ -10,6 +10,89 @@ struct SharedMapping {
 }
 
 impl Alpha {
+    pub(super) fn handle_release_views_request(
+        &mut self, request: OsRequestEvent,
+    ) -> Result<(Word, Word), CapabilityError> {
+        use nanami_uapi::os::{OS_MAPPING_RELEASE_ALLOW_HOLES, OS_PAGE_VIEW_VECTOR_MAX};
+        if request.identifier == 0 || request.arg0 == 0 || request.arg1 == 0
+            || request.arg1 > OS_PAGE_VIEW_VECTOR_MAX || request.arg2 != 0 || request.arg3 != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        let descriptor = self.read_process_memory_into_static_buffer(request.identifier,
+            request.arg0, request.arg1 * core::mem::size_of::<Word>())?;
+        let mut locals = [0; OS_PAGE_VIEW_VECTOR_MAX];
+        for (index, local) in locals[..request.arg1].iter_mut().enumerate() {
+            *local = unsafe { ptr::read_unaligned(descriptor.as_ptr().add(index * core::mem::size_of::<Word>()) as *const Word) };
+        }
+        let locals = &locals[..request.arg1];
+        for (index, &local) in locals.iter().enumerate() {
+            if local == 0 || local & (PAGE_SIZE - 1) != 0 || local.checked_add(PAGE_SIZE).is_none()
+                || locals[..index].contains(&local) {
+                return Err(CapabilityError::InvalidArgument);
+            }
+        }
+        let mut acknowledged: Word = 0;
+        for (index, &local) in locals.iter().enumerate() {
+            // Preserve the ordinary ownership validation, UNMAP/TLB ACK and
+            // backing retention on failure. Sparse release makes a lost reply
+            // retryable without mistaking retained or uncertain RAM for a hole.
+            let single = OsRequestEvent { arg0: local, arg1: PAGE_SIZE, arg2: 0,
+                arg3: OS_MAPPING_RELEASE_ALLOW_HOLES, ..request };
+            if self.handle_mapping_release_request(single).is_ok() {
+                acknowledged |= 1 << index;
+            }
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_PAGE_VIEW_VECTOR_DIAG") == Some("1") {
+            crate::force_info!("[view.release-vector] caller={} requested={} acknowledged={}",
+                request.identifier, locals.len(), acknowledged.count_ones());
+        }
+        Ok((acknowledged, locals.len()))
+    }
+
+    pub(super) fn handle_process_page_views_request(
+        &mut self, request: OsRequestEvent, writable: bool,
+    ) -> Result<(Word, Word), CapabilityError> {
+        use nanami_uapi::os::{OsPageViewEntry, OS_PAGE_VIEW_VECTOR_MAX};
+        if request.identifier == 0 || request.arg0 == 0 || request.arg1 == 0
+            || request.arg2 == 0 || request.arg2 > OS_PAGE_VIEW_VECTOR_MAX || request.arg3 != 0 {
+            return Err(CapabilityError::InvalidArgument);
+        }
+        // Copy the complete descriptor before installing any caller mapping.
+        // The descriptor's own backing may overlap a requested local address.
+        let descriptor = self.read_process_memory_into_static_buffer(request.identifier,
+            request.arg1, request.arg2 * core::mem::size_of::<OsPageViewEntry>())?;
+        let mut entries = [OsPageViewEntry::default(); OS_PAGE_VIEW_VECTOR_MAX];
+        for (index, entry) in entries[..request.arg2].iter_mut().enumerate() {
+            *entry = unsafe { ptr::read_unaligned(descriptor.as_ptr().add(index * core::mem::size_of::<OsPageViewEntry>()) as *const OsPageViewEntry) };
+        }
+        let entries = &entries[..request.arg2];
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.target == 0 || entry.local == 0 || (entry.target | entry.local) & (PAGE_SIZE - 1) != 0
+                || entry.target.checked_add(PAGE_SIZE).is_none() || entry.local.checked_add(PAGE_SIZE).is_none()
+                || entries[..index].iter().any(|prior| prior.local == entry.local) {
+                return Err(CapabilityError::InvalidArgument);
+            }
+        }
+        let mut result = (entries.len(), 0);
+        for (index, entry) in entries.iter().enumerate() {
+            let single = OsRequestEvent { arg1: entry.target, arg2: entry.local, arg3: 0, ..request };
+            if let Err(error) = self.handle_process_page_view_request(single, writable) {
+                // Previous successes remain independently pinned. The failing
+                // entry has exactly the scalar operation's cleanup guarantee;
+                // the untouched suffix owns no new mapping.
+                result = (index, response_from_status_result(Err(error)).0);
+                break;
+            }
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_PAGE_VIEW_VECTOR_DIAG") == Some("1") {
+            crate::force_info!("[view.vector] caller={} pid={} write={} requested={} completed={} status={}",
+                request.identifier, request.arg0, usize::from(writable), entries.len(), result.0, result.1);
+        }
+        Ok(result)
+    }
+
     /// A supervisor already has checked read authority. A view additionally
     /// pins one ordinary RAM allocation through the permanent Alpha pool Frame.
     /// Only the mapped VA is returned to the trusted native supervisor.

@@ -20,7 +20,7 @@ mod guest_views {
     }
 }
 thread_local! { static RANGE_INVALIDATIONS: RefCell<Vec<(Word, Word, Vec<Call>)>> = const { RefCell::new(Vec::new()) }; }
-pub use nanami_uapi::os::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED};
+pub use nanami_uapi::os::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED, OS_PRIVATE_WRITE_DETACH_POPULATE};
 #[macro_export]
 macro_rules! println {
     ($($args:tt)*) => {};
@@ -46,7 +46,7 @@ struct Process {
     rootfs: Rootfs,
     signals: Signals,
 }
-struct Mapping { base: Word, size: Word }
+struct Mapping { base: Word, size: Word, prot: Word }
 struct Mappings(Word, Vec<Mapping>);
 impl Mappings {
     fn generation(&self) -> Word { self.0 }
@@ -123,7 +123,7 @@ pub fn request_process_private_write(_: Word, _: Word, _: Word, mode: Word) -> R
             backend.calls.push(Call::Query);
             return Ok(backend.shared);
         }
-        assert!(matches!(mode, OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED));
+        assert!(matches!(mode, OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED | OS_PRIVATE_WRITE_DETACH_POPULATE));
         backend.detach_modes.push(mode);
         backend.calls.push(Call::Detach);
         if backend.fail_detach {
@@ -249,7 +249,7 @@ fn calls(expected: &[Call]) {
 }
 
 #[test]
-fn protection_guards_request_deferred_detach_while_writes_and_faults_keep_present_repair() {
+fn protection_writes_and_faults_select_their_distinct_detach_contracts() {
     for kind in 0..5 {
         let r = setup();
         let result = match kind {
@@ -261,7 +261,8 @@ fn protection_guards_request_deferred_detach_while_writes_and_faults_keep_presen
         };
         assert_eq!(result, Ok(91));
         BACKEND.with_borrow(|b| assert_eq!(b.detach_modes,
-            [if kind < 2 { OS_PRIVATE_WRITE_DETACH_DEFERRED } else { OS_PRIVATE_WRITE_DETACH }]));
+            [if kind < 2 { OS_PRIVATE_WRITE_DETACH_DEFERRED }
+                else if kind == 4 { OS_PRIVATE_WRITE_DETACH_POPULATE } else { OS_PRIVATE_WRITE_DETACH }]));
     }
 }
 
@@ -403,6 +404,33 @@ fn guard_stops_only_active_vm_peers_never_replaying_a_handled_wait() {
         Call::Write,
         Call::Resume(102),
     ]);
+}
+
+#[test]
+fn cold_write_view_requires_the_current_fault_and_no_runnable_vm_user() {
+    let enabled=option_env!("NANAMI_COLD_WRITE_VIEWS")!=Some("0");
+    for mode in 0..8 {
+        let mut r=setup();r.managed.truncate(2);
+        match mode {
+            0=>{}, // A running peer forbids a cold attempt.
+            1=>r.managed[1].parked=true,
+            2=>r.managed[1].rootfs.prepared=true,
+            3=>r.managed[1].signals.stopped=true,
+            4=>r.managed[1].signals.stopped_context=Some(()),
+            5=>r.managed[1].exited=true,
+            6=>r.managed[1].vm_group=2,
+            _=>r.managed[1].pid=0,
+        }
+        assert_eq!(production::can_try_cold_write_view(&r,1),enabled && mode!=0);
+        BACKEND.with_borrow(|b|assert!(b.calls.is_empty()));
+    }
+    for invalid in 0..5 {
+        let mut r=setup();r.managed.truncate(1);
+        match invalid { 0=>r.current_fault_pid=0,1=>r.current_fault_pid=2,
+            2=>r.managed[0].exited=true,3=>r.managed[0].vm_group=0,_=>r.managed[0].pid=2 }
+        assert!(!production::can_try_cold_write_view(&r,1));
+        assert!(!production::can_try_cold_write_view(&r,0));
+    }
 }
 
 #[test]
@@ -674,7 +702,7 @@ fn fork_barrier_quiesces_running_peers_even_without_shared_markers() {
 fn large_mapping_mutations_stop_peers_before_the_rpc_and_resume_after_failure() {
     for fail in [false, true] {
         let mut r=setup(); r.managed.truncate(2);
-        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21});
+        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21,prot:3});
         let result=production::with_mapping_mutation(&r,1,0x401000,4096,false,|| {
             write()?; if fail {Err(EIO)} else {Ok(91)}
         });
@@ -693,7 +721,7 @@ fn large_constructors_stop_peers_before_vma_publication_but_small_fresh_chunks_d
         (0x5ff000,4096,false,true),
     ] {
         let mut r=setup(); r.managed.truncate(2);
-        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21});
+        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21,prot:3});
         production::with_mapping_mutation(&r,1,base,bytes,creating,write).unwrap();
         if barrier { calls(&[Call::Suspend(102),Call::Write,Call::Resume(102)]); }
         else {calls(&[Call::Write]);}
@@ -705,7 +733,7 @@ fn huge_protect_combines_shape_and_cow_barriers_without_nested_resume() {
     for marker in [false,true] {
         let mut r=setup(); r.managed.truncate(2);
         r.managed[0].vm_private_shared=marker;
-        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21});
+        r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21,prot:3});
         BACKEND.with_borrow_mut(|b|b.shared=false);
         production::with_private_protect(&r,1,0x401000,4096,write).unwrap();
         if marker {calls(&[Call::Query,Call::Suspend(102),Call::Write,Call::Resume(102)]);}
@@ -713,7 +741,7 @@ fn huge_protect_combines_shape_and_cow_barriers_without_nested_resume() {
     }
     let mut r=setup();r.managed.truncate(2);
     r.managed[0].vm_writable_private_shared=false;
-    r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21});
+    r.managed[0].mappings.1.push(Mapping {base:0x400000,size:1<<21,prot:3});
     production::with_checked_private_write(&r,1,0x401000,4,write).unwrap();
     calls(&[Call::Write]);
 }
@@ -742,7 +770,7 @@ fn privileged_writes_clear_immutable_origin_even_without_detach_or_guest_views()
 
 #[test]
 fn cow_fault_rejects_non_write_faults_and_requires_logical_rights_and_alpha_sharing() {
-    for code in [0, 1, 2, 4, 5, 6, 15, 23, 39, 71] {
+    for code in [0, 1, 4, 5, 15, 23, 39, 71] {
         let r = setup();
         assert!(!production::materialize_private_write_fault(&r, 1, 0x12345, code));
         calls(&[]);
@@ -777,6 +805,17 @@ fn cow_fault_detaches_and_restores_rights_inside_acknowledged_vm_barrier() {
         expected.push(Call::Resume(102));
         calls(&expected);
     }
+}
+
+#[test]
+fn missing_or_present_write_faults_use_the_sealed_population_mode_under_the_same_barrier() {
+    for code in [2,3,6,7] {for shared in [false,true] {
+        let mut r=setup();r.managed.truncate(1);
+        BACKEND.with_borrow_mut(|b|b.shared=shared);
+        assert_eq!(production::materialize_private_write_fault(&r,1,0x12345,code),shared);
+        calls(&[Call::Detach]);
+        BACKEND.with_borrow(|b|assert_eq!(b.detach_modes,vec![OS_PRIVATE_WRITE_DETACH_POPULATE]));
+    }}
 }
 
 #[test]
@@ -822,3 +861,46 @@ fn snapshot_fault_requires_missing_pte_current_vma_and_alpha_admission_without_s
 }
 
 mod private_memory { pub(super) use super::production::with_mapping_mutation; }
+
+#[test]
+fn unmarked_readonly_and_none_backing_still_detach_before_privileged_write_or_upgrade() {
+    for rights in [0, 1, 4, 5] {
+        for protect in [false, true] {
+            let mut r = setup(); r.managed.truncate(1);
+            r.managed[0].vm_private_shared = false;
+            r.managed[0].vm_writable_private_shared = false;
+            r.managed[0].mappings.1.push(Mapping { base: 0x400000, size: 4096, prot: rights });
+            let result = if protect {
+                production::with_private_protect(&r, 1, 0x400000, 4096, || write())
+            } else {
+                production::with_private_write(&r, 1, 0x400000, 4096, || write())
+            };
+            assert_eq!(result, Ok(91));
+            calls(&[Call::Detach, Call::Write]);
+            BACKEND.with_borrow(|b| assert_eq!(b.detach_modes,
+                vec![if protect { OS_PRIVATE_WRITE_DETACH_DEFERRED } else { OS_PRIVATE_WRITE_DETACH }]));
+        }
+    }
+}
+
+#[test]
+fn unmarked_readonly_backing_retains_query_stop_ack_and_failed_stop_policy() {
+    for fail in [false, true] {
+        let mut r = setup();
+        for p in &mut r.managed { p.vm_private_shared = false; p.vm_writable_private_shared = false; }
+        r.managed[0].mappings.1.push(Mapping { base: 0x400000, size: 4096, prot: 1 });
+        if fail { BACKEND.with_borrow_mut(|b| b.fail_stop = 104); }
+        assert_eq!(production::with_private_protect(&r, 1, 0x400000, 4096, || write()),
+            if fail { Err(EIO) } else { Ok(91) });
+        BACKEND.with_borrow(|b| {
+            assert_eq!(b.calls[0], Call::Query);
+            let detach = b.calls.iter().position(|c| *c == Call::Detach);
+            if fail { assert!(detach.is_none()); assert!(!b.calls.contains(&Call::Write)); }
+            else {
+                let detach = detach.unwrap();
+                assert_eq!(&b.calls[1..detach], &(2..=8).map(|p| Call::Suspend(p + 100)).collect::<Vec<_>>());
+                assert_eq!(b.calls[detach + 1], Call::Write);
+            }
+        });
+    }
+}

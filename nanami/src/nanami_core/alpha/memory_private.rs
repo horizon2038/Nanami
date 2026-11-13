@@ -8,6 +8,11 @@ const DEFER_FORK_READONLY: bool = match option_env!("NANAMI_DEFER_FORK_READONLY"
     None => true,
 };
 
+const DEFER_FORK_WRITABLE: bool = match option_env!("NANAMI_DEFER_FORK_WRITABLE") {
+    Some(value) => value.len() == 1 && value.as_bytes()[0] == b'1',
+    None => true,
+};
+
 #[cfg(test)]
 static DETACH_CONTEXT_RESOLUTIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
@@ -174,6 +179,8 @@ impl Alpha {
         let mut begin = 0;
         #[cfg(not(test))]
         let mut deferred_pages = 0usize;
+        #[cfg(not(test))]
+        let mut deferred_writable_pages = 0usize;
         while begin < pages.len() {
             let share = references.get(shared_cursor)
                 .is_some_and(|reference| reference.allocation.base_va == pages[begin].0);
@@ -197,24 +204,33 @@ impl Alpha {
                     PROCESS_FRAME_TOTAL_PAGES,
                 )?;
                 self.process_root_slot(root)?;
-                let mut readonly_start = 0;
-                let mut readonly_end = 0;
+                let deferred_kind = |permissions| match permissions {
+                    1 | 4 | 5 if DEFER_FORK_READONLY => 1,
+                    3 | 7 if DEFER_FORK_WRITABLE => 2,
+                    _ => 0,
+                };
+                let mut deferred_start = 0;
+                let mut deferred_end = 0;
                 for (offset, &(va, permissions)) in run.iter().enumerate() {
-                    if writable_cow && DEFER_FORK_READONLY && offset >= readonly_end {
-                        readonly_start = offset;
-                        readonly_end = offset;
-                        while readonly_end < run.len() && matches!(run[readonly_end].1, 1 | 4 | 5) {
-                            readonly_end += 1;
+                    if writable_cow && offset >= deferred_end {
+                        deferred_start = offset;
+                        deferred_end = offset;
+                        let kind = deferred_kind(permissions);
+                        if kind != 0 {
+                            while deferred_end < run.len() && deferred_kind(run[deferred_end].1) == kind {
+                                deferred_end += 1;
+                            }
                         }
                     }
                     // A fork child often immediately execs. Keep all owned
                     // initialized backing, but avoid registering the unused
-                    // tail of large readonly runs. The existing snapshot
-                    // resolver populates absent leaves in bounded2MiB clusters.
-                    // Writable COW/stack/data keep their current eager policy.
-                    let deferred = writable_cow && DEFER_FORK_READONLY
-                        && readonly_end - readonly_start >= 128
-                        && offset >= readonly_start + 16 && offset < readonly_end;
+                    // tail of large readonly or writable COW runs. The existing
+                    // snapshot resolver populates at most 2 MiB, stripping WRITE
+                    // from COW pages; a later write uses the normal detach path.
+                    // Parent WRITE revocation still precedes every child alias.
+                    // Eager stack/data copies and the allocator prefix stay eager.
+                    let deferred = writable_cow && deferred_end - deferred_start >= 128
+                        && offset >= deferred_start + 16 && offset < deferred_end;
                     let allocation = references[shared_cursor + offset].allocation;
                     let cow_write = permissions & 2 != 0;
                     if permissions & 2 != 0 && !self.processes.vm_space(source)
@@ -266,7 +282,10 @@ impl Alpha {
                         }
                         vm.record_frame(va, frame).map_err(|_| CapabilityError::Fatal)?;
                         #[cfg(not(test))]
-                        { deferred_pages += 1; }
+                        {
+                            deferred_pages += 1;
+                            deferred_writable_pages += usize::from(cow_write);
+                        }
                         continue;
                     }
                     if !vm.page_tables_ready(va) {
@@ -300,6 +319,8 @@ impl Alpha {
         if option_env!("NANAMI_FORK_READONLY_DIAG") == Some("1") {
             crate::force_info!("[fork.readonly] source={} target={} pages={} shared={} deferred={} copied={}",
                 source, target, pages.len(), shared_count, deferred_pages, pages.len() - shared_count);
+            crate::force_info!("[fork.writable] source={} target={} deferred={}",
+                source, target, deferred_writable_pages);
         }
         Ok(())
     }
@@ -308,7 +329,7 @@ impl Alpha {
         &mut self,
         request: OsRequestEvent,
     ) -> Result<usize, CapabilityError> {
-        use nanami_uapi::os::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED};
+        use nanami_uapi::os::{OS_PRIVATE_WRITE_DETACH, OS_PRIVATE_WRITE_QUERY, OS_PRIVATE_WRITE_DETACH_DEFERRED, OS_PRIVATE_WRITE_DETACH_POPULATE};
         let pid = request.arg0;
         let target = self
             .processes
@@ -325,12 +346,13 @@ impl Alpha {
             return Err(CapabilityError::PermissionDenied);
         }
         if request.arg2 == 0
-            || !matches!(request.arg3, OS_PRIVATE_WRITE_QUERY | OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED)
+            || !matches!(request.arg3, OS_PRIVATE_WRITE_QUERY | OS_PRIVATE_WRITE_DETACH | OS_PRIVATE_WRITE_DETACH_DEFERRED | OS_PRIVATE_WRITE_DETACH_POPULATE)
         {
             return Err(CapabilityError::InvalidArgument);
         }
         let defer_replacement = request.arg3 == OS_PRIVATE_WRITE_DETACH_DEFERRED;
-        if defer_replacement && !target.capabilities_sealed {
+        let populate_replacement = request.arg3 == OS_PRIVATE_WRITE_DETACH_POPULATE;
+        if (defer_replacement || populate_replacement) && !target.capabilities_sealed {
             return Err(CapabilityError::PermissionDenied);
         }
         let end = request
@@ -338,6 +360,8 @@ impl Alpha {
             .checked_add(request.arg2)
             .ok_or(CapabilityError::InvalidArgument)?;
         let start = align_down(request.arg1, PAGE_SIZE);
+        let cluster_allowed = target.capabilities_sealed && populate_replacement
+            && request.arg1 == start && request.arg2 == PAGE_SIZE;
         let vm = self
             .processes
             .vm_space_mut(pid)
@@ -345,32 +369,124 @@ impl Alpha {
         if request.arg3 == OS_PRIVATE_WRITE_QUERY {
             return Ok(usize::from(vm.private_range_shared(start, end)));
         }
-        let pages = vm.shared_private_pages(start, end);
+        // Repeated writable aliases of one initialized pool Frame are cold
+        // zero backing. Copy a bounded word on first write, under the same VM
+        // barrier. Ordinary fork Frames differ per VA and keep point detach.
+        // Current rights, COW markers, uncertainty and exact Frame identity
+        // filter every neighbor; this never grants new logical permissions.
+        let cluster_frame = cluster_allowed.then(|| vm.find_frame(start)).flatten()
+            .filter(|&frame| vm.private_page_cow_write(start) && !vm.mapping_is_uncertain(start)
+                && vm.permissions(start) & 3 == 3 && self.memory.is_pool_frame_descriptor(frame)
+                && (start.checked_add(PAGE_SIZE).is_some_and(|va| vm.find_frame(va) == Some(frame))
+                    || start.checked_sub(PAGE_SIZE).is_some_and(|va| vm.find_frame(va) == Some(frame))));
+        let (start, end, pages) = if let Some(frame) = cluster_frame {
+            let base = start & !(64 * PAGE_SIZE - 1);
+            let end = base.checked_add(64 * PAGE_SIZE).ok_or(CapabilityError::InvalidArgument)?;
+            let mut selected = vm.shared_private_pages(base, end);
+            selected.retain(|&va| vm.find_frame(va) == Some(frame) && vm.private_page_cow_write(va)
+                && vm.permissions(va) & 3 == 3 && !vm.mapping_is_uncertain(va));
+            (base, end, selected)
+        } else { (start, end, vm.shared_private_pages(start, end)) };
         if pages.is_empty() {
             return Ok(0);
         }
+        #[cfg(not(test))]
+        let repaired = pages.len();
+        #[cfg(not(test))]
+        let absent = if option_env!("NANAMI_WRITABLE_ZERO_DIAG") == Some("1") {
+            pages.iter().filter(|&&va| vm.mapping_deferred(va)).count()
+        } else { 0 };
         // DETACH is a trusted supervisor contract: all users of this VM are
         // already trapped, parked, prepared, stopped, or synchronously suspended.
-        let references = self.processes.private_page_references(pid, start, end);
+        let mut references = self.processes.private_page_references(pid, start, end);
+        let mut index = 0;
+        references.retain(|reference| {
+            while index < pages.len() && pages[index] < reference.allocation.base_va { index += 1; }
+            pages.get(index) == Some(&reference.allocation.base_va)
+        });
+        if references.len() != pages.len() { return Err(CapabilityError::Fatal); }
         self.invalidate_process_copy_mappings(pid)?;
+        let replacements = if cluster_frame.is_some() {
+            self.prepare_private_replacement_batch(pid, &references)?
+        } else { Vec::new() };
         // Only this request's owner/root/space identity is reused. Kernel
         // capability calls do not dispatch another Alpha process event.
         let mut memory_context = None;
-        let mut index = 0;
-        for va in pages {
-            // shared_private_pages and references are sorted; references keep
+        for (index, reference) in references.into_iter().enumerate() {
+            // The selected references are sorted and keep
             // their stable ownership handles across earlier detach commits.
-            while index < references.len() && references[index].allocation.base_va < va {
-                index += 1;
-            }
-            if references.get(index).is_none_or(|r| r.allocation.base_va != va) {
-                return Err(CapabilityError::Fatal);
-            }
-            self.detach_private_page(pid, references[index], &mut memory_context, defer_replacement)?;
+            self.detach_private_page(pid, reference, &mut memory_context, defer_replacement,
+                populate_replacement, replacements.get(index).copied())?;
         }
         // Report a completed nonempty detach, not merely an admitted request.
         // Fault repair can use this commit result instead of a prior QUERY.
+        #[cfg(not(test))]
+        if populate_replacement && repaired > 1 && option_env!("NANAMI_WRITABLE_ZERO_DIAG") == Some("1") {
+            crate::force_info!("[anon.zero-write] pid={} requested={:#x} repaired={} absent-before={}",
+                pid, request.arg1, repaired, absent);
+        }
         Ok(1)
+    }
+
+    /// Only the bounded, same-pool-Frame population path uses this plan. Claim
+    /// every new page before conversion/copy/MAP; a partial failure must retain
+    /// both the current replacement and its untouched suffix until retirement.
+    fn prepare_private_replacement_batch(
+        &mut self, pid: usize, references: &[PhysicalPageReference],
+    ) -> Result<Vec<ProcessPhysicalAllocation>, CapabilityError> {
+        if option_env!("NANAMI_PRIVATE_BATCH_BACKING") == Some("0") || references.len() < 2 {
+            return Ok(Vec::new());
+        }
+        if !self.processes.find_entry_by_pid(self.processes.memory_owner_pid(pid))
+            .is_some_and(|entry| entry.capabilities_sealed)
+        { return Ok(Vec::new()); }
+        let old = references[0].allocation;
+        if old.owns_frame_cap || old.page_count != 1
+            || references.iter().any(|r| r.allocation.owns_frame_cap
+                || r.allocation.page_count != 1 || r.allocation.base_page != old.base_page)
+        { return Err(CapabilityError::Fatal); }
+        let count = self.processes.physical_reference_count(old);
+        if count < references.len() { return Err(CapabilityError::Fatal); }
+        // The last local alias can keep the original RAM only if no active or
+        // deferred peer owns it. Per-page detach still rechecks the live count.
+        let pages = references.len() - usize::from(count == references.len());
+        let mut replacements = Vec::new();
+        if replacements.try_reserve_exact(pages).is_err() { return Ok(replacements); }
+        let (root, _, slot) = match self.processes.reserve_private_replacement_slots(
+            pid, pages, PROCESS_FRAME_TOTAL_PAGES,
+        ) {
+            Ok(reservation) => reservation,
+            Err(CapabilityError::InvalidArgument) => return Ok(replacements),
+            Err(error) => return Err(error),
+        };
+        let allocation = self.process_root_slot(root)
+            .and_then(|_| self.memory.allocate_physical_any(pages * PAGE_SIZE));
+        let physical = match allocation {
+            Ok(physical) => physical,
+            Err(error) => {
+                // Nothing was published or allocated on a failed reservation.
+                self.processes.recycle_private_frame_slots(pid, slot, pages);
+                return match error {
+                    CapabilityError::InvalidArgument => Ok(replacements),
+                    error => Err(error),
+                };
+            }
+        };
+        for (offset, reference) in references[..pages].iter().enumerate() {
+            replacements.push(ProcessPhysicalAllocation {
+                base_va: reference.allocation.base_va, start_slot: slot + offset,
+                base_page: physical + offset, page_count: 1, owns_frame_cap: false,
+            });
+        }
+        // replace_private_backing consumes the deferred head. Reverse insertion
+        // makes ascending-VA publication consume that head without list scans.
+        self.processes.defer_physical_allocations_for_pid(pid, replacements.iter().rev().copied());
+        #[cfg(not(test))]
+        if option_env!("NANAMI_WRITABLE_ZERO_DIAG") == Some("1") {
+            crate::force_info!("[private.batch] pid={} pages={} replacements={} physical-requests=1 slot-requests=1",
+                pid, references.len(), pages);
+        }
+        Ok(replacements)
     }
 
     fn detach_private_page(
@@ -379,6 +495,8 @@ impl Alpha {
         reference: PhysicalPageReference,
         context: &mut Option<ProcessMemoryContext>,
         defer_replacement: bool,
+        populate_replacement: bool,
+        prepared: Option<ProcessPhysicalAllocation>,
     ) -> Result<(), CapabilityError> {
         let old = reference.allocation;
         let count = self.processes.physical_reference_count(old);
@@ -418,12 +536,26 @@ impl Alpha {
         // Pool aliases need no cap removal after an acknowledged UNMAP, so
         // their initialized replacement can remain absent for final PROTECT.
         let defer_replacement = defer_replacement && !old.owns_frame_cap;
+        let publish_absent = populate_replacement && !old.owns_frame_cap && hardware == 0
+            && permissions != 0 && vm.mapping_deferred(old.base_va);
         let old_attributes = nun::capability_call::address_space::Attribute::from_bits(hardware)
             .ok_or(CapabilityError::Fatal)?;
         if count == 1 {
+            if prepared.is_some() { return Err(CapabilityError::Fatal); }
             if vm.mapping_deferred(old.base_va) {
-                // Last-owner repair does not need a PTE. The caller's later
-                // protection/population can map this same initialized RAM.
+                if publish_absent {
+                    if !vm.page_tables_ready(old.base_va) {
+                        self.memory.ensure_page_tables(memory.address_space, old.base_va, vm)?;
+                    }
+                    let attributes = nun::capability_call::address_space::Attribute::from_bits(permissions)
+                        .ok_or(CapabilityError::Fatal)?;
+                    if let Err(error) = arch::address_space::map(memory.address_space, old_frame, old.base_va, attributes) {
+                        vm.mark_mapping_uncertain(old.base_va);
+                        return Err(error);
+                    }
+                    vm.complete_deferred_mapping(old.base_va);
+                }
+                // Deferred-mode callers still follow with their own PROTECT.
                 vm.mark_private_page_shared(old.base_va, false);
                 return Ok(());
             }
@@ -442,13 +574,21 @@ impl Alpha {
             vm.mark_private_page_shared(old.base_va, false);
             return Ok(());
         }
-        let (root, space, slot) = self
+        let (root, space, slot) = if let Some(replacement) = prepared {
+            if replacement.base_va != old.base_va || replacement.page_count != 1 || replacement.owns_frame_cap {
+                return Err(CapabilityError::Fatal);
+            }
+            (memory.root_node, memory.address_space, replacement.start_slot)
+        } else { self
             .processes
-            .reserve_private_replacement_slot(pid, PROCESS_FRAME_TOTAL_PAGES)?;
+            .reserve_private_replacement_slot(pid, PROCESS_FRAME_TOTAL_PAGES)? };
         let owner = self.processes.memory_owner_pid(pid);
         let pool_backing = self.processes.find_entry_by_pid(owner)
             .is_some_and(|entry| entry.capabilities_sealed);
-        let physical = if pool_backing {
+        let physical = if let Some(replacement) = prepared {
+            if !pool_backing { return Err(CapabilityError::Fatal); }
+            replacement.base_page
+        } else if pool_backing {
             self.process_root_slot(root)?;
             self.memory.allocate_physical_any(PAGE_SIZE)?
         } else {
@@ -467,8 +607,9 @@ impl Alpha {
             owns_frame_cap: !pool_backing,
         };
         // An unpublished replacement is still owned, including on any error.
-        self.processes
-            .defer_physical_allocation_for_pid(pid, replacement);
+        if prepared.is_none() {
+            self.processes.defer_physical_allocation_for_pid(pid, replacement);
+        }
         if physical == old.base_page {
             return Err(CapabilityError::Fatal);
         }
@@ -534,6 +675,21 @@ impl Alpha {
                 }
             }
         }
+        if publish_absent {
+            let vm = self.processes.vm_space_mut(pid).ok_or(CapabilityError::Fatal)?;
+            if !vm.page_tables_ready(old.base_va) { self.memory.ensure_page_tables(space, old.base_va, vm)?; }
+            if let Err(error) = arch::address_space::map(space, new_frame, old.base_va, attributes) {
+                vm.mark_mapping_uncertain(old.base_va);
+                // Only an acknowledged removal proves the old absent state.
+                // Failed cleanup retains both old and copied ownership.
+                if arch::address_space::unmap(space, new_frame, old.base_va).is_ok() {
+                    vm.confirm_unmapped(old.base_va);
+                    vm.set_permissions(old.base_va, permissions);
+                    vm.mark_mapping_deferred(old.base_va);
+                }
+                return Err(error);
+            }
+        }
         if let Err(error) = if old.owns_frame_cap { arch::node::remove(
             process_frame_chunk_descriptor(root, old.start_slot / PROCESS_FRAME_CHUNK_PAGES),
             old.start_slot % PROCESS_FRAME_CHUNK_PAGES,
@@ -551,15 +707,23 @@ impl Alpha {
             }
             return Err(error);
         }
-        let last = self
-            .processes
-            .replace_private_backing(reference, replacement)?;
+        let last = match self.processes.replace_private_backing(reference, replacement) {
+            Ok(last) => last,
+            Err(error) => {
+                if publish_absent { self.processes.vm_space_mut(pid).ok_or(CapabilityError::Fatal)?
+                    .mark_mapping_uncertain(old.base_va); }
+                return Err(error);
+            }
+        };
         let vm = self
             .processes
             .vm_space_mut(pid)
             .ok_or(CapabilityError::Fatal)?;
-        vm.record_frame(old.base_va, new_frame)
-            .map_err(|_| CapabilityError::Fatal)?;
+        if vm.record_frame(old.base_va, new_frame).is_err() {
+            vm.mark_mapping_uncertain(old.base_va);
+            return Err(CapabilityError::Fatal);
+        }
+        if publish_absent { vm.complete_deferred_mapping(old.base_va); }
         vm.mark_private_page_shared(old.base_va, false);
         #[cfg(not(test))]
         if defer_replacement && hardware != 0 && option_env!("NANAMI_DETACH_DEFERRED_DIAG") == Some("1") {

@@ -724,6 +724,13 @@ impl MemoryManager {
         virtual_address: usize,
         vm_space: &mut impl VmTracker,
     ) -> CapabilityResult {
+        // This hint proves an existing 4K leaf table, independently of which
+        // Frames currently occupy it. Leaf UNMAP preserves the table; huge
+        // transitions explicitly invalidate the hint. Reuse the same proof
+        // as map_frame even for callers that prepare their own MAP.
+        if vm_space.page_tables_ready(virtual_address) {
+            return Ok(());
+        }
         self.ensure_page_tables_for_leaf(address_space, virtual_address, PAGE_BITS, vm_space)
     }
 

@@ -457,7 +457,7 @@ impl Alpha {
                 .is_none_or(|entry| entry.exited || entry.resource_quarantined)) {
             return Err(CapabilityError::InvalidArgument);
         }
-        let deferred_from = if let Some(prefix) = eager {
+        let mut deferred_from = if let Some(prefix) = eager {
             if !pool_backing || permissions != 1 || reserved.is_some()
                 || prefix == 0 || prefix > bytes || prefix & (PAGE_SIZE - 1) != 0
                 || self.processes.find_entry_by_pid(pid)
@@ -480,6 +480,15 @@ impl Alpha {
                 pool_source_only = self.validate_initializer_frames(source, end, REUSE_INITIALIZATION_SOURCE)?;
             }
         }
+        // ELF alignment can make a small file's temporary readonly mapping
+        // span a multi-MiB zero suffix. Initialize and retain that RAM, but do
+        // not publish cold 4K leaves before the loader removes the gap. Huge
+        // allocation still runs first and may cover this suffix with one leaf.
+        let defer_zero_tail = cfg!(any(target_arch = "x86_64", test)) && eager.is_none() && pool_backing
+            && reserved.is_none() && permissions != 0 && permissions & 2 == 0
+            && option_env!("NANAMI_EAGER_FILE_ZERO_TAIL") != Some("1")
+            && self.processes.find_entry_by_pid(pid).is_some_and(|entry|
+                entry.capabilities_sealed && !entry.exited && !entry.resource_quarantined);
         // One bounded ownership walk per request, never a full allocation-list
         // search for each copied page. Failure only disables the optimization.
         // Pool Frames can use their exact ready-alias probe directly. This
@@ -548,9 +557,34 @@ impl Alpha {
                 alignment,
             )?
         };
+        // Resolve automatic placement before admitting the cold zero tail too.
+        // The same current-rights fault path handles both fixed and automatic
+        // readonly reservations; retained extents and genuine huge pages still
+        // take their existing paths inside the population constructor.
+        if defer_zero_tail {
+            let prefix = align_up_checked(source.map_or(0, |source| source.bytes), PAGE_SIZE)
+                .ok_or(CapabilityError::InvalidArgument)?;
+            if bytes.saturating_sub(prefix) >= 128 * PAGE_SIZE {
+                deferred_from = Some(base_va.checked_add(prefix).ok_or(CapabilityError::InvalidArgument)?);
+            }
+        }
         self.populate_process_reserved_pages(ProcessPageRange { pid, root: root_node,
             space: address_space, base: base_va, slot: start_slot, pages: page_count,
             permissions, pool: pool_backing, deferred_from }, source, source_pages.as_ref())?;
+        #[cfg(not(test))]
+        if option_env!("NANAMI_FILE_ZERO_TAIL_DIAG") == Some("1") && eager.is_none()
+            && pool_backing && permissions != 0 && permissions & 2 == 0
+            && bytes.saturating_sub(source.map_or(0, |source| source.bytes).next_multiple_of(PAGE_SIZE)) >= 128 * PAGE_SIZE
+        {
+            let vm = self.processes.vm_space(pid).ok_or(CapabilityError::Fatal)?;
+            let pending = (0..page_count).filter(|page| vm.mapping_deferred(base_va + page * PAGE_SIZE)).count();
+            let huge = self.memory.stable_private_large_mappings(address_space, base_va, base_va + bytes)
+                .filter(|leaf| leaf.permissions != 0 && leaf.base >= base_va
+                    && leaf.base + super::memory_large::LARGE_PAGE_BYTES <= base_va + bytes).count();
+            let leaves = page_count - pending - huge * (super::memory_large::LARGE_PAGE_COUNT - 1);
+            crate::force_info!("[image.zero-tail] pid={} base={:#x} pages={} source-bytes={} pending={} leaves={} huge={}",
+                pid, base_va, page_count, source.map_or(0, |source| source.bytes), pending, leaves, huge);
+        }
         Ok(base_va)
     }
 
@@ -558,6 +592,14 @@ impl Alpha {
         &mut self, range: ProcessPageRange, source: Option<PageSource>, source_pages: Option<&InitializationSource>,
         preallocated: Option<usize>, preregistered: bool,
         reuse: Option<crate::nanami_core::process::ProcessPhysicalAllocation>,
+    ) -> Result<(), CapabilityError> {
+        self.populate_process_small_pages_inner(range, source, source_pages, preallocated, preregistered, reuse, false)
+    }
+
+    fn populate_process_small_pages_inner(
+        &mut self, range: ProcessPageRange, source: Option<PageSource>, source_pages: Option<&InitializationSource>,
+        preallocated: Option<usize>, preregistered: bool,
+        reuse: Option<crate::nanami_core::process::ProcessPhysicalAllocation>, bounded: bool,
     ) -> Result<(), CapabilityError> {
         let ProcessPageRange { pid, root: root_node, space: address_space, base: base_va,
             slot: start_slot, pages: page_count, permissions, pool: pool_backing, deferred_from } = range;
@@ -571,16 +613,59 @@ impl Alpha {
         }
         let reuse_allocation = if preregistered { None } else { reuse.or_else(|| self.processes
             .take_deferred_physical_allocation(pid, base_va, page_count)) };
+        // Cold readonly zero tails need bytes, not distinct physical identity.
+        // Keep huge allocation and retained extents ahead of this fallback.
+        // Existing private sharing/COW owns one reference per virtual page.
+        let zero_from = source.map_or(0, |source| source.bytes.div_ceil(PAGE_SIZE))
+            .max(deferred_from.map_or(page_count, |first| first.saturating_sub(base_va).div_ceil(PAGE_SIZE)));
+        let shared_zero = cfg!(any(target_arch = "x86_64", test))
+            && pool_backing && preallocated.is_none() && !preregistered
+            && reuse_allocation.is_none() && permissions != 0 && permissions & 2 == 0
+            && page_count.saturating_sub(zero_from) >= 128
+            && self.processes.find_entry_by_pid(pid).is_some_and(|entry|
+                entry.capabilities_sealed && !entry.exited && !entry.resource_quarantined);
+        if shared_zero {
+            let enabled = option_env!("NANAMI_SHARED_FILE_ZERO_TAIL") != Some("0");
+            #[cfg(not(test))]
+            if option_env!("NANAMI_SHARED_FILE_ZERO_DIAG") == Some("1") {
+                crate::force_info!("[image.zero-sharing] pid={} base={:#x} prefix={} pages={} rights={} shared={}",
+                    pid, base_va, zero_from, page_count - zero_from, permissions, enabled);
+            }
+            if enabled {
+                let result = (|| {
+                    if zero_from != 0 {
+                        self.populate_process_small_pages_inner(range.part(0, zero_from), source,
+                            source_pages, None, false, None, true)?;
+                    }
+                    self.populate_shared_zero_pages(range.part(zero_from, page_count - zero_from))
+                })();
+                if let Err(error) = result {
+                    self.handle_mapping_release_request(OsRequestEvent {
+                        identifier: pid, code: nanami_uapi::os::OS_REQUEST_MAPPING_RELEASE,
+                        arg0: base_va, arg1: bytes, arg2: pid,
+                        arg3: nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES,
+                    })?;
+                    return Err(error);
+                }
+                return Ok(());
+            }
+        }
+        let bulk_registration = option_env!("NANAMI_SCALAR_POOL_REGISTRATION") != Some("1");
         if let Some(allocation) = reuse_allocation {
             // Transfer ownership of the entire reused extent before any
             // fallible cap/mapping operation, including its unused suffix.
-            for i in 0..page_count {
-                if pool_backing {
-                    self.processes.register_pool_allocation(pid, base_va + i * PAGE_SIZE,
-                        start_slot + i, allocation.base_page + i, 1)?;
-                } else {
-                    self.processes.register_physical_allocation(pid, base_va + i * PAGE_SIZE,
-                        start_slot + i, allocation.base_page + i, 1)?;
+            if pool_backing && bulk_registration {
+                self.processes.register_pool_page_run(pid, base_va, start_slot,
+                    allocation.base_page, page_count)?;
+            } else {
+                for i in 0..page_count {
+                    if pool_backing {
+                        self.processes.register_pool_allocation(pid, base_va + i * PAGE_SIZE,
+                            start_slot + i, allocation.base_page + i, 1)?;
+                    } else {
+                        self.processes.register_physical_allocation(pid, base_va + i * PAGE_SIZE,
+                            start_slot + i, allocation.base_page + i, 1)?;
+                    }
                 }
             }
         }
@@ -588,6 +673,7 @@ impl Alpha {
         // synchronous request alone and has not been published to the target.
         let mut fresh_batch = preallocated;
         let mut fresh_claimed = if preregistered { page_count } else { 0 };
+        let mut registered_batch = preregistered;
         let result = (|| {
             if reuse_allocation.is_none() && page_count > 1 && fresh_batch.is_none() {
                 // Lack of contiguous RAM keeps the existing single-page path.
@@ -598,7 +684,19 @@ impl Alpha {
                     Err(error) => return Err(error),
                 }
             }
-            let frame_hint = fresh_batch.and_then(|first| self.memory.allocation_frame_hint(first, page_count));
+            if bulk_registration && pool_backing && page_count > 1 && !registered_batch {
+                if let Some(first) = fresh_batch {
+                    // Keep independent page references and their prepend order,
+                    // but find/update the owner's list head once for the run.
+                    // Claim the entire private batch before any fallible MAP.
+                    self.processes.register_pool_page_run(pid, base_va, start_slot, first, page_count)?;
+                    fresh_claimed = page_count;
+                    registered_batch = true;
+                }
+            }
+            let frame_hint = fresh_batch.and_then(|first| if bounded {
+                self.memory.small_allocation_frame_hint(first, page_count)
+            } else { self.memory.allocation_frame_hint(first, page_count) });
             let end = base_va + bytes;
             let deferred_words = deferred_from
                 .and_then(|first| align_up_checked(first.max(base_va), FRAME_WORD_BYTES))
@@ -621,7 +719,7 @@ impl Alpha {
                     page
                 } else if let Some(first) = fresh_batch {
                     let page = first + i;
-                    if preregistered {
+                    if registered_batch {
                         // This whole batch was published as owned before any
                         // initializer, including a preceding unaligned prefix.
                     } else if pool_backing {
@@ -629,7 +727,7 @@ impl Alpha {
                     } else {
                         self.processes.register_physical_allocation(pid, va, slot, page, 1)?;
                     }
-                    if !preregistered { fresh_claimed = i + 1; }
+                    if !registered_batch { fresh_claimed = i + 1; }
                     self.memory.ensure_alpha_frame_for_allocation(page, frame_hint)?;
                     if !pool_backing {
                         let frame = self.memory.physical_frame_descriptor_from_index(page)
@@ -673,9 +771,12 @@ impl Alpha {
                     // A failed initializer leaves the current word unpublished.
                     // Its individual ownership records still drive rollback.
                     if index + 1 == FRAME_WORD_PAGES {
-                        self.processes.vm_space_mut(pid).ok_or(CapabilityError::InvalidArgument)?
-                            .record_deferred_frame_word(word, &deferred_frames, false)
+                        let vm = self.processes.vm_space_mut(pid).ok_or(CapabilityError::InvalidArgument)?;
+                        vm.record_deferred_frame_word(word, &deferred_frames, false)
                             .map_err(|_| CapabilityError::Fatal)?;
+                        if permissions != 1 {
+                            vm.set_permission_words(word, word + FRAME_WORD_BYTES, permissions);
+                        }
                     }
                     continue;
                 }
@@ -743,6 +844,15 @@ impl Alpha {
                 arg3: nanami_uapi::os::OS_MAPPING_RELEASE_ALLOW_HOLES,
             })?;
             return Err(error);
+        }
+        #[cfg(not(test))]
+        if option_env!("NANAMI_POOL_REGISTRATION_DIAG") == Some("1") && pool_backing
+            && page_count > 1 && !preregistered
+            && (reuse_allocation.is_some() || fresh_batch.is_some())
+        {
+            crate::force_info!("[image.pool-registration] pid={} base={:#x} pages={} calls={} reused={}",
+                pid, base_va, page_count, if bulk_registration { 1 } else { page_count },
+                usize::from(reuse_allocation.is_some()));
         }
         Ok(())
     }
@@ -875,6 +985,45 @@ impl Alpha {
             .or_else(|| source_pages.and_then(|pages| {
                 self.cached_source_initialization_page(pid, page, frame, destination, pages)
             }))
+    }
+
+    fn populate_shared_zero_pages(&mut self, range: ProcessPageRange) -> Result<(), CapabilityError> {
+        let first = self.memory.allocate_physical_any(PAGE_SIZE)?;
+        // Claim every alias before fallible conversion/initialization. A failed
+        // physical free retains the sole allocation for ordinary rollback.
+        if let Err(error) = self.processes.register_pool_aliases(range.pid, range.base, range.slot,
+            core::iter::repeat_n(first, range.pages))
+        {
+            if self.memory.free_physical(first * PAGE_SIZE, PAGE_SIZE).is_err() {
+                self.processes.register_pool_allocation(range.pid, range.base, range.slot, first, 1)?;
+            }
+            return Err(error);
+        }
+        let hint = self.memory.small_allocation_frame_hint(first, 1);
+        self.memory.ensure_alpha_frame_for_allocation(first, hint)?;
+        self.zero_physical_pages(first, 1)?;
+        let frame = self.memory.physical_frame_descriptor_from_index(first)
+            .ok_or(CapabilityError::Fatal)?;
+        let vm = self.processes.vm_space_mut(range.pid).ok_or(CapabilityError::Fatal)?;
+        let mut offset = 0;
+        while offset < range.pages {
+            let va = range.base + offset * PAGE_SIZE;
+            if va & (FRAME_WORD_BYTES - 1) == 0 && range.pages - offset >= FRAME_WORD_PAGES {
+                vm.record_deferred_frame_word(va, &[frame; FRAME_WORD_PAGES], true)
+                    .map_err(|_| CapabilityError::Fatal)?;
+                if range.permissions != 1 {
+                    vm.set_permission_words(va, va + FRAME_WORD_BYTES, range.permissions);
+                }
+                offset += FRAME_WORD_PAGES;
+            } else {
+                vm.mark_private_page_shared(va, true);
+                vm.mark_mapping_deferred(va);
+                vm.set_permissions(va, range.permissions);
+                vm.record_frame(va, frame).map_err(|_| CapabilityError::Fatal)?;
+                offset += 1;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn cached_source_initialization_page(

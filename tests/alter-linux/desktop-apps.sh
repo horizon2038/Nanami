@@ -25,6 +25,28 @@ finish() {
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+find_viewable_window() {
+    # xwininfo also prints WM_CLASS for unnamed toolkit helper windows.
+    # Match only the quoted title immediately following the window ID.
+    for window in $(awk -v title="$2" '
+        /^[ \t]*0x[[:xdigit:]]+[ \t]+"/ {
+            name = $0
+            sub(/^[ \t]*0x[[:xdigit:]]+[ \t]+"/, "", name)
+            sub(/".*$/, "", name)
+            if (tolower(name) ~ title) print $1
+        }' "$1"); do
+        # A matching window can be unmapped or disappear during startup.
+        # Continue to the other titled windows before retrying the tree.
+        if xwininfo -id "$window" > "$3" 2>/dev/null; then
+            if grep -q 'Map State: IsViewable' "$3"; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
 for application in files images paint calculator clock; do
     case "$application" in
         files) title='xfe|file explorer' ;;
@@ -42,20 +64,11 @@ for application in files images paint calculator clock; do
             break
         fi
         xwininfo -root -tree > "$root/$application.tree"
-        # Match the real application title, not an untitled error dialog or
-        # a toolkit's unmapped helper window. Query only that window's state.
-        window=$(awk -v title="$title" '/^[ \t]*0x/ && tolower($0) ~ title { print $1; exit }' "$root/$application.tree")
         # X servers can reuse resource IDs immediately after a client exits.
         # The distinct application title, not comparison with stale IDs, is
         # what identifies this application's newly launched main window.
-        if [ -n "$window" ]; then
-            if xwininfo -id "$window" > "$root/$application.window" 2>/dev/null; then
-                if grep -q 'Map State: IsViewable' "$root/$application.window"; then
-                    ready=true
-                fi
-            fi
-        fi
-        if [ "$ready" = true ]; then
+        if find_viewable_window "$root/$application.tree" "$title" "$root/$application.window"; then
+            ready=true
             break
         fi
         sleep 1

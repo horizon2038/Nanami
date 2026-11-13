@@ -11,6 +11,7 @@ const LINUX_IOV_MAX: usize = 16;
 const LINUX_MSGHDR_LEN: usize = 56;
 const LINUX_PAGE_SIZE: usize = 4096;
 struct Runtime {
+    cold_views_quiescent: bool,
     private_shared: bool,
     readonly_only: bool,
     private_failure: Option<Word>,
@@ -54,6 +55,11 @@ mod guest_views {
         pub(super) static CACHED_WRITE_HIT: Cell<bool> = const { Cell::new(false) };
         pub(super) static WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
         pub(super) static BATCH_WRITE_CALLS: Cell<usize> = const { Cell::new(0) };
+        pub(super) static COW_PAGE: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+    fn writable(destination:usize,bytes:usize)->bool {
+        WRITE_HIT.with(Cell::get) && !COW_PAGE.with(Cell::get).is_some_and(|page|
+            destination < page+4096 && destination.checked_add(bytes).is_none_or(|end|end>page))
     }
     pub(super) fn copy_into_scratch(
         runtime: &super::Runtime,
@@ -98,7 +104,7 @@ mod guest_views {
         source: &[u8],
     ) -> bool {
         WRITE_CALLS.with(|calls| calls.set(calls.get() + 1));
-        if source.len() > 4096 || !WRITE_HIT.with(|hit| hit.get()) {
+        if source.len() > 4096 || !writable(destination,source.len()) {
             return false;
         }
         unsafe {
@@ -155,6 +161,7 @@ mod guest_views {
                 })
                 .is_none()
             || !WRITE_HIT.with(|hit| hit.get())
+            || buffers.iter().any(|(destination,source)| !writable(*destination,source.len()))
         {
             return false;
         }
@@ -176,6 +183,9 @@ mod private_memory {
     pub(super) fn needs_checked_write_preparation(runtime: &Runtime, _: Word) -> bool {
         runtime.private_shared && !runtime.readonly_only
     }
+    pub(super) fn can_try_cold_write_view(runtime:&Runtime,_:Word)->bool {
+        option_env!("NANAMI_COLD_WRITE_VIEWS")!=Some("0") && runtime.cold_views_quiescent
+    }
     pub(super) fn with_checked_private_write<T>(
         runtime: &Runtime, pid: Word, address: Word, bytes: Word,
         operation: impl FnOnce() -> Result<T, i32>,
@@ -194,6 +204,9 @@ mod private_memory {
         if runtime.private_shared {
             PREPARED.with(|p| p.borrow_mut().push((address, bytes)));
             if runtime.private_failure == Some(address) { return Err(EFAULT); }
+            guest_views::COW_PAGE.with(|cow| {
+                if cow.get().is_some_and(|page|address<page+4096 && address.checked_add(bytes).is_some_and(|end|end>page)) { cow.set(None); }
+            });
         }
         operation()
     }
@@ -278,6 +291,7 @@ fn runtime(buffer: &mut [u8]) -> Runtime {
     private_memory::PREPARED.with(|p| p.borrow_mut().clear());
     guest_views::COPY_INPUT.with(|copy| copy.set(false));
     guest_views::WRITE_HIT.with(|hit| hit.set(false));
+    guest_views::COW_PAGE.with(|cow| cow.set(None));
     guest_views::CACHED_WRITE_HIT.with(|hit| hit.set(false));
     guest_views::WRITE_CALLS.with(|calls| calls.set(0));
     guest_views::BATCH_WRITE_CALLS.with(|calls| calls.set(0));
@@ -285,6 +299,7 @@ fn runtime(buffer: &mut [u8]) -> Runtime {
     guest_views::CALLS.with(|calls| calls.set(0));
     TRANSPORT.with(|transport| *transport.borrow_mut() = Transport::default());
     Runtime {
+        cold_views_quiescent:false,
         private_shared: false,
         readonly_only: false,
         private_failure: None,
@@ -446,6 +461,73 @@ fn cached_writable_copy_skips_preparation_but_misses_and_permissions_do_not() {
             assert_eq!(output, [if cached {37} else {0}; 32]);
         }
     }
+}
+
+#[test]
+fn quiescent_cold_non_cow_views_omit_preparation_for_owned_scratch_and_vectors() {
+    let enabled=option_env!("NANAMI_COLD_WRITE_VIEWS")!=Some("0");
+    for kind in 0..3 {
+        for quiescent in [false,true] {
+            let mut source=[37u8;32];let mut output=[0x99u8;32];
+            let base=output.as_mut_ptr() as Word;let mut r=runtime(&mut source);
+            r.private_shared=true;r.cold_views_quiescent=quiescent;r.private_failure=Some(base);
+            guest_views::WRITE_HIT.with(|hit|hit.set(true));
+            let result=match kind {
+                0=>copyout_owned(&r,7,base,&source[..16]),
+                1=>copyout_from(&r,7,base,r.posix_shm,16),
+                _=>copyout_owned_many(&r,7,&[(base,&source[..8]),(base+8,&source[8..16])]),
+            };
+            let copied=enabled&&quiescent;
+            assert_eq!(result,if copied {Ok(())}else{Err(EFAULT)});
+            assert_eq!(&output[..16],&[if copied {37}else{0x99};16]);
+            assert_eq!(&output[16..],&[0x99;16]);
+            private_memory::PREPARED.with(|p|assert_eq!(p.borrow().is_empty(),copied));
+            TRANSPORT.with(|t|assert!(t.borrow().calls.is_empty()));
+            // Logical denial still precedes all native view/store operations.
+            let before=output;r.allowed=false;
+            assert_eq!(copyout_owned(&r,7,base,&[99;16]),Err(EFAULT));assert_eq!(output,before);
+        }
+    }
+}
+
+#[test]
+fn cold_cow_refusal_keeps_the_whole_scalar_unwritten_until_preparation_succeeds() {
+    #[repr(align(4096))] struct Pages([u8;8192]);
+    for fail in [false,true] {
+        let mut source=[37u8;32];let mut output=Box::new(Pages([0x99;8192]));
+        let page=output.0.as_mut_ptr() as Word;let target=page+4096-16;
+        let mut r=runtime(&mut source);r.private_shared=true;r.cold_views_quiescent=true;
+        if fail {r.private_failure=Some(target);}
+        guest_views::WRITE_HIT.with(|hit|hit.set(true));guest_views::COW_PAGE.with(|cow|cow.set(Some(page+4096)));
+        assert_eq!(copyout_owned(&r,7,target,&source),if fail {Err(EFAULT)}else{Ok(())});
+        assert!(output.0[..4096-16].iter().chain(&output.0[4096+16..]).all(|&byte|byte==0x99));
+        assert_eq!(&output.0[4096-16..4096+16],&[if fail {0x99}else{37};32]);
+        private_memory::PREPARED.with(|p|assert_eq!(*p.borrow(),[(target,32)]));
+        if fail {guest_views::COW_PAGE.with(|cow|assert_eq!(cow.get(),Some(page+4096)));}
+    }
+}
+
+#[test]
+fn cold_vector_refusal_preserves_the_old_ordered_prefix_on_later_cow_failure() {
+    #[repr(align(4096))] struct Pages([u8;12288]);
+    let enabled=option_env!("NANAMI_COLD_WRITE_VIEWS")!=Some("0");
+    let mut source=[37u8;32];let mut output=Box::new(Pages([0x99;12288]));let base=output.0.as_mut_ptr() as Word;
+    let mut r=runtime(&mut source);r.private_shared=true;r.cold_views_quiescent=true;r.private_failure=Some(base+4096);
+    guest_views::WRITE_HIT.with(|hit|hit.set(true));guest_views::COW_PAGE.with(|cow|cow.set(Some(base+4096)));
+    let fields=[(base,&source[..8]),(base+4096,&source[8..16]),(base+8192,&source[16..24])];
+    assert_eq!(copyout_owned_many(&r,7,&fields),Err(EFAULT));
+    assert_eq!(&output.0[..8],&[37;8]);assert!(output.0[8..].iter().all(|&byte|byte==0x99));
+    private_memory::PREPARED.with(|p|assert_eq!(*p.borrow(),if enabled {vec![(base+4096,8)]}else{vec![(base,8),(base+4096,8)]}));
+}
+
+#[test]
+fn cold_copyout_never_admits_unowned_raw_sources_or_oversized_vectors() {
+    let mut source=[37u8;32];let foreign=[17u8;32];let mut output=[0x99;32];let base=output.as_mut_ptr() as Word;
+    let mut r=runtime(&mut source);r.private_shared=true;r.cold_views_quiescent=true;r.private_failure=Some(base);
+    guest_views::WRITE_HIT.with(|hit|hit.set(true));
+    assert_eq!(copyout_from(&r,7,base,foreign.as_ptr() as Word,16),Err(EFAULT));assert_eq!(output,[0x99;32]);
+    let fields=[(base,&source[..1]);5];
+    assert_eq!(copyout_owned_many(&r,7,&fields),Err(EFAULT));assert_eq!(output,[0x99;32]);
 }
 
 #[test]

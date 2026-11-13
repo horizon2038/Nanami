@@ -15,6 +15,8 @@ const WRITE_BASE: Word = READ_BASE + SLOTS * PAGE;
 const SETS: usize = 16;
 const WAYS: usize = 4;
 const SLOTS: usize = SETS * WAYS;
+const _: () = assert!(SLOTS <= u64::BITS as usize);
+pub const MAX_BATCH_PAGES: usize = CONTIGUOUS_WRITE_PAGES;
 const _: () = assert!(CONTIGUOUS_WRITE_PAGES <= SLOTS);
 
 #[cfg(not(test))]
@@ -61,9 +63,35 @@ pub enum GrantError {
     Uncertain,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct PageGrant { pub page: Word, pub local: Word }
+
+pub enum BatchGrant {
+    Complete,
+    Stopped { completed: usize, error: GrantError },
+    Uncertain,
+}
+
 pub trait LeaseEffects {
     fn grant(&mut self, pid: Word, page: Word, local: Word) -> Result<(), GrantError>;
     fn release(&mut self, local: Word) -> Result<(), ()>;
+    /// Only acknowledged entries may be reused. A lost response returns zero.
+    fn release_many(&mut self, locals: &[Word]) -> Word {
+        let mut acknowledged = 0;
+        for (index, &local) in locals.iter().enumerate() {
+            if self.release(local).is_ok() { acknowledged |= 1 << index; }
+        }
+        acknowledged
+    }
+    fn batch_supported(&self) -> bool { false }
+    fn grant_many(&mut self, pid: Word, entries: &[PageGrant]) -> BatchGrant {
+        for (completed, entry) in entries.iter().enumerate() {
+            if let Err(error) = self.grant(pid, entry.page, entry.local) {
+                return BatchGrant::Stopped { completed, error };
+            }
+        }
+        BatchGrant::Complete
+    }
 }
 pub trait Effects: LeaseEffects {
     fn read(&mut self, local: Word, offset: Word, destination: &mut [MaybeUninit<u8>]);
@@ -186,6 +214,89 @@ impl Cache {
         Some(self.base + index * PAGE)
     }
 
+    /// Reserve only pages the caller will actually use. Protect every hit and
+    /// planned slot before choosing victims, so a later miss cannot evict an
+    /// earlier fragment. No grant occurs until all victim releases acknowledge.
+    fn prepare_pages(
+        &self, state: &mut State, owner: Word, generation: Word, pid: Word,
+        pages: &[Word], effects: &mut impl LeaseEffects,
+    ) -> Option<[Word; MAX_BATCH_PAGES]> {
+        if pages.len() > MAX_BATCH_PAGES { return None; }
+        let mut locals = [0; MAX_BATCH_PAGES];
+        if !effects.batch_supported() || pages.len() <= 1 {
+            for (index, &page) in pages.iter().enumerate() {
+                locals[index] = self.acquire(state, owner, generation, pid, page, effects)?;
+            }
+            return Some(locals);
+        }
+        let mut protected = 0u64;
+        for (index, &page) in pages.iter().enumerate() {
+            if let Some(local) = self.cached(state, owner, generation, page) {
+                locals[index] = local;
+                protected |= 1u64 << ((local - self.base) / PAGE);
+            }
+        }
+        let mut pending = [PageGrant::default(); MAX_BATCH_PAGES];
+        let mut indices = [0; MAX_BATCH_PAGES];
+        let mut count = 0;
+        for (position, &page) in pages.iter().enumerate() {
+            if locals[position] != 0 { continue; }
+            if let Some(prior) = pages[..position].iter().position(|&prior| prior == page) {
+                locals[position] = locals[prior];
+                continue;
+            }
+            let set = Self::set(owner, page);
+            let first = set * WAYS;
+            let available = |way: usize| protected & (1u64 << (first + way)) == 0;
+            let way = (0..WAYS).find(|&way| available(way) && !state.leases[first + way].occupied)
+                .or_else(|| (0..WAYS).map(|offset| (state.next[set] + offset) % WAYS).find(|&way| available(way)))?;
+            let index = first + way;
+            let local = self.base + index * PAGE;
+            if state.leases[index].occupied {
+                state.leases[index].ready = false;
+                #[cfg(not(test))]
+                self.record(1);
+                effects.release(local).ok()?;
+                state.leases[index] = Lease::EMPTY;
+            }
+            // Until the grant, released/unused slots stay empty. A subsequent
+            // planning failure therefore needs no rollback of unissued work.
+            pending[count] = PageGrant { page, local };
+            indices[count] = index;
+            count += 1;
+            locals[position] = local;
+            protected |= 1u64 << index;
+        }
+        if count == 0 { return Some(locals); }
+        for (entry, &index) in pending[..count].iter().zip(&indices[..count]) {
+            state.leases[index] = Lease { owner, generation, page: entry.page, occupied: true, ready: false };
+            #[cfg(not(test))]
+            self.record(0);
+        }
+        // A lost/malformed response may hide any installed prefix. Retain all
+        // pending pins and VAs as unready until individually released.
+        let result = if count == 1 {
+            match effects.grant(pid, pending[0].page, pending[0].local) {
+                Ok(()) => BatchGrant::Complete,
+                Err(error) => BatchGrant::Stopped { completed: 0, error },
+            }
+        } else { effects.grant_many(pid, &pending[..count]) };
+        let (completed, failure) = match result {
+            BatchGrant::Complete => (count, None),
+            BatchGrant::Stopped { completed, error } if completed < count => (completed, Some(error)),
+            _ => return None,
+        };
+        for (offset, &index) in indices[..count].iter().enumerate() {
+            if offset < completed {
+                state.leases[index].ready = true;
+                state.next[index / WAYS] = (index % WAYS + 1) % WAYS;
+            } else if offset != completed || !matches!(failure, Some(GrantError::Uncertain)) {
+                state.leases[index] = Lease::EMPTY;
+            }
+        }
+        (completed == count).then_some(locals)
+    }
+
     // Only a completed, range-confined mapping operation may carry these
     // exact Ready leases into its new metadata generation. The set excludes
     // generation so their existing local VAs remain usable without remapping.
@@ -219,6 +330,7 @@ impl Cache {
 
     fn clear_selected(&self, owner: Word, range: Option<(Word, Word)>, effects: &mut impl LeaseEffects) {
         let mut state = self.state.borrow_mut();
+        let mut selected = 0u64;
         for (index, lease) in state.leases.iter_mut().enumerate() {
             if lease.occupied && lease.owner == owner && range.is_none_or(|(base, end)| {
                 lease.page.checked_add(PAGE).is_none_or(|stop| lease.page < end && stop > base)
@@ -226,8 +338,27 @@ impl Cache {
                 lease.ready = false;
                 #[cfg(not(test))]
                 self.record(3);
-                if effects.release(self.base + index * PAGE).is_ok() {
-                    *lease = Lease::EMPTY;
+                selected |= 1 << index;
+            }
+        }
+        // Mark the entire selection unready before the first remote release.
+        // The bounded request owns no new heap storage or persistent state.
+        while selected != 0 {
+            let mut locals = [0; MAX_BATCH_PAGES];
+            let mut indices = [0; MAX_BATCH_PAGES];
+            let mut count = 0;
+            while selected != 0 && count < MAX_BATCH_PAGES {
+                let index = selected.trailing_zeros() as usize;
+                selected &= selected - 1;
+                locals[count] = self.base + index * PAGE;
+                indices[count] = index;
+                count += 1;
+            }
+            let acknowledged = effects.release_many(&locals[..count]);
+            // An out-of-range bitmap cannot prove any particular release.
+            if acknowledged >> count == 0 {
+                for (bit, &index) in indices[..count].iter().enumerate() {
+                    if acknowledged & (1 << bit) != 0 { state.leases[index] = Lease::EMPTY; }
                 }
             }
         }
@@ -268,18 +399,26 @@ impl ReadWindow {
             return false;
         }
         let mut state = self.0.state.borrow_mut();
+        if destination.is_empty() { return true; }
+        let first = source & !(PAGE - 1);
+        let count = (source - first + destination.len()).div_ceil(PAGE);
+        let mut pages = [0; MAX_BATCH_PAGES];
+        for (index, page) in pages[..count].iter_mut().enumerate() { *page = first + index * PAGE; }
+        let locals = if effects.batch_supported() && count > 1 {
+            match self.0.prepare_pages(&mut state, owner, generation, pid, &pages[..count], effects) {
+                Some(locals) => Some(locals), None => return false,
+            }
+        } else { None };
         let mut copied = 0;
         while copied < destination.len() {
             let address = source + copied;
             let page = address & !(PAGE - 1);
             let offset = address - page;
             let bytes = (PAGE - offset).min(destination.len() - copied);
-            let Some(local) = self
-                .0
-                .acquire(&mut state, owner, generation, pid, page, effects)
-            else {
-                return false;
-            };
+            let local = if let Some(locals) = &locals { locals[(page - first) / PAGE] }
+                else { match self.0.acquire(&mut state, owner, generation, pid, page, effects) {
+                    Some(local) => local, None => return false,
+                } };
             effects.read(local, offset, &mut destination[copied..copied + bytes]);
             copied += bytes;
         }
@@ -364,7 +503,8 @@ impl WriteWindow {
             return false;
         }
         let mut state = self.0.state.borrow_mut();
-        if !CACHED && source.len() > 4 * PAGE {
+        if source.is_empty() { return true; }
+        if !CACHED && !effects.batch_supported() && source.len() > 4 * PAGE {
             let hint = [owner, generation, destination, source.len()];
             let first = destination & !(PAGE - 1);
             let pages = ((destination - first) + source.len()).div_ceil(PAGE);
@@ -378,6 +518,15 @@ impl WriteWindow {
             }
         }
         let mut fragments = [(0, 0, 0); CONTIGUOUS_WRITE_PAGES];
+        let first = destination & !(PAGE - 1);
+        let page_count = (destination - first + source.len()).div_ceil(PAGE);
+        let mut pages = [0; MAX_BATCH_PAGES];
+        for (index, page) in pages[..page_count].iter_mut().enumerate() { *page = first + index * PAGE; }
+        let locals = if CACHED { None } else {
+            match self.0.prepare_pages(&mut state, owner, generation, pid, &pages[..page_count], effects) {
+                Some(locals) => Some(locals), None => return false,
+            }
+        };
         let mut count = 0;
         let mut prepared = 0;
         while prepared < source.len() {
@@ -388,7 +537,7 @@ impl WriteWindow {
             let Some(local) = (if CACHED {
                 self.0.cached(&state, owner, generation, page)
             } else {
-                self.0.acquire(&mut state, owner, generation, pid, page, effects)
+                Some(locals.as_ref().unwrap()[(page - first) / PAGE])
             })
             else {
                 return false;
@@ -470,6 +619,22 @@ impl WriteWindow {
         }
         let mut state = self.0.state.borrow_mut();
         let mut fragments = [WriteFragment::default(); MAX_WRITE_BUFFERS * 2];
+        let mut pages = [0; MAX_BATCH_PAGES];
+        let mut page_count = 0;
+        for &(destination, source) in buffers {
+            let mut offset = 0;
+            while offset < source.len() {
+                let address = destination + offset;
+                pages[page_count] = address & !(PAGE - 1);
+                page_count += 1;
+                offset += (PAGE - (address & (PAGE - 1))).min(source.len() - offset);
+            }
+        }
+        let locals = if CACHED { None } else {
+            match self.0.prepare_pages(&mut state, owner, generation, pid, &pages[..page_count], effects) {
+                Some(locals) => Some(locals), None => return false,
+            }
+        };
         let mut count = 0;
         for &(destination, source) in buffers {
             let mut prepared = 0;
@@ -481,7 +646,7 @@ impl WriteWindow {
                 let Some(local) = (if CACHED {
                     self.0.cached(&state, owner, generation, page)
                 } else {
-                    self.0.acquire(&mut state, owner, generation, pid, page, effects)
+                    Some(locals.as_ref().unwrap()[count])
                 })
                 else {
                     return false;

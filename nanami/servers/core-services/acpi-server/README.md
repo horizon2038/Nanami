@@ -22,6 +22,12 @@ The pinned crate includes a [local AML reference-handling patch](../../vendor/ac
 for integer arguments/locals used by firmware methods. The host tests use the
 same patched dependency; failures still abort shutdown rather than being ignored.
 
+Process-local capability slots are assigned in `src/slots.rs`. PCI remains in
+slot 23 throughout AML evaluation; shutdown connects VFS in the distinct slot
+25. Reusing PCI's occupied slot for VFS fails service connection before storage
+freeze or S5 register writes. The host tests check that all assignments are
+distinct, and a compile-time assertion guards the PCI/VFS pair.
+
 Shutdown sequence:
 
 1. Resolve and validate the firmware's S5 definition and PM1 registers.

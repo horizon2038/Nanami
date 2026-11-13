@@ -5,6 +5,10 @@ extern crate alloc;
 mod power;
 
 #[cfg(test)]
+#[path = "../../nanami/servers/core-services/acpi-server/src/slots.rs"]
+mod slots;
+
+#[cfg(test)]
 #[path = "routing.rs"]
 mod routing_tests;
 

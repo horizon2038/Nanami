@@ -3,11 +3,8 @@ use acpi::{aml::AmlError, Handle, Handler, PciAddress, PhysicalMapping};
 use alloc::{rc::Rc, vec::Vec};
 use core::{cell::RefCell, mem, ptr::NonNull};
 use nanami_runtime::{RequestError, Word};
+use crate::slots::{HIGH_IO_SLOT, IO_SLOT, PCI_SLOT, TIMER_SLOT};
 
-const IO_SLOT: Word = 16;
-const HIGH_IO_SLOT: Word = 17;
-const PCI_SLOT: Word = 23;
-const TIMER_SLOT: Word = 22;
 const PAGE_SIZE: usize = 4096;
 
 struct Mapping {

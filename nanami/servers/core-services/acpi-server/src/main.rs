@@ -11,12 +11,12 @@ mod firmware;
 mod host;
 mod power;
 mod routing;
+mod slots;
 
 use nanami_runtime::{ipc::ServiceEvent, RequestError, Word};
 use nanami_client::{power::ACPI_SERVICE, registry, vfs};
 
-const SERVICE_SLOT: Word = 20;
-const VFS_SLOT: Word = 23;
+use slots::{DEVICE_MANAGER_SLOT, SERVICE_SLOT, VFS_SLOT};
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -26,8 +26,13 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_runtime::ipc::init_ipc_tls()?;
-    registry::connect_service(nanami_client::device::DEVICE_MANAGER_SERVICE, 24)?;
-    let rsdp = nanami_client::device::acpi_rsdp(nanami_runtime::ipc::process_slot_descriptor(24))?;
+    registry::connect_service(
+        nanami_client::device::DEVICE_MANAGER_SERVICE,
+        DEVICE_MANAGER_SLOT,
+    )?;
+    let rsdp = nanami_client::device::acpi_rsdp(
+        nanami_runtime::ipc::process_slot_descriptor(DEVICE_MANAGER_SLOT),
+    )?;
     // Register before loading AML. Routing runs on notification without holding
     // a driver-manager RPC; power methods remain deferred until shutdown.
     registry::register_service(ACPI_SERVICE)?;
@@ -98,7 +103,7 @@ impl State {
     }
 
     fn route_usb(&mut self, rsdp: Word) {
-        let manager = nanami_runtime::ipc::process_slot_descriptor(24);
+        let manager = nanami_runtime::ipc::process_slot_descriptor(DEVICE_MANAGER_SLOT);
         let router = self.firmware(rsdp).and_then(|firmware| {
             routing::Routing::new(firmware.interpreter.clone()).map_err(|error| {
                 nanami_runtime::println!("[acpi-server] PCI routing init: {}", error);

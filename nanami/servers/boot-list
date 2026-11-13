@@ -19,6 +19,7 @@
 @process ./bin/virtio-gpu-server priority=24
 @process ./bin/ps2-server priority=28
 @process ./bin/virtio-net priority=23
+@process ./bin/intel-net priority=23
 @process ./bin/hpet-server priority=30
 @process ./bin/timer-server priority=30
 # Firmware SMI_CMD access belongs on the boot processor.

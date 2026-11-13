@@ -15,6 +15,7 @@ pub mod gfx;
 pub mod gpu;
 pub mod input;
 pub mod intel_graphics;
+pub mod intel_net;
 pub mod ipc;
 pub mod negoto;
 pub mod net;

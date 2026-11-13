@@ -13,7 +13,7 @@ in the initramfs even when started after core initialization. `system-list`
 contains logical services, not unconditional display/PS2/PCI-network drivers.
 
 On pc99, the manager starts `pci-server`, connects to its registry entry, then
-selects storage/timer/USB and optional PS/2, virtio networking and display
+selects storage/timer/USB and detected PS/2, virtio/Intel networking and display
 providers. The existing storage-root arbitration remains in place. Optional
 driver spawn failure is logged without terminating the manager. PCI discovery
 failure is a boot error because storage selection cannot safely continue.
@@ -21,6 +21,12 @@ Boot-time PCI and timer dependencies use bounded, yielding registration retries;
 their providers run at least at the dependent driver's priority. This avoids
 PS/2 or ACPI exiting when another CPU has not yet published the timer. Ordinary
 service connection and steady-state IPC paths are unchanged.
+
+PS/2 uses the ACPI 2+ FADT I8042-present flag and a nondestructive status-port
+presence read instead of always launching a driver/allocating its IRQs. Legacy
+firmware without that declaration uses the status read. AArch64 QEMU storage startup checks the platform's virtio-MMIO inventory
+for a block transport; architecture alone no longer starts an absent device.
+Generic DTB handoff/discovery is not currently exposed by Alpha's platform API.
 
 Display selection and fallback live in the manager's common `display.rs`, not
 in an Intel-specific backend. Architecture code returns an optional native
@@ -36,6 +42,12 @@ initialization so the manager starts `fb-server`. Probe reports are accepted
 only from the selected PID; duplicate success/fallback reports are rejected.
 If framebuffer startup fails, a decline report returns an error, not a false
 success. Missing boot framebuffer permits headless startup and is logged.
+
+The Intel driver is spawned by its unambiguous archive basename
+`intel-graphics-server`: its full `./bin/` path exceeds the 24-byte spawn name
+field. Alpha still applies policy to the resolved full archive entry, so
+priority and authority do not change. This fixes rejection before Gen9
+initialization on `8086:3e91` UHD 630 without changing Kernel or spawn ABI.
 
 `fb-server` remains a separate backend with its own WB shared composition RAM
 and WC hardware framebuffer mapping. It validates the existing 32-bpp layout,
@@ -98,6 +110,24 @@ The current native authority model grants configuration access through the PCI
 service connection. It does not implement per-function leases, driver sandbox
 isolation or a DMA IOMMU. Alpha still grants MMIO/DMA/IRQ capabilities. Packet,
 block, MMIO and DMA data paths do not traverse the PCI service.
+
+## Intel Ethernet
+
+The manager selects `intel-net` only for explicitly supported Ethernet PCI IDs
+when no virtio NIC is selected. It supplies e1000e-class (including I219) and
+igb-class (including I211) queue-zero backends through the unchanged
+`net-device` SHM/batch/notification protocol. Only one selected interface is
+published. Firmware INTx is preferred; unresolved/busy IRQs use a bounded
+timer-driven RX fallback without modifying Kernel interrupt routing.
+See the [Intel NIC guide](../servers/core-services/intel-net/README.md) for the
+binding table, multi-NIC selection, DMA lifetime, test commands and physical
+validation boundaries.
+
+`acpi-service` additionally accepts `ACPI_REQUEST_PCI_INTX_ROUTE` (`0xa002`):
+arg0 is a segment-zero packed BDF and arg1 is a pin in 1..4. Success returns
+the GSI in detail0, restricted to the current HAL's level/low GSI16..23 range.
+Unsupported routes return an error, never a guessed IRQ. This query neither
+freezes storage nor executes shutdown methods.
 
 ### Identification and `pci-info`
 

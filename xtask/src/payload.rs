@@ -88,6 +88,7 @@ fn discover_at(
                     | "virtio-gpu-server"
                     | "ps2-server"
                     | "virtio-net"
+                    | "intel-net"
             )
         {
             continue;

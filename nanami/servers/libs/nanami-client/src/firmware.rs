@@ -261,6 +261,23 @@ pub fn find_hpet_mmio_base(rsdp: Word) -> Result<Option<Word>, RequestError> {
         .transpose()
 }
 
+/// ACPI 2+ explicitly describes whether the legacy keyboard controller exists.
+/// Old/absent firmware has no declaration; retain the legacy PC probe there.
+pub fn has_i8042(rsdp: Word) -> Result<bool, RequestError> {
+    let mut mapper = AcpiMapper::new();
+    let Some(table) = find_table(&mut mapper, rsdp, b"FACP")? else {
+        return Ok(true);
+    };
+    let length = mapper.sdt_length(table, b"FACP")?;
+    if mapper.read_u8(table + 8)? < 2 {
+        return Ok(true);
+    }
+    if length < 111 {
+        return Err(RequestError::Protocol);
+    }
+    Ok(mapper.read_u8(table + 109)? & 2 != 0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EcamRegion {
     pub physical: Word,

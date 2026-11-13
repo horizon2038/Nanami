@@ -12,3 +12,22 @@ pub fn shutdown(port: Word) -> Result<(), RequestError> {
         Err(RequestError::Status(status))
     }
 }
+
+pub fn pci_intx_route(port: Word, address: Word, pin: u8) -> Result<Word, RequestError> {
+    let (status, irq, _) = call_port(
+        port,
+        ACPI_REQUEST_PCI_INTX_ROUTE,
+        address,
+        pin as Word,
+        0,
+        0,
+        3,
+    )?;
+    if status != OS_RESPONSE_OK {
+        return Err(RequestError::Status(status));
+    }
+    if !(16..=23).contains(&irq) {
+        return Err(RequestError::Protocol);
+    }
+    Ok(irq)
+}

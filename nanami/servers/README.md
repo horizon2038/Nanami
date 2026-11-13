@@ -53,6 +53,10 @@ Rust-generated `initramfs.cpio`. Driver Manager selects platform PCI, timer,
 storage, input, display and network-device drivers; ext2-server and
 system-manager consume the mounted filesystem. In particular, `fb-server`,
 `ps2-server` and `virtio-net` are no longer unconditional rootfs services.
+PS/2 is gated by the FADT controller-present flag and status-port presence read. Supported Intel NICs select
+`intel-net` (e1000e/I219 and igb/I211 backends), using the same `net-device`
+SHM/batch/notification protocol as virtio networking. Only one network-device
+provider is published; see its [hardware guide](core-services/intel-net/README.md).
 `system-list` starts logical services, including input distribution, the network
 stack and Honoka, which connect to those selected hardware providers.
 
@@ -94,7 +98,7 @@ sources = ["src/main.cpp"]
 ```
 
 xtask invokes Clang/LLD directly, linking the shared runtime and matching target
-script. AArch64 currently omits the x86-only PCI, Intel graphics, PS/2, virtio-net,
+script. AArch64 currently omits the x86-only PCI, Intel graphics/Ethernet, PS/2, virtio-net,
 ACPI/AHCI/HPET/PIT services and C++ sample.
 
 The headless AArch64 configuration has no timer provider yet. Alter/Linux can

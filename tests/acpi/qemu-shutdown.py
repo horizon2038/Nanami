@@ -111,6 +111,8 @@ with (logs / "qemu.log").open("w") as diagnostics:
         if process.wait(timeout=10) != 0:
             raise RuntimeError("QEMU failed")
         text = serial.read_text(errors="replace")
+        if args.i8042 == "off":
+            assert "spawned ./bin/ps2-server" not in text, "absent PS/2 controller was started"
         assert "storage synchronized and frozen" in text
         assert "[acpi-server] entering S5" in text or "entering S5" in text
         assert text.index("storage synchronized and frozen") < text.index("entering S5")

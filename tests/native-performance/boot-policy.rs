@@ -3,9 +3,52 @@ extern crate self as nun;
 pub type Word = usize;
 pub use a9n_abi::CapabilityError;
 
+#[path = "../../nanami/src/nanami_core/cpio.rs"]
+mod cpio;
 #[path = "../../nanami/src/nanami_core/alpha/process_policy.rs"]
 mod policy;
 use policy::{ComponentSpec, ProcessPolicies, ProcessPolicy};
+
+#[test]
+fn intel_graphics_short_spawn_name_preserves_resolved_archive_policy() {
+    let mut archive = Vec::new();
+    for (name, data) in [
+        ("./bin/intel-graphics-server", b"elf".as_slice()),
+        ("TRAILER!!!", b"".as_slice()),
+    ] {
+        archive.extend_from_slice(b"070701");
+        for value in [
+            1,
+            0o100755,
+            0,
+            0,
+            1,
+            0,
+            data.len(),
+            0,
+            0,
+            0,
+            0,
+            name.len() + 1,
+            0,
+        ] {
+            archive.extend_from_slice(format!("{value:08x}").as_bytes());
+        }
+        archive.extend_from_slice(name.as_bytes());
+        archive.push(0);
+        archive.resize((archive.len() + 3) & !3, 0);
+        archive.extend_from_slice(data);
+        archive.resize((archive.len() + 3) & !3, 0);
+    }
+    let name = "intel-graphics-server";
+    assert!(name.len() <= 24);
+    let entry = cpio::find_image(&archive, name).unwrap();
+    assert_eq!(entry.name, "./bin/intel-graphics-server");
+    let policies =
+        ProcessPolicies::parse(include_str!("../../nanami/servers/boot-list"), 4).unwrap();
+    assert_eq!(policies.for_image(entry.name).priority(None).unwrap(), 24);
+    assert!(!policies.for_image(entry.name).platform_information);
+}
 
 #[test]
 fn placement_preferences_preserve_automatic_order_and_exact_affinity() {

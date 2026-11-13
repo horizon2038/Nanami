@@ -1,5 +1,5 @@
 use crate::{
-    cli::{Arch, Gpu, Network, Platform, Run, Storage},
+    cli::{Arch, Gpu, Network, Nic, Platform, Run, Storage},
     rootfs, util,
 };
 use anyhow::{ensure, Context, Result};
@@ -93,7 +93,12 @@ fn network(args: &Run, host: Host, out: &mut Vec<String>) -> Result<()> {
         "-netdev".into(),
         netdev,
         "-device".into(),
-        "virtio-net-pci,netdev=net0,addr=5,disable-legacy=off,disable-modern=on".into(),
+        match args.nic {
+            Nic::Virtio => "virtio-net-pci,netdev=net0,addr=5,disable-legacy=off,disable-modern=on",
+            Nic::E1000e => "e1000e,netdev=net0,addr=5",
+            Nic::Igb => "igb,netdev=net0,addr=5",
+        }
+        .into(),
     ]);
     if let Some(pcap) = &args.pcap {
         out.extend([
@@ -340,6 +345,27 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|s| s.starts_with(expected)));
+        }
+    }
+    #[test]
+    fn ethernet_model_is_independent_of_network_backend_and_none_has_no_nic() {
+        for (nic, model) in [
+            ("virtio", "virtio-net-pci,"),
+            ("e1000e", "e1000e,"),
+            ("igb", "igb,"),
+        ] {
+            let args = arguments(Path::new("."), &parse(&["--nic", nic]), Host::Other).unwrap();
+            assert_eq!(
+                args.iter().filter(|value| value.starts_with(model)).count(),
+                1
+            );
+            let args = arguments(
+                Path::new("."),
+                &parse(&["--nic", nic, "--net", "none"]),
+                Host::Other,
+            )
+            .unwrap();
+            assert!(!args.iter().any(|value| value.starts_with(model)));
         }
     }
     #[test]

@@ -715,7 +715,7 @@ IDLでFault handlingを対象に含めるなら、Normal RPC、Notification、Fa
 | Exec | [exec.rs](../servers/uapi/src/exec.rs) | path / argv / env payload、Process管理 |
 | Alter | [alter.rs](../servers/uapi/src/alter.rs) | context record、legacy launch、Fault IPC |
 | Negoto | [negoto.rs](../servers/uapi/src/negoto.rs) | in/out JSON共有buffer |
-| Power | [power.rs](../servers/uapi/src/power.rs) | scalar request |
+| Power / ACPI | [power.rs](../servers/uapi/src/power.rs) | S5 request、PCI INTx routeのscalar query |
 
 一つのserverが複数interfaceを同じendpointで受ける場合がある。例えばUSB serverはUSB情報とblock-deviceの要求を扱い、display backendはlegacy displayとGPUを扱う。IDL上のinterfaceとProcess / endpointの個数を一対一と固定しない。
 

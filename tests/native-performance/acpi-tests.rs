@@ -130,6 +130,26 @@ fn nvs_and_reclaim_tables_are_discoverable_without_modifying_firmware() {
 }
 
 #[test]
+fn fadt_i8042_flag_controls_legacy_controller_discovery() {
+    let kind = MemoryType::ACPI_RECLAIM;
+    install(kind, HPET);
+    assert_eq!(acpi::has_i8042(RSDP), Ok(true)); // no FADT: legacy probe
+    for (revision, flags, present) in [(6, 0, false), (6, 2, true), (1, 0, true)] {
+        let mut table = sdt(b"FACP", 116);
+        table[8] = revision;
+        table[109] = flags;
+        checksum(&mut table, 9);
+        write(HPET, &table, kind);
+        assert_eq!(acpi::has_i8042(RSDP), Ok(present));
+    }
+    let mut table = sdt(b"FACP", 100);
+    table[8] = 6;
+    checksum(&mut table, 9);
+    write(HPET, &table, kind);
+    assert_eq!(acpi::has_i8042(RSDP), Err(RequestError::Protocol));
+}
+
+#[test]
 fn reserved_runtime_and_boot_services_are_still_not_exposed() {
     for kind in [
         MemoryType::RESERVED,

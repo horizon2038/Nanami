@@ -150,6 +150,12 @@ pub enum Gpu {
     Virtio,
     Std,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Nic {
+    Virtio,
+    E1000e,
+    Igb,
+}
 #[derive(Clone, Debug, Args)]
 pub struct Run {
     #[command(flatten)]
@@ -184,6 +190,9 @@ pub struct Run {
     /// Defaults to user; BRIDGE_IF/--bridge-if selects bridged unless overridden.
     #[arg(long, value_enum, env = "NET_MODE")]
     pub net: Option<Network>,
+    /// PCI Ethernet controller model (independent of the host network backend).
+    #[arg(long, value_enum, default_value = "virtio")]
+    pub nic: Nic,
     /// macOS vmnet interface or Linux bridge.
     #[arg(long, env = "BRIDGE_IF")]
     pub bridge_if: Option<String>,

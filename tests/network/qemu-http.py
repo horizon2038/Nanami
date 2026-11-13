@@ -22,6 +22,9 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--image', type=pathlib.Path, required=True)
 parser.add_argument('--smp', type=int, default=4)
+parser.add_argument('--nic', choices=('virtio', 'e1000e', 'igb'), default='virtio')
+parser.add_argument('--shared-intx', action='store_true',
+                    help='put xHCI on the Intel NIC PIRQ to exercise timer RX fallback')
 parser.add_argument('-n', '--requests', type=int, default=1000)
 parser.add_argument('-c', '--concurrency', type=int, default=100)
 parser.add_argument('--multicast', action='store_true')
@@ -35,6 +38,8 @@ parser.add_argument('--timeout', type=int, default=60)
 parser.add_argument('--fix-slirp-backlog', action='store_true',
                     help='Darwin only: raise the QEMU host-forward listener backlog from 1 to SOMAXCONN')
 args = parser.parse_args()
+if args.shared_intx and args.nic == 'virtio':
+    parser.error('--shared-intx requires an Intel NIC')
 if args.boot_multicast and not args.multicast:
     parser.error('--boot-multicast requires --multicast')
 repo = pathlib.Path(__file__).resolve().parents[2]
@@ -72,7 +77,8 @@ command = [
     '-netdev', f'socket,id=inject,udp=127.0.0.1:{peer_port},localaddr=127.0.0.1:{inject_port}',
     '-netdev', 'hubport,id=inject-port,hubid=0,netdev=inject',
     '-netdev', 'hubport,id=net0,hubid=0',
-    '-device', 'virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on',
+    '-device', ('virtio-net,netdev=net0,addr=5,disable-legacy=off,disable-modern=on'
+                if args.nic == 'virtio' else f'{args.nic},netdev=net0,addr=5'),
     '-object', f'filter-dump,id=dump,netdev=net0,file={logs / "net.pcap"}',
     '-drive', f'if=pflash,format=raw,readonly=on,file={firmware / "OVMF_CODE.fd"}',
     '-drive', f'if=pflash,format=raw,file={logs / "OVMF_VARS.fd"}',
@@ -80,6 +86,9 @@ command = [
     '-drive', f'if=none,id=disk,format=raw,snapshot=on,file={args.image.resolve()}',
     '-device', 'ide-hd,drive=disk,bus=ahci.0,bootindex=1', '--no-reboot', '--no-shutdown',
 ]
+if args.shared_intx:
+    # Slots 5 and 9 share PIRQ A on i440fx. USB owns the IRQ before intel-net.
+    command.extend(['-device', 'qemu-xhci,addr=9'])
 
 def multicast_frame():
     ip = bytearray(struct.pack('!BBHHHBBH4s4s', 0x45, 0, 28, 0, 0, 1, 17, 0,
@@ -149,12 +158,16 @@ with (logs / 'qemu.log').open('w') as diagnostics:
     worker = threading.Thread(target=network_peer)
     worker.start()
     try:
-        wait_for(lambda text: re.search(r'\[\s*shell\] font init end', text) and '[              honoka] online' in text)
+        # Font diagnostics can interleave with another CPU's output. They are
+        # not a readiness protocol; actual HTTP listen/traffic is checked below.
+        wait_for(lambda text: '[              honoka] online' in text)
         expected_mask = str(ipaddress.IPv4Network(f'10.0.2.0/{args.subnet_prefix}').netmask)
         # SMP boot logs can interleave characters from different services.
         # Only apply_lease logs this dotted mask token; do not require its
         # prefix and address to survive as one uninterrupted serial line.
         wait_for(lambda text: re.search(r'\bmask=' + re.escape(expected_mask) + r'\b', text))
+        if args.shared_intx:
+            wait_for(lambda text: 'rx=timer' in text)
         print(f'Guest applied DHCP mask {expected_mask}', flush=True)
         time.sleep(5)
         for char in 'http-server\n':

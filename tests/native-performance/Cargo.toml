@@ -193,6 +193,10 @@ name = "intel-graphics"
 path = "intel-graphics.rs"
 
 [[test]]
+name = "intel-net"
+path = "intel-net.rs"
+
+[[test]]
 name = "gpu"
 path = "gpu.rs"
 

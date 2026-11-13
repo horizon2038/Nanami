@@ -13,8 +13,8 @@ mod power;
 mod routing;
 mod slots;
 
-use nanami_runtime::{ipc::ServiceEvent, RequestError, Word};
 use nanami_client::{power::ACPI_SERVICE, registry, vfs};
+use nanami_runtime::{ipc::ServiceEvent, RequestError, Word};
 
 use slots::{DEVICE_MANAGER_SLOT, SERVICE_SLOT, VFS_SLOT};
 
@@ -30,15 +30,15 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
         nanami_client::device::DEVICE_MANAGER_SERVICE,
         DEVICE_MANAGER_SLOT,
     )?;
-    let rsdp = nanami_client::device::acpi_rsdp(
-        nanami_runtime::ipc::process_slot_descriptor(DEVICE_MANAGER_SLOT),
-    )?;
+    let rsdp = nanami_client::device::acpi_rsdp(nanami_runtime::ipc::process_slot_descriptor(
+        DEVICE_MANAGER_SLOT,
+    ))?;
     // Register before loading AML. Routing runs on notification without holding
     // a driver-manager RPC; power methods remain deferred until shutdown.
     registry::register_service(ACPI_SERVICE)?;
-    nanami_runtime::ipc::bind_current_thread_notification(nanami_runtime::ipc::process_slot_descriptor(
-        nanami_runtime::PROCESS_SLOT_NOTIFICATION,
-    ))?;
+    nanami_runtime::ipc::bind_current_thread_notification(
+        nanami_runtime::ipc::process_slot_descriptor(nanami_runtime::PROCESS_SLOT_NOTIFICATION),
+    )?;
     nanami_runtime::println!("[acpi-server] ready rsdp={:#x} (S5 on demand)", rsdp);
     let port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_SLOT);
     let mut reply = None;
@@ -50,7 +50,9 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     };
     loop {
         let event = match reply.take() {
-            Some(status) => nanami_runtime::ipc::service_reply_receive_event(port, status, 0, 0)?,
+            Some((status, a, b)) => {
+                nanami_runtime::ipc::service_reply_receive_event(port, status, a, b)?
+            }
             None => nanami_runtime::ipc::service_receive_event(port)?,
         };
         if let ServiceEvent::Notification { identifier, .. } = event {
@@ -60,20 +62,28 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             continue;
         }
         if let ServiceEvent::Request(request) = event {
+            if request.code == nanami_client::power::ACPI_REQUEST_PCI_INTX_ROUTE {
+                failure::request_active(true);
+                reply = Some(match state.pci_route(rsdp, request.arg0, request.arg1) {
+                    Ok(irq) => (nanami_runtime::OS_RESPONSE_OK, irq, 0),
+                    Err(_) => (nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION, 0, 0),
+                });
+                failure::request_active(false);
+                continue;
+            }
             failure::request_active(true);
-            reply = Some(
-                if request.code != nanami_client::power::POWER_REQUEST_SHUTDOWN {
-                    nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT
-                } else {
-                    match state.shutdown(rsdp) {
-                        Err(error) => {
-                            nanami_runtime::println!("[acpi-server] shutdown aborted: {}", error);
-                            nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION
-                        }
-                        Ok(()) => nanami_runtime::OS_RESPONSE_FATAL,
+            let status = if request.code != nanami_client::power::POWER_REQUEST_SHUTDOWN {
+                nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT
+            } else {
+                match state.shutdown(rsdp) {
+                    Err(error) => {
+                        nanami_runtime::println!("[acpi-server] shutdown aborted: {}", error);
+                        nanami_runtime::OS_RESPONSE_ILLEGAL_OPERATION
                     }
-                },
-            );
+                    Ok(()) => nanami_runtime::OS_RESPONSE_FATAL,
+                }
+            };
+            reply = Some((status, 0, 0));
             failure::request_active(false);
         }
     }
@@ -87,6 +97,16 @@ struct State {
 }
 
 impl State {
+    fn pci_route(&mut self, rsdp: Word, address: Word, pin: Word) -> Result<Word, RequestError> {
+        if address & !0x00ff_1f07 != 0 || !(1..=4).contains(&pin) {
+            return Err(RequestError::InvalidArgument);
+        }
+        let firmware = self.firmware(rsdp)?;
+        routing::Routing::new(firmware.interpreter.clone())
+            .and_then(|router| router.route(address, pin as u8))
+            .and_then(|route| route.supported_irq())
+            .map_err(|_| RequestError::Unsupported)
+    }
     fn firmware(&mut self, rsdp: Word) -> Result<&firmware::Firmware, RequestError> {
         if self.host.is_none() {
             self.host = Some(host::Host::new()?);
@@ -111,8 +131,7 @@ impl State {
             })
         });
         for index in 0..4 {
-            let Ok(Some((bdf, pin))) = nanami_client::device::usb_pci_route(manager, index)
-            else {
+            let Ok(Some((bdf, pin))) = nanami_client::device::usb_pci_route(manager, index) else {
                 continue;
             };
             let irq = router.as_ref().ok().and_then(|router| {

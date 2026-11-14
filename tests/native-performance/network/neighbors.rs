@@ -15,10 +15,10 @@ use arp::{arp_lookup, emit_arp_request};
 mod dns;
 #[path = "../../../nanami/servers/apps/net-server/src/app/ip.rs"]
 mod ip;
-#[path = "../../../nanami/servers/apps/net-server/src/app/tcp_send.rs"]
-mod tcp_send;
 #[path = "../../../nanami/servers/apps/net-server/src/app/routing.rs"]
 mod routing;
+#[path = "../../../nanami/servers/apps/net-server/src/app/tcp_send.rs"]
+mod tcp_send;
 use routing::next_hop_ip;
 
 const ETH_HDR_LEN: usize = 14;
@@ -94,13 +94,20 @@ fn emit_tcp_segment(
     _: [u8; 4],
     _: u16,
     _: u16,
+    seq: u32,
     _: u32,
-    _: u32,
-    _: u8,
+    flags: u8,
     _: u16,
     data: &[u8],
 ) -> Result<Word, RequestError> {
-    Ok(data.len())
+    FAKE.with(|f| {
+        let mut f = f.borrow_mut();
+        if f.segment_fail_after.is_some_and(|n| f.segments.len() >= n) {
+            return Err(RequestError::Transport);
+        }
+        f.segments.push((seq, flags, data.len()));
+        Ok(data.len())
+    })
 }
 
 mod dhcp {
@@ -157,6 +164,7 @@ mod udp {
 }
 
 fn setup() -> (Vec<u8>, NetRuntime) {
+    FAKE.with(|f| *f.borrow_mut() = Fake::default());
     let mut buffer = vec![0u8; 4096];
     let runtime = NetRuntime {
         mac: [2, 0, 0, 0, 0, 26],
@@ -358,6 +366,42 @@ fn addressed_packets_learn_local_peers_and_routed_next_hops() {
     assert_eq!(arp_lookup(&runtime, [192, 168, 1, 22]), Some([2; 6]));
     assert_eq!(arp_lookup(&runtime, runtime.gateway_ip), Some([4; 6]));
     assert_eq!(arp_lookup(&runtime, [10, 0, 0, 2]), None);
+}
+
+#[test]
+fn partial_segment_failure_reports_the_consumed_prefix_and_defers_fin() {
+    let (_buffer, mut runtime) = setup();
+    runtime.arp.update([192, 168, 1, 22], [2; 6]);
+    FAKE.with(|f| f.borrow_mut().segment_fail_after = Some(1));
+    let request = || ipc::ServiceRequest {
+        identifier: 1,
+        arg0: 512,
+        arg1: 3000,
+        arg2: 0x19,
+        arg3: 7,
+    };
+    let mut stats = NetStats::default();
+    assert_eq!(
+        tcp_send::handle_tcp_send_request(&mut runtime, request(), &mut stats),
+        (OS_RESPONSE_OK, 1460, 0)
+    );
+    assert_eq!(runtime.tcp_connections[0].snd_nxt, 1560);
+    assert_eq!(runtime.tcp_connections[0].state, 2);
+    FAKE.with(|f| f.borrow_mut().segment_fail_after = None);
+    let mut retry = request();
+    retry.arg0 += 1460;
+    retry.arg1 -= 1460;
+    assert_eq!(
+        tcp_send::handle_tcp_send_request(&mut runtime, retry, &mut stats),
+        (OS_RESPONSE_OK, 1540, 0)
+    );
+    assert_eq!(runtime.tcp_connections[0].snd_nxt, 3101);
+    FAKE.with(|f| {
+        assert_eq!(
+            f.borrow().segments,
+            [(100, 0x18, 1460), (1560, 0x18, 1460), (3020, 0x19, 80)]
+        )
+    });
 }
 
 #[test]

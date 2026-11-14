@@ -33,6 +33,7 @@ pub fn create(root: &Path, args: &Common) -> Result<PathBuf> {
     for dir in [
         "/nanami",
         "/bin",
+        "/www",
         "/.honoka",
         "/alter",
         "/alter/linux",
@@ -55,6 +56,13 @@ pub fn create(root: &Path, args: &Common) -> Result<PathBuf> {
     let session = payload::manifest(root, "session-list", args.arch)?;
     builder.add_file("/nanami/system-list", 0o644, system.clone())?;
     builder.add_file("/nanami/session-list", 0o644, session.clone())?;
+    for name in ["index.html", "style.css"] {
+        builder.add_file(
+            &format!("/www/{name}"),
+            0o644,
+            fs::read(root.join("nanami/servers/apps/http-server/src").join(name))?,
+        )?;
+    }
     let theme = root.join("nanami/servers/apps/honoka/assets/themes");
     let config = fs::read(theme.join("config")).context("Honoka theme config")?;
     ensure!(!config.is_empty(), "Honoka theme config is empty");
@@ -276,6 +284,7 @@ mod tests {
         for directory in [
             "nanami/servers/core-services",
             "nanami/servers/apps/sample/src",
+            "nanami/servers/apps/http-server/src",
             "nanami/servers/apps/honoka/assets/themes",
             "bin/nested",
         ] {
@@ -287,6 +296,14 @@ mod tests {
                 "[package]\nname='sample_binary'\n",
             ),
             ("nanami/servers/apps/sample/src/main.rs", ""),
+            (
+                "nanami/servers/apps/http-server/src/index.html",
+                "http-html-fixture",
+            ),
+            (
+                "nanami/servers/apps/http-server/src/style.css",
+                "http-css-fixture",
+            ),
             ("nanami/servers/system-list", "sample 20 /bin/sample\n"),
             ("nanami/servers/session-list", ""),
             ("nanami/servers/apps/honoka/assets/themes/config", "dark"),
@@ -327,6 +344,8 @@ mod tests {
             b"hidden-payload",
             b"game-data-payload",
             b"native-payload",
+            b"http-html-fixture",
+            b"http-css-fixture",
             b"theme-payload",
             b"vt100|Nanami VT100-compatible terminal\0",
             b"nanami-256color|Nanami color terminal\0",

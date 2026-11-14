@@ -1,10 +1,15 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+extern crate alloc;
 
 use core::cmp::min;
 use core::ptr;
 use nanami_runtime::Word;
 
+mod content;
+mod framing;
+mod options;
 mod reactor;
 use reactor::run_http_reactor;
 
@@ -28,8 +33,6 @@ const RX_BUDGET: usize = 128;
 const TX_BUDGET: usize = 128;
 const TCP_RECV_MAX: Word = 1400;
 
-const INDEX_HTML: &str = include_str!("index.html");
-const STYLE_CSS: &str = include_str!("style.css");
 const HTTP_HDR_200: &[u8] = b"HTTP/1.1 200 OK\r\n";
 const HTTP_HDR_404: &[u8] = b"HTTP/1.1 404 Not Found\r\n";
 const HTTP_HDR_CONTENT_TYPE_HTML: &[u8] = b"Content-Type: text/html; charset=utf-8\r\n";
@@ -46,9 +49,14 @@ enum ResponseKind {
     Index,
     Style,
     NotFound,
+    BadRequest,
 }
 
 struct ResponseCache {
+    index: &'static [u8],
+    style: &'static [u8],
+    bad_request: [u8; HTTP_HEADER_CAP],
+    bad_request_len: usize,
     index_close: [u8; HTTP_HEADER_CAP],
     index_close_len: usize,
     index_keep_alive: [u8; HTTP_HEADER_CAP],
@@ -65,6 +73,10 @@ struct ResponseCache {
 
 impl ResponseCache {
     const EMPTY: Self = Self {
+        index: b"",
+        style: b"",
+        bad_request: [0; HTTP_HEADER_CAP],
+        bad_request_len: 0,
         index_close: [0; HTTP_HEADER_CAP],
         index_close_len: 0,
         index_keep_alive: [0; HTTP_HEADER_CAP],
@@ -85,8 +97,32 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     nanami_runtime::print!("[http-server] panic\n");
     loop {}
 }
+#[alloc_error_handler]
+fn oom(_: core::alloc::Layout) -> ! {
+    panic!("out of memory");
+}
 
 fn nanami_main() -> nanami_runtime::NanamiResult {
+    nanami_runtime::ipc::init_ipc_tls()?;
+    nanami_runtime::heap::init_heap(8 * 1024 * 1024)?;
+    if nanami_runtime::process_arg(1) == Some(b"--help") {
+        nanami_runtime::println!(
+            "http-server [--port 1..65535] [--file /www/index.html] [--css /www/style.css]"
+        );
+        return Ok(());
+    }
+    let options = options::Options::parse(|index| {
+        nanami_runtime::process_arg(index).and_then(|bytes| core::str::from_utf8(bytes).ok())
+    })
+    .map_err(|message| {
+        nanami_runtime::println!("[http-server] {}", message);
+        nanami_runtime::NanamiError(nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT)
+    })?;
+    let (index, style) = content::load(options.file, options.css).map_err(|error| {
+        nanami_runtime::println!("[http-server] content load failed: {}", error);
+        error
+    })?;
+    let response_cache = build_response_cache(index, style);
     nanami_runtime::print!("[http-server] bootstrap\n");
 
     let notification =
@@ -147,16 +183,28 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     nanami_client::net::net_service_control(
         net_desc,
         nanami_client::net::NET_SERVICE_CONTROL_TCP_BIND,
-        80,
+        options.port as Word,
         0,
     )
     .map_err(|e| {
         log_request_error("[http-server] tcp bind failed: ", e);
         e
     })?;
-    nanami_runtime::print!("[http-server] tcp listen port=80\n");
+    nanami_runtime::println!(
+        "[http-server] tcp listen port={} file={} bytes={}",
+        options.port,
+        options.file,
+        index.len()
+    );
 
-    run_http_reactor(net_desc, timer_desc, rx_notification, shm_vaddr, shm_size)
+    run_http_reactor(
+        net_desc,
+        timer_desc,
+        rx_notification,
+        shm_vaddr,
+        shm_size,
+        response_cache,
+    )
 }
 
 fn wait_network_service(timer_desc: Option<Word>) {
@@ -269,13 +317,20 @@ fn build_http_header(
 }
 
 fn request_path<'a>(req: &'a [u8]) -> Option<&'a [u8]> {
-    if req.len() < 6 || !req.starts_with(b"GET ") {
+    let start = if req.starts_with(b"GET ") {
+        4
+    } else if req.starts_with(b"HEAD ") {
+        5
+    } else {
+        return None;
+    };
+    if req.len() < start + 2 {
         return None;
     }
-    let mut i = 4usize;
+    let mut i = start;
     while i < req.len() {
         if req[i] == b' ' {
-            return Some(&req[4..i]);
+            return Some(&req[start..i]);
         }
         if req[i] == b'\r' || req[i] == b'\n' {
             return None;
@@ -285,97 +340,11 @@ fn request_path<'a>(req: &'a [u8]) -> Option<&'a [u8]> {
     None
 }
 
-fn ascii_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0usize;
-    while i < a.len() {
-        let ac = if a[i].is_ascii_uppercase() {
-            a[i] + 32
-        } else {
-            a[i]
-        };
-        let bc = if b[i].is_ascii_uppercase() {
-            b[i] + 32
-        } else {
-            b[i]
-        };
-        if ac != bc {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
-fn contains_token_ignore_case(haystack: &[u8], token: &[u8]) -> bool {
-    if token.is_empty() || haystack.len() < token.len() {
-        return false;
-    }
-    let mut i = 0usize;
-    while i + token.len() <= haystack.len() {
-        if ascii_eq_ignore_case(&haystack[i..i + token.len()], token) {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-fn header_value<'a>(req: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
-    let mut line_start = 0usize;
-    while line_start < req.len() {
-        let mut line_end = line_start;
-        while line_end < req.len() && req[line_end] != b'\n' {
-            line_end += 1;
-        }
-        let mut end = line_end;
-        if end > line_start && req[end - 1] == b'\r' {
-            end -= 1;
-        }
-        let line = &req[line_start..end];
-        if line.len() > name.len()
-            && ascii_eq_ignore_case(&line[..name.len()], name)
-            && line[name.len()] == b':'
-        {
-            let mut value_start = name.len() + 1;
-            while value_start < line.len()
-                && (line[value_start] == b' ' || line[value_start] == b'\t')
-            {
-                value_start += 1;
-            }
-            return Some(&line[value_start..]);
-        }
-        line_start = line_end.saturating_add(1);
-    }
-    None
-}
-
-fn request_is_http11(req: &[u8]) -> bool {
-    let mut i = 0usize;
-    while i < req.len() {
-        if req[i] == b'\r' || req[i] == b'\n' {
-            return false;
-        }
-        if i + 8 <= req.len() && &req[i..i + 8] == b"HTTP/1.1" {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
 fn should_keep_alive(req: &[u8]) -> bool {
-    if let Some(value) = header_value(req, b"Connection") {
-        if contains_token_ignore_case(value, b"close") {
-            return false;
-        }
-        if contains_token_ignore_case(value, b"keep-alive") {
-            return true;
-        }
-    }
-    request_is_http11(req)
+    framing::request(req)
+        .ok()
+        .flatten()
+        .is_some_and(|request| request.keep_alive)
 }
 
 fn select_response_kind(req: &[u8]) -> ResponseKind {
@@ -389,16 +358,21 @@ fn select_response_kind(req: &[u8]) -> ResponseKind {
     ResponseKind::NotFound
 }
 
-fn response_body(kind: ResponseKind) -> &'static [u8] {
+fn response_body(cache: &ResponseCache, kind: ResponseKind) -> &'static [u8] {
     match kind {
-        ResponseKind::Index => INDEX_HTML.as_bytes(),
-        ResponseKind::Style => STYLE_CSS.as_bytes(),
+        ResponseKind::Index => cache.index,
+        ResponseKind::Style => cache.style,
         ResponseKind::NotFound => BODY_404,
+        ResponseKind::BadRequest => b"400 Bad Request\n",
     }
 }
 
 fn response_header(cache: &ResponseCache, kind: ResponseKind, keep_alive: bool) -> (&[u8], usize) {
     match (kind, keep_alive) {
+        (ResponseKind::BadRequest, _) => (
+            &cache.bad_request[..cache.bad_request_len],
+            cache.bad_request_len,
+        ),
         (ResponseKind::Index, false) => (
             &cache.index_close[..cache.index_close_len],
             cache.index_close_len,
@@ -426,13 +400,23 @@ fn response_header(cache: &ResponseCache, kind: ResponseKind, keep_alive: bool) 
     }
 }
 
-fn build_response_cache() -> ResponseCache {
+fn build_response_cache(index: &'static [u8], style: &'static [u8]) -> ResponseCache {
     let mut cache = ResponseCache::EMPTY;
+    cache.index = index;
+    cache.style = style;
+    cache.bad_request_len = build_http_header(
+        &mut cache.bad_request,
+        b"HTTP/1.1 400 Bad Request\r\n",
+        HTTP_HDR_CONTENT_TYPE_TEXT,
+        b"400 Bad Request\n".len(),
+        false,
+    )
+    .unwrap_or(0);
     cache.index_close_len = build_http_header(
         &mut cache.index_close,
         HTTP_HDR_200,
         HTTP_HDR_CONTENT_TYPE_HTML,
-        INDEX_HTML.len(),
+        index.len(),
         false,
     )
     .unwrap_or(0);
@@ -440,7 +424,7 @@ fn build_response_cache() -> ResponseCache {
         &mut cache.index_keep_alive,
         HTTP_HDR_200,
         HTTP_HDR_CONTENT_TYPE_HTML,
-        INDEX_HTML.len(),
+        index.len(),
         true,
     )
     .unwrap_or(0);
@@ -448,7 +432,7 @@ fn build_response_cache() -> ResponseCache {
         &mut cache.style_close,
         HTTP_HDR_200,
         HTTP_HDR_CONTENT_TYPE_CSS,
-        STYLE_CSS.len(),
+        style.len(),
         false,
     )
     .unwrap_or(0);
@@ -456,7 +440,7 @@ fn build_response_cache() -> ResponseCache {
         &mut cache.style_keep_alive,
         HTTP_HDR_200,
         HTTP_HDR_CONTENT_TYPE_CSS,
-        STYLE_CSS.len(),
+        style.len(),
         true,
     )
     .unwrap_or(0);

@@ -573,7 +573,7 @@ fn tx_backpressure_never_overwrites_owned_dma_and_completion_reclaims_it() {
                 bytes.len(),
             )
         },
-        Err(RequestError::Transport)
+        Err(RequestError::Status(net::NET_DEVICE_RESPONSE_WOULD_BLOCK))
     );
     unsafe {
         let descriptor = dma.ptr.add(ring::TX_OFFSET).cast::<ring::Descriptor>();

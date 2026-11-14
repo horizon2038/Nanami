@@ -22,12 +22,130 @@ const DHCP_MSG_REQUEST: u8 = 3;
 const DHCP_MSG_ACK: u8 = 5;
 const DHCP_MSG_NAK: u8 = 6;
 
-const DHCP_POLL_STEP_MS: Word = 200;
 const DHCP_SEND_ERROR_BACKOFF_MS: Word = 250;
 const DHCP_RETX_BACKOFF_INITIAL_MS: Word = 4000;
 const DHCP_RETX_BACKOFF_MAX_MS: Word = 64000;
 const DHCP_MAX_RETRIES: usize = 6;
-const DHCP_PUMP_BURST: usize = 128;
+
+/// Nonblocking acquisition: service requests continue while a lease is pending.
+pub struct Acquisition {
+    phase: u8,
+    retry: usize,
+    deadline: Word,
+    poll_at: Word,
+}
+impl Acquisition {
+    pub const OFF: Self = Self {
+        phase: 0,
+        retry: 0,
+        deadline: 0,
+        poll_at: 0,
+    };
+    pub fn active(&self) -> bool {
+        matches!(self.phase, 1 | 2)
+    }
+    pub fn start(runtime: &mut NetRuntime, now: Word) -> Self {
+        runtime.dhcp_waiting = true;
+        runtime.dhcp_offer_valid = false;
+        runtime.dhcp_ack_valid = false;
+        runtime.dhcp_offer_ip = [0; 4];
+        runtime.dhcp_server_ip = [0; 4];
+        runtime.dhcp_router_ip = [0; 4];
+        runtime.dhcp_dns_ip = [0; 4];
+        runtime.dhcp_subnet_mask = None;
+        super::refresh_dhcp_port(runtime, false);
+        runtime.dhcp_xid = make_dhcp_xid(runtime.mac) ^ now as u32;
+        let mut acquisition = Self {
+            phase: 1,
+            retry: 0,
+            deadline: now,
+            poll_at: now,
+        };
+        acquisition.send(runtime, now);
+        acquisition
+    }
+    fn send(&mut self, runtime: &NetRuntime, now: Word) {
+        let result = if self.phase == 1 {
+            nanami_runtime::println!("[net-server][dhcp] discover retry={}", self.retry);
+            send_dhcp_discover(runtime)
+        } else {
+            nanami_runtime::println!("[net-server][dhcp] request retry={}", self.retry);
+            send_dhcp_request(runtime)
+        };
+        let delay = if result.is_ok() {
+            dhcp_backoff_ms(self.retry)
+        } else {
+            DHCP_SEND_ERROR_BACKOFF_MS
+        };
+        self.deadline = now.saturating_add(delay);
+    }
+    pub fn poll(&mut self, runtime: &mut NetRuntime, now: Word) -> Word {
+        use nanami_client::net::*;
+        if !self.active() {
+            return IPV4_STATE_UNCONFIGURED;
+        }
+        if now < self.poll_at
+            && !(runtime.dhcp_ack_valid && self.phase == 2)
+            && !(runtime.dhcp_offer_valid && self.phase == 1)
+            && !(self.phase == 2 && !runtime.dhcp_offer_valid)
+        {
+            return IPV4_STATE_ACQUIRING;
+        }
+        self.poll_at = now.saturating_add(100);
+        if runtime.dhcp_ack_valid && self.phase == 2 {
+            let lease = Ipv4Settings {
+                mode: IPV4_MODE_MANUAL,
+                address: runtime.dhcp_offer_ip,
+                netmask: runtime.dhcp_subnet_mask.unwrap_or([0; 4]),
+                gateway: runtime.dhcp_router_ip,
+                dns: runtime.dhcp_dns_ip,
+            };
+            if lease.validate_apply().is_ok() {
+                apply_lease(runtime);
+                runtime.dhcp_waiting = false;
+                let _ = emit_gratuitous_arp_reply(runtime);
+                self.phase = 0;
+                return IPV4_STATE_READY;
+            }
+            runtime.dhcp_ack_valid = false;
+            runtime.dhcp_offer_valid = false;
+            runtime.dhcp_waiting = false;
+            self.phase = 0;
+            nanami_runtime::println!(
+                "[net-server][dhcp] rejected invalid address, subnet or gateway"
+            );
+            return IPV4_STATE_FAILED;
+        }
+        let changed = super::refresh_dhcp_port(runtime, false);
+        if changed {
+            *self = Self::start(runtime, now);
+        } else if self.phase == 2 && !runtime.dhcp_offer_valid {
+            // RFC 2131 4.4.4 recommends a ten-second pause after a NAK.
+            self.phase = 1;
+            self.retry = 0;
+            runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(1);
+            self.deadline = now.saturating_add(10_000);
+        } else if self.phase == 1 && runtime.dhcp_offer_valid {
+            self.phase = 2;
+            self.retry = 0;
+            self.send(runtime, now);
+        } else if now >= self.deadline {
+            super::report_backend_status(runtime);
+            self.retry += 1;
+            if self.retry >= DHCP_MAX_RETRIES {
+                self.phase = 0;
+                runtime.dhcp_waiting = false;
+                return IPV4_STATE_FAILED;
+            }
+            if self.phase == 1 && super::refresh_dhcp_port(runtime, true) {
+                *self = Self::start(runtime, now);
+            } else {
+                self.send(runtime, now);
+            }
+        }
+        IPV4_STATE_ACQUIRING
+    }
+}
 
 #[derive(Clone, Copy)]
 struct DhcpParsed {
@@ -172,220 +290,6 @@ fn inspect_dhcp_packet(payload: &[u8]) -> Option<(u32, u8)> {
     Some((xid, msg_type))
 }
 
-pub(crate) fn dhcp_bootstrap(runtime: &mut NetRuntime, stats: &mut NetStats) {
-    runtime.dhcp_waiting = true;
-    runtime.dhcp_offer_valid = false;
-    runtime.dhcp_ack_valid = false;
-    runtime.dhcp_offer_ip = [0; 4];
-    runtime.dhcp_server_ip = [0; 4];
-    runtime.dhcp_router_ip = [0; 4];
-    runtime.dhcp_dns_ip = [0; 4];
-    runtime.dhcp_subnet_mask = None;
-    runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
-
-    nanami_runtime::print!("[net-server][dhcp] bootstrap start xid=0x");
-    nanami_runtime::print!("{:#x}", runtime.dhcp_xid as usize);
-    nanami_runtime::print!("\n");
-
-    'discover_phase: loop {
-        runtime.dhcp_offer_valid = false;
-        runtime.dhcp_ack_valid = false;
-        runtime.dhcp_server_ip = [0; 4];
-        runtime.dhcp_router_ip = [0; 4];
-        runtime.dhcp_dns_ip = [0; 4];
-        runtime.dhcp_subnet_mask = None;
-
-        let mut retry = 0usize;
-        loop {
-            if super::refresh_dhcp_port(runtime, retry != 0) {
-                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
-            }
-            nanami_runtime::print!("[net-server][dhcp] discover");
-            if retry > 0 {
-                nanami_runtime::print!(" retry=");
-                nanami_runtime::print!("{}", retry);
-            }
-            nanami_runtime::print!("\n");
-
-            let wait_ms = dhcp_backoff_ms(retry);
-            if let Err(e) = send_dhcp_discover(runtime) {
-                log_request_error("[net-server][dhcp] discover send failed: ", e);
-                super::sleep_ms(runtime.timer_port, DHCP_SEND_ERROR_BACKOFF_MS);
-            } else if wait_dhcp_offer(runtime, stats, wait_ms) && runtime.dhcp_offer_valid {
-                break;
-            }
-
-            super::report_backend_status(runtime);
-            retry = retry.saturating_add(1);
-            if retry >= DHCP_MAX_RETRIES {
-                use_configured_fallback(runtime, "offer timeout");
-                return;
-            }
-            nanami_runtime::print!("[net-server][dhcp] offer timeout, retry=");
-            nanami_runtime::print!("{}", retry);
-            nanami_runtime::print!(" next_wait_ms=");
-            nanami_runtime::print!("{}", dhcp_backoff_ms(retry));
-            nanami_runtime::print!("\n");
-        }
-
-        let mut retry = 0usize;
-        loop {
-            runtime.dhcp_ack_valid = false;
-            nanami_runtime::print!("[net-server][dhcp] request");
-            if retry > 0 {
-                nanami_runtime::print!(" retry=");
-                nanami_runtime::print!("{}", retry);
-            }
-            nanami_runtime::print!("\n");
-
-            let wait_ms = dhcp_backoff_ms(retry);
-            if let Err(e) = send_dhcp_request(runtime) {
-                log_request_error("[net-server][dhcp] request send failed: ", e);
-                super::sleep_ms(runtime.timer_port, DHCP_SEND_ERROR_BACKOFF_MS);
-            } else if wait_dhcp_ack(runtime, stats, wait_ms) && runtime.dhcp_ack_valid {
-                apply_lease(runtime);
-                runtime.dhcp_waiting = false;
-                return;
-            }
-
-            super::report_backend_status(runtime);
-            if !runtime.dhcp_offer_valid {
-                nanami_runtime::print!(
-                    "[net-server][dhcp] request invalidated; restart discover\n"
-                );
-                runtime.dhcp_xid = runtime.dhcp_xid.wrapping_add(0x1111_1111);
-                continue 'discover_phase;
-            }
-
-            retry = retry.saturating_add(1);
-            if retry >= DHCP_MAX_RETRIES {
-                use_configured_fallback(runtime, "ack timeout");
-                return;
-            }
-            nanami_runtime::print!("[net-server][dhcp] ack timeout, retry=");
-            nanami_runtime::print!("{}", retry);
-            nanami_runtime::print!(" next_wait_ms=");
-            nanami_runtime::print!("{}", dhcp_backoff_ms(retry));
-            nanami_runtime::print!("\n");
-        }
-    }
-}
-
-fn use_configured_fallback(runtime: &mut NetRuntime, reason: &str) {
-    runtime.dhcp_waiting = false;
-    runtime.dhcp_offer_valid = false;
-    runtime.dhcp_ack_valid = false;
-    nanami_runtime::print!("[net-server][dhcp] ");
-    nanami_runtime::print!("{}", reason);
-    if runtime.ip == [0; 4] {
-        nanami_runtime::print!("; IPv4 remains unconfigured (no DHCP lease)\n");
-        return;
-    }
-    nanami_runtime::print!("; using configured ip=");
-    log_ip(runtime.ip);
-    nanami_runtime::print!(" gw=");
-    log_ip(runtime.gateway_ip);
-    nanami_runtime::print!(" dns=");
-    log_ip(runtime.dns_ip);
-    nanami_runtime::print!("\n");
-}
-
-fn wait_dhcp_offer(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {
-    wait_dhcp(runtime, stats, timeout_ms, false)
-}
-
-fn wait_dhcp_ack(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word) -> bool {
-    wait_dhcp(runtime, stats, timeout_ms, true)
-}
-
-fn wait_dhcp(runtime: &mut NetRuntime, stats: &mut NetStats, timeout_ms: Word, ack: bool) -> bool {
-    use nanami_client::timer::{timer_service_monotonic_ticks, timer_service_set_alarm_ticks};
-    let complete = |runtime: &NetRuntime| {
-        if ack {
-            runtime.dhcp_ack_valid
-        } else {
-            runtime.dhcp_offer_valid
-        }
-    };
-    let Some(timer) = runtime.timer_port else {
-        // Preserve the bounded fallback for platforms without a clock service.
-        let mut elapsed = 0;
-        while elapsed < timeout_ms {
-            if !ack && super::refresh_dhcp_port(runtime, false) {
-                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
-                return false; // Resend DISCOVER using this port's MAC/xid.
-            }
-            super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
-            if complete(runtime) {
-                return true;
-            }
-            if ack && !runtime.dhcp_offer_valid {
-                return false;
-            }
-            super::sleep_ms(None, DHCP_POLL_STEP_MS);
-            elapsed += DHCP_POLL_STEP_MS;
-        }
-        return false;
-    };
-    let mut alarm = None;
-    let result = (|| -> Result<bool, RequestError> {
-        let (start, hz) = timer_service_monotonic_ticks(timer)?;
-        if hz == 0 {
-            return Err(RequestError::Protocol);
-        }
-        let ticks =
-            |ms: Word| ((ms as u128 * hz as u128).div_ceil(1000)).min(Word::MAX as u128) as Word;
-        let deadline = start.saturating_add(ticks(timeout_ms));
-        loop {
-            if !ack && super::refresh_dhcp_port(runtime, false) {
-                runtime.dhcp_xid = make_dhcp_xid(runtime.mac);
-                return Ok(false);
-            }
-            let count = super::pump_backend_with_budget(runtime, stats, DHCP_PUMP_BURST);
-            if complete(runtime) {
-                return Ok(true);
-            }
-            if ack && !runtime.dhcp_offer_valid {
-                return Ok(false);
-            }
-            let now = timer_service_monotonic_ticks(timer)?.0;
-            if now >= deadline {
-                return Ok(false);
-            }
-            // A full batch may leave a DHCP reply queued behind LAN traffic.
-            // Drain another bounded batch instead of inserting a minimum sleep.
-            if count == DHCP_PUMP_BURST {
-                continue;
-            }
-            if alarm.is_none_or(|tick| tick <= now) {
-                let tick = now.saturating_add(ticks(DHCP_POLL_STEP_MS)).min(deadline);
-                timer_service_set_alarm_ticks(
-                    timer,
-                    nanami_runtime::PROCESS_SLOT_NOTIFICATION,
-                    Some(tick),
-                )?;
-                alarm = Some(tick);
-            }
-            // RX notifications wake immediately; the alarm covers polling-only
-            // NICs and an absent server. Only one replaceable alarm is live.
-            nanami_runtime::ipc::notification_wait(nanami_runtime::ipc::process_slot_descriptor(
-                nanami_runtime::PROCESS_SLOT_NOTIFICATION,
-            ))?;
-        }
-    })();
-    if alarm.is_some() {
-        if let Err(error) =
-            timer_service_set_alarm_ticks(timer, nanami_runtime::PROCESS_SLOT_NOTIFICATION, None)
-        {
-            log_request_error("[net-server][dhcp] alarm cancellation failed: ", error);
-        }
-    }
-    result.unwrap_or_else(|error| {
-        log_request_error("[net-server][dhcp] wait failed: ", error);
-        false
-    })
-}
-
 fn dhcp_backoff_ms(retry: usize) -> Word {
     if retry == 0 {
         return DHCP_RETX_BACKOFF_INITIAL_MS;
@@ -419,7 +323,6 @@ fn apply_lease(runtime: &mut NetRuntime) {
     nanami_runtime::print!(" dns=");
     log_ip(runtime.dns_ip);
     nanami_runtime::print!("\n");
-    announce_lease(runtime);
 }
 
 fn make_dhcp_xid(mac: [u8; 6]) -> u32 {
@@ -428,16 +331,6 @@ fn make_dhcp_xid(mac: [u8; 6]) -> u32 {
         ^ ((mac[1] as u32) << 16)
         ^ ((mac[4] as u32) << 8)
         ^ (mac[5] as u32)
-}
-
-fn announce_lease(runtime: &mut NetRuntime) {
-    let mut i = 0usize;
-    while i < 3 {
-        let _ = emit_gratuitous_arp_reply(runtime);
-        let _ = emit_arp_request(runtime, runtime.ip);
-        super::sleep_ms(runtime.timer_port, 50);
-        i += 1;
-    }
 }
 
 fn send_dhcp_discover(runtime: &NetRuntime) -> Result<(), RequestError> {

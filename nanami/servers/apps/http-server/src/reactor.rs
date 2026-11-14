@@ -1,8 +1,9 @@
 use super::*;
+use alloc::vec::Vec;
 
-const TX_RETRY_MS: Word = 10;
+const TX_RETRY_MS: Word = 1;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HttpConnection {
     active: bool,
     connection_id: Word,
@@ -12,6 +13,10 @@ struct HttpConnection {
     body_sent: usize,
     keep_alive: bool,
     close_only: bool,
+    responding: bool,
+    head: bool,
+    peer_closed: bool,
+    request: Vec<u8>,
 }
 
 impl HttpConnection {
@@ -24,6 +29,10 @@ impl HttpConnection {
         body_sent: 0,
         keep_alive: false,
         close_only: false,
+        responding: false,
+        head: false,
+        peer_closed: false,
+        request: Vec::new(),
     };
 }
 
@@ -33,8 +42,11 @@ pub(super) fn run_http_reactor(
     rx_notification: Option<Word>,
     shm_vaddr: Word,
     shm_size: Word,
+    response_cache: ResponseCache,
 ) -> nanami_runtime::NanamiResult {
-    let mut connections = [HttpConnection::EMPTY; HTTP_CONNECTIONS];
+    let mut connections: Vec<_> = (0..HTTP_CONNECTIONS)
+        .map(|_| HttpConnection::EMPTY)
+        .collect();
     let tx_capacity = tx_capacity(shm_size);
     if tx_capacity == 0 {
         nanami_runtime::print!("[http-server] invalid tx shm capacity=0\n");
@@ -45,7 +57,6 @@ pub(super) fn run_http_reactor(
 
     let mut idle_streak = 0usize;
     let mut rx_notification = rx_notification;
-    let response_cache = build_response_cache();
     loop {
         let received_any = drain_tcp_rx(net_desc, shm_vaddr, &response_cache, &mut connections);
         let (sent_any, pending_tx) = flush_http_tx(
@@ -81,13 +92,38 @@ fn drain_tcp_rx(
     // A deferred response owns its slot until it is sent. Do not dequeue a
     // request that we cannot retain while all response slots are occupied.
     let mut free_slots = connections.iter().filter(|conn| !conn.active).count();
-    while budget < RX_BUDGET && free_slots != 0 {
-        let (received, connection_id) = match nanami_client::net::net_service_tcp_recv_ex(
-            net_desc,
-            META_OFFSET,
-            RX_OFFSET,
-            TCP_RECV_MAX,
-        ) {
+    let mut partial = 0;
+    while budget < RX_BUDGET {
+        let filter = if free_slots == 0 {
+            // All response slots can be occupied by fragmented headers. Read
+            // only their already-owned streams, not a new unretainable stream.
+            let Some(index) = (partial..connections.len())
+                .find(|i| connections[*i].active && !connections[*i].responding)
+            else {
+                break;
+            };
+            partial = index + 1;
+            connections[index].connection_id
+        } else {
+            0
+        };
+        let result = if filter == 0 {
+            nanami_client::net::net_service_tcp_recv_ex(
+                net_desc,
+                META_OFFSET,
+                RX_OFFSET,
+                TCP_RECV_MAX,
+            )
+        } else {
+            nanami_client::net::net_service_tcp_recv_on_connection(
+                net_desc,
+                filter,
+                META_OFFSET,
+                RX_OFFSET,
+                TCP_RECV_MAX,
+            )
+        };
+        let (received, connection_id) = match result {
             Ok(v) => v,
             Err(e) => {
                 log_request_error("[http-server] tcp recv failed: ", e);
@@ -96,7 +132,11 @@ fn drain_tcp_rx(
         };
         if connection_id == 0 {
             if received == 0 {
-                break;
+                if filter == 0 {
+                    break;
+                } else {
+                    continue;
+                }
             }
             budget += 1;
             continue;
@@ -114,7 +154,26 @@ fn drain_tcp_rx(
                 if received == 0 {
                     finish_peer_close(conn, connection_id);
                 } else {
-                    prepare_response(conn, connection_id, req, response_cache);
+                    if !conn.active {
+                        conn.request.clear();
+                        conn.connection_id = connection_id;
+                        conn.active = true;
+                        conn.responding = false;
+                        conn.peer_closed = false;
+                    }
+                    if conn.request.len().saturating_add(req.len()) > framing::MAX_PENDING {
+                        // Do not overwrite an in-flight response. Finish it
+                        // and close; otherwise reply with a bounded error.
+                        conn.peer_closed = true;
+                        if !conn.responding {
+                            bad_request(conn);
+                        }
+                    } else {
+                        conn.request.extend_from_slice(req);
+                        if !conn.responding {
+                            prepare_buffered(conn, response_cache);
+                        }
+                    }
                 }
             }
             None => nanami_runtime::print!("[http-server] no free http connection slot\n"),
@@ -131,10 +190,15 @@ fn finish_peer_close(conn: &mut HttpConnection, connection_id: Word) {
             active: true,
             connection_id,
             close_only: true,
+            responding: true,
             ..HttpConnection::EMPTY
         };
     }
-    conn.keep_alive = false;
+    conn.peer_closed = true;
+    if !conn.responding {
+        conn.close_only = true;
+        conn.responding = true;
+    }
 }
 
 fn flush_http_tx(
@@ -174,7 +238,7 @@ fn flush_http_tx(
                     sent += 1;
                 }
             }
-            pending_tx |= connections[index].active;
+            pending_tx |= connections[index].active && connections[index].responding;
         }
         index += 1;
     }
@@ -196,6 +260,9 @@ fn flush_one_connection(
     conn: &mut HttpConnection,
 ) -> Result<bool, nanami_runtime::RequestError> {
     if !conn.active {
+        return Ok(false);
+    }
+    if !conn.responding {
         return Ok(false);
     }
     if conn.close_only {
@@ -224,7 +291,8 @@ fn flush_one_connection(
             header_advance = n;
         }
         if written < tx_capacity && conn.header_sent + header_advance == header_len {
-            let remain = conn.body.len() - conn.body_sent;
+            let body_len = if conn.head { 0 } else { conn.body.len() };
+            let remain = body_len - conn.body_sent;
             let n = min(remain, tx_capacity - written);
             if n > 0 {
                 ptr::copy_nonoverlapping(
@@ -244,9 +312,10 @@ fn flush_one_connection(
     }
 
     let will_finish = conn.header_sent + header_advance == header_len
-        && conn.body_sent + body_advance == conn.body.len();
+        && conn.body_sent + body_advance == if conn.head { 0 } else { conn.body.len() };
+    let pipelined = conn.keep_alive && matches!(framing::request(&conn.request), Ok(Some(_)));
     let flags = if will_finish {
-        if conn.keep_alive {
+        if conn.keep_alive && (!conn.peer_closed || pipelined) {
             TCP_FLAG_ACK | TCP_FLAG_PSH
         } else {
             TCP_FLAG_ACK | TCP_FLAG_PSH | TCP_FLAG_FIN
@@ -255,18 +324,38 @@ fn flush_one_connection(
         TCP_FLAG_ACK | TCP_FLAG_PSH
     };
 
-    nanami_client::net::net_service_tcp_send_on_connection(
+    let accepted = nanami_client::net::net_service_tcp_send_on_connection(
         net_desc,
         conn.connection_id,
         TX_OFFSET,
         written as Word,
         flags,
     )?;
+    if accepted > written {
+        return Err(nanami_runtime::RequestError::Protocol);
+    }
+    if accepted == 0 {
+        return Err(nanami_runtime::RequestError::Status(
+            nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK,
+        ));
+    }
+
+    // The transport may accept only a prefix under NIC backpressure. Advance
+    // by that prefix, never resend bytes whose sequence space was consumed.
+    let header_remaining = header_len - conn.header_sent;
+    header_advance = accepted.min(header_remaining);
+    body_advance = accepted - header_advance;
 
     conn.header_sent += header_advance;
     conn.body_sent += body_advance;
-    if will_finish {
-        conn.active = false;
+    if will_finish && accepted == written {
+        conn.responding = false;
+        if conn.keep_alive && !conn.request.is_empty() && (!conn.peer_closed || pipelined) {
+            prepare_buffered(conn, response_cache);
+        } else {
+            conn.active = false;
+            conn.request.clear();
+        }
     }
     Ok(true)
 }
@@ -296,9 +385,13 @@ fn prepare_response(
     response_cache: &ResponseCache,
 ) {
     let kind = select_response_kind(req);
-    let body = response_body(kind);
+    let body = response_body(response_cache, kind);
     let keep_alive = should_keep_alive(req);
-    *conn = HttpConnection::EMPTY;
+    conn.header_sent = 0;
+    conn.body_sent = 0;
+    conn.close_only = false;
+    conn.head = false;
+    conn.responding = true;
     conn.active = true;
     conn.connection_id = connection_id;
     conn.kind = kind;
@@ -309,6 +402,33 @@ fn prepare_response(
         conn.active = false;
         nanami_runtime::print!("[http-server] cached header invalid\n");
         return;
+    }
+}
+
+fn bad_request(conn: &mut HttpConnection) {
+    conn.kind = ResponseKind::BadRequest;
+    conn.body = b"400 Bad Request\n";
+    conn.header_sent = 0;
+    conn.body_sent = 0;
+    conn.head = false;
+    conn.keep_alive = false;
+    conn.responding = true;
+    conn.close_only = false;
+    conn.request.clear();
+}
+fn prepare_buffered(conn: &mut HttpConnection, cache: &ResponseCache) {
+    match framing::request(&conn.request) {
+        Ok(Some(request)) => {
+            // Own the completed header while preparing so the connection's
+            // queued pipeline remains intact and the response is immutable.
+            let mut bytes = core::mem::take(&mut conn.request);
+            prepare_response(conn, conn.connection_id, &bytes[..request.bytes], cache);
+            bytes.drain(..request.bytes);
+            conn.request = bytes;
+            conn.head = request.head;
+        }
+        Ok(None) => {}
+        Err(()) => bad_request(conn),
     }
 }
 

@@ -17,7 +17,7 @@ pub(super) fn handle_tcp_send_request(
     let payload_offset = request.arg0;
     let payload_len = request.arg1 as usize;
     let flags = (request.arg2 & 0xff) as u8;
-    if payload_offset + payload_len as Word > session.shm_size {
+    if payload_offset > session.shm_size || payload_len > session.shm_size - payload_offset {
         return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0);
     }
 
@@ -108,14 +108,28 @@ pub(super) fn handle_tcp_send_request(
                 remaining -= chunk;
             }
             Err(e) => {
+                if total_payload_sent != 0 {
+                    // A successful prefix consumed sequence space. Report it
+                    // even when a later segment hit NIC backpressure; callers
+                    // must not repeat that prefix or assume FIN was sent.
+                    return (
+                        nanami_runtime::OS_RESPONSE_OK,
+                        total_payload_sent as Word,
+                        0,
+                    );
+                }
                 return (
                     map_request_error_to_status(e),
                     total_payload_sent as Word,
                     0,
-                )
+                );
             }
         }
     }
 
-    (nanami_runtime::OS_RESPONSE_OK, total_payload_sent as Word, 0)
+    (
+        nanami_runtime::OS_RESPONSE_OK,
+        total_payload_sent as Word,
+        0,
+    )
 }

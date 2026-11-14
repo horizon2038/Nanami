@@ -1,0 +1,13 @@
+[package]
+name = "network-manager"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+nanami-runtime = { path = "../../libs/nanami-runtime" }
+nanami-client = { path = "../../libs/nanami-client" }
+nanami-ui = { path = "../../libs/nanami-ui" }
+[profile.dev]
+panic = "abort"
+[profile.release]
+panic = "abort"
+[workspace]

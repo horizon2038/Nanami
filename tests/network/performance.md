@@ -1,5 +1,45 @@
 # HTTP throughput follow-up
 
+## Static settings / file-backed HTTP follow-up (2026-11-14)
+
+See [IPv4 configuration and HTTP serving](../../nanami/docs/network.md) for
+the new CLI, GUI, persistence and file/port options. The current changes also
+enable per-port Intel INTx with bridge swizzling, select I211's EITR[0] rather
+than legacy ITR, reduce pending-response retry from 10 to 1 ms, preserve partial
+TCP writes, and remove the redundant empty RECV_BATCH IPC after a short batch.
+The latter is checked by a production-code host test: a one-frame batch needs
+one receive IPC instead of two, and a later arrival still drains normally.
+
+Same host, QEMU software emulation, 4 CPUs, primary `igb` with an earlier
+disconnected `e1000e`, delayed carrier, default 363-byte HTML and no keep-alive:
+
+| Image / sample | `ab -n 500 -c 1` RPS | `ab -n 500 -c 16` RPS |
+| --- | ---: | ---: |
+| Before these changes | 1,116.69 | 1,189.55 |
+| Initial implementation, before short-batch drain optimization | 958.92 | 1,067.52 |
+| Final implementation | 1,001.07 | 1,376.67 |
+
+All samples completed 500 requests with zero failures. These are individual,
+short samples, not confidence intervals or isolated component speedups. The
+final image improves the concurrent sample but not the serial sample; there
+is no consistent overall throughput gain demonstrated here. The physical
+approximately 50-rps symptom was not reproduced in QEMU, so its resolution is
+**not hardware-verified**. Compare a longer, identical workload on that machine,
+with the same content, concurrency and keep-alive policy, for example:
+
+```text
+ab -n 10000 -c 1 http://192.168.10.101:8080/
+ab -n 10000 -c 16 http://192.168.10.101:8080/
+```
+
+Logs are under `out/hardware/network-http-before-c*.log` and
+`out/hardware/network-http-optimized-c*.log`. Additional integration checks
+cover the native GUI, configuration while DHCP is unanswered, cold-restart
+persistence, PCI bridge IRQ routing, and a byte-exact 209,160-byte file served
+on port 8080. Those are correctness checks, not physical throughput evidence.
+
+## Earlier queue/index work
+
 This follows the receive-loss fixes in [HTTP / network regressions](README.md).
 It changes user-space net-server, virtio-net and their SDK transport only;
 A9N, interrupt/register writeback and the HTTP response format are unchanged.

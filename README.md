@@ -233,6 +233,10 @@ build. Linux needs an existing bridge (`br0` example) and bridge-helper
 permissions. Bridge setup is not automatic.
 `BRIDGE_IF` and `NET_MODE` remain supported; explicit `--net` wins.
 
+Use `net-control` or the native `network-manager` GUI to save DHCP/manual IPv4
+settings. `http-server --port 8080 --file /www/example.html` serves a file loaded
+at startup. See [IPv4 configuration and HTTP serving](nanami/docs/network.md).
+
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--storage` | `usb` | Root controller: `usb`, `ahci`, `virtio` |

@@ -85,12 +85,20 @@ parks the driver rather than returning live DMA pages to Alpha's allocator.
 INTx routing first uses the ACPI service and otherwise a usable firmware PCI
 Interrupt Line. Only GSI routes supported by the current A9N HAL are accepted;
 there is no guessed PCH/PIIX register programming. A busy/shared or unresolved
-IRQ, or a multi-port provider, uses one 2 ms timer notification and notifies `net-server` on pending
-RX. IRQ mode has a one-second maintenance wakeup, not continuous polling.
+IRQ uses a 2 ms timer notification and notifies `net-server` on pending RX.
+Multi-port providers retain per-port IRQ capabilities and select the appropriate
+timer interval when the active port changes. Ports sharing a GSI inside this
+provider share one interrupt capability; another process owning it still causes
+the timer fallback. IRQ mode has a one-second maintenance wakeup, not continuous polling.
 Reading ICR deasserts the device before IO-APIC rearm; RX is checked again after
-rearm. Existing ACPI root-bus routing does not yet resolve bridge-local `_PRT`
-tables, so an I211 behind a bridge may use the timer fallback. This is not an
-MSI/MSI-X implementation.
+rearm. A bounded PCI bridge walk applies standard INTx pin swizzling to ACPI
+root-bus `_PRT` routes, including nonzero root buses. Bridge-local `_PRT` tables
+are not interpreted, so boards requiring such overrides may still use the
+fallback. This is not an MSI/MSI-X implementation. Legacy devices moderate with
+ITR at 0x00c4; igb/I211 uses EITR[0] at 0x1680, including in legacy INTx mode.
+Both are programmed to 128 units of 256 ns (32.768 us), not the previous 1 ms.
+See Intel I211 datasheet 333017, sections 7.3.5 and 8.7.14, available in the
+[Intel datasheet](https://cdrdv2-public.intel.com/333017/333017%20-%20I211_Datasheet_v_3_4.pdf).
 
 ## Validation and commands
 

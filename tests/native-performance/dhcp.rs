@@ -252,6 +252,7 @@ fn setup(reply: bool) -> (Vec<u8>, NetRuntime) {
     FAKE.with_borrow_mut(|s| {
         *s = Fake {
             reply,
+            offer_mask: Some([255, 255, 255, 0]),
             ..Fake::default()
         }
     });
@@ -276,10 +277,37 @@ fn setup(reply: bool) -> (Vec<u8>, NetRuntime) {
     };
     (buffer, runtime)
 }
+
+// Drive the production asynchronous state machine from a simulated service
+// loop. The DHCP implementation itself never waits, sleeps or owns an alarm.
+fn drive_acquisition(runtime: &mut NetRuntime) {
+    runtime.ip = [0; 4];
+    runtime.subnet_mask = [0; 4];
+    runtime.gateway_ip = [0; 4];
+    runtime.dns_ip = [0; 4];
+    let now = FAKE.with_borrow(|s| s.now);
+    let mut acquisition = dhcp::Acquisition::start(runtime, now);
+    for _ in 0..10_000 {
+        pump_backend_with_budget(runtime, &mut NetStats, 128);
+        let now = FAKE.with_borrow(|s| s.now);
+        let state = acquisition.poll(runtime, now);
+        if state != net::IPV4_STATE_ACQUIRING {
+            return;
+        }
+        if FAKE.with_borrow(|s| !s.queue.is_empty()) {
+            continue;
+        }
+        timer::timer_service_set_alarm_ticks(1, PROCESS_SLOT_NOTIFICATION, Some(now + 100))
+            .unwrap();
+        ipc::notification_wait(PROCESS_SLOT_NOTIFICATION).unwrap();
+        timer::timer_service_set_alarm_ticks(1, PROCESS_SLOT_NOTIFICATION, None).unwrap();
+    }
+    panic!("DHCP never completed or timed out");
+}
 #[test]
 fn lan_burst_does_not_insert_minimum_sleeps_before_dhcp_replies() {
     let (_buffer, mut runtime) = setup(true);
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert_eq!(runtime.ip, [192, 168, 1, 50]);
     assert!(!runtime.dhcp_waiting);
     FAKE.with_borrow(|s| {
@@ -292,7 +320,7 @@ fn lan_burst_does_not_insert_minimum_sleeps_before_dhcp_replies() {
 fn strict_bootp_server_accepts_full_length_discover_and_request() {
     let (_buffer, mut runtime) = setup(true);
     FAKE.with_borrow_mut(|s| s.strict_bootp_minimum = true);
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert_eq!(runtime.ip, [192, 168, 1, 50]);
     FAKE.with_borrow(|s| {
         assert_eq!(s.transmitted.len(), 2);
@@ -328,7 +356,7 @@ fn discover_and_request_use_the_current_physical_ports_mac_and_transaction_id() 
     ] {
         let (_buffer, mut runtime) = setup(true);
         runtime.mac = mac;
-        dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+        drive_acquisition(&mut runtime);
         assert_eq!(runtime.ip, [192, 168, 1, 50]);
         FAKE.with_borrow(|s| {
             assert_eq!(s.transmitted.len(), 2);
@@ -361,8 +389,8 @@ fn discover_and_request_use_the_current_physical_ports_mac_and_transaction_id() 
 #[test]
 fn absent_server_uses_bounded_monotonic_timeouts_and_cancels_alarm() {
     let (_buffer, mut runtime) = setup(false);
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
-    assert_eq!(runtime.ip, [10, 0, 2, 15]);
+    drive_acquisition(&mut runtime);
+    assert_eq!(runtime.ip, [0; 4]); // DHCP mode must not silently use a static fallback.
     assert!(!runtime.dhcp_waiting);
     FAKE.with_borrow(|s| {
         assert_eq!(s.now, 188_000);
@@ -377,13 +405,13 @@ fn absent_server_uses_bounded_monotonic_timeouts_and_cancels_alarm() {
 fn rx_notification_wakes_before_the_polling_alarm() {
     let (_buffer, mut runtime) = setup(true);
     FAKE.with_borrow_mut(|s| s.reply_delay = 10);
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert_eq!(runtime.ip, [192, 168, 1, 50]);
     FAKE.with_borrow(|s| {
-        assert_eq!(s.now, 170); // Two 10-ms RX wakes and three 50-ms announcements.
+        assert_eq!(s.now, 20); // Two 10-ms RX wakes; no blocking announcements.
         assert_eq!(s.wakes, 2);
         assert_eq!(s.alarm, None);
-        assert_eq!(s.alarms, [Some(200), None, Some(210), None]);
+        assert_eq!(s.alarms, [Some(100), None, Some(110), None]);
     });
 }
 
@@ -394,25 +422,32 @@ fn continuous_lan_traffic_and_pump_cost_do_not_extend_deadlines() {
         s.flood = true;
         s.pump_delay = 25;
     });
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert!(!runtime.dhcp_waiting);
     FAKE.with_borrow(|s| {
-        assert_eq!(s.now, 188_000);
-        assert_eq!(s.wakes, 0);
+        assert!((188_000..189_000).contains(&s.now));
+        assert!(s.wakes > 0);
         assert_eq!(s.alarm, None);
     });
 }
 
 #[test]
-fn notification_errors_cancel_each_outstanding_alarm() {
+fn acquisition_step_never_waits_on_notifications_or_sleeps() {
     let (_buffer, mut runtime) = setup(false);
     FAKE.with_borrow_mut(|s| s.fail_wait = true);
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
-    assert!(!runtime.dhcp_waiting);
+    let mut acquisition = dhcp::Acquisition::start(&mut runtime, 0);
+    for now in 0..100 {
+        assert_eq!(
+            acquisition.poll(&mut runtime, now),
+            net::IPV4_STATE_ACQUIRING
+        );
+    }
+    assert!(runtime.dhcp_waiting);
     FAKE.with_borrow(|s| {
-        assert_eq!(s.wakes, 6);
+        assert_eq!(s.wakes, 0);
         assert_eq!(s.alarm, None);
-        assert_eq!(s.alarms, [Some(200), None].repeat(6));
+        assert!(s.alarms.is_empty());
+        assert!(s.sleeps.is_empty());
     });
 }
 
@@ -420,7 +455,7 @@ fn notification_errors_cancel_each_outstanding_alarm() {
 fn dhcp_offer_mask_is_retained_when_ack_omits_it() {
     let (_buffer, mut runtime) = setup(true);
     FAKE.with_borrow_mut(|s| s.offer_mask = Some([255, 255, 254, 0]));
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert_eq!(runtime.subnet_mask, [255, 255, 254, 0]);
     assert_eq!(
         routing::next_hop_ip(&runtime, [192, 168, 0, 9]),
@@ -439,7 +474,7 @@ fn dhcp_ack_mask_overrides_offer_mask() {
         s.offer_mask = Some([255, 255, 0, 0]);
         s.ack_mask = Some([255, 255, 255, 128]);
     });
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
+    drive_acquisition(&mut runtime);
     assert_eq!(runtime.subnet_mask, [255, 255, 255, 128]);
     assert_eq!(
         routing::next_hop_ip(&runtime, [192, 168, 1, 100]),
@@ -452,14 +487,15 @@ fn dhcp_ack_mask_overrides_offer_mask() {
 }
 
 #[test]
-fn malformed_mask_does_not_replace_configured_subnet() {
+fn malformed_lease_mask_leaves_dhcp_unconfigured_instead_of_using_old_static_settings() {
     let (_buffer, mut runtime) = setup(true);
     FAKE.with_borrow_mut(|s| {
         s.offer_mask = Some([255, 0, 255, 0]);
         s.ack_mask = Some([255, 255, 255, 1]);
     });
-    dhcp::dhcp_bootstrap(&mut runtime, &mut NetStats);
-    assert_eq!(runtime.subnet_mask, [255, 255, 255, 0]);
+    drive_acquisition(&mut runtime);
+    assert_eq!(runtime.subnet_mask, [0; 4]);
+    assert_eq!(runtime.ip, [0; 4]);
 }
 
 #[test]

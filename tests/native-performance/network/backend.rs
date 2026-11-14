@@ -134,6 +134,18 @@ fn batched_backend_respects_budget_order_and_separate_tx_storage() {
 }
 
 #[test]
+fn a_short_batch_does_not_issue_a_redundant_empty_receive_ipc() {
+    let (_shm, mut runtime, mut stats) = setup(true, 1);
+    assert_eq!(backend::pump_backend(&mut runtime, &mut stats), 1);
+    DEVICE.with(|device| assert_eq!(device.borrow().calls, [(32, true)]));
+    // A later notification/poll still drains a new arrival normally.
+    DEVICE.with(|device| device.borrow_mut().frames.push_back(vec![42; 100]));
+    assert_eq!(backend::pump_backend(&mut runtime, &mut stats), 1);
+    assert_eq!(runtime.packets[1], [42; 100]);
+    assert_eq!(stats.rx_packets, 2);
+}
+
+#[test]
 fn legacy_backend_uses_single_frame_api_with_identical_packet_order() {
     let (_shm, mut runtime, mut stats) = setup(false, 81);
     assert_eq!(backend::pump_backend(&mut runtime, &mut stats), 81);

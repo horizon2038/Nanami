@@ -3,6 +3,59 @@
 The subsequent TX queue, RX batch and TCP lookup changes are documented in
 [HTTP throughput follow-up](performance.md).
 
+## IPv4 settings and file-backed HTTP (2026-11-14)
+
+Current commands and persistence semantics are described in
+[IPv4 configuration and HTTP serving](../../nanami/docs/network.md).
+DHCP now advances without blocking the service loop; it does not sleep for
+address announcements or assign a configured fallback address on failure.
+Invalid/missing lease masks leave the address unconfigured. These changes
+supersede the older bootstrap/default-mask behavior described below.
+
+```sh
+cargo test --locked --manifest-path tests/native-performance/Cargo.toml \
+  --test network-settings --test network-configuration --test dhcp \
+  --test network --test intel-net --test linux-network --test desktop-tools \
+  -- --test-threads=1
+cargo test -p nanami-xtask
+python3 tests/network/qemu-http.py --image out/hardware/nanami.img \
+  --nic igb --spare-nic e1000e --late-link \
+  --management-checks --gui-checks --guest-port 8080 -n 500 -c 16
+python3 tests/network/qemu-http.py --image out/hardware/network-updated.img \
+  --nic igb --spare-nic e1000e --late-link --management-checks \
+  --manual-bootstrap --guest-port 8080 -n 20 -c 2
+python3 tests/network/qemu-http.py --image out/hardware/network-updated.img \
+  --nic igb --spare-nic e1000e --late-link --pci-bridge -n 500 -c 1
+python3 tests/network/qemu-http.py --image out/hardware/nanami.img \
+  --nic e1000e --spare-nic igb --late-link \
+  --http-file /bin/shell \
+  --expect-file nanami/servers/target/x86_64-unknown-a9n/release/shell -n 20 -c 2
+```
+
+The management test uses a private qcow2 overlay: static address application,
+save-only field edits, reload, cold VM restart with persisted settings, GUI
+save/reload, and restoration of DHCP. The base disk is never modified. GUI
+screenshots are retained in the reported log directory for visual inspection.
+Other runs retain the original disposable snapshot behavior. Do not rebuild
+the base image while any test VM is running.
+`--manual-bootstrap` leaves the DHCP LAN disconnected until the CLI has applied
+a manual address, testing that configuration is usable during acquisition.
+`--gui-checks` uses USB keyboard/mouse input and saves screenshots of manual
+field entry, application and the switch back to DHCP. `--pci-bridge` checks the
+provider's bridge walk against a real emulated PCI hierarchy.
+
+Before benchmarking, every run checks actual response bytes, split headers,
+pipelined GET/HEAD, content length, connection close and invalid request framing.
+`--http-file` selects a guest file; `--expect-file` supplies the host byte-for-byte
+reference (including large/binary fixtures). The example uses an existing
+209-KiB executable as a non-embedded large-file fixture, not as HTML content.
+DHCP packet-capture checks continue to validate BOOTP padding/checksums.
+
+Host tests include saved-draft/apply isolation, invalid reload preserving live
+state, revision conflicts, failed saves, torn records, GUI field validation,
+PCI bridge swizzling, partial TCP submissions, fragmented/pipelined HTTP, HEAD
+and half-close ordering. These tests do not measure physical I211 throughput.
+
 ## Launcher and DHCP bootstrap regression (2026-10-11)
 
 The Rust launcher selects bridged networking when `BRIDGE_IF` / `--bridge-if`

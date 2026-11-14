@@ -1,5 +1,7 @@
 use super::*;
 use std::{cmp::min, ptr};
+#[path = "../../../nanami/servers/apps/http-server/src/framing.rs"]
+mod framing;
 
 const META_OFFSET: Word = 0;
 const RX_OFFSET: Word = 4096;
@@ -18,6 +20,7 @@ const IDLE_SPIN_BEFORE_SLEEP: usize = 8;
 #[derive(Clone, Copy)]
 enum ResponseKind {
     NotFound,
+    BadRequest,
 }
 struct ResponseCache;
 fn response_header(_: &ResponseCache, _: ResponseKind, _: bool) -> (&'static [u8], usize) {
@@ -29,11 +32,14 @@ fn build_response_cache() -> ResponseCache {
 fn select_response_kind(_: &[u8]) -> ResponseKind {
     ResponseKind::NotFound
 }
-fn response_body(_: ResponseKind) -> &'static [u8] {
+fn response_body(_: &ResponseCache, _: ResponseKind) -> &'static [u8] {
     b"body"
 }
-fn should_keep_alive(_: &[u8]) -> bool {
-    false
+fn should_keep_alive(req: &[u8]) -> bool {
+    framing::request(req)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.keep_alive)
 }
 fn tx_capacity(_: Word) -> usize {
     4096
@@ -59,7 +65,79 @@ mod reactor {
                 ..Fake::default()
             }
         });
-        (shm, [HttpConnection::EMPTY; HTTP_CONNECTIONS])
+        (shm, [const { HttpConnection::EMPTY }; HTTP_CONNECTIONS])
+    }
+
+    #[test]
+    fn partial_transport_acceptance_never_repeats_a_prefix_or_fin() {
+        let (mut shm, mut conns) = setup();
+        prepare_response(&mut conns[0], 7, b"GET /", &ResponseCache);
+        FAKE.with(|f| f.borrow_mut().send_limit = Some(3));
+        for _ in 0..4 {
+            flush_http_tx(
+                1,
+                shm.as_mut_ptr() as Word,
+                4096,
+                &ResponseCache,
+                &mut conns,
+            );
+        }
+        assert!(!conns[0].active);
+        FAKE.with(|f| {
+            let f = f.borrow();
+            let bytes: Vec<_> = f.sent.iter().flat_map(|s| s.1.iter().copied()).collect();
+            assert_eq!(bytes, b"headerbody");
+            assert_eq!(f.sent.iter().filter(|s| s.2 & TCP_FLAG_FIN != 0).count(), 1);
+        });
+    }
+
+    #[test]
+    fn fragmented_headers_wait_and_pipelined_head_survives_peer_half_close() {
+        let (mut shm, mut conns) = setup();
+        FAKE.with(|f| {
+            f.borrow_mut()
+                .incoming
+                .push_back((7, b"GET / HTTP/1.1\r\nHo".to_vec()))
+        });
+        drain_tcp_rx(1, shm.as_mut_ptr() as Word, &ResponseCache, &mut conns);
+        assert!(conns[0].active);
+        assert!(!conns[0].responding);
+        assert_eq!(
+            flush_http_tx(
+                1,
+                shm.as_mut_ptr() as Word,
+                4096,
+                &ResponseCache,
+                &mut conns
+            ),
+            (false, false)
+        );
+        FAKE.with(|f| {
+            let mut f = f.borrow_mut();
+            f.incoming.push_back((
+                7,
+                b"st: test\r\n\r\nHEAD / HTTP/1.1\r\nHost: test\r\n\r\n".to_vec(),
+            ));
+            f.incoming.push_back((7, Vec::new()));
+        });
+        drain_tcp_rx(1, shm.as_mut_ptr() as Word, &ResponseCache, &mut conns);
+        for _ in 0..3 {
+            flush_http_tx(
+                1,
+                shm.as_mut_ptr() as Word,
+                4096,
+                &ResponseCache,
+                &mut conns,
+            );
+        }
+        assert!(!conns[0].active);
+        FAKE.with(|f| {
+            let f = f.borrow();
+            let bytes: Vec<_> = f.sent.iter().flat_map(|s| s.1.iter().copied()).collect();
+            assert_eq!(bytes, b"headerbodyheader");
+            assert_eq!(f.sent[0].2 & TCP_FLAG_FIN, 0);
+            assert_ne!(f.sent[1].2 & TCP_FLAG_FIN, 0);
+        });
     }
 
     #[test]
@@ -165,7 +243,7 @@ mod reactor {
         FAKE.with(|fake| {
             fake.borrow_mut()
                 .incoming
-                .push_back((1000, b"GET /".to_vec()))
+                .push_back((1000, b"GET / HTTP/1.0\r\n\r\n".to_vec()))
         });
         assert!(!drain_tcp_rx(
             1,
@@ -230,7 +308,8 @@ mod reactor {
         conns[0].header_sent = 3;
         finish_peer_close(&mut conns[0], 7);
         assert!(!conns[0].close_only);
-        assert!(!conns[0].keep_alive);
+        assert!(conns[0].keep_alive); // already-selected header must remain immutable
+        assert!(conns[0].peer_closed);
         assert_eq!(conns[0].header_sent, 3);
     }
 

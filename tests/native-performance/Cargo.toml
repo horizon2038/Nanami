@@ -441,6 +441,14 @@ name = "network"
 path = "network/main.rs"
 
 [[test]]
+name = "network-settings"
+path = "network-settings.rs"
+
+[[test]]
+name = "network-configuration"
+path = "network-configuration.rs"
+
+[[test]]
 name = "dhcp"
 path = "dhcp.rs"
 

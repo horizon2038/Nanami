@@ -42,6 +42,13 @@ pub(super) fn pump_backend_with_budget(
                 }
             }
             processed += count;
+            if count < slots {
+                // RECV_BATCH already tried the next descriptor and found the
+                // queue empty. Do not pay another IPC round trip to ask again.
+                // Later arrivals retain the backend RX notification; polling
+                // backends still have the service's maintenance timer.
+                break;
+            }
         } else {
             // Drivers that do not advertise batching keep the original API.
             let len = match net_device_recv(

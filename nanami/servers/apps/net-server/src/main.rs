@@ -16,6 +16,8 @@ mod arp_cache;
 mod backend;
 #[path = "app/backend_connect.rs"]
 mod backend_connect;
+#[path = "app/configuration.rs"]
+mod configuration;
 #[path = "app/dhcp.rs"]
 mod dhcp;
 #[path = "app/dns.rs"]
@@ -32,6 +34,10 @@ mod ip;
 mod readiness;
 #[path = "app/routing.rs"]
 mod routing;
+#[path = "app/settings_record.rs"]
+mod settings_record;
+#[path = "app/settings_store.rs"]
+mod settings_store;
 #[path = "app/tcp.rs"]
 mod tcp;
 #[path = "app/tcp_index.rs"]
@@ -53,7 +59,6 @@ use arp::arp_lookup;
 use arp::emit_arp_request;
 use arp_cache::ArpCache;
 use backend::{pump_backend, pump_backend_with_budget};
-use dhcp::dhcp_bootstrap;
 use dns::handle_dns_query_request;
 use ethernet::process_ethernet_frame;
 use icmp::{emit_icmp_echo_from_session, handle_icmp_recv_request};
@@ -435,6 +440,7 @@ impl RawRxQueue {
 }
 
 struct NetRuntime {
+    configuration: configuration::Configuration,
     net_device_port: Word,
     timer_port: Option<Word>,
     backend_shm_local: Word,
@@ -612,11 +618,16 @@ fn get_backend_shm_ptr(runtime: &NetRuntime, offset: Word) -> *mut u8 {
 }
 
 fn emit_frame(runtime: &NetRuntime, frame_len: usize) -> Result<Word, RequestError> {
-    nanami_client::net::net_device_send(
+    match nanami_client::net::net_device_send(
         runtime.net_device_port,
         BACKEND_TX_OFFSET,
         frame_len as Word,
-    )
+    ) {
+        Err(RequestError::Status(nanami_client::net::NET_DEVICE_RESPONSE_WOULD_BLOCK)) => Err(
+            RequestError::Status(nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK),
+        ),
+        other => other,
+    }
 }
 
 fn notify_client_sessions(runtime: &NetRuntime) {
@@ -770,6 +781,19 @@ fn handle_network_request(
     request: nanami_runtime::ipc::ServiceRequest,
     stats: &mut NetStats,
 ) -> (Word, Word, Word) {
+    // Configuration remains reachable while DHCP is pending, but ordinary
+    // IP traffic must not originate from an unconfigured 0.0.0.0 address.
+    if runtime.ip == [0; 4]
+        && matches!(
+            request.code,
+            nanami_client::net::NET_SERVICE_REQUEST_UDP_SEND
+                | nanami_client::net::NET_SERVICE_REQUEST_ICMP_SEND
+                | nanami_client::net::NET_SERVICE_REQUEST_TCP_CONNECT
+                | nanami_client::net::NET_SERVICE_REQUEST_DNS_QUERY
+        )
+    {
+        return (nanami_client::net::NET_SERVICE_RESPONSE_WOULD_BLOCK, 0, 0);
+    }
     match request.code {
         nanami_client::net::NET_SERVICE_REQUEST_ARP_SNAPSHOT => {
             arp::handle_snapshot_request(runtime, request)
@@ -823,7 +847,44 @@ fn handle_network_request(
             }
             (nanami_runtime::OS_RESPONSE_OK, n as Word, 0)
         }
+        nanami_client::net::NET_SERVICE_REQUEST_SET_SETTINGS => {
+            configuration::save(runtime, request)
+        }
         nanami_client::net::NET_SERVICE_REQUEST_CONTROL => match request.arg0 {
+            nanami_client::net::NET_SERVICE_CONTROL_GET_SETTINGS => {
+                let settings = runtime.configuration.draft;
+                let (a, b) = match request.arg1 {
+                    0 => (settings.mode, runtime.configuration.revision),
+                    1 => (
+                        pack_ipv4(settings.address) as Word,
+                        pack_ipv4(settings.netmask) as Word,
+                    ),
+                    2 => (
+                        pack_ipv4(settings.gateway) as Word,
+                        pack_ipv4(settings.dns) as Word,
+                    ),
+                    _ => return (nanami_runtime::OS_RESPONSE_INVALID_ARGUMENT, 0, 0),
+                };
+                (nanami_runtime::OS_RESPONSE_OK, a, b)
+            }
+            nanami_client::net::NET_SERVICE_CONTROL_GET_CONFIG_STATE => (
+                nanami_runtime::OS_RESPONSE_OK,
+                runtime.configuration.state,
+                runtime.configuration.active_mode,
+            ),
+            nanami_client::net::NET_SERVICE_CONTROL_RELOAD => {
+                if request.identifier == 0 {
+                    return (nanami_runtime::OS_RESPONSE_PERMISSION_DENIED, 0, 0);
+                }
+                match configuration::reload(runtime) {
+                    Ok(()) => (
+                        nanami_runtime::OS_RESPONSE_OK,
+                        runtime.configuration.state,
+                        0,
+                    ),
+                    Err(error) => (map_request_error_to_status(error), 0, 0),
+                }
+            }
             nanami_client::net::NET_SERVICE_CONTROL_LINK_UP => {
                 match nanami_client::net::net_device_control(
                     runtime.net_device_port,
@@ -1239,6 +1300,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
             if features & nanami_client::net::NET_DEVICE_FEATURE_RECV_BATCH != 0
     );
     let mut runtime = NetRuntime {
+        configuration: configuration::Configuration::new(),
         net_device_port,
         timer_port,
         backend_shm_local: backend_local_vaddr,
@@ -1274,19 +1336,27 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
     let mut pending_status = (nanami_runtime::OS_RESPONSE_OK, 0, 0);
     let mut has_pending_reply = false;
     let mut stats = NetStats::new();
-    dhcp_bootstrap(&mut runtime, &mut stats);
-
-    if !irq_driven {
-        if let Some(timer_port) = runtime.timer_port {
-            nanami_client::timer::timer_service_interval_on_notification_milliseconds(
-                timer_port,
-                RX_MAINTENANCE_INTERVAL_MS,
-                nanami_runtime::PROCESS_SLOT_NOTIFICATION,
-            )?;
-            nanami_runtime::print!("[net-server] rx fallback polling enabled\n");
-        } else {
-            nanami_runtime::print!("[net-server] rx polling unavailable\n");
+    let settings = runtime.configuration.draft;
+    if runtime.configuration.state != nanami_client::net::IPV4_STATE_FAILED {
+        match settings.validate_apply() {
+            Ok(()) => configuration::apply(&mut runtime, settings),
+            Err(message) => {
+                nanami_runtime::println!("[net-server] configuration not applied: {}", message);
+                runtime.configuration.state = nanami_client::net::IPV4_STATE_FAILED;
+            }
         }
+    }
+
+    if let Some(timer_port) = runtime.timer_port {
+        nanami_client::timer::timer_service_interval_on_notification_milliseconds(
+            timer_port,
+            if irq_driven {
+                100
+            } else {
+                RX_MAINTENANCE_INTERVAL_MS
+            },
+            nanami_runtime::PROCESS_SLOT_NOTIFICATION,
+        )?;
     }
 
     // Publish only after backend initialization. Otherwise a machine without a
@@ -1334,8 +1404,11 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 pending_status = handle_network_request(&mut runtime, req, &mut stats);
                 has_pending_reply = true;
             }
-            ServiceEvent::Notification { .. } => {
+            ServiceEvent::Notification { identifier, .. } => {
                 let _ = pump_backend(&mut runtime, &mut stats);
+                if identifier & nanami_client::timer::TIMER_NOTIFICATION_IDENTIFIER_BIT != 0 {
+                    configuration::maintenance(&mut runtime);
+                }
             }
             ServiceEvent::Fault {
                 identifier, reason, ..
@@ -1348,6 +1421,7 @@ fn nanami_main() -> nanami_runtime::NanamiResult {
                 has_pending_reply = false;
             }
         }
+        configuration::tick(&mut runtime);
     }
 }
 

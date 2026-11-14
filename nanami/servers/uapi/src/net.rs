@@ -1,9 +1,15 @@
 use crate::Word;
 
+#[path = "net/settings.rs"]
+pub mod settings;
+pub use settings::*;
+
 pub const NET_DEVICE_REQUEST_SEND: Word = 0x2001;
 pub const NET_DEVICE_REQUEST_RECV: Word = 0x2002;
 pub const NET_DEVICE_REQUEST_CONTROL: Word = 0x2003;
 pub const NET_DEVICE_REQUEST_RECV_BATCH: Word = 0x2004;
+/// TX ring full; no bytes were consumed. Retry after progress/notification.
+pub const NET_DEVICE_RESPONSE_WOULD_BLOCK: Word = 0x2000_0001;
 
 pub const NET_DEVICE_CONTROL_LINK_UP: Word = 1;
 pub const NET_DEVICE_CONTROL_LINK_DOWN: Word = 2;
@@ -42,6 +48,14 @@ pub const NET_SERVICE_REQUEST_READINESS: Word = 0x3005;
 /// Read-only ARP snapshot: arg0=SHM offset, arg1=capacity in bytes; returns count.
 /// Records contain IPv4 (4 bytes), MAC (6 bytes), then two reserved zero bytes.
 pub const NET_SERVICE_REQUEST_ARP_SNAPSHOT: Word = 0x3006;
+/// SET_SETTINGS(mode, address|mask<<32, gateway|dns<<32, expected_revision).
+/// Saves a validated draft. Reload applies it and terminates existing flows.
+pub const NET_SERVICE_REQUEST_SET_SETTINGS: Word = 0x3007;
+pub const NET_SERVICE_CONTROL_GET_SETTINGS: Word = 20;
+pub const NET_SERVICE_CONTROL_RELOAD: Word = 21;
+pub const NET_SERVICE_CONTROL_GET_CONFIG_STATE: Word = 22;
+/// Another writer changed the draft. Fetch a fresh snapshot before retrying.
+pub const NET_SERVICE_RESPONSE_CONFIG_CONFLICT: Word = 0x3000_0002;
 pub const NET_ARP_ENTRY_BYTES: usize = 12;
 pub const NET_ARP_MAX_ENTRIES: usize = 32;
 pub const NET_READINESS_UDP: Word = 1;

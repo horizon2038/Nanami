@@ -1,7 +1,8 @@
 //! Production ARP/IP/TCP-send and HTTP reactor code with IPC/device I/O mocked.
 #![allow(dead_code)]
-extern crate self as nanami_runtime;
+extern crate alloc;
 extern crate self as nanami_client;
+extern crate self as nanami_runtime;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -22,7 +23,9 @@ pub enum RequestError {
 pub struct NanamiError(pub Word);
 pub type NanamiResult = Result<(), NanamiError>;
 pub mod debug {
-    pub fn print_char(c: char) { print!("{c}"); }
+    pub fn print_char(c: char) {
+        print!("{c}");
+    }
 }
 
 #[derive(Default)]
@@ -35,7 +38,10 @@ struct Fake {
     polls: usize,
     waits: usize,
     recv_calls: usize,
+    send_limit: Option<usize>,
     logs: usize,
+    segment_fail_after: Option<usize>,
+    segments: Vec<(u32, u8, usize)>,
 }
 thread_local! { static FAKE: RefCell<Fake> = RefCell::new(Fake::default()); }
 
@@ -81,15 +87,17 @@ pub mod net {
             if let Some(error) = fake.send_error {
                 return Err(error);
             }
-            let data = if len == 0 {
+            let accepted = fake.send_limit.unwrap_or(len).min(len);
+            let data = if accepted == 0 {
                 Vec::new()
             } else {
                 unsafe {
-                    std::slice::from_raw_parts((fake.shm + offset) as *const u8, len).to_vec()
+                    std::slice::from_raw_parts((fake.shm + offset) as *const u8, accepted).to_vec()
                 }
             };
-            fake.sent.push((id, data, flags));
-            Ok(len)
+            fake.sent
+                .push((id, data, if accepted == len { flags } else { flags & !1 }));
+            Ok(accepted)
         })
     }
     pub fn net_service_tcp_recv_ex(
@@ -98,10 +106,27 @@ pub mod net {
         offset: Word,
         max: Word,
     ) -> Result<(Word, Word), RequestError> {
+        net_service_tcp_recv_on_connection(0, 0, 0, offset, max)
+    }
+    pub fn net_service_tcp_recv_on_connection(
+        _: Word,
+        connection: Word,
+        _: Word,
+        offset: Word,
+        max: Word,
+    ) -> Result<(Word, Word), RequestError> {
         FAKE.with(|fake| {
             let mut fake = fake.borrow_mut();
             fake.recv_calls += 1;
-            let Some((id, data)) = fake.incoming.pop_front() else {
+            let index = if connection == 0 {
+                0
+            } else {
+                let Some(index) = fake.incoming.iter().position(|(id, _)| *id == connection) else {
+                    return Ok((0, 0));
+                };
+                index
+            };
+            let Some((id, data)) = fake.incoming.remove(index) else {
                 return Ok((0, 0));
             };
             assert!(data.len() <= max);
@@ -127,10 +152,10 @@ pub mod net {
     }
 }
 
+mod backend;
+mod backend_connect;
 mod http;
 mod neighbors;
 mod tcp;
 mod virtio;
 mod virtio_tx;
-mod backend;
-mod backend_connect;

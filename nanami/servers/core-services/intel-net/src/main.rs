@@ -8,6 +8,7 @@ mod chipset;
 mod ports;
 mod registers;
 mod ring;
+mod routing;
 mod service;
 
 use alloc::vec::Vec;
@@ -24,8 +25,6 @@ use registers::*;
 
 const PCI_SLOT: Word = 16;
 const TIMER_SLOT: Word = 17;
-const IRQ_NOTIFICATION: Word = 18;
-const IRQ_SLOT: Word = 19;
 const SERVICE_SLOT: Word = 20;
 const CLIENT_NOTIFICATION: Word = 24;
 const ACPI_SLOT: Word = 25;
@@ -156,15 +155,33 @@ fn discover(port: Word, timer: Word) -> Result<Vec<Candidate>, RequestError> {
     Ok(candidates)
 }
 
-fn interrupt_route(port: Word, device: pci::Device) -> Option<Word> {
-    let interrupt = pci::read(port, device.address, 0x3c, 4).ok()?;
+fn interrupt_route(port: Word, acpi: Option<Word>, address: pci::Address) -> Option<Word> {
+    let interrupt = pci::read(port, address, 0x3c, 4).ok()?;
     let pin = (interrupt >> 8) as u8;
     if !(1..=4).contains(&pin) {
         return None;
     }
-    if registry::connect_service(nanami_client::power::ACPI_SERVICE, ACPI_SLOT).is_ok() {
-        let acpi = nanami_runtime::ipc::process_slot_descriptor(ACPI_SLOT);
-        if let Ok(irq) = nanami_client::power::pci_intx_route(acpi, device.address.packed(), pin) {
+    if let Some(acpi) = acpi {
+        let mut bridges = Vec::new();
+        let mut index = 0;
+        while let Ok(Some(device)) = pci::enumerate(port, index) {
+            index += 1;
+            if device.class >> 8 == 0x0604 {
+                let buses = pci::read(port, device.address, 0x18, 4).ok()?;
+                bridges.push(routing::Bridge {
+                    address: device.address,
+                    primary: buses as u8,
+                    secondary: (buses >> 8) as u8,
+                    subordinate: (buses >> 16) as u8,
+                });
+            }
+        }
+        if let Some(irq) = routing::resolve(
+            address,
+            pin,
+            |index| bridges.get(index).copied(),
+            |address, pin| nanami_client::power::pci_intx_route(acpi, address.packed(), pin).ok(),
+        ) {
             return Some(irq);
         }
     }
@@ -174,9 +191,9 @@ fn interrupt_route(port: Word, device: pci::Device) -> Option<Word> {
 }
 
 fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
-    let single_device = (candidates.len() == 1).then_some(candidates[0].device);
     let timer_port = candidates[0].regs.timer;
     let mut ports = Vec::new();
+    let mut devices = Vec::new();
     for mut selected in candidates {
         let (physical, memory) = nanami_runtime::request_dma(ring::DMA_BYTES)?;
         let advanced = matches!(selected.family, Family::Igb | Family::I210);
@@ -209,6 +226,7 @@ fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
             // pinned until process destruction; never reuse them for another NIC.
             continue;
         }
+        devices.push(selected.device);
         ports.push(ports::Port {
             regs: selected.regs,
             rings,
@@ -221,42 +239,69 @@ fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
         return Err(RequestError::Unsupported);
     }
     let mut active = ports.iter().position(|port| port.carrier()).unwrap_or(0);
-    // Multi-port mode uses one notification clock, not one timer per port.
-    // Only the selected port has RX/TX enabled; all DMA allocations stay pinned.
-    let mut irq = false;
-    let mut notification = nanami_runtime::PROCESS_SLOT_NOTIFICATION;
-    if let Some(number) = single_device.and_then(|device| interrupt_route(port, device)) {
-        match nanami_runtime::request_irq(number, IRQ_NOTIFICATION, IRQ_SLOT) {
-            Ok(()) => {
-                nanami_runtime::ipc::bind_current_thread_notification(
-                    nanami_runtime::ipc::process_slot_descriptor(IRQ_NOTIFICATION),
-                )?;
-                notification = IRQ_NOTIFICATION;
-                irq = true;
-                nanami_runtime::println!("[intel-net] INTx GSI={}", number);
+    // Multiple IRQs can identify the same stable notification object. Keep
+    // each interrupt capability separate, including when PCI NICs share a GSI.
+    let notification = nanami_runtime::PROCESS_SLOT_NOTIFICATION;
+    nanami_runtime::ipc::bind_current_thread_notification(
+        nanami_runtime::ipc::process_slot_descriptor(notification),
+    )?;
+    let mut irq_ports = Vec::new();
+    let mut interrupts: Vec<(Word, Word)> = Vec::new();
+    let acpi = registry::connect_service(nanami_client::power::ACPI_SERVICE, ACPI_SLOT)
+        .ok()
+        .map(|_| nanami_runtime::ipc::process_slot_descriptor(ACPI_SLOT));
+    for (index, device) in devices.iter().enumerate() {
+        let irq = if let Some(number) = interrupt_route(port, acpi, device.address) {
+            if interrupts.iter().any(|(irq, _)| *irq == number) {
+                true
+            } else {
+                let slot = 64 + index;
+                match nanami_runtime::request_irq(number, notification, slot) {
+                    Ok(()) => {
+                        interrupts.push((number, slot));
+                        true
+                    }
+                    Err(error) => {
+                        nanami_runtime::println!(
+                            "[intel-net] PCI {:06x} INTx {} unavailable: {}; timer fallback",
+                            device.address.packed(),
+                            number,
+                            error
+                        );
+                        false
+                    }
+                }
             }
-            Err(error) => nanami_runtime::println!(
-                "[intel-net] INTx {} unavailable: {}; timer RX fallback",
-                number,
-                error
-            ),
+        } else {
+            false
+        };
+        irq_ports.push(irq);
+        if irq {
+            let command = pci::read(port, device.address, 4, 2)?;
+            pci::write(port, device.address, 4, 2, command & !(1 << 10))?;
+            let regs = &mut ports[index].regs;
+            let _ = regs.read(ICR);
+            // Advanced I211/igb use EITR[0], not the legacy ITR address.
+            let advanced = matches!(
+                family(device.vendor_id, device.device_id, device.class),
+                Some(Family::Igb | Family::I210)
+            );
+            regs.write(if advanced { 0x1680 } else { ITR }, 128); // 32.768 us, bounded rate
+            regs.write(IMS, RX_INTERRUPTS);
+            nanami_runtime::println!(
+                "[intel-net] PCI {:06x} interrupt RX enabled",
+                device.address.packed()
+            );
         }
     }
-    if irq {
-        let device = single_device.unwrap();
-        let command = pci::read(port, device.address, 4, 2)?;
-        pci::write(port, device.address, 4, 2, command & !(1 << 10))?;
-        let regs = &mut ports[active].regs;
-        let _ = regs.read(ICR);
-        regs.write(ITR, 4000); // bounded interrupt rate; ~1 ms on 82574/PCH
-        regs.write(IMS, RX_INTERRUPTS);
-        nanami_runtime::ipc::interrupt_ack(nanami_runtime::ipc::process_slot_descriptor(IRQ_SLOT))?;
+    for (_, slot) in &interrupts {
+        nanami_runtime::ipc::interrupt_ack(nanami_runtime::ipc::process_slot_descriptor(*slot))?;
     }
     // No busy polling. Unsupported/shared INTx routes use notification-driven
     // 2 ms polling; IRQ mode has only a slow lost-wakeup/link maintenance tick.
     timer::timer_service_interval_on_notification_milliseconds(
         timer_port,
-        if irq { 1000 } else { 2 },
+        if irq_ports[active] { 1000 } else { 2 },
         notification,
     )?;
     let mut service = service::Service::new(ports[active].physical, ports[active].mac);
@@ -270,7 +315,11 @@ fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
         active,
         ports[active].bdf,
         ports[active].carrier(),
-        if irq { "interrupt" } else { "timer" }
+        if irq_ports[active] {
+            "interrupt"
+        } else {
+            "timer"
+        }
     );
     let service_port = nanami_runtime::ipc::process_slot_descriptor(SERVICE_SLOT);
     let mut reply = None;
@@ -307,6 +356,11 @@ fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
                         },
                     );
                     if previous != active {
+                        timer::timer_service_interval_on_notification_milliseconds(
+                            timer_port,
+                            if irq_ports[active] { 1000 } else { 2 },
+                            notification,
+                        )?;
                         nanami_runtime::println!(
                             "[intel-net] selected port={} PCI {:06x} carrier={} MAC-Mbps={}",
                             active,
@@ -321,13 +375,16 @@ fn serve(candidates: Vec<Candidate>, port: Word) -> Result<(), RequestError> {
                 }
             }
             ServiceEvent::Notification { .. } => {
+                // Deassert all NICs sharing an owned GSI before rearming it.
+                for port in &mut ports {
+                    let _ = port.regs.read(ICR);
+                }
                 let selected = &mut ports[active];
-                let _ = selected.regs.read(ICR); // clear device level before rearming IO-APIC
                 selected.rings.reclaim_tx();
                 service.notify_rx(&selected.rings);
-                if irq {
+                for (_, slot) in &interrupts {
                     nanami_runtime::ipc::interrupt_ack(
-                        nanami_runtime::ipc::process_slot_descriptor(IRQ_SLOT),
+                        nanami_runtime::ipc::process_slot_descriptor(*slot),
                     )?;
                     service.notify_rx(&selected.rings); // cover the masked-interrupt window
                 }

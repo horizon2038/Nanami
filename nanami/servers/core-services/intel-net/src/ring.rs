@@ -216,7 +216,9 @@ impl Rings {
         }
         self.reclaim_tx();
         if self.tx_used == COUNT - 1 {
-            return Err(RequestError::Transport);
+            return Err(RequestError::Status(
+                nanami_client::net::NET_DEVICE_RESPONSE_WOULD_BLOCK,
+            ));
         }
         let buffer = TX_BUFFERS + self.tx_next * BUFFER;
         ptr::copy_nonoverlapping(

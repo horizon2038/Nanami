@@ -508,6 +508,7 @@ impl Shell {
             self.push_line_bytes(b"          path [PATH], external apps via PATH");
             self.push_line_bytes(b"          nanami-info memory|process, performance-monitor");
             self.push_line_bytes(b"          pci-info [-n|-nn] [-v]");
+            self.push_line_bytes(b"          net-control [show|dhcp|manual|reload], network-manager");
             self.push_line_bytes(b"foreground app: F12 terminate");
             self.push_line_bytes(b"          nanami-control os.log enable|disable");
             self.push_line_bytes(b"          clear, echo, about");
